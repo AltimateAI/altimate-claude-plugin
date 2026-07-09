@@ -1,0 +1,15 @@
+{
+  "name": "altimate-code",
+  "displayName": "Altimate Code",
+  "version": "1.0.0",
+  "description": "Delegates dbt and warehouse work to altimate-code, a specialized CLI agent with 100+ purpose-built data tools (SQL analysis, column-level lineage, dbt build/test/run, warehouse profiling, FinOps, connectivity to Snowflake, BigQuery, Redshift, Databricks, Postgres, MySQL, DuckDB).",
+  "author": {
+    "name": "AltimateAI",
+    "url": "https://altimate.ai"
+  },
+  "homepage": "https://altimate.ai",
+  "repository": "https://github.com/AltimateAI/altimate-claude-plugin",
+  "license": "MIT",
+  "keywords": ["dbt", "sql", "data-engineering", "warehouse", "snowflake", "bigquery", "databricks", "column-lineage"],
+  "defaultEnabled": false
+}
