@@ -23,6 +23,7 @@ See [plugins/altimate-code/README.md](./plugins/altimate-code/README.md) for plu
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
-## License
+## License & legal
 
 MIT — see [LICENSE](./LICENSE).
+Privacy: [PRIVACY.md](./PRIVACY.md) · Terms: [TERMS.md](./TERMS.md) · Security: [SECURITY.md](./SECURITY.md)
