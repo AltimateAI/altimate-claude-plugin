@@ -21,6 +21,8 @@ This plugin's skill forwards the user's task text to the [altimate-code](https:/
 
 If you do not want prompts to leave Claude Code's process, do not enable this plugin (`defaultEnabled: false` — the plugin ships disabled).
 
+For the complete privacy policy covering the plugin and the altimate-code CLI, see [PRIVACY.md](./PRIVACY.md).
+
 ## Supported versions
 
 Only the latest published version receives security fixes.
