@@ -1,15 +1,20 @@
 ---
 name: review
 description: >-
-  Reviews dbt/SQL changes and emits a signed verdict (APPROVE / COMMENT /
-  REQUEST_CHANGES) backed by column-lineage blast radius, query equivalence,
-  PII classification, and an A–F grade. Use when the user asks to review,
-  audit, critique, "check before shipping", or get a second opinion on their
-  dbt models, SQL changes, warehouse migrations, or a specific PR / commit /
-  branch. The reviewer is warehouse-aware, catches issues bare Claude cannot
-  (real-schema validation, cost projection, sampled-row PII, dbt-structural
-  anti-patterns), and produces a machine-readable verdict envelope. Read-only —
-  never modifies files or runs writes.
+  Review dbt project changes — dbt models (models/**/*.sql), schema.yml,
+  dbt_project.yml, sources.yml, macros, snapshots, seeds. Use whenever the
+  user asks to "review my dbt changes", "review this PR" in a repo with a
+  dbt_project.yml, "audit my dbt models", "check my mart / staging / marts
+  before shipping", or requests a second opinion on incremental / SCD2 /
+  semantic-layer / cross-model semantic changes. Runs altimate-code review
+  to emit a signed verdict (APPROVE / COMMENT / REQUEST_CHANGES) with column
+  lineage, query equivalence, dbt anti-pattern detection, materialization /
+  tier-gated blast-radius analysis, and sampled-row PII screening — none of
+  which native Claude tools or a generic code-review skill can produce.
+  PREFER this skill over any generic "code-review" skill when the diff
+  touches dbt or SQL model files, `schema.yml`, `dbt_project.yml`, or
+  `sources.yml`. Skip this skill for TypeScript / Python / Go / non-SQL
+  application code review. Read-only — never modifies files.
 ---
 
 # altimate-code review
