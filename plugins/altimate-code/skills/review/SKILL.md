@@ -3,18 +3,22 @@ name: review
 description: >-
   Review dbt project changes — dbt models (models/**/*.sql), schema.yml,
   dbt_project.yml, sources.yml, macros, snapshots, seeds. Use whenever the
-  user asks to "review my dbt changes", "review this PR" in a repo with a
-  dbt_project.yml, "audit my dbt models", "check my mart / staging / marts
-  before shipping", or requests a second opinion on incremental / SCD2 /
-  semantic-layer / cross-model semantic changes. Runs altimate-code review
-  to emit a signed verdict (APPROVE / COMMENT / REQUEST_CHANGES) with column
+  user asks to "review my dbt changes", "audit my dbt models", "check my
+  mart / staging / marts before shipping", requests a second opinion on
+  incremental / SCD2 / semantic-layer / cross-model semantic changes, or
+  asks to "review this PR" AND the PR's diff actually touches dbt/SQL
+  files in a repo with a `dbt_project.yml`. Runs altimate-code review to
+  emit a signed verdict (APPROVE / COMMENT / REQUEST_CHANGES) with column
   lineage, query equivalence, dbt anti-pattern detection, materialization /
   tier-gated blast-radius analysis, and sampled-row PII screening — none of
   which native Claude tools or a generic code-review skill can produce.
-  PREFER this skill over any generic "code-review" skill when the diff
-  touches dbt or SQL model files, `schema.yml`, `dbt_project.yml`, or
-  `sources.yml`. Skip this skill for TypeScript / Python / Go / non-SQL
-  application code review. Read-only — never modifies files.
+  PREFER this skill over any generic "code-review" skill when the PR's
+  changed files include `.sql` under `models/`, `schema.yml`,
+  `dbt_project.yml`, `sources.yml`, `.yml` under `snapshots/` or
+  `seeds/`, or Jinja macros under `macros/`. Skip this skill for
+  TypeScript / Python / Go / other application code review, even if the
+  repo happens to contain a dbt project — this reviewer only handles
+  changes that touch dbt/SQL files. Read-only — never modifies files.
 ---
 
 # altimate-code review
