@@ -10,6 +10,5 @@
   "homepage": "https://github.com/AltimateAI/altimate-claude-plugin",
   "repository": "https://github.com/AltimateAI/altimate-claude-plugin",
   "license": "MIT",
-  "keywords": ["dbt", "sql", "data-engineering", "warehouse", "snowflake", "bigquery", "databricks", "column-lineage"],
-  "defaultEnabled": false
+  "keywords": ["dbt", "sql", "data-engineering", "warehouse", "snowflake", "bigquery", "databricks", "column-lineage"]
 }

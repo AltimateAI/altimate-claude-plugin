@@ -19,7 +19,7 @@ This plugin's skill forwards the user's task text to the [altimate-code](https:/
 - **Warehouse queries and dbt commands** → executed locally under your credentials by the CLI; not forwarded.
 - **Query results and file edits** → produced locally; the CLI writes an output file which the plugin surfaces back to Claude.
 
-If you do not want prompts to leave Claude Code's process, do not enable this plugin (`defaultEnabled: false` — the plugin ships disabled).
+If you do not want prompts to leave Claude Code's process, do not install this plugin. Adding the marketplace only makes it discoverable in `/plugin`; the plugin is not installed or runnable until you explicitly `/plugin install altimate-code@altimate-claude-plugin`.
 
 For the complete privacy policy covering the plugin and the altimate-code CLI, see [PRIVACY.md](./PRIVACY.md).
 

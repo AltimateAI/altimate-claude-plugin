@@ -12,7 +12,7 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 - The plugin itself collects **no data**. It is a routing layer (a skill, a slash command, and a static session hook) that tells Claude Code when to delegate a task to the altimate-code CLI installed on your machine.
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
-- The plugin ships **disabled by default** (`defaultEnabled: false`). Nothing is delegated until you explicitly enable it.
+- Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
 

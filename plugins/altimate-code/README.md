@@ -11,12 +11,6 @@ Routes dbt + warehouse tasks from Claude Code to [altimate-code](https://github.
 /plugin install altimate-code@altimate-claude-plugin
 ```
 
-The plugin ships with `defaultEnabled: false` — enable it explicitly when you want data work delegated to altimate-code:
-
-```
-claude plugin enable altimate-code@altimate-claude-plugin
-```
-
 ## Prerequisites
 
 The altimate-code CLI must be installed and configured on your PATH:
@@ -39,7 +33,7 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 
 ## Example prompts
 
-Once enabled, try these in Claude Code (or prefix any of them with `/altimate`):
+Once installed, try these in Claude Code (or prefix any of them with `/altimate`):
 
 1. **Column-level lineage** — *"Trace the `revenue_usd` column in `models/marts/fct_revenue.sql` back to its sources, and list every downstream model that would be affected if I change its rounding."*
 2. **Warehouse cost analysis** — *"Give me a cost report for our Snowflake account: the ten most expensive queries this month and any warehouses that look over-provisioned."*
