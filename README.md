@@ -11,12 +11,6 @@ Currently ships one plugin: **[altimate-code](./plugins/altimate-code/)** — de
 /plugin install altimate-code@altimate-claude-plugin
 ```
 
-The plugin ships with `defaultEnabled: false` — enable it explicitly:
-
-```
-claude plugin enable altimate-code@altimate-claude-plugin
-```
-
 See [plugins/altimate-code/README.md](./plugins/altimate-code/README.md) for plugin-specific docs (prerequisites, data-handling, components).
 
 ## Contributing
