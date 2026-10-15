@@ -21,7 +21,7 @@ altimate-code is a CLI AI agent with 100+ purpose-built data engineering tools. 
 
 ## You MUST follow this workflow
 
-1. **Verify altimate-code is on PATH** with `command -v altimate-code`. If it returns nothing, jump to "Not installed" below and stop.
+1. **Verify altimate-code is on PATH** with `command -v altimate-code || command -v altimate`. The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Either name is the same CLI. If neither resolves, jump to "Failure modes" below and stop.
 2. **Run altimate-code with the user's task** using the invocation below. Pass the user's request through verbatim — do not paraphrase or split it.
 3. **Read the output file** and present it to the user as-is.
 
@@ -57,7 +57,8 @@ ALTIMATE_TASK
 )"
 umask 077
 OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
-altimate-code run "$TASK" \
+ALTIMATE_BIN="$(command -v altimate-code || command -v altimate)"
+"$ALTIMATE_BIN" run "$TASK" \
   --agent <fast-edit|analyst|builder> \
   --yolo \
   --output "$OUTPUT_FILE" \
@@ -75,6 +76,8 @@ Then `Read "$OUTPUT_FILE"` and emit its contents to the user without re-summaris
 | `--output "$OUTPUT_FILE"` | Captures the final response. Use the private `mktemp` file from above — do NOT use a fixed path like `/tmp/altimate-result.md`; concurrent sessions clobber each other and a world-readable fixed path leaks data. |
 | `--dir "$(pwd)"` | Runs altimate-code in the current project so it picks up dbt project config, profiles.yml, etc. |
 
+Each Bash call starts a fresh shell, so keep the `ALTIMATE_BIN=...` resolver line inside the same command as the `run` — do not resolve it in an earlier call and reuse the variable.
+
 ### Follow-up tasks in the same project
 
 When the user makes a follow-up data task in the same project after a successful altimate-code delegation, prefer `--continue` to resume the warm session instead of starting a fresh one. Same here-doc + `mktemp` pattern:
@@ -86,7 +89,8 @@ ALTIMATE_TASK
 )"
 umask 077
 OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
-altimate-code run "$TASK" \
+ALTIMATE_BIN="$(command -v altimate-code || command -v altimate)"
+"$ALTIMATE_BIN" run "$TASK" \
   --agent <fast-edit|analyst|builder> \
   --yolo \
   --output "$OUTPUT_FILE" \
@@ -104,7 +108,7 @@ When altimate-code returns an error, **report the error to the user and STOP**. 
 
 | Symptom | What to tell the user — verbatim |
 |---|---|
-| `command not found: altimate-code` | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) and run `altimate-code` once to configure auth. Then re-run your request." |
+| Neither `altimate-code` nor `altimate` on PATH (`ALTIMATE_BIN` is empty) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth. Then re-run your request." |
 | `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` in your terminal to open the TUI and reconfigure your provider, then re-run your request." |
 | Process hangs >5 min | "altimate-code is unresponsive. Try `altimate-code` to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |
 | Output file empty | "altimate-code returned without producing output. The task may be too ambiguous — please restate with more detail (target table, expected columns, time window)." |
@@ -115,5 +119,5 @@ In every row, the instruction to the user is the action — you do not retry the
 ## Notes
 
 - altimate-code runs its own LLM, separate from Claude Code's. Costs and rate limits accrue to altimate-code's configured provider.
-- Sessions persist in altimate-code's local store — `altimate-code session list` shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
+- Sessions persist in altimate-code's local store — `altimate-code session list` (or `altimate session list`) shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
 - For very long tasks, the `--output` file is the source of truth — stdout buffering can drop content.

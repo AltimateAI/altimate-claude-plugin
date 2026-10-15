@@ -27,7 +27,14 @@ description: >-
 
 ## You MUST follow this workflow
 
-1. **Verify altimate-code is on PATH** with `command -v altimate-code`. If it returns nothing, jump to "Failure modes" below and stop.
+1. **Verify altimate-code is on PATH** with `command -v altimate-code || command -v altimate`. If neither resolves, jump to "Failure modes" below and stop.
+
+   The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Every `altimate-code review ...` command below must be run through the resolved binary, in the same Bash call as the resolver (shell state does not persist between calls):
+
+   ```bash
+   ALTIMATE_BIN="$(command -v altimate-code || command -v altimate)"
+   "$ALTIMATE_BIN" review   # plus any scope/flags from below
+   ```
 
 2. **Determine review scope from the user's ask** using the table below.
 
@@ -68,7 +75,7 @@ description: >-
 
 | Symptom | Message to the user |
 |---|---|
-| `command not found: altimate-code` | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+), then run `altimate-code` once to configure your provider and warehouse auth. Then re-run the review." |
+| Neither `altimate-code` nor `altimate` on PATH | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider and warehouse auth. Then re-run the review." |
 | `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` to reconfigure — or re-run with `--no-ai` to skip the LLM lane entirely and get a deterministic-only review." |
 | `fatal: not a git repository` | "This directory isn't a git repo. `altimate-code review` computes the diff via git — run from a dbt project inside a git worktree." |
 | No `dbt_project.yml` found | "No dbt project detected at this path. The review needs a dbt project to compile models against. Run from the directory containing `dbt_project.yml`." |

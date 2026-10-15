@@ -9,10 +9,10 @@ Workflow (follow in order, no skipping):
 
 1. **Verify altimate-code is installed:**
    ```bash
-   command -v altimate-code
+   command -v altimate-code || command -v altimate
    ```
-   If it returns nothing, stop and tell the user:
-   > altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+), then run `altimate-code` once to configure your provider/warehouse auth, then re-run `/altimate <task>`.
+   The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Either one is fine. If neither resolves, stop and tell the user:
+   > altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install | bash`, then run `altimate` once to configure your provider/warehouse auth, then re-run `/altimate <task>`.
 
 2. **Pick the agent persona** based on the user's task shape. Start cheap and escalate on failure — fast-edit handles most dbt/SQL work at 10–20× lower cost than builder.
 
@@ -37,7 +37,8 @@ Workflow (follow in order, no skipping):
    )"
    umask 077
    OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
-   altimate-code run "$TASK" \
+   ALTIMATE_BIN="$(command -v altimate-code || command -v altimate)"
+   "$ALTIMATE_BIN" run "$TASK" \
      --agent <fast-edit|analyst|builder> \
      --yolo \
      --output "$OUTPUT_FILE" \
@@ -53,7 +54,8 @@ Workflow (follow in order, no skipping):
    )"
    umask 077
    OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
-   altimate-code run "$TASK" \
+   ALTIMATE_BIN="$(command -v altimate-code || command -v altimate)"
+   "$ALTIMATE_BIN" run "$TASK" \
      --agent <fast-edit|analyst|builder> \
      --yolo --output "$OUTPUT_FILE" --dir "$(pwd)" \
      --continue

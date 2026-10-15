@@ -13,12 +13,15 @@ Routes dbt + warehouse tasks from Claude Code to [altimate-code](https://github.
 
 ## Prerequisites
 
-The altimate-code CLI must be installed and configured on your PATH:
+The altimate-code CLI must be installed and configured on your PATH. Either install method works:
 
 ```bash
-npm install -g altimate-code     # requires Node 20+
-altimate-code                    # launch the TUI, then run /connect to configure your LLM provider
+npm install -g altimate-code                       # requires Node 20+; exposes `altimate-code` and `altimate`
+curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes only `altimate`
+altimate                                           # launch the TUI, then run /connect to configure your LLM provider
 ```
+
+The plugin invokes `altimate-code` when it is on PATH and falls back to `altimate` otherwise, so standalone installs work without an `altimate-code` alias.
 
 Or configure a provider via environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and 20+ others — see the [altimate-code docs](https://docs.altimate.sh)).
 
@@ -50,7 +53,7 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 
 | Symptom | Fix |
 |---|---|
-| `command not found: altimate-code` | `npm install -g altimate-code` (Node 20+), then run `altimate-code` once to configure your provider. |
+| Neither `altimate-code` nor `altimate` on PATH | `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider. |
 | `Unauthorized` / `No provider configured` | Run `altimate-code` to open the TUI and reconfigure your provider via `/connect`, or set the provider API key env var. |
 | Task hangs for several minutes | Open `altimate-code` to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
 | Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |

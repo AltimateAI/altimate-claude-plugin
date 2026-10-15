@@ -17,7 +17,14 @@ Run the `altimate-code review` CLI on the current dbt project and present the si
 
 ## Workflow
 
-1. **Verify altimate-code is on PATH.** Run `command -v altimate-code`. If nothing is returned, tell the user: `"altimate-code is not installed. Install with 'npm install -g altimate-code' (Node 20+), then run 'altimate-code' once to configure your provider and warehouse auth."` — then STOP.
+1. **Verify altimate-code is on PATH.** Run `command -v altimate-code || command -v altimate`. If nothing is returned, tell the user: `"altimate-code is not installed. Install with 'npm install -g altimate-code' (Node 20+) or 'curl -fsSL https://www.altimate.sh/install | bash', then run 'altimate' once to configure your provider and warehouse auth."` — then STOP.
+
+   The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Every `altimate-code review ...` command below must be run through the resolved binary, in the same Bash call as the resolver (shell state does not persist between calls):
+
+   ```bash
+   ALTIMATE_BIN="$(command -v altimate-code || command -v altimate)"
+   "$ALTIMATE_BIN" review   # plus any scope/flags from below
+   ```
 
 2. **Confirm you are in a dbt project root** (`dbt_project.yml` present). If not, tell the user to `cd` there and STOP.
 
@@ -54,7 +61,7 @@ Anything else (`--manifest`, `--cwd`) only if the user explicitly requested it o
 
 | Symptom | Message to user |
 |---|---|
-| `command not found: altimate-code` | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+), then run `altimate-code` once to configure auth." |
+| Neither `altimate-code` nor `altimate` on PATH | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth." |
 | `Unauthorized: Incorrect auth token` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` to reconfigure, or re-run with `--no-ai`." |
 | `fatal: not a git repository` | "This directory isn't a git repo. `altimate-code review` needs git to compute the diff." |
 | No `dbt_project.yml` | "No dbt project detected at this path. Run from the directory with `dbt_project.yml`." |
