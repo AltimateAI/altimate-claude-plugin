@@ -6,13 +6,13 @@
     "url": "https://altimate.ai"
   },
   "metadata": {
-    "description": "Altimate's Claude Code plugin — delegates dbt and warehouse work to the altimate-code CLI agent.",
+    "description": "Altimate's Claude Code plugin — direct MCP data tools and CLI delegation for long dbt and warehouse jobs.",
     "version": "1.0.0"
   },
   "plugins": [
     {
       "name": "altimate-code",
-      "description": "Delegates dbt and warehouse work to altimate-code, a specialized CLI agent with 100+ purpose-built data tools (SQL analysis, column-level lineage, dbt build/test/run, warehouse profiling, FinOps, connectivity to Snowflake, BigQuery, Redshift, Databricks, Postgres, MySQL, DuckDB).",
+      "description": "Use altimate-code data tools directly through MCP with Claude Code reasoning, or delegate long dbt and warehouse jobs to the altimate-code CLI agent.",
       "source": "./plugins/altimate-code",
       "strict": false
     }

@@ -1,31 +1,42 @@
 ---
 name: altimate-code
 description: >-
-  Delegates dbt and warehouse work to altimate-code, a specialized CLI agent
-  with 100+ purpose-built data tools. Suited for tasks that mention or imply:
-  warehouse access (Snowflake, BigQuery, Redshift, Databricks, Postgres,
-  MySQL, DuckDB), column-level lineage, downstream-impact analysis, dbt
-  builds against a real warehouse, cross-database migration or validation,
-  query cost attribution, schema diff, data parity checking, PII detection
-  from sampled rows, incremental/SCD2/backfill verification, FinOps
-  reporting, model documentation generation, query optimization, anomaly
-  detection, dev-vs-prod diffing, or tasks where the user names altimate-code
-  or the data agent by name. The skill routes to a purpose-built CLI, so it
-  covers workloads that touch live data, lineage, or warehouse state more
-  directly than native file-editing tools do.
+  Routes warehouse data questions to altimate-code MCP tools for Claude to
+  answer directly; delegates long dbt project builds, migrations, and FinOps
+  jobs to the altimate-code CLI agent. Use also when altimate-code is named.
 ---
 
 # altimate-code
 
-altimate-code is a CLI AI agent with 100+ purpose-built data engineering tools. **This skill exists for one purpose: delegate the user's task to altimate-code and pass the result back.** Native tools (Bash, Edit, Write, Read) are NOT a fallback path inside this skill — if altimate-code cannot complete the task, surface the failure to the user and STOP.
+Choose the path from the requested outcome, including when invoked via `/altimate`.
 
-## You MUST follow this workflow
+## Data questions: use MCP tools directly
 
-1. **Verify altimate-code is on PATH** with `command -v altimate-code`. If it returns nothing, jump to "Not installed" below and stop.
-2. **Run altimate-code with the user's task** using the invocation below. Pass the user's request through verbatim — do not paraphrase or split it.
-3. **Read the output file** and present it to the user as-is.
+For answers, numbers, or lists over warehouse data, use the `altimate-code` MCP
+server yourself. Follow the `data-question` skill for discovery, value profiles,
+SQL, cross-connection joins, correctness checks, and answer shape. The tools are
+`warehouse_list`, `schema_inspect`, `sql_execute`, `sql_check`, and `sql_materialize`.
+Claude Code does the reasoning; this server runs no LLM and needs no separate
+LLM-provider configuration. Do not delegate a data question to `altimate-code run`.
 
-Do not attempt the work with Edit/Write/Bash yourself, even if it looks simple. The whole point of this skill is to route data-engineering work to the agent that's built for it. If you find yourself reaching for Edit or Write while this skill is active, stop and re-read this paragraph.
+The server is read-only by default for source databases. Postgres, SQLite, and
+DuckDB enforce read-only access at the database level; other databases rely on
+SQL classification, so use a read-only DB user. `sql_materialize` writes only to
+session-local `scratch` DuckDB for analysis. Large query results may spill to a
+local file path; read the needed results there before answering.
+
+If MCP is unavailable, report the connection/startup error and check that an
+altimate-code build with `mcp serve` is on PATH and connections are configured.
+Do not silently switch to the separate CLI agent or invent results. Use native
+file-reading tools as needed to read local result files.
+
+## Long jobs: delegate to the CLI agent
+
+Use `altimate-code run` for long multi-step jobs needing its own agent, such as
+building a dbt project, migrations, or a FinOps report. First check
+`command -v altimate-code`. Pass the user's task verbatim using the safe
+invocation below, then read and present the output. Delegation uses
+altimate-code's own configured LLM provider, costs, and rate limits.
 
 ## Invocation — pick the right agent for the task
 
@@ -35,16 +46,16 @@ altimate-code has multiple agent personas. The default (`builder`) does a full p
 
 | Shape | Examples | Use |
 |---|---|---|
-| **Any dbt / SQL task** (rename, refactor, create model, debug, structural reorg, multi-step setup) | the vast majority of customer requests | `fast-edit` — try this first |
+| **Delegated dbt / SQL job** (rename, refactor, create model, debug, structural reorg, multi-step setup) | long project jobs needing the CLI agent | `fast-edit` — try this first |
 | **Multi-table aggregation correctness** | new model joining 3+ tables with `count(*)` / `sum() over (...)` / "first X, last X" logic that must be exactly right | `analyst` if `fast-edit` fails the user's verification |
 | **Warehouse-state work** | column-level lineage, downstream-impact, cross-DB migration / parity, query cost attribution against a real warehouse, schema diff between environments, PII detection, FinOps reporting | `builder` (default — has warehouse tools enabled) |
 | **Vague debug** ("X is broken", "make it work", "fix this") | unspecified failure mode | **Don't delegate yet.** Ask the user for the specific error message or symptom before invoking any agent — empirically all three agents fail vague debug prompts at ~700K tokens each. |
 
-**Decision policy:** start with `fast-edit` for any dbt/SQL task. If the user reports the result is wrong (e.g. aggregation values don't match), retry with `analyst`. Only use `builder` when the task genuinely needs the warehouse-investigation tools (it's 10–20× more expensive than fast-edit and rarely required).
+**Decision policy (delegation only):** start with `fast-edit` for dbt/SQL project jobs. Data questions stay on the MCP path, including multi-table aggregations. If the user reports the result is wrong (e.g. aggregation values don't match), retry with `analyst`. Only use `builder` when the task genuinely needs the warehouse-investigation tools (it's 10–20× more expensive than fast-edit and rarely required).
 
 ### Step 2 — invoke with the chosen agent
 
-Pass the task through a here-doc into a variable so the shell never
+Choose a here-doc delimiter that does not occur as a standalone line in the task. Pass the task through a quoted here-doc into a variable so the shell never
 command-substitutes anything the user typed (a task like
 `refactor `whoami` and $(rm -rf ~)` would otherwise fire `whoami` and
 `rm -rf ~` before `altimate-code` ever runs). Write the result to a
@@ -98,22 +109,22 @@ altimate-code's prompt cache is warm in a continued session — project structur
 
 If the user starts a clearly unrelated workflow (different project, different schema, different debugging thread), drop `--continue` and start fresh — the warm cache is irrelevant and you'd carry unrelated history into the prompt.
 
-## Failure modes — route every one to the user
+## Delegation failures
 
-When altimate-code returns an error, **report the error to the user and STOP**. Do not fall back to Bash, Edit, or Write. The skill's contract is "altimate-code handles this, or the user is told why it couldn't."
+If `altimate-code run` fails, report the error and stop that delegation; do not
+silently replace it with native edits or warehouse commands.
 
-| Symptom | What to tell the user — verbatim |
+| Symptom | Action to tell the user |
 |---|---|
-| `command not found: altimate-code` | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) and run `altimate-code` once to configure auth. Then re-run your request." |
-| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` in your terminal to open the TUI and reconfigure your provider, then re-run your request." |
-| Process hangs >5 min | "altimate-code is unresponsive. Try `altimate-code` to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |
-| Output file empty | "altimate-code returned without producing output. The task may be too ambiguous — please restate with more detail (target table, expected columns, time window)." |
-| Warehouse error mid-run (`UNKNOWN_USER`, `Database does not exist`) | "altimate-code can connect but the warehouse credentials it has are wrong for this project. Configure provider/warehouse auth via `altimate-code` TUI." |
+| CLI not on PATH | Install an altimate-code build appropriate for this plugin, then retry. MCP requires a build with `mcp serve`. |
+| `Unauthorized: Incorrect auth token` / `No provider configured` | Run `altimate-code` in a terminal and configure its LLM provider, then retry the delegated job. MCP data questions do not require this provider. |
+| Process hangs >5 min | Open the altimate-code TUI to check for a pending prompt. |
+| Output file empty | Report the missing output; ask for the target, expected result, or time window if the task is ambiguous. |
+| Warehouse error (`UNKNOWN_USER`, `Database does not exist`) | Check the project's warehouse connection configuration and database access. |
 
-In every row, the instruction to the user is the action — you do not retry the task with native tools. If the user fixes the underlying issue and asks again, you delegate again.
+## Delegation notes
 
-## Notes
-
-- altimate-code runs its own LLM, separate from Claude Code's. Costs and rate limits accrue to altimate-code's configured provider.
-- Sessions persist in altimate-code's local store — `altimate-code session list` shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
-- For very long tasks, the `--output` file is the source of truth — stdout buffering can drop content.
+- Sessions persist locally: `altimate-code session list` lists prior runs;
+  `--continue` resumes the latest, `--session <id>` a specific session.
+- For very long tasks, the private `--output` file is the source of truth;
+  stdout buffering can drop content.

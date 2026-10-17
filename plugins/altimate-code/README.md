@@ -1,8 +1,13 @@
 # Altimate Code — Claude Code plugin
 
-Routes dbt + warehouse tasks from Claude Code to [altimate-code](https://github.com/AltimateAI/altimate-code), a specialized open-source CLI agent with 100+ deterministic data-engineering tools: SQL anti-pattern detection, column-level lineage, dbt build/test/run against real warehouses, FinOps and cost analysis, cross-dialect translation and data parity, and PII detection.
+Use [altimate-code](https://github.com/AltimateAI/altimate-code) data tools directly
+from Claude Code through MCP. **Claude Code does the reasoning and carries the
+LLM cost** for data questions; the stdio MCP server runs no LLM. Long multi-step
+jobs such as dbt project builds, migrations, and FinOps reports can still be
+delegated to `altimate-code run`, which uses its own agent and configured provider.
 
-**Why delegate?** General coding agents can edit SQL files; they can't inspect your live warehouse state. altimate-code gives Claude Code a deterministic data-engineering layer — indexed schemas, real query history, real cost data — instead of guesses.
+**1.1.0-experimental: requires an altimate-code build with `mcp serve`.** This
+server is in an unreleased branch; a published CLI release may not include it.
 
 ## Install
 
@@ -13,57 +18,111 @@ Routes dbt + warehouse tasks from Claude Code to [altimate-code](https://github.
 
 ## Prerequisites
 
-The altimate-code CLI must be installed and configured on your PATH:
+Install an altimate-code build containing `mcp serve` and put `altimate-code` on
+PATH where Claude Code can launch it. The CLI requires Node 20+. Check your build
+with `altimate-code mcp serve --help`; an unknown command means you need a build
+that includes the MCP server. Installing the latest published npm package alone
+may not satisfy this experimental requirement.
 
-```bash
-npm install -g altimate-code     # requires Node 20+
-altimate-code                    # launch the TUI, then run /connect to configure your LLM provider
-```
-
-Or configure a provider via environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and 20+ others — see the [altimate-code docs](https://docs.altimate.sh)).
-
-If altimate-code is not on PATH or not configured, the plugin surfaces the failure with fix instructions rather than silently falling back to Claude's native tools.
+Configure database connections as described below. Direct MCP use does **not**
+require an altimate-code LLM provider or API key. For delegated jobs only, run
+`altimate-code` to configure its provider (or use its provider environment settings).
 
 ## How it works
 
-1. A **SessionStart hook** adds a static description of altimate-code's capabilities to the session, so Claude Code knows when a task fits.
-2. When a data-engineering task fires the **skill** (or you invoke **`/altimate <task>`** explicitly), Claude Code runs `altimate-code run "<your task>"` locally, selecting the cheapest suitable agent persona (`fast-edit` for dbt/SQL edits, `analyst` for aggregation-heavy correctness work, `builder` for warehouse-state investigation).
-3. altimate-code plans and executes the task using your configured LLM provider. Warehouse queries, dbt commands, and file edits run **locally under your credentials**.
-4. The result is written to a local output file and surfaced back in your Claude Code conversation.
+The plugin's `.mcp.json` registers the `altimate-code` stdio server by running
+`altimate-code mcp serve`, without `--allow-write`. Claude calls these tools directly:
+
+| Tool | Purpose |
+|---|---|
+| `warehouse_list` | List available connections. |
+| `schema_inspect` | Inspect columns and value profiles: frequency-ranked values, distinct/null counts, unique-in-sample flags, value shapes, and MongoDB nested paths. |
+| `sql_execute` | Execute SQL, read-only by default. Large results spill to a local file path. |
+| `sql_check` | Check keys, fan-out, grain, and nulls that could affect correctness. |
+| `sql_materialize` | Copy a read-only query result from any connection into session-local `scratch` DuckDB for cross-database joins. |
+
+For a data question, Claude lists connections, inspects schemas and value profiles,
+computes in SQL, checks correctness where needed, and returns the requested values
+with a one-line basis. For cross-connection joins, it materializes the smaller
+filtered side and other required inputs into `scratch`, then joins there.
+
+The routing skill and `/altimate <task>` select this direct path for answers,
+numbers, and lists. Long jobs needing altimate-code's own agent use
+`altimate-code run` with persona selection (`fast-edit`, `analyst`, or `builder`)
+and a private output file. Delegated jobs use the CLI's separate LLM provider,
+costs, and rate limits. `/review` retains the specialized dbt/SQL reviewer.
+A short SessionStart hook describes these capabilities to Claude.
+
+## Connections
+
+The server uses normal altimate-code discovery: project and global
+`.altimate-code/connections.json` files, and `ALTIMATE_CODE_CONN_*` environment
+variables. Launch Claude Code in the intended project and make any connection
+environment variables available to its MCP subprocess.
+
+To select a connections file explicitly, change the server's `args` in
+`plugins/altimate-code/.mcp.json` (or the installed plugin's `.mcp.json`) to:
+
+```json
+["mcp", "serve", "--connections", "/absolute/path/to/connections.json"]
+```
+
+Use an absolute path to avoid working-directory ambiguity. Connection credentials
+are database credentials; they are independent of an LLM provider configuration.
+
+## Read-only default
+
+The plugin does not pass `--allow-write`. Read-only execution is **database-enforced
+on Postgres, SQLite, and DuckDB**. Elsewhere it is **SQL-classification-only**;
+use a read-only DB user to enforce the boundary in the database. This default is
+not a universal database permission guarantee. The CLI supports `--allow-write`
+for explicitly enabling writes, but this plugin does not enable it.
+
+`sql_materialize` copies read-only source query results into session-local
+`scratch` DuckDB; that local analytical storage does not modify the source
+databases. Large results can also be written to local spill files.
 
 ## Example prompts
 
-Once installed, try these in Claude Code (or prefix any of them with `/altimate`):
-
-1. **Column-level lineage** — *"Trace the `revenue_usd` column in `models/marts/fct_revenue.sql` back to its sources, and list every downstream model that would be affected if I change its rounding."*
-2. **Warehouse cost analysis** — *"Give me a cost report for our Snowflake account: the ten most expensive queries this month and any warehouses that look over-provisioned."*
-3. **Cross-dialect validation** — *"Compare `prod.orders` in Snowflake with `analytics.orders` in BigQuery row-by-row using `id` as the key, and summarize any mismatches."*
-4. **dbt test generation** — *"Generate dbt tests for `models/staging/stg_orders.sql`, including unit tests for the CASE/WHEN logic."*
+- "How many orders were completed last month? Return the count and total revenue."
+- "Join customer activity across our two connections and list the ten most active customers."
+- "/altimate Build and test a dbt staging project for these sources."
+- "/altimate Produce a warehouse FinOps report with recommendations."
+- "/review Review my dbt changes."
 
 ## Data handling
 
-Delegating a task passes your prompt text to the altimate-code CLI, which sends it to your configured LLM provider — the Altimate LLM Gateway by default, or your own provider (BYOK), in which case Altimate never sees it. Warehouse credentials and query results stay on your machine.
+MCP tools run locally under your database credentials. Tool results, including
+sampled values and query results Claude reads, enter the Claude Code conversation
+and are handled by Claude Code's configured model/provider. The MCP server makes
+no separate LLM calls. Scratch data and spilled results are local artifacts.
 
-Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosure: **[SECURITY.md](../../SECURITY.md)** · Terms: **[TERMS.md](../../TERMS.md)**
+Delegation passes your task to `altimate-code run`; its own configured LLM
+provider handles the task and any data supplied to that agent. This is a separate
+provider and billing path from direct MCP use.
+
+See **[PRIVACY.md](../../PRIVACY.md)** for the existing delegation policy;
+**[SECURITY.md](../../SECURITY.md)** and **[TERMS.md](../../TERMS.md)** also apply.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `command not found: altimate-code` | `npm install -g altimate-code` (Node 20+), then run `altimate-code` once to configure your provider. |
-| `Unauthorized` / `No provider configured` | Run `altimate-code` to open the TUI and reconfigure your provider via `/connect`, or set the provider API key env var. |
-| Task hangs for several minutes | Open `altimate-code` to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
-| Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |
-| `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate-code` TUI or `profiles.yml`. |
-| Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
-
-Still stuck? See [Support](#support).
+| `command not found: altimate-code` | Put a build with `mcp serve` on Claude Code's PATH. |
+| Unknown `mcp` or `serve` command | Use an altimate-code build containing the unreleased MCP server. |
+| No connections / database access error | Check project/global connection files, `ALTIMATE_CODE_CONN_*` environment variables, and database permissions. |
+| `Unauthorized` / `No provider configured` from a delegated job | Configure the CLI's LLM provider; direct MCP data questions do not need it. |
+| Delegated job hangs or returns no output | Check the CLI TUI for pending prompts and provide a precise target and expected result. |
+| Plugin unavailable | Confirm it is enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 ## Components
 
-- **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and agent-persona selection
-- **Command** — `commands/altimate.md` — `/altimate` slash command for explicit delegation
-- **Hook** — `hooks/hooks.json` — SessionStart capability description (static text only)
+- **MCP server** — `.mcp.json` — direct stdio data tools
+- **Routing skill** — `skills/altimate-code/SKILL.md` — direct questions or CLI delegation
+- **Data-question skill** — `skills/data-question/SKILL.md` — concise analysis workflow
+- **Review skill** — `skills/review/SKILL.md` — specialized dbt/SQL review
+- **Commands** — `commands/altimate.md` and `commands/review.md`
+- **Hook** — `hooks/hooks.json` and `hooks-handlers/session-start.sh`
 
 ## Support
 

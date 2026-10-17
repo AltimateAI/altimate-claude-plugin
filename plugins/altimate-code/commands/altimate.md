@@ -1,11 +1,19 @@
 ---
-description: Delegate a task to altimate-code, the specialised data-engineering CLI agent (warehouse access, column-level lineage, cross-DB, FinOps, query optimization)
+description: Answer data questions with altimate-code MCP tools or delegate long dbt and warehouse jobs to its CLI agent.
 argument-hint: <task description>
 ---
 
-The user explicitly invoked `/altimate` to delegate this task to altimate-code. You MUST run the task via the `altimate-code` CLI — do NOT attempt the work with native `Bash`/`Edit`/`Write` tools.
+The user invoked `/altimate` to use altimate-code for this task. For a data
+question requesting answers, numbers, or lists, use the `altimate-code` MCP tools
+directly and follow the `data-question` skill. Claude Code does the reasoning;
+do not invoke `altimate-code run` or require its LLM provider for this path.
+If MCP is unavailable, report the error and the requirement for a build with
+`mcp serve` and configured connections; do not silently delegate instead.
 
-Workflow (follow in order, no skipping):
+For a long multi-step job needing altimate-code's own agent (such as a dbt project
+build, migration, or FinOps report), use the delegation workflow below.
+
+Delegation workflow (follow in order):
 
 1. **Verify altimate-code is installed:**
    ```bash
@@ -18,14 +26,15 @@ Workflow (follow in order, no skipping):
 
    | Task shape | Use `--agent` |
    |---|---|
-   | Any dbt / SQL task (rename, refactor, create, debug, structural) | `fast-edit` (default) |
+   | Delegated dbt / SQL project job (rename, refactor, create, debug, structural) | `fast-edit` (default) |
    | Aggregation correctness on multi-table joins | `analyst` if fast-edit fails the user's verification |
    | Warehouse-state work (lineage, cost, parity, schema diff, PII, FinOps) | `builder` |
    | Vague debug ("X is broken") | **Stop — ask the user for the specific error before delegating.** |
 
-   Decision rule: start with `fast-edit`. Only use `analyst` / `builder` when the cheap path fails for a documented reason.
+   Decision rule: start with `fast-edit` for delegated dbt/SQL project jobs; use `analyst` after correctness verification fails, and `builder` for warehouse-state jobs. Data questions use MCP regardless of join complexity.
 
-3. **Run altimate-code with the chosen agent.** Pass `$ARGUMENTS` through a
+3. **Run altimate-code with the chosen agent.** Choose a here-doc delimiter that
+   does not occur as a standalone line in the task. Pass `$ARGUMENTS` through a
    here-doc into a variable so the shell never command-substitutes anything the
    user typed, and write the result to a private `mktemp` file (not a shared
    `/tmp/altimate-result.md` — concurrent invocations clobber each other and a
@@ -65,4 +74,4 @@ Workflow (follow in order, no skipping):
 
 5. **On any altimate-code error** (`Unauthorized`, `Token limit reached`, `No provider configured`, warehouse credentials wrong, process timeout) — surface the error message to the user along with the fix from the skill body's failure-modes table. Do NOT fall back to native tools. The user invoked `/altimate` specifically to use altimate-code; falling back would defeat the purpose.
 
-Task to delegate: $ARGUMENTS
+Task: $ARGUMENTS
