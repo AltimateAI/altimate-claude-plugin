@@ -1,7 +1,7 @@
 # Privacy Policy — Altimate Code plugin for Claude Code
 
-**Effective date:** July 9, 2026
-**Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) CLI.
+**Effective date:** October 17, 2026
+**Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) MCP server and CLI.
 
 This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai/privacy) and [Terms](https://www.altimate.ai/terms), which govern Altimate services generally. Where this document is silent, the master policy applies. Questions: **info@altimate.ai**.
 
@@ -9,16 +9,25 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 
 ## The short version
 
-- The plugin itself collects **no data**. It is a routing layer (a skill, a slash command, and a static session hook) that tells Claude Code when to delegate a task to the altimate-code CLI installed on your machine.
+- When the plugin is enabled, Claude Code launches a local `altimate-code mcp serve` process for direct data tools. This requires a build containing `mcp serve`; if the server cannot start or its tools are unavailable, data questions fall back to CLI delegation.
+- MCP tool results, including sampled column values and query results, enter the Claude Code conversation and therefore reach your configured model provider. The local MCP server makes no separate LLM calls.
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
 - Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
 
-The plugin contains no executable service of its own. Its only runtime behavior is a SessionStart hook that prints a fixed, static text block describing the skill's capabilities. It does not read your files, does not phone home, and does not collect analytics.
+The plugin registers a local stdio MCP server through `.mcp.json`, provides routing skills and slash commands, and runs a SessionStart hook that prints a fixed capability description. The server reads configured connections and runs data tools under your local credentials. The plugin adds no analytics of its own; CLI telemetry is described below.
 
-Data leaves Claude Code's process only when the delegation skill or the `/altimate` command fires and invokes the locally installed altimate-code CLI.
+## Data flows through MCP tools
+
+| Data | Where it goes | Retention |
+|---|---|---|
+| Database credentials and connection configuration | Read locally by the MCP server to connect to your databases | Local configuration; not included in tool results |
+| Schema metadata, sampled column values, and query results returned by tools | Local MCP server → Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
+| Scratch tables and spilled query results | Local session storage or spill files; any content Claude reads enters the conversation and reaches your model provider | Local artifacts; conversation copies follow Claude Code and provider policies |
+
+The MCP server makes no separate LLM calls. Delegation uses the separate provider path below.
 
 ## Data flows when a task is delegated
 
@@ -26,7 +35,7 @@ Data leaves Claude Code's process only when the delegation skill or the `/altima
 |---|---|---|
 | Your task prompt (verbatim) | Local altimate-code CLI → your configured LLM provider | Altimate LLM Gateway does not retain full prompts and responses after processing. BYOK providers: governed by that provider's policy — Altimate never sees this traffic. |
 | Warehouse credentials (`profiles.yml`, env vars) | Stay on your machine; used locally by the CLI | Never transmitted to Altimate |
-| Warehouse query results, dbt output, file edits | Produced locally; written to a local output file surfaced back to Claude Code | Local only |
+| Warehouse query results, dbt output, file edits | Produced locally; data supplied to the CLI agent reaches its configured LLM provider. Output read back into Claude Code reaches Claude Code's model provider. | Local output files; provider copies follow the applicable provider policies |
 | Schema metadata indexed by the CLI | Local index on your machine | Local only |
 
 **Bring Your Own Key (BYOK):** if you configure your own provider (Anthropic, OpenAI, Bedrock, Azure OpenAI, Ollama, and others), your prompts go directly from your machine to that provider. Altimate is not in the path.
@@ -57,8 +66,8 @@ All data transmitted to Altimate services is encrypted in transit using TLS. Alt
 
 ## Your choices
 
-- **Don't enable the plugin** — it ships disabled; nothing is delegated until you enable it.
-- **Use BYOK** — route prompts directly to your own provider so Altimate never sees them.
+- **Don't enable the plugin** — no plugin MCP server is launched and no tasks are delegated while it is disabled.
+- **Use BYOK for delegation** — route CLI agent prompts directly to your own provider. MCP tool results are handled by Claude Code's configured model provider independently.
 - **Disable telemetry** — see above.
 - **Contact us** — for access, correction, or deletion requests, email **info@altimate.ai**.
 

@@ -2,7 +2,7 @@
 
 All notable changes to this plugin will be documented in this file.
 
-## [1.1.0-experimental] — Unreleased — experimental; requires an altimate-code build with `mcp serve`
+## [1.1.0-experimental] — Unreleased — direct MCP use requires an altimate-code build with `mcp serve`
 
 ### Added
 - Stdio MCP registration for `altimate-code mcp serve`, without `--allow-write`.
@@ -10,7 +10,8 @@ All notable changes to this plugin will be documented in this file.
 - Lean `data-question` skill for value-profile inspection, SQL analysis, cross-connection scratch joins, and correctness checks.
 
 ### Changed
-- Routing skill, `/altimate`, and SessionStart context use MCP directly for data questions with Claude Code reasoning; long jobs retain CLI delegation and agent-persona guidance.
+- Routing skill, `data-question`, and `/altimate` prefer MCP for data questions with Claude Code reasoning. If the MCP tools are unavailable, they fall back to CLI analyst delegation and tell the user which path is used. Released builds without `mcp serve` fail to start the MCP server and use this fallback.
+- Long jobs and capabilities outside the five MCP tools retain CLI delegation and agent-persona guidance.
 - Documentation covers experimental prerequisites, connection discovery, read-only enforcement limits, local result files, and separate reasoning/billing paths.
 
 ## [1.0.0] — 2026-07-09

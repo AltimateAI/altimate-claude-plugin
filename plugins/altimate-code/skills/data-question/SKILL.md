@@ -1,13 +1,19 @@
 ---
 name: data-question
 description: >-
-  Answer natural-language questions over one or more databases directly with
-  altimate-code MCP tools, using Claude Code for reasoning and SQL analysis.
+  Prefer altimate-code MCP tools for natural-language questions over databases,
+  using Claude Code for reasoning; delegate to the CLI analyst if unavailable.
 ---
 
 # Answer a data question
 
-Use the `altimate-code` MCP tools yourself; Claude Code supplies the reasoning.
+When the `altimate-code` MCP tools are available in the session, use them yourself;
+Claude Code supplies the reasoning. Tell the user that the MCP path is being used.
+If the tools are unavailable (server missing or failed to start), tell the user
+and follow the `altimate-code` skill's CLI delegation workflow with
+`--agent analyst`, including its installation/provider checks and private output
+file. Delegation uses the CLI's separate configured LLM provider. Do not attempt
+the MCP steps below when its tools are unavailable.
 
 1. List available connections with `warehouse_list`.
 2. Inspect relevant tables with `schema_inspect`. Read its value profile before
@@ -20,6 +26,9 @@ Use the `altimate-code` MCP tools yourself; Claude Code supplies the reasoning.
    filtered side into session-local `scratch` DuckDB. Materialize the other
    required inputs there too, then join them in one SQL query in `scratch`.
 5. Use `sql_check` when keys, fan-out, grain, or nulls could change the answer.
+   It runs on SQLite, DuckDB, and Postgres. For other engines, first use
+   `sql_materialize` to copy the relevant rows into `scratch`, then run the checks
+   there. Materialize all relevant rows for a key or grain check, not just a sample.
    Unique-in-sample is evidence to investigate, not proof of a unique key.
 6. Check that every condition in the question actually filters something.
    Compare counts or values before and after filtering; investigate no-op

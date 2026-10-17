@@ -6,8 +6,10 @@ LLM cost** for data questions; the stdio MCP server runs no LLM. Long multi-step
 jobs such as dbt project builds, migrations, and FinOps reports can still be
 delegated to `altimate-code run`, which uses its own agent and configured provider.
 
-**1.1.0-experimental: requires an altimate-code build with `mcp serve`.** This
-server is in an unreleased branch; a published CLI release may not include it.
+**1.1.0-experimental: direct MCP use requires an altimate-code build with `mcp serve`.**
+This server is in an unreleased branch. Released builds without `mcp serve` fail
+to start the MCP server; the plugin falls back to `altimate-code run` with the
+analyst persona for data questions. It tells you which path is being used.
 
 ## Install
 
@@ -18,11 +20,11 @@ server is in an unreleased branch; a published CLI release may not include it.
 
 ## Prerequisites
 
-Install an altimate-code build containing `mcp serve` and put `altimate-code` on
-PATH where Claude Code can launch it. The CLI requires Node 20+. Check your build
-with `altimate-code mcp serve --help`; an unknown command means you need a build
-that includes the MCP server. Installing the latest published npm package alone
-may not satisfy this experimental requirement.
+Put `altimate-code` on PATH where Claude Code can launch it. The CLI requires
+Node 20+. For direct MCP use, install a build containing `mcp serve`. Check your
+build with `altimate-code mcp serve --help`; an unknown command means the MCP
+server cannot start and data questions use CLI delegation instead. Installing
+the latest published npm package alone does not provide the unreleased server.
 
 Configure database connections as described below. Direct MCP use does **not**
 require an altimate-code LLM provider or API key. For delegated jobs only, run
@@ -38,7 +40,7 @@ The plugin's `.mcp.json` registers the `altimate-code` stdio server by running
 | `warehouse_list` | List available connections. |
 | `schema_inspect` | Inspect columns and value profiles: frequency-ranked values, distinct/null counts, unique-in-sample flags, value shapes, and MongoDB nested paths. |
 | `sql_execute` | Execute SQL, read-only by default. Large results spill to a local file path. |
-| `sql_check` | Check keys, fan-out, grain, and nulls that could affect correctness. |
+| `sql_check` | Check keys, fan-out, grain, and nulls on SQLite, DuckDB, and Postgres. For other engines, first `sql_materialize` the relevant rows into `scratch` and check there. |
 | `sql_materialize` | Copy a read-only query result from any connection into session-local `scratch` DuckDB for cross-database joins. |
 
 For a data question, Claude lists connections, inspects schemas and value profiles,
@@ -46,10 +48,13 @@ computes in SQL, checks correctness where needed, and returns the requested valu
 with a one-line basis. For cross-connection joins, it materializes the smaller
 filtered side and other required inputs into `scratch`, then joins there.
 
-The routing skill and `/altimate <task>` select this direct path for answers,
-numbers, and lists. Long jobs needing altimate-code's own agent use
+The routing skill, `data-question` skill, and `/altimate <task>` prefer this direct
+path for answers, numbers, and lists when the MCP tools are available in the
+session. If the server is missing or fails to start, they delegate data questions
+with `--agent analyst`. Long jobs and capabilities outside the five MCP tools use
 `altimate-code run` with persona selection (`fast-edit`, `analyst`, or `builder`)
-and a private output file. Delegated jobs use the CLI's separate LLM provider,
+and a private output file. The plugin tells you which path it uses.
+Delegated jobs use the CLI's separate LLM provider,
 costs, and rate limits. `/review` retains the specialized dbt/SQL reviewer.
 A short SessionStart hook describes these capabilities to Claude.
 
@@ -101,15 +106,15 @@ Delegation passes your task to `altimate-code run`; its own configured LLM
 provider handles the task and any data supplied to that agent. This is a separate
 provider and billing path from direct MCP use.
 
-See **[PRIVACY.md](../../PRIVACY.md)** for the existing delegation policy;
+See **[PRIVACY.md](../../PRIVACY.md)** for MCP and delegation data flows;
 **[SECURITY.md](../../SECURITY.md)** and **[TERMS.md](../../TERMS.md)** also apply.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `command not found: altimate-code` | Put a build with `mcp serve` on Claude Code's PATH. |
-| Unknown `mcp` or `serve` command | Use an altimate-code build containing the unreleased MCP server. |
+| `command not found: altimate-code` | Install altimate-code on Claude Code's PATH for delegation; direct MCP tools additionally require a build with `mcp serve`. |
+| Unknown `mcp` or `serve` command | The MCP server fails to start; data questions fall back to CLI analyst delegation. Configure the CLI's LLM provider for delegation, or use a build containing `mcp serve` for direct MCP tools. |
 | No connections / database access error | Check project/global connection files, `ALTIMATE_CODE_CONN_*` environment variables, and database permissions. |
 | `Unauthorized` / `No provider configured` from a delegated job | Configure the CLI's LLM provider; direct MCP data questions do not need it. |
 | Delegated job hangs or returns no output | Check the CLI TUI for pending prompts and provide a precise target and expected result. |

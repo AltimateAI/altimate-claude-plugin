@@ -1,23 +1,26 @@
 ---
 name: altimate-code
 description: >-
-  Routes warehouse data questions to altimate-code MCP tools for Claude to
-  answer directly; delegates long dbt project builds, migrations, and FinOps
-  jobs to the altimate-code CLI agent. Use also when altimate-code is named.
+  Prefer altimate-code MCP for data questions; delegate if unavailable. Delegate
+  dbt builds, migrations, FinOps, column-level lineage, downstream impact, schema
+  diff, data parity, PII detection, query cost attribution, query optimization,
+  incremental/SCD2 verification, model docs, and dev-vs-prod diffs. Use also when
+  altimate-code is named.
 ---
 
 # altimate-code
 
 Choose the path from the requested outcome, including when invoked via `/altimate`.
 
-## Data questions: use MCP tools directly
+## Data questions: prefer MCP tools, otherwise delegate
 
 For answers, numbers, or lists over warehouse data, use the `altimate-code` MCP
-server yourself. Follow the `data-question` skill for discovery, value profiles,
+server yourself when its tools are available in the session. Follow the
+`data-question` skill for discovery, value profiles,
 SQL, cross-connection joins, correctness checks, and answer shape. The tools are
 `warehouse_list`, `schema_inspect`, `sql_execute`, `sql_check`, and `sql_materialize`.
 Claude Code does the reasoning; this server runs no LLM and needs no separate
-LLM-provider configuration. Do not delegate a data question to `altimate-code run`.
+LLM-provider configuration. Tell the user that the MCP path is being used.
 
 The server is read-only by default for source databases. Postgres, SQLite, and
 DuckDB enforce read-only access at the database level; other databases rely on
@@ -25,15 +28,22 @@ SQL classification, so use a read-only DB user. `sql_materialize` writes only to
 session-local `scratch` DuckDB for analysis. Large query results may spill to a
 local file path; read the needed results there before answering.
 
-If MCP is unavailable, report the connection/startup error and check that an
-altimate-code build with `mcp serve` is on PATH and connections are configured.
-Do not silently switch to the separate CLI agent or invent results. Use native
-file-reading tools as needed to read local result files.
+If the MCP tools are unavailable in the session (server missing or failed to
+start), tell the user that MCP is unavailable and that you are using CLI
+delegation with its separate configured LLM provider. Follow the invocation
+workflow below with `--agent analyst`. Released altimate-code builds without
+`mcp serve` can still use this delegation path. If an available tool fails,
+report that error; do not invent results. Use native file-reading tools as needed
+to read local result files.
 
-## Long jobs: delegate to the CLI agent
+## Other capabilities and long jobs: delegate to the CLI agent
 
 Use `altimate-code run` for long multi-step jobs needing its own agent, such as
-building a dbt project, migrations, or a FinOps report. First check
+building a dbt project, migrations, or a FinOps report. Also delegate capabilities
+outside the five MCP tools: column-level lineage, downstream impact, schema diff,
+data parity, PII detection, query cost attribution, query optimization,
+incremental/SCD2 verification, model docs, and dev-vs-prod diffs. Tell the user
+that CLI delegation is being used. First check
 `command -v altimate-code`. Pass the user's task verbatim using the safe
 invocation below, then read and present the output. Delegation uses
 altimate-code's own configured LLM provider, costs, and rate limits.
@@ -46,25 +56,30 @@ altimate-code has multiple agent personas. The default (`builder`) does a full p
 
 | Shape | Examples | Use |
 |---|---|---|
+| **Data question when MCP tools are unavailable** | answers, numbers, lists, including multi-table aggregations | `analyst` |
 | **Delegated dbt / SQL job** (rename, refactor, create model, debug, structural reorg, multi-step setup) | long project jobs needing the CLI agent | `fast-edit` — try this first |
 | **Multi-table aggregation correctness** | new model joining 3+ tables with `count(*)` / `sum() over (...)` / "first X, last X" logic that must be exactly right | `analyst` if `fast-edit` fails the user's verification |
 | **Warehouse-state work** | column-level lineage, downstream-impact, cross-DB migration / parity, query cost attribution against a real warehouse, schema diff between environments, PII detection, FinOps reporting | `builder` (default — has warehouse tools enabled) |
 | **Vague debug** ("X is broken", "make it work", "fix this") | unspecified failure mode | **Don't delegate yet.** Ask the user for the specific error message or symptom before invoking any agent — empirically all three agents fail vague debug prompts at ~700K tokens each. |
 
-**Decision policy (delegation only):** start with `fast-edit` for dbt/SQL project jobs. Data questions stay on the MCP path, including multi-table aggregations. If the user reports the result is wrong (e.g. aggregation values don't match), retry with `analyst`. Only use `builder` when the task genuinely needs the warehouse-investigation tools (it's 10–20× more expensive than fast-edit and rarely required).
+**Decision policy (delegation only):** use `analyst` for data questions when MCP tools are unavailable; otherwise prefer MCP for data questions, including multi-table aggregations. Start with `fast-edit` for dbt/SQL project jobs. If the user reports the result is wrong (e.g. aggregation values don't match), retry with `analyst`. Only use `builder` when the task genuinely needs the warehouse-investigation tools (it's 10–20× more expensive than fast-edit and rarely required).
 
 ### Step 2 — invoke with the chosen agent
 
-Choose a here-doc delimiter that does not occur as a standalone line in the task. Pass the task through a quoted here-doc into a variable so the shell never
+Generate a fresh delimiter per call, such as `ALTIMATE_TASK_<random hex>`, and
+check that it does not occur as a standalone line in the complete task. Regenerate
+it if it does. Replace both occurrences of `ALTIMATE_TASK_<random hex>` in each
+template below with that checked delimiter; keep the opening delimiter
+single-quoted (no shell expansion). Pass the task through a quoted here-doc into a variable so the shell never
 command-substitutes anything the user typed (a task like
 `refactor `whoami` and $(rm -rf ~)` would otherwise fire `whoami` and
 `rm -rf ~` before `altimate-code` ever runs). Write the result to a
 private temporary file, not a shared one under `/tmp`:
 
 ```bash
-TASK="$(cat <<'ALTIMATE_TASK'
+TASK="$(cat <<'ALTIMATE_TASK_<random hex>'
 <user's task, verbatim>
-ALTIMATE_TASK
+ALTIMATE_TASK_<random hex>
 )"
 umask 077
 OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
@@ -91,9 +106,9 @@ Then `Read "$OUTPUT_FILE"` and emit its contents to the user without re-summaris
 When the user makes a follow-up data task in the same project after a successful altimate-code delegation, prefer `--continue` to resume the warm session instead of starting a fresh one. Same here-doc + `mktemp` pattern:
 
 ```bash
-TASK="$(cat <<'ALTIMATE_TASK'
+TASK="$(cat <<'ALTIMATE_TASK_<random hex>'
 <follow-up task>
-ALTIMATE_TASK
+ALTIMATE_TASK_<random hex>
 )"
 umask 077
 OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
