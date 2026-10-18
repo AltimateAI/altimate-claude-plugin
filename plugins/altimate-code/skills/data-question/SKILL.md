@@ -36,6 +36,12 @@ the MCP steps below when its tools are unavailable.
    conditions rather than silently dropping them or inventing exclusions.
 7. When a phrase has two readings, compute both and choose using the question's
    own definitions. If those definitions do not resolve it, show both readings.
-8. Return the requested values in the requested shape, with a one-line basis
-   stating the sources, filters, and calculation. Report tool failures or missing
-   data plainly; do not fabricate values.
+8. Finish with `answer_commit`: pass one field (or rows column) per item the
+   request asks for, `asked` listing those items in order, and a one-line basis
+   (sources, filters, calculation). It rejects a call that leaves an asked item
+   unanswered or commits a number absent from query output; fix what it names and
+   call again. Reply with exactly the `FINAL ANSWER:` text it returns. Report tool
+   failures or missing data plainly; do not fabricate values.
+
+For a dedicated analyst session, start Claude Code with
+`claude --agent altimate-code:analyst`; it carries this method as its system prompt.
