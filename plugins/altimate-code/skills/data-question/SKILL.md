@@ -1,8 +1,9 @@
 ---
 name: data-question
 description: >-
-  Prefer altimate-code MCP tools for natural-language questions over databases,
-  using Claude Code for reasoning; delegate to the CLI analyst if unavailable.
+  Use for ordinary data questions over a database or warehouse ("how many",
+  "which", "average", "top N", "compare", counts, lists, totals). Answer with the
+  altimate-code MCP tools yourself; delegate to the CLI analyst if unavailable.
 ---
 
 # Answer a data question
