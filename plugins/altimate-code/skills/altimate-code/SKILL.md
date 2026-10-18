@@ -115,7 +115,7 @@ When altimate-code returns an error, **report the error to the user and STOP**. 
 | Symptom | What to tell the user — verbatim |
 |---|---|
 | `command not found: altimate-code` | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) and run `altimate-code` once to configure auth. Then re-run your request." |
-| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` in your terminal to open the TUI and reconfigure your provider, or sign in to Altimate with `altimate-code auth login -p altimate-backend`, then re-run your request." |
+| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` in your terminal to open the TUI and reconfigure your provider, or sign in to Altimate with `altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`, then re-run your request." |
 | `Not signed in to Altimate` | "altimate-code is not signed in to Altimate, so it cannot reach your workspace. Run `! altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`, sign in in the browser, then re-run your request." |
 | `memory was saved here but could not be sent to the workspace` (stderr) | Present the result as usual, then add: "altimate-code saved what it learned on this machine but could not send it to your workspace. Run `! altimate-code workspace sync` to send it." |
 | Process hangs >5 min | "altimate-code is unresponsive. Try `altimate-code` to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |

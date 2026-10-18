@@ -82,7 +82,7 @@ Still stuck? See [Support](#support).
 
 ## Components
 
-- **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and agent-persona selection
+- **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and workspace guidance
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
 - **Hook** — `hooks/hooks.json` — SessionStart capability description (static text only)
 
