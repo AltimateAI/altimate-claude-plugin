@@ -58,7 +58,7 @@ Workflow (follow in order, no skipping):
 
    If the project is linked to an Altimate workspace, altimate-code uses its skills, knowledge and memory automatically. There is nothing to pass.
 
-4. **Surface the result verbatim:** read `"$OUTPUT_FILE"` and present its contents to the user without re-summarising, re-formatting, or commenting. altimate-code has already produced the answer. Delete `"$OUTPUT_FILE"` after presenting so warehouse rows, lineage, or PII findings don't linger on disk.
+4. **Surface the result verbatim:** read `"$OUTPUT_FILE"` and present its contents to the user without re-summarising, re-formatting, or commenting. altimate-code has already produced the answer. Delete `"$OUTPUT_FILE"` after presenting so warehouse rows, lineage, or PII findings don't linger on disk. If the command's stderr says `not in the workspace yet` or `Could not confirm that the memory saved here reached the workspace`, add the matching note from the skill body's failure-modes table after the result.
 
 5. **On any altimate-code error** (`Unauthorized`, `Token limit reached`, `No provider configured`, `Not signed in to Altimate`, warehouse credentials wrong, process timeout) — surface the error message to the user along with the fix from the skill body's failure-modes table. Do NOT fall back to native tools. The user invoked `/altimate-code:altimate` specifically to use altimate-code; falling back would defeat the purpose.
 
