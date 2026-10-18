@@ -43,14 +43,12 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 
 An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's shared skills, knowledge, memory and warehouse integrations. Claude Code reaches it through altimate-code: every task the plugin hands over runs in your project, so it uses the workspace the project is linked to. Nothing in Claude Code needs configuring.
 
-1. **Sign in to Altimate** — `altimate-code auth login -p altimate-backend`, then choose **Altimate LLM Gateway**. It opens your browser. This also sets up the model provider altimate-code uses.
-2. **Link the project** — run `altimate-code link` in the project folder and pick the workspace, or create one. From a script, use `altimate-code link --workspace <id or name>` or `altimate-code link --create`.
+1. **Sign in to Altimate** — `altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`. It opens your browser. This also sets up the model provider altimate-code uses. You can run it from Claude Code by typing it after `!`.
+2. **Link the project** — ask Claude to link the project to your workspace. It lists your workspaces with `altimate-code workspace list` and links the one you choose with `altimate-code link --workspace <id or name>`, or creates one with `altimate-code link --create`. In a terminal, `altimate-code link` does the same with a picker; the picker does not work after `!` in Claude Code.
 3. **Check it** — `altimate-code workspace status` shows the linked workspace and its page in the Altimate web app.
 4. **Ask Claude** — questions about your team's conventions, standards or knowledge go to altimate-code, which answers from the workspace. Start a request with `/altimate-code:altimate` to be sure it does: *"/altimate-code:altimate what are our naming conventions for staging models?"*
 
 What altimate-code learns during these tasks is saved to the workspace's memory and shared with your team in the CLI, the IDE and Studio. Skills added to the workspace reach the next task.
-
-In Claude Code you can run the sign-in and link commands without leaving the session by prefixing them with `!`, for example `! altimate-code link`.
 
 ## Example prompts
 
@@ -76,8 +74,8 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | Task hangs for several minutes | Open `altimate-code` to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
 | Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |
 | `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate-code` TUI or `profiles.yml`. |
-| `Not signed in to Altimate` | Run `altimate-code auth login -p altimate-backend` and choose Altimate LLM Gateway. |
-| Answers ignore your workspace's skills or knowledge | Run `altimate-code workspace status` in the project. If it isn't linked, run `altimate-code link`. |
+| `Not signed in to Altimate` | Run `altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`. |
+| Answers ignore your workspace's skills or knowledge | Run `altimate-code workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate-code link` in a terminal. |
 | Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 Still stuck? See [Support](#support).

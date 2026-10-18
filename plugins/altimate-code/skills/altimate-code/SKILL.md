@@ -102,8 +102,8 @@ A project can be linked to an Altimate workspace: the team's shared skills, know
 When the user asks about their workspace or wants to set one up:
 
 - **Check the link:** `altimate-code workspace status < /dev/null`. Exit code 3 means the project is not linked; 2 means the user is not signed in to Altimate.
-- **Not signed in:** tell the user to run `! altimate-code auth login -p altimate-backend` in this session and choose **Altimate LLM Gateway**. It opens their browser to sign in. Do not try to sign in for them.
-- **Not linked:** `altimate-code link` is interactive, so tell the user to run `! altimate-code link` in this session and pick the workspace. If they name the workspace, you can run `altimate-code link --workspace "<id or name>" < /dev/null` instead; `altimate-code link --create < /dev/null` creates a new workspace named after the repository.
+- **Not signed in:** tell the user to run `! altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"` in this session. It opens their browser to sign in. Do not try to sign in for them. Keep the `--method` flag: without it the command waits at a menu that cannot be answered from this session.
+- **Not linked:** do not suggest `! altimate-code link`: its picker needs a terminal, and this session does not give it one. Instead run `altimate-code workspace list < /dev/null`, show the user the workspaces it prints, and once they choose, run `altimate-code link --workspace "<id or name>" < /dev/null`. If they want a new workspace, run `altimate-code link --create < /dev/null`, which names it after the repository. If `workspace list` is an unknown command (an older altimate-code), ask the user for the workspace's name, or tell them to run `altimate-code link` in a separate terminal.
 - **Open it in the browser:** `altimate-code workspace status` prints the workspace page's URL.
 
 What altimate-code learns during delegated tasks is saved to the workspace's memory and shared with the team in the CLI, the IDE and Studio.
@@ -116,7 +116,7 @@ When altimate-code returns an error, **report the error to the user and STOP**. 
 |---|---|
 | `command not found: altimate-code` | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) and run `altimate-code` once to configure auth. Then re-run your request." |
 | `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` in your terminal to open the TUI and reconfigure your provider, or sign in to Altimate with `altimate-code auth login -p altimate-backend`, then re-run your request." |
-| `Not signed in to Altimate` | "altimate-code is not signed in to Altimate, so it cannot reach your workspace. Run `! altimate-code auth login -p altimate-backend` and choose Altimate LLM Gateway, then re-run your request." |
+| `Not signed in to Altimate` | "altimate-code is not signed in to Altimate, so it cannot reach your workspace. Run `! altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`, sign in in the browser, then re-run your request." |
 | `memory was saved here but could not be sent to the workspace` (stderr) | Present the result as usual, then add: "altimate-code saved what it learned on this machine but could not send it to your workspace. Run `! altimate-code workspace sync` to send it." |
 | Process hangs >5 min | "altimate-code is unresponsive. Try `altimate-code` to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |
 | Output file empty | "altimate-code returned without producing output. The task may be too ambiguous — please restate with more detail (target table, expected columns, time window)." |
