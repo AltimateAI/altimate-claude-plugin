@@ -21,7 +21,7 @@ altimate-code is a CLI AI agent with 100+ purpose-built data engineering tools. 
 
 ## You MUST follow this workflow
 
-1. **Verify altimate-code is on PATH** with `command -v altimate-code || command -v altimate`. The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Either name is the same CLI. If neither resolves, jump to "Failure modes" below and stop.
+1. **Verify altimate-code is on PATH.** There is no separate check: the invocation below resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Either name is the same CLI. If the invocation exits with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
 2. **Run altimate-code with the user's task** using the invocation below. Pass the user's request through verbatim — do not paraphrase or split it.
 3. **Read the output file** and present it to the user as-is.
 

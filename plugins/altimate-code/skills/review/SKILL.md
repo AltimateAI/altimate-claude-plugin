@@ -27,7 +27,7 @@ description: >-
 
 ## You MUST follow this workflow
 
-1. **Verify altimate-code is on PATH** with `command -v altimate-code || command -v altimate`. If neither resolves, jump to "Failure modes" below and stop.
+1. **Verify altimate-code is on PATH.** There is no separate check: the resolver below runs first in the same Bash call as the review. If it exits 127 with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
 
    The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Every review command below runs through `"$ALTIMATE_BIN"`, in the same Bash call as this resolver (shell state does not persist between calls). The lookup ignores aliases and shell functions, so a user alias such as `alias altimate-code=altimate` cannot be captured as the binary path:
 

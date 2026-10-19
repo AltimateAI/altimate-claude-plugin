@@ -63,6 +63,7 @@ for sh in bash zsh; do
   expect "$sh" "$STUBS/neither" '' 127 'altimate-code CLI not found (tried altimate-code, altimate)'
   expect "$sh" "$STUBS/only-altimate" "$ALIAS_SETUP" 0 'ran altimate'
   expect "$sh" "$STUBS/only-altimate" "$ALIAS_SETUP; altimate() { echo function; }" 0 'ran altimate'
+  expect "$sh" "$STUBS/only-altimate" 'altimate-code() { echo function; }' 0 'ran altimate'
   expect "$sh" "relative dir" '' 0 'ran altimate'
 done
 

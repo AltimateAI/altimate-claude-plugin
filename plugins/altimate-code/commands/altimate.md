@@ -7,11 +7,7 @@ The user explicitly invoked `/altimate` to delegate this task to altimate-code. 
 
 Workflow (follow in order, no skipping):
 
-1. **Verify altimate-code is installed:**
-   ```bash
-   command -v altimate-code || command -v altimate
-   ```
-   The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Either one is fine. If neither resolves, stop and tell the user:
+1. **Verify altimate-code is installed.** There is no separate check: the run command in step 3 resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Either one is fine. If the run exits with `altimate-code CLI not found`, stop and tell the user:
    > altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install | bash`, then run `altimate` once to configure your provider/warehouse auth, then re-run `/altimate <task>`.
 
 2. **Pick the agent persona** based on the user's task shape. Start cheap and escalate on failure — fast-edit handles most dbt/SQL work at 10–20× lower cost than builder.
