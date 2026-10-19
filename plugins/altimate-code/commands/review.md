@@ -22,10 +22,10 @@ Run the `altimate-code review` CLI on the current dbt project and present the si
    The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Every review command below runs through `"$ALTIMATE_BIN"`, in the same Bash call as this resolver (shell state does not persist between calls). The lookup ignores aliases and shell functions, so a user alias such as `alias altimate-code=altimate` cannot be captured as the binary path:
 
    ```bash
-   for ALTIMATE_NAME in altimate-code altimate; do
+   for ALTIMATE_NAME in altimate altimate-code; do
      ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")" && break
    done
-   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate-code, altimate)" >&2; exit 127; }
+   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
    "$ALTIMATE_BIN" review   # plus any scope/flags from below
    ```
 

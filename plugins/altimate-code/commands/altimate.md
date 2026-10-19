@@ -31,10 +31,10 @@ Workflow (follow in order, no skipping):
    $ARGUMENTS
    ALTIMATE_TASK
    )"
-   for ALTIMATE_NAME in altimate-code altimate; do
+   for ALTIMATE_NAME in altimate altimate-code; do
      ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")" && break
    done
-   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate-code, altimate)" >&2; exit 127; }
+   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
    umask 077
    OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
    "$ALTIMATE_BIN" run "$TASK" \
@@ -51,10 +51,10 @@ Workflow (follow in order, no skipping):
    $ARGUMENTS
    ALTIMATE_TASK
    )"
-   for ALTIMATE_NAME in altimate-code altimate; do
+   for ALTIMATE_NAME in altimate altimate-code; do
      ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")" && break
    done
-   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate-code, altimate)" >&2; exit 127; }
+   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
    umask 077
    OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
    "$ALTIMATE_BIN" run "$TASK" \

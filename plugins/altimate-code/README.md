@@ -21,7 +21,7 @@ curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes 
 altimate                                           # launch the TUI, then run /connect to configure your LLM provider
 ```
 
-The plugin invokes `altimate-code` when it is on PATH and falls back to `altimate` otherwise, so standalone installs work without an `altimate-code` alias.
+The plugin invokes `altimate`, the CLI's canonical name, and falls back to `altimate-code` for npm installs older than v0.7.1, so standalone installs work without an `altimate-code` alias.
 
 Or configure a provider via environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and 20+ others — see the [altimate-code docs](https://docs.altimate.sh)).
 

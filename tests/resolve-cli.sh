@@ -59,11 +59,12 @@ for sh in bash zsh; do
   command -v "$sh" >/dev/null || { echo "skip: $sh not installed"; continue; }
   expect "$sh" "$STUBS/only-altimate" '' 0 'ran altimate'
   expect "$sh" "$STUBS/only-altimate-code" '' 0 'ran altimate-code'
-  expect "$sh" "$STUBS/both" '' 0 'ran altimate-code'
-  expect "$sh" "$STUBS/neither" '' 127 'altimate-code CLI not found (tried altimate-code, altimate)'
+  expect "$sh" "$STUBS/both" '' 0 'ran altimate'
+  expect "$sh" "$STUBS/neither" '' 127 'altimate-code CLI not found (tried altimate, altimate-code)'
   expect "$sh" "$STUBS/only-altimate" "$ALIAS_SETUP" 0 'ran altimate'
   expect "$sh" "$STUBS/only-altimate" "$ALIAS_SETUP; altimate() { echo function; }" 0 'ran altimate'
   expect "$sh" "$STUBS/only-altimate" 'altimate-code() { echo function; }' 0 'ran altimate'
+  expect "$sh" "$STUBS/only-altimate-code" 'shopt -s expand_aliases 2>/dev/null; alias altimate=altimate-code' 0 'ran altimate-code'
   expect "$sh" "relative dir" '' 0 'ran altimate'
 done
 
