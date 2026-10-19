@@ -32,7 +32,8 @@ Workflow (follow in order, no skipping):
    ALTIMATE_TASK
    )"
    for ALTIMATE_NAME in altimate altimate-code; do
-     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")" && break
+     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+     [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
    done
    [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
    umask 077
@@ -52,7 +53,8 @@ Workflow (follow in order, no skipping):
    ALTIMATE_TASK
    )"
    for ALTIMATE_NAME in altimate altimate-code; do
-     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")" && break
+     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+     [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
    done
    [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
    umask 077

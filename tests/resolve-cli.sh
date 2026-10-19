@@ -32,21 +32,23 @@ done
 [ "$(printf '%s' "$ALL_BLOCKS" | grep . | sort -u | grep -c .)" -eq 1 ] || fail "resolver blocks differ between files"
 RESOLVER="$(printf '%b' "$(printf '%s' "$ALL_BLOCKS" | head -n1)")"
 
-STUBS="$(mktemp -d)"
+STUBS="$(mktemp -d)" && [ -d "$STUBS" ] || { echo "FAIL: could not create a temp dir"; exit 1; }
 trap 'rm -rf "$STUBS"' EXIT
 for stub in only-altimate/altimate only-altimate-code/altimate-code both/altimate both/altimate-code "relative dir/altimate"; do
   mkdir -p "$STUBS/$(dirname "$stub")"
   printf '#!/bin/sh\necho "ran %s"\n' "$(basename "$stub")" > "$STUBS/$stub"
   chmod +x "$STUBS/$stub"
 done
-mkdir -p "$STUBS/neither"
+mkdir -p "$STUBS/neither" "$STUBS/broken-altimate"
+printf 'not a program\n' > "$STUBS/broken-altimate/altimate"
 
 # expect <shell> <PATH prefix> <setup> <expected exit> <expected output>
-# Runs from $STUBS without startup files, so relative PATH entries resolve and user config can't interfere.
+# Runs from $STUBS without startup files and with only the stub dirs on PATH, so relative PATH
+# entries resolve and neither user config nor system-installed binaries can interfere.
 expect() {
   local shell_cmd
-  case "$1" in zsh) shell_cmd=(zsh -f) ;; *) shell_cmd=(bash --noprofile --norc) ;; esac
-  out="$(cd "$STUBS" && env -u BASH_ENV -u ENV PATH="$2:/usr/bin:/bin" "${shell_cmd[@]}" -c "$3
+  case "$1" in zsh) shell_cmd=("$(command -v zsh)" -f) ;; *) shell_cmd=("$(command -v bash)" --noprofile --norc) ;; esac
+  out="$(cd "$STUBS" && env -u BASH_ENV -u ENV PATH="$2" "${shell_cmd[@]}" -c "$3
 $RESOLVER
 \"\$ALTIMATE_BIN\"" 2>&1)"
   status=$?
@@ -65,6 +67,10 @@ for sh in bash zsh; do
   expect "$sh" "$STUBS/only-altimate" "$ALIAS_SETUP; altimate() { echo function; }" 0 'ran altimate'
   expect "$sh" "$STUBS/only-altimate" 'altimate-code() { echo function; }' 0 'ran altimate'
   expect "$sh" "$STUBS/only-altimate-code" 'shopt -s expand_aliases 2>/dev/null; alias altimate=altimate-code' 0 'ran altimate-code'
+  expect "$sh" "$STUBS/only-altimate-code" 'altimate-code() { echo function; }' 0 'ran altimate-code'
+  expect "$sh" "$STUBS/only-altimate-code" 'shopt -s expand_aliases 2>/dev/null; alias altimate-code="echo alias"' 0 'ran altimate-code'
+  expect "$sh" "$STUBS/neither" "$ALIAS_SETUP; altimate() { echo function; }" 127 'altimate-code CLI not found (tried altimate, altimate-code)'
+  expect "$sh" "$STUBS/broken-altimate:$STUBS/only-altimate-code" '' 0 'ran altimate-code'
   expect "$sh" "relative dir" '' 0 'ran altimate'
 done
 

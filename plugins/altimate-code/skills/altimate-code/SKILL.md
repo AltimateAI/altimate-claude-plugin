@@ -56,7 +56,8 @@ TASK="$(cat <<'ALTIMATE_TASK'
 ALTIMATE_TASK
 )"
 for ALTIMATE_NAME in altimate altimate-code; do
-  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")" && break
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
 done
 [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
 umask 077
@@ -91,7 +92,8 @@ TASK="$(cat <<'ALTIMATE_TASK'
 ALTIMATE_TASK
 )"
 for ALTIMATE_NAME in altimate altimate-code; do
-  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")" && break
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
 done
 [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
 umask 077
@@ -115,10 +117,10 @@ When altimate-code returns an error, **report the error to the user and STOP**. 
 | Symptom | What to tell the user — verbatim |
 |---|---|
 | `altimate-code CLI not found` (neither `altimate-code` nor `altimate` on PATH) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth. Then re-run your request." |
-| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` in your terminal to open the TUI and reconfigure your provider, then re-run your request." |
-| Process hangs >5 min | "altimate-code is unresponsive. Try `altimate` to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |
+| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` (`altimate-code` on npm installs older than v0.7.1) in your terminal to open the TUI and reconfigure your provider, then re-run your request." |
+| Process hangs >5 min | "altimate-code is unresponsive. Try `altimate` (`altimate-code` on npm installs older than v0.7.1) to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |
 | Output file empty | "altimate-code returned without producing output. The task may be too ambiguous — please restate with more detail (target table, expected columns, time window)." |
-| Warehouse error mid-run (`UNKNOWN_USER`, `Database does not exist`) | "altimate-code can connect but the warehouse credentials it has are wrong for this project. Configure provider/warehouse auth via the `altimate` TUI." |
+| Warehouse error mid-run (`UNKNOWN_USER`, `Database does not exist`) | "altimate-code can connect but the warehouse credentials it has are wrong for this project. Configure provider/warehouse auth via the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1)." |
 
 In every row, the instruction to the user is the action — you do not retry the task with native tools. If the user fixes the underlying issue and asks again, you delegate again.
 
