@@ -6,7 +6,7 @@ All notable changes to this plugin will be documented in this file.
 
 ### Fixed
 - The skills and slash commands now resolve the CLI as `altimate-code` and fall back to `altimate`. Standalone installs (curl, Homebrew, PowerShell) expose only `altimate`, so the plugin previously reported "not installed" on machines where the CLI was present.
-- Install guidance now lists both the npm and the standalone installer.
+- Install guidance and recovery messages now name `altimate`, which both install methods provide.
 
 ## [1.0.0] — 2026-07-09
 

@@ -29,10 +29,13 @@ description: >-
 
 1. **Verify altimate-code is on PATH** with `command -v altimate-code || command -v altimate`. If neither resolves, jump to "Failure modes" below and stop.
 
-   The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Every `altimate-code review ...` command below must be run through the resolved binary, in the same Bash call as the resolver (shell state does not persist between calls):
+   The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Every review command below runs through `"$ALTIMATE_BIN"`, in the same Bash call as this resolver (shell state does not persist between calls). The lookup ignores aliases and shell functions, so a user alias such as `alias altimate-code=altimate` cannot be captured as the binary path:
 
    ```bash
-   ALTIMATE_BIN="$(command -v altimate-code || command -v altimate)"
+   for ALTIMATE_NAME in altimate-code altimate; do
+     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")" && break
+   done
+   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate-code, altimate)" >&2; exit 127; }
    "$ALTIMATE_BIN" review   # plus any scope/flags from below
    ```
 
@@ -48,10 +51,10 @@ description: >-
 
 | User says | Command to run |
 |---|---|
-| "review my changes" / "review this branch" / "audit my dbt work" / no scope specified | `altimate-code review` (default: working tree vs merge-base with `origin/main`) |
-| "review PR #123" or gives a GitHub PR URL | First `gh pr checkout 123`, then `altimate-code review` |
-| "review commit `abc123`" | `altimate-code review --base abc123~1 --head abc123` |
-| "compare staging to prod" / "review the diff between two branches" | `altimate-code review --base prod --head staging` |
+| "review my changes" / "review this branch" / "audit my dbt work" / no scope specified | `"$ALTIMATE_BIN" review` (default: working tree vs merge-base with `origin/main`) |
+| "review PR #123" or gives a GitHub PR URL | First `gh pr checkout 123`, then `"$ALTIMATE_BIN" review` |
+| "review commit `abc123`" | `"$ALTIMATE_BIN" review --base abc123~1 --head abc123` |
+| "compare staging to prod" / "review the diff between two branches" | `"$ALTIMATE_BIN" review --base prod --head staging` |
 
 ## Do NOT do these
 
@@ -75,8 +78,8 @@ description: >-
 
 | Symptom | Message to the user |
 |---|---|
-| Neither `altimate-code` nor `altimate` on PATH | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider and warehouse auth. Then re-run the review." |
-| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` to reconfigure — or re-run with `--no-ai` to skip the LLM lane entirely and get a deterministic-only review." |
+| `altimate-code CLI not found` (neither `altimate-code` nor `altimate` on PATH) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider and warehouse auth. Then re-run the review." |
+| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` to reconfigure — or re-run with `--no-ai` to skip the LLM lane entirely and get a deterministic-only review." |
 | `fatal: not a git repository` | "This directory isn't a git repo. `altimate-code review` computes the diff via git — run from a dbt project inside a git worktree." |
 | No `dbt_project.yml` found | "No dbt project detected at this path. The review needs a dbt project to compile models against. Run from the directory containing `dbt_project.yml`." |
 | Output says `DEGRADED — lint-only` | Present that note verbatim. Do not silently upgrade a degraded run to a full verdict. |
