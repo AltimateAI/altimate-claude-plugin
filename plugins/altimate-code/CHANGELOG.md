@@ -2,7 +2,7 @@
 
 All notable changes to this plugin will be documented in this file.
 
-## [1.0.1] — 2026-10-15
+## [1.1.0] — 2026-10-19
 
 ### Fixed
 - The skills and slash commands now resolve the CLI as `altimate-code` and fall back to `altimate`. Standalone installs (curl, Homebrew, PowerShell) expose only `altimate`, so the plugin previously reported "not installed" on machines where the CLI was present.
