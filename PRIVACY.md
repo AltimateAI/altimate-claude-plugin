@@ -18,7 +18,7 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 
 The plugin contains no executable service of its own. Its only runtime behavior is a SessionStart hook that prints a fixed, static text block describing the skill's capabilities. It does not read your files, does not phone home, and does not collect analytics.
 
-Data leaves Claude Code's process only when the delegation skill or the `/altimate` command fires and invokes the locally installed altimate-code CLI.
+Data leaves Claude Code's process only when the delegation skill or the `/altimate-code:altimate` command fires and invokes the locally installed altimate-code CLI.
 
 ## Data flows when a task is delegated
 

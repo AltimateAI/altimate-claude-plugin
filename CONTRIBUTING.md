@@ -34,7 +34,7 @@ altimate-claude-plugin/
 │       ├── hooks-handlers/
 │       │   └── session-start.sh # SessionStart hook handler
 │       ├── commands/
-│       │   └── altimate.md      # /altimate slash command
+│       │   └── altimate.md      # /altimate-code:altimate slash command
 │       ├── README.md            # plugin-specific docs
 │       └── CHANGELOG.md         # plugin-specific changelog
 ├── README.md                # repo overview
@@ -47,7 +47,7 @@ altimate-claude-plugin/
 ## What to change where
 
 - **Routing behavior** (when Claude picks up the skill): edit `plugins/altimate-code/skills/altimate-code/SKILL.md` frontmatter description and/or `plugins/altimate-code/hooks-handlers/session-start.sh` `additionalContext`.
-- **Explicit-invocation UX** (what `/altimate <task>` does): edit `plugins/altimate-code/commands/altimate.md`.
+- **Explicit-invocation UX** (what `/altimate-code:altimate <task>` does): edit `plugins/altimate-code/commands/altimate.md`.
 - **CLI invocation details** (agent selection, flags, follow-up handling): edit the workflow section in `plugins/altimate-code/skills/altimate-code/SKILL.md`.
 
 ## Frontmatter — YAML gotcha
@@ -79,7 +79,7 @@ claude plugin install altimate-code@altimate-claude-plugin
 
 - **Skill** — `plugins/altimate-code/skills/altimate-code/SKILL.md` — the delegation logic (`altimate-code run "$USER_TASK"` and surface the result).
 - **Hook** — `plugins/altimate-code/hooks/hooks.json` + `plugins/altimate-code/hooks-handlers/session-start.sh` — SessionStart hook that describes the plugin's capabilities in the system prompt so Claude can route to it when the task shape fits.
-- **Command** — `plugins/altimate-code/commands/altimate.md` — `/altimate` slash command for explicit delegation with agent-persona selection.
+- **Command** — `plugins/altimate-code/commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation.
 
 ## Reporting bugs / requesting features
 

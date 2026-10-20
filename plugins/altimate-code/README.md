@@ -6,6 +6,14 @@ Routes dbt + warehouse tasks from Claude Code to [altimate-code](https://github.
 
 ## Install
 
+From Anthropic's plugin directory:
+
+```bash
+claude plugin install altimate-code
+```
+
+Or from this repository's marketplace:
+
 ```
 /plugin marketplace add AltimateAI/altimate-claude-plugin
 /plugin install altimate-code@altimate-claude-plugin
@@ -27,13 +35,24 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 ## How it works
 
 1. A **SessionStart hook** adds a static description of altimate-code's capabilities to the session, so Claude Code knows when a task fits.
-2. When a data-engineering task fires the **skill** (or you invoke **`/altimate <task>`** explicitly), Claude Code runs `altimate-code run "<your task>"` locally, selecting the cheapest suitable agent persona (`fast-edit` for dbt/SQL edits, `analyst` for aggregation-heavy correctness work, `builder` for warehouse-state investigation).
+2. When a data-engineering task fires the **skill** (or you invoke **`/altimate-code:altimate <task>`** explicitly), Claude Code runs `altimate-code run "<your task>"` locally with its `builder` agent.
 3. altimate-code plans and executes the task using your configured LLM provider. Warehouse queries, dbt commands, and file edits run **locally under your credentials**.
 4. The result is written to a local output file and surfaced back in your Claude Code conversation.
 
+## Use an Altimate workspace
+
+An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's shared skills, knowledge, memory and warehouse integrations. Claude Code reaches it through altimate-code: every task the plugin hands over runs in your project, so it uses the workspace the project is linked to. Nothing in Claude Code needs configuring.
+
+1. **Sign in to Altimate** — `altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`. It opens your browser. This also sets up the model provider altimate-code uses. You can run it from Claude Code by typing it after `!`.
+2. **Link the project** — ask Claude to link the project to your workspace. It lists your workspaces with `altimate-code workspace list` and links the one you choose with `altimate-code link --workspace "<id or name>"`, or creates one with `altimate-code link --create`. Moving a linked project to a different workspace also needs `--yes`. `workspace list` is in newer altimate-code releases; with an older one, tell Claude the workspace's name. In a terminal, `altimate-code link` does the same with a picker; the picker does not work after `!` in Claude Code.
+3. **Check it** — `altimate-code workspace status` shows the linked workspace and its page in the Altimate web app.
+4. **Ask Claude** — questions about your team's conventions, standards or knowledge go to altimate-code, which answers from the workspace. Start a request with `/altimate-code:altimate` to be sure it does: *"/altimate-code:altimate what are our naming conventions for staging models?"*
+
+What altimate-code learns during these tasks is saved to the workspace's memory and shared with your team in the CLI, the IDE and Studio. Skills added to the workspace reach the next task.
+
 ## Example prompts
 
-Once installed, try these in Claude Code (or prefix any of them with `/altimate`):
+Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):
 
 1. **Column-level lineage** — *"Trace the `revenue_usd` column in `models/marts/fct_revenue.sql` back to its sources, and list every downstream model that would be affected if I change its rounding."*
 2. **Warehouse cost analysis** — *"Give me a cost report for our Snowflake account: the ten most expensive queries this month and any warehouses that look over-provisioned."*
@@ -55,14 +74,16 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | Task hangs for several minutes | Open `altimate-code` to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
 | Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |
 | `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate-code` TUI or `profiles.yml`. |
+| `Not signed in to Altimate` | Run `altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`. |
+| Answers ignore your workspace's skills or knowledge | Run `altimate-code workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate-code link` in a terminal. |
 | Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 Still stuck? See [Support](#support).
 
 ## Components
 
-- **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and agent-persona selection
-- **Command** — `commands/altimate.md` — `/altimate` slash command for explicit delegation
+- **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and workspace guidance
+- **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
 - **Hook** — `hooks/hooks.json` — SessionStart capability description (static text only)
 
 ## Support
