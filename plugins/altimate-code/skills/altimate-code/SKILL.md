@@ -1,12 +1,7 @@
 ---
 name: altimate-code
 description: >-
-  Route data questions over a database or warehouse ("how many", "which",
-  "average", "top N", "compare") to the altimate-code MCP tools; delegate if
-  unavailable. Delegate dbt builds, migrations, FinOps, column-level lineage,
-  downstream impact, schema diff, data parity, PII detection, query cost
-  attribution, query optimization, incremental/SCD2 verification, model docs,
-  and dev-vs-prod diffs. Use also when altimate-code is named.
+  Delegate long dbt and warehouse jobs to the altimate-code CLI (builds, migrations, FinOps, lineage, impact, schema diff, parity, PII, cost, SCD2 checks, docs, env diffs), or data questions when its MCP tools are unavailable.
 ---
 
 # altimate-code
