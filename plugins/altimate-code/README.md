@@ -50,7 +50,7 @@ computes in SQL, checks correctness where needed, and returns the requested valu
 with a one-line basis. For cross-connection joins, it materializes the smaller
 filtered side and other required inputs into `scratch`, then joins there.
 
-The routing skill, `data-question` skill, and `/altimate <task>` prefer this direct
+The routing skill and `/altimate <task>` prefer this direct
 path for answers, numbers, and lists when the MCP tools are available in the
 session. If the server is missing or fails to start, they delegate data questions
 with `--agent analyst`. Long jobs and capabilities outside the five MCP tools use
@@ -126,7 +126,6 @@ See **[PRIVACY.md](../../PRIVACY.md)** for MCP and delegation data flows;
 
 - **MCP server** — `.mcp.json` — direct stdio data tools
 - **Routing skill** — `skills/altimate-code/SKILL.md` — direct questions or CLI delegation
-- **Data-question skill** — `skills/data-question/SKILL.md` — concise analysis workflow
 - **Review skill** — `skills/review/SKILL.md` — specialized dbt/SQL review
 - **Commands** — `commands/altimate.md` and `commands/review.md`
 - **Hook** — `hooks/hooks.json` and `hooks-handlers/session-start.sh`

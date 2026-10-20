@@ -5,7 +5,7 @@ argument-hint: <task description>
 
 The user invoked `/altimate` to use altimate-code for this task. For a data
 question requesting answers, numbers, or lists, prefer the `altimate-code` MCP
-tools when available in the session and follow the `data-question` skill.
+tools when available in the session and follow the server's analysis method.
 Claude Code does the reasoning; this path needs no CLI LLM provider. If the tools
 are unavailable (server missing or failed to start), use the delegation workflow
 below with `--agent analyst`. Released builds without `mcp serve` can still

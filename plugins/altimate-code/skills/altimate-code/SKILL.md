@@ -16,9 +16,8 @@ Choose the path from the requested outcome, including when invoked via `/altimat
 ## Data questions: prefer MCP tools, otherwise delegate
 
 For answers, numbers, or lists over warehouse data, use the `altimate-code` MCP
-server yourself when its tools are available in the session. Follow the
-`data-question` skill for discovery, value profiles,
-SQL, cross-connection joins, correctness checks, and answer shape. The tools are
+server yourself when its tools are available in the session; the server's
+instructions give the analysis method. The tools are
 `warehouse_list`, `warehouse_add`, `sql_execute` (with `tables` for schemas), `sql_materialize`, and `answer_commit`.
 Claude Code does the reasoning; this server runs no LLM and needs no separate
 LLM-provider configuration. Tell the user that the MCP path is being used.
