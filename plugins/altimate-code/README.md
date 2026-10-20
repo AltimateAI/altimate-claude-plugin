@@ -37,11 +37,13 @@ The plugin's `.mcp.json` registers the `altimate-code` stdio server by running
 
 | Tool | Purpose |
 |---|---|
-| `warehouse_list` | List available connections. |
-| `schema_inspect` | Inspect columns and value profiles: frequency-ranked values, distinct/null counts, unique-in-sample flags, value shapes, and MongoDB nested paths. |
-| `sql_execute` | Execute SQL, read-only by default. Large results spill to a local file path. |
-| `sql_check` | Check keys, fan-out, grain, and nulls on SQLite, DuckDB, and Postgres. For other engines, first `sql_materialize` the relevant rows into `scratch` and check there. |
+| `warehouse_list` | List available connections; for local databases also tables, columns and a sample row. |
+| `warehouse_add` | Add a connection when none is configured or one is missing. |
+| `sql_execute` | Execute SQL, read-only by default; `queries` batches independent queries and `tables` returns columns and value profiles (frequency-ranked values, distinct/null counts, unique-in-sample flags, value shapes, MongoDB nested paths) in the same call. Large results spill to a local file path. |
 | `sql_materialize` | Copy a read-only query result from any connection into session-local `scratch` DuckDB for cross-database joins. |
+| `answer_commit` | Finish a data question with one field per requested item. |
+
+`altimate-code mcp serve --all-tools` also exposes `schema_inspect` and `sql_check`.
 
 For a data question, Claude lists connections, inspects schemas and value profiles,
 computes in SQL, checks correctness where needed, and returns the requested values

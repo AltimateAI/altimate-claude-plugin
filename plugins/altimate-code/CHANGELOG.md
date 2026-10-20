@@ -6,7 +6,7 @@ All notable changes to this plugin will be documented in this file.
 
 ### Added
 - Stdio MCP registration for `altimate-code mcp serve`, without `--allow-write`.
-- Direct data tools: `warehouse_list`, `schema_inspect`, `sql_execute`, `sql_check`, and `sql_materialize`.
+- Direct data tools: `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns schemas and value profiles in the same call), `sql_materialize` and `answer_commit`; `schema_inspect` and `sql_check` with `mcp serve --all-tools`.
 - Lean `data-question` skill for value-profile inspection, SQL analysis, cross-connection scratch joins, and correctness checks.
 
 ### Changed

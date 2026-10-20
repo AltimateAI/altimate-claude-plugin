@@ -16,8 +16,10 @@ and follow the `altimate-code` skill's CLI delegation workflow with
 file. Delegation uses the CLI's separate configured LLM provider. Do not attempt
 the MCP steps below when its tools are unavailable.
 
-1. List available connections with `warehouse_list`.
-2. Inspect relevant tables with `schema_inspect`. Read its value profile before
+1. List available connections with `warehouse_list`. If the one you need is
+   missing, find its details in the project and add it with `warehouse_add`.
+2. Inspect relevant tables by passing `tables` to `sql_execute` (together with
+   your first queries when you can). Read the value profile before
    choosing columns or join keys: frequency-ranked values, distinct/null counts,
    unique-in-sample flags, value shapes, and nested paths where present. Formats
    can differ across databases; names alone do not establish compatible keys.
@@ -26,10 +28,8 @@ the MCP steps below when its tools are unavailable.
 4. For joins across connections, use `sql_materialize` to copy the smaller,
    filtered side into session-local `scratch` DuckDB. Materialize the other
    required inputs there too, then join them in one SQL query in `scratch`.
-5. Use `sql_check` when keys, fan-out, grain, or nulls could change the answer.
-   It runs on SQLite, DuckDB, and Postgres. For other engines, first use
-   `sql_materialize` to copy the relevant rows into `scratch`, then run the checks
-   there. Materialize all relevant rows for a key or grain check, not just a sample.
+5. Check keys, fan-out, grain, or nulls with counting queries when they could
+   change the answer. Count over all relevant rows, not just a sample.
    Unique-in-sample is evidence to investigate, not proof of a unique key.
 6. Check that every condition in the question actually filters something.
    Compare counts or values before and after filtering; investigate no-op
