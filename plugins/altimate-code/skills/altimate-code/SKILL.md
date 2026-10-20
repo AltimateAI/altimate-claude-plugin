@@ -26,7 +26,7 @@ altimate-code is a CLI AI agent with 100+ purpose-built data engineering tools. 
 
 ## You MUST follow this workflow
 
-1. **Verify altimate-code is on PATH** with `command -v altimate-code`. If it returns nothing, jump to "Not installed" below and stop.
+1. **Verify altimate-code is on PATH.** There is no separate check: the invocation below resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Either name is the same CLI. If the invocation exits with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
 2. **Run altimate-code with the user's task** using the invocation below. Pass the user's request through verbatim — do not paraphrase or split it.
 3. **Read the output file** and present it to the user as-is.
 
@@ -49,9 +49,14 @@ TASK="$(cat <<'ALTIMATE_TASK'
 <user's task, verbatim>
 ALTIMATE_TASK
 )"
+for ALTIMATE_NAME in altimate altimate-code; do
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+done
+[ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
 umask 077
 OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
-altimate-code run "$TASK" \
+"$ALTIMATE_BIN" run "$TASK" \
   --agent builder \
   --yolo \
   --output "$OUTPUT_FILE" \
@@ -71,6 +76,8 @@ Then `Read "$OUTPUT_FILE"` and emit its contents to the user without re-summaris
 | `--dir "$(pwd)"` | Runs altimate-code in the current project so it picks up dbt project config, profiles.yml, the linked workspace, etc. |
 | `< /dev/null` | `altimate-code run` reads piped stdin as part of the task. The shell this runs in leaves stdin open, so without the redirect the run waits for input that never comes. |
 
+Each Bash call starts a fresh shell, so keep the `ALTIMATE_BIN` resolver loop inside the same command as the `run` — do not resolve it in an earlier call and reuse the variable.
+
 ### Follow-up tasks in the same project
 
 When the user makes a follow-up data task in the same project after a successful altimate-code delegation, prefer `--continue` to resume the warm session instead of starting a fresh one. Same here-doc + `mktemp` pattern:
@@ -80,9 +87,14 @@ TASK="$(cat <<'ALTIMATE_TASK'
 <follow-up task>
 ALTIMATE_TASK
 )"
+for ALTIMATE_NAME in altimate altimate-code; do
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+done
+[ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
 umask 077
 OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
-altimate-code run "$TASK" \
+"$ALTIMATE_BIN" run "$TASK" \
   --agent builder \
   --yolo \
   --output "$OUTPUT_FILE" \
@@ -99,12 +111,23 @@ If the user starts a clearly unrelated workflow (different project, different sc
 
 A project can be linked to an Altimate workspace: the team's shared skills, knowledge, memory and warehouse integrations. Every `altimate-code run` in a linked project uses that workspace automatically — there is nothing to pass. That is why questions about the team's conventions, standards or knowledge belong to this skill.
 
-When the user asks about their workspace or wants to set one up:
+When the user asks about their workspace or wants to set one up, run each command below through the same resolver as the `run`, in the same Bash call:
 
-- **Check the link:** `altimate-code workspace status < /dev/null`. Exit code 0 means linked and 3 means not linked. Exit code 2 with `Not signed in to Altimate` means the user must sign in. For anything else, show the user the CLI's message.
-- **Not signed in:** tell the user to run `! altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"` in this session. It opens their browser to sign in. Do not try to sign in for them. Keep the `--method` flag: without it the command waits at a menu that cannot be answered from this session.
-- **Not linked:** do not suggest `! altimate-code link`: its picker needs a terminal, and this session does not give it one. Instead run `altimate-code workspace list < /dev/null`, show the user the workspaces it prints, and once they choose, run `altimate-code link --workspace "<id or name>" < /dev/null`. If they want a new workspace, run `altimate-code link --create < /dev/null`, which names it after the repository. If a workspace with that name already exists, `--create` refuses and names it: offer to link to that one with `--workspace`, or, if the user confirms they want a second one, re-run with `--allow-duplicate`. If the project is already linked to a different workspace, `link` refuses; confirm the move with the user, then re-run it with `--yes`. If `workspace list` is an unknown command (an older altimate-code), ask the user for the workspace's name, or tell them to run `altimate-code link` in a separate terminal.
-- **Open it in the browser:** `altimate-code workspace status` prints the workspace page's URL.
+```bash
+for ALTIMATE_NAME in altimate altimate-code; do
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+done
+[ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
+"$ALTIMATE_BIN" <workspace or link command from the list below> < /dev/null
+```
+
+Commands the user types after `!` use `altimate`; on npm installs older than v0.7.1 the user types `altimate-code` instead.
+
+- **Check the link:** `"$ALTIMATE_BIN" workspace status < /dev/null`. Exit code 0 means linked and 3 means not linked. Exit code 2 with `Not signed in to Altimate` means the user must sign in. For anything else, show the user the CLI's message.
+- **Not signed in:** tell the user to run `! altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` in this session. It opens their browser to sign in. Do not try to sign in for them. Keep the `--method` flag: without it the command waits at a menu that cannot be answered from this session.
+- **Not linked:** do not suggest `! altimate link`: its picker needs a terminal, and this session does not give it one. Instead run `"$ALTIMATE_BIN" workspace list < /dev/null`, show the user the workspaces it prints, and once they choose, run `"$ALTIMATE_BIN" link --workspace "<id or name>" < /dev/null`. If they want a new workspace, run `"$ALTIMATE_BIN" link --create < /dev/null`, which names it after the repository. If a workspace with that name already exists, `--create` refuses and names it: offer to link to that one with `--workspace`, or, if the user confirms they want a second one, re-run with `--allow-duplicate`. If the project is already linked to a different workspace, `link` refuses; confirm the move with the user, then re-run it with `--yes`. If `workspace list` is an unknown command (an older altimate-code), ask the user for the workspace's name, or tell them to run `altimate link` in a separate terminal.
+- **Open it in the browser:** `"$ALTIMATE_BIN" workspace status` prints the workspace page's URL.
 
 What altimate-code learns during delegated tasks is saved to the workspace's memory and shared with the team in the CLI, the IDE and Studio.
 
@@ -114,19 +137,19 @@ When altimate-code returns an error, **report the error to the user and STOP**. 
 
 | Symptom | What to tell the user — verbatim |
 |---|---|
-| `command not found: altimate-code` | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) and run `altimate-code` once to configure auth. Then re-run your request." |
-| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate-code` in your terminal to open the TUI and reconfigure your provider, or sign in to Altimate with `altimate-code auth login -p altimate-backend --method 'Altimate LLM Gateway'`, then re-run your request." |
-| `Not signed in to Altimate` | "altimate-code is not signed in to Altimate, so it cannot reach your workspace. Run `! altimate-code auth login -p altimate-backend --method 'Altimate LLM Gateway'`, sign in in the browser, then re-run your request." |
-| `not in the workspace yet` (stderr) | Present the result as usual, then add: "altimate-code saved what it learned on this machine, but it has not reached your workspace yet. Run `! altimate-code workspace sync` to send it." |
-| `Could not confirm that the memory saved here reached the workspace` (stderr) | Present the result as usual, then add: "altimate-code could not confirm that what it learned reached your workspace. Run `! altimate-code workspace status` to check." |
-| Process hangs >5 min | "altimate-code is unresponsive. Try `altimate-code` to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |
+| `altimate-code CLI not found` (neither `altimate` nor `altimate-code` on PATH) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth. Then re-run your request." |
+| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` (`altimate-code` on npm installs older than v0.7.1) in your terminal to open the TUI and reconfigure your provider, or sign in to Altimate with `altimate auth login -p altimate-backend --method 'Altimate LLM Gateway'`, then re-run your request." |
+| `Not signed in to Altimate` | "altimate-code is not signed in to Altimate, so it cannot reach your workspace. Run `! altimate auth login -p altimate-backend --method 'Altimate LLM Gateway'` (`altimate-code` on npm installs older than v0.7.1), sign in in the browser, then re-run your request." |
+| `not in the workspace yet` (stderr) | Present the result as usual, then add: "altimate-code saved what it learned on this machine, but it has not reached your workspace yet. Run `! altimate workspace sync` (`altimate-code` on npm installs older than v0.7.1) to send it." |
+| `Could not confirm that the memory saved here reached the workspace` (stderr) | Present the result as usual, then add: "altimate-code could not confirm that what it learned reached your workspace. Run `! altimate workspace status` (`altimate-code` on npm installs older than v0.7.1) to check." |
+| Process hangs >5 min | "altimate-code is unresponsive. Try `altimate` (`altimate-code` on npm installs older than v0.7.1) to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |
 | Output file empty | "altimate-code returned without producing output. The task may be too ambiguous — please restate with more detail (target table, expected columns, time window)." |
-| Warehouse error mid-run (`UNKNOWN_USER`, `Database does not exist`) | "altimate-code can connect but the warehouse credentials it has are wrong for this project. Configure provider/warehouse auth via `altimate-code` TUI." |
+| Warehouse error mid-run (`UNKNOWN_USER`, `Database does not exist`) | "altimate-code can connect but the warehouse credentials it has are wrong for this project. Configure provider/warehouse auth via the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1)." |
 
 In every row, the instruction to the user is the action — you do not retry the task with native tools. If the user fixes the underlying issue and asks again, you delegate again.
 
 ## Notes
 
 - altimate-code runs its own LLM, separate from Claude Code's. Costs and rate limits accrue to altimate-code's configured provider.
-- Sessions persist in altimate-code's local store — `altimate-code session list` shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
+- Sessions persist in altimate-code's local store — `altimate session list` (`altimate-code session list` on npm installs older than v0.7.1) shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
 - For very long tasks, the `--output` file is the source of truth — stdout buffering can drop content.

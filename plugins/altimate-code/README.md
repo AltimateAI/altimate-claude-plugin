@@ -21,12 +21,16 @@ Or from this repository's marketplace:
 
 ## Prerequisites
 
-The altimate-code CLI must be installed and configured on your PATH:
+The altimate-code CLI must be installed and configured on your PATH. Either install method works:
 
 ```bash
-npm install -g altimate-code     # requires Node 20+
-altimate-code                    # launch the TUI, then run /connect to configure your LLM provider
+npm install -g altimate-code                       # requires Node 20+; exposes `altimate` and `altimate-code`
+curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes `altimate`
+altimate                                           # launch the TUI, then run /connect to configure your LLM provider
 ```
+
+The plugin invokes `altimate`, the CLI's canonical name, and falls back to `altimate-code` for npm installs older than v0.7.1, so standalone installs work without an `altimate-code` alias.
+
 
 Or configure a provider via environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and 20+ others — see the [altimate-code docs](https://docs.altimate.sh)).
 
@@ -35,7 +39,7 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 ## How it works
 
 1. A **SessionStart hook** adds a static description of altimate-code's capabilities to the session, so Claude Code knows when a task fits.
-2. When a data-engineering task fires the **skill** (or you invoke **`/altimate-code:altimate <task>`** explicitly), Claude Code runs `altimate-code run "<your task>"` locally with its `builder` agent.
+2. When a data-engineering task fires the **skill** (or you invoke **`/altimate-code:altimate <task>`** explicitly), Claude Code runs `altimate run "<your task>"` locally with its `builder` agent.
 3. altimate-code plans and executes the task using your configured LLM provider. Warehouse queries, dbt commands, and file edits run **locally under your credentials**.
 4. The result is written to a local output file and surfaced back in your Claude Code conversation.
 
@@ -43,9 +47,9 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 
 An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's shared skills, knowledge, memory and warehouse integrations. Claude Code reaches it through altimate-code: every task the plugin hands over runs in your project, so it uses the workspace the project is linked to. Nothing in Claude Code needs configuring.
 
-1. **Sign in to Altimate** — `altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`. It opens your browser. This also sets up the model provider altimate-code uses. You can run it from Claude Code by typing it after `!`.
-2. **Link the project** — ask Claude to link the project to your workspace. It lists your workspaces with `altimate-code workspace list` and links the one you choose with `altimate-code link --workspace "<id or name>"`, or creates one with `altimate-code link --create`. Moving a linked project to a different workspace also needs `--yes`. `workspace list` is in newer altimate-code releases; with an older one, tell Claude the workspace's name. In a terminal, `altimate-code link` does the same with a picker; the picker does not work after `!` in Claude Code.
-3. **Check it** — `altimate-code workspace status` shows the linked workspace and its page in the Altimate web app.
+1. **Sign in to Altimate** — `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). It opens your browser. This also sets up the model provider altimate-code uses. You can run it from Claude Code by typing it after `!`.
+2. **Link the project** — ask Claude to link the project to your workspace. It lists your workspaces with `altimate workspace list` and links the one you choose with `altimate link --workspace "<id or name>"`, or creates one with `altimate link --create`. Moving a linked project to a different workspace also needs `--yes`. `workspace list` is in newer altimate-code releases; with an older one, tell Claude the workspace's name. In a terminal, `altimate link` does the same with a picker; the picker does not work after `!` in Claude Code.
+3. **Check it** — `altimate workspace status` shows the linked workspace and its page in the Altimate web app.
 4. **Ask Claude** — questions about your team's conventions, standards or knowledge go to altimate-code, which answers from the workspace. Start a request with `/altimate-code:altimate` to be sure it does: *"/altimate-code:altimate what are our naming conventions for staging models?"*
 
 What altimate-code learns during these tasks is saved to the workspace's memory and shared with your team in the CLI, the IDE and Studio. Skills added to the workspace reach the next task.
@@ -69,13 +73,13 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 
 | Symptom | Fix |
 |---|---|
-| `command not found: altimate-code` | `npm install -g altimate-code` (Node 20+), then run `altimate-code` once to configure your provider. |
-| `Unauthorized` / `No provider configured` | Run `altimate-code` to open the TUI and reconfigure your provider via `/connect`, or set the provider API key env var. |
-| Task hangs for several minutes | Open `altimate-code` to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
+| Neither `altimate-code` nor `altimate` on PATH | `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider. |
+| `Unauthorized` / `No provider configured` | Run `altimate` (`altimate-code` on npm installs older than v0.7.1) to open the TUI and reconfigure your provider via `/connect`, or set the provider API key env var. |
+| Task hangs for several minutes | Open `altimate` (`altimate-code` on npm installs older than v0.7.1) to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
 | Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |
-| `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate-code` TUI or `profiles.yml`. |
-| `Not signed in to Altimate` | Run `altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"`. |
-| Answers ignore your workspace's skills or knowledge | Run `altimate-code workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate-code link` in a terminal. |
+| `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1) or `profiles.yml`. |
+| `Not signed in to Altimate` | Run `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). |
+| Answers ignore your workspace's skills or knowledge | Run `altimate workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate link` in a terminal. |
 | Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 Still stuck? See [Support](#support).

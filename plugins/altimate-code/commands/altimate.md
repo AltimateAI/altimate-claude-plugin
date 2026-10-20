@@ -7,12 +7,8 @@ The user explicitly invoked `/altimate-code:altimate` to delegate this task to a
 
 Workflow (follow in order, no skipping):
 
-1. **Verify altimate-code is installed:**
-   ```bash
-   command -v altimate-code
-   ```
-   If it returns nothing, stop and tell the user:
-   > altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+), then run `altimate-code` once to configure your provider/warehouse auth, then re-run `/altimate-code:altimate <task>`.
+1. **Verify altimate-code is installed.** There is no separate check: the run command in step 3 resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Either one is fine. If the run exits with `altimate-code CLI not found`, stop and tell the user:
+   > altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install | bash`, then run `altimate` once to configure your provider/warehouse auth, then re-run `/altimate-code:altimate <task>`.
 
 2. **Vague debug** ("X is broken") with no failure named: **stop — ask the user for the specific error before delegating.**
 
@@ -28,9 +24,14 @@ Workflow (follow in order, no skipping):
    $ARGUMENTS
    ALTIMATE_TASK
    )"
+   for ALTIMATE_NAME in altimate altimate-code; do
+     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+     [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+   done
+   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
    umask 077
    OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
-   altimate-code run "$TASK" \
+   "$ALTIMATE_BIN" run "$TASK" \
      --agent builder \
      --yolo \
      --output "$OUTPUT_FILE" \
@@ -45,9 +46,14 @@ Workflow (follow in order, no skipping):
    $ARGUMENTS
    ALTIMATE_TASK
    )"
+   for ALTIMATE_NAME in altimate altimate-code; do
+     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+     [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+   done
+   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
    umask 077
    OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
-   altimate-code run "$TASK" \
+   "$ALTIMATE_BIN" run "$TASK" \
      --agent builder \
      --yolo --output "$OUTPUT_FILE" --dir "$(pwd)" \
      --continue \
