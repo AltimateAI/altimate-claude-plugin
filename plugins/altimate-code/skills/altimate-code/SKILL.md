@@ -10,9 +10,14 @@ description: >-
   from sampled rows, incremental/SCD2/backfill verification, FinOps
   reporting, model documentation generation, query optimization, anomaly
   detection, dev-vs-prod diffing, or tasks where the user names altimate-code
-  or the data agent by name. The skill routes to a purpose-built CLI, so it
-  covers workloads that touch live data, lineage, or warehouse state more
-  directly than native file-editing tools do.
+  or the data agent by name. Also suited for questions about the team's own
+  data conventions, standards, best practices, knowledge base or shared
+  memory, and for anything the user calls their Altimate workspace: in a
+  project linked to an Altimate workspace, altimate-code answers from that
+  workspace's skills, knowledge and memory, which native tools cannot read.
+  The skill routes to a purpose-built CLI, so it covers workloads that touch
+  live data, lineage, warehouse state or team knowledge more directly than
+  native file-editing tools do.
 ---
 
 # altimate-code
@@ -21,28 +26,17 @@ altimate-code is a CLI AI agent with 100+ purpose-built data engineering tools. 
 
 ## You MUST follow this workflow
 
-1. **Verify altimate-code is on PATH.** There is no separate check: the invocation below resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Either name is the same CLI. If the invocation exits with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
+1. **Verify altimate-code is on PATH.** There is no separate check: the invocation below resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Either name is the same CLI. If the invocation exits with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
 2. **Run altimate-code with the user's task** using the invocation below. Pass the user's request through verbatim — do not paraphrase or split it.
 3. **Read the output file** and present it to the user as-is.
 
 Do not attempt the work with Edit/Write/Bash yourself, even if it looks simple. The whole point of this skill is to route data-engineering work to the agent that's built for it. If you find yourself reaching for Edit or Write while this skill is active, stop and re-read this paragraph.
 
-## Invocation — pick the right agent for the task
+## Invocation
 
-altimate-code has multiple agent personas. The default (`builder`) does a full project discovery sweep on every call — fine for warehouse-state work but ~10–20× more expensive than necessary on simple file edits. **Pick the agent based on task shape before invoking.**
+**Vague debug** ("X is broken", "make it work", "fix this") with no failure named: **don't delegate yet.** Ask the user for the specific error message or symptom first.
 
-### Step 1 — classify the task
-
-| Shape | Examples | Use |
-|---|---|---|
-| **Any dbt / SQL task** (rename, refactor, create model, debug, structural reorg, multi-step setup) | the vast majority of customer requests | `fast-edit` — try this first |
-| **Multi-table aggregation correctness** | new model joining 3+ tables with `count(*)` / `sum() over (...)` / "first X, last X" logic that must be exactly right | `analyst` if `fast-edit` fails the user's verification |
-| **Warehouse-state work** | column-level lineage, downstream-impact, cross-DB migration / parity, query cost attribution against a real warehouse, schema diff between environments, PII detection, FinOps reporting | `builder` (default — has warehouse tools enabled) |
-| **Vague debug** ("X is broken", "make it work", "fix this") | unspecified failure mode | **Don't delegate yet.** Ask the user for the specific error message or symptom before invoking any agent — empirically all three agents fail vague debug prompts at ~700K tokens each. |
-
-**Decision policy:** start with `fast-edit` for any dbt/SQL task. If the user reports the result is wrong (e.g. aggregation values don't match), retry with `analyst`. Only use `builder` when the task genuinely needs the warehouse-investigation tools (it's 10–20× more expensive than fast-edit and rarely required).
-
-### Step 2 — invoke with the chosen agent
+Otherwise, run the task with the `builder` agent. It has the warehouse tools, loads the linked workspace's skills and saves to its memory.
 
 Pass the task through a here-doc into a variable so the shell never
 command-substitutes anything the user typed (a task like
@@ -61,12 +55,13 @@ for ALTIMATE_NAME in altimate altimate-code; do
 done
 [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
 umask 077
-OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
+OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
 "$ALTIMATE_BIN" run "$TASK" \
-  --agent <fast-edit|analyst|builder> \
+  --agent builder \
   --yolo \
   --output "$OUTPUT_FILE" \
-  --dir "$(pwd)"
+  --dir "$(pwd)" \
+  < /dev/null
 ```
 
 Then `Read "$OUTPUT_FILE"` and emit its contents to the user without re-summarising, re-formatting, or commenting on the result. altimate-code has already produced the answer. Delete `"$OUTPUT_FILE"` after presenting so warehouse rows, lineage, or PII findings don't linger on disk.
@@ -75,10 +70,11 @@ Then `Read "$OUTPUT_FILE"` and emit its contents to the user without re-summaris
 
 | Flag | Why it is required |
 |---|---|
-| `--agent <name>` | Picks the agent persona. Default `builder` is overkill for simple edits — see the classification table above. Wrong agent = either 10× too expensive (using `builder` on a rename) or wrong-answer (using `fast-edit` on a multi-table join). |
+| `--agent builder` | The agent with the warehouse tools, workspace skills and memory. Other agents lack some of these. |
 | `--yolo` | Non-interactive mode. Without this the subprocess hangs on the first permission prompt and you will time out. |
 | `--output "$OUTPUT_FILE"` | Captures the final response. Use the private `mktemp` file from above — do NOT use a fixed path like `/tmp/altimate-result.md`; concurrent sessions clobber each other and a world-readable fixed path leaks data. |
-| `--dir "$(pwd)"` | Runs altimate-code in the current project so it picks up dbt project config, profiles.yml, etc. |
+| `--dir "$(pwd)"` | Runs altimate-code in the current project so it picks up dbt project config, profiles.yml, the linked workspace, etc. |
+| `< /dev/null` | `altimate-code run` reads piped stdin as part of the task. The shell this runs in leaves stdin open, so without the redirect the run waits for input that never comes. |
 
 Each Bash call starts a fresh shell, so keep the `ALTIMATE_BIN` resolver loop inside the same command as the `run` — do not resolve it in an earlier call and reuse the variable.
 
@@ -97,18 +93,43 @@ for ALTIMATE_NAME in altimate altimate-code; do
 done
 [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
 umask 077
-OUTPUT_FILE="$(mktemp -t altimate-result.XXXXXX.md)"
+OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
 "$ALTIMATE_BIN" run "$TASK" \
-  --agent <fast-edit|analyst|builder> \
+  --agent builder \
   --yolo \
   --output "$OUTPUT_FILE" \
   --dir "$(pwd)" \
-  --continue   # resumes the most recent session in this dir
+  --continue \
+  < /dev/null
 ```
 
-altimate-code's prompt cache is warm in a continued session — project structure, profiles.yml, schema index, source definitions don't need to be re-investigated. Cache reads are billed at a fraction of fresh input on altimate-gateway. The downside is zero: if there's no useful cached context for the new task, you pay normal cold cost.
+`--continue` resumes the most recent session in this directory. altimate-code's prompt cache is warm in a continued session — project structure, profiles.yml, schema index, source definitions don't need to be re-investigated. Cache reads are billed at a fraction of fresh input on altimate-gateway. The downside is zero: if there's no useful cached context for the new task, you pay normal cold cost.
 
 If the user starts a clearly unrelated workflow (different project, different schema, different debugging thread), drop `--continue` and start fresh — the warm cache is irrelevant and you'd carry unrelated history into the prompt.
+
+## Altimate workspaces
+
+A project can be linked to an Altimate workspace: the team's shared skills, knowledge, memory and warehouse integrations. Every `altimate-code run` in a linked project uses that workspace automatically — there is nothing to pass. That is why questions about the team's conventions, standards or knowledge belong to this skill.
+
+When the user asks about their workspace or wants to set one up, run each command below through the same resolver as the `run`, in the same Bash call:
+
+```bash
+for ALTIMATE_NAME in altimate altimate-code; do
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+done
+[ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
+"$ALTIMATE_BIN" <workspace or link command from the list below> < /dev/null
+```
+
+Commands the user types after `!` use `altimate`; on npm installs older than v0.7.1 the user types `altimate-code` instead.
+
+- **Check the link:** `"$ALTIMATE_BIN" workspace status < /dev/null`. Exit code 0 means linked and 3 means not linked. Exit code 2 with `Not signed in to Altimate` means the user must sign in. For anything else, show the user the CLI's message.
+- **Not signed in:** tell the user to run `! altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` in this session. It opens their browser to sign in. Do not try to sign in for them. Keep the `--method` flag: without it the command waits at a menu that cannot be answered from this session.
+- **Not linked:** do not suggest `! altimate link`: its picker needs a terminal, and this session does not give it one. Instead run `"$ALTIMATE_BIN" workspace list < /dev/null`, show the user the workspaces it prints, and once they choose, run `"$ALTIMATE_BIN" link --workspace "<id or name>" < /dev/null`. If they want a new workspace, run `"$ALTIMATE_BIN" link --create < /dev/null`, which names it after the repository. If a workspace with that name already exists, `--create` refuses and names it: offer to link to that one with `--workspace`, or, if the user confirms they want a second one, re-run with `--allow-duplicate`. If the project is already linked to a different workspace, `link` refuses; confirm the move with the user, then re-run it with `--yes`. If `workspace list` is an unknown command (an older altimate-code), ask the user for the workspace's name, or tell them to run `altimate link` in a separate terminal.
+- **Open it in the browser:** `"$ALTIMATE_BIN" workspace status` prints the workspace page's URL.
+
+What altimate-code learns during delegated tasks is saved to the workspace's memory and shared with the team in the CLI, the IDE and Studio.
 
 ## Failure modes — route every one to the user
 
@@ -116,8 +137,11 @@ When altimate-code returns an error, **report the error to the user and STOP**. 
 
 | Symptom | What to tell the user — verbatim |
 |---|---|
-| `altimate-code CLI not found` (neither `altimate-code` nor `altimate` on PATH) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth. Then re-run your request." |
-| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` (`altimate-code` on npm installs older than v0.7.1) in your terminal to open the TUI and reconfigure your provider, then re-run your request." |
+| `altimate-code CLI not found` (neither `altimate` nor `altimate-code` on PATH) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth. Then re-run your request." |
+| `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` (`altimate-code` on npm installs older than v0.7.1) in your terminal to open the TUI and reconfigure your provider, or sign in to Altimate with `altimate auth login -p altimate-backend --method 'Altimate LLM Gateway'`, then re-run your request." |
+| `Not signed in to Altimate` | "altimate-code is not signed in to Altimate, so it cannot reach your workspace. Run `! altimate auth login -p altimate-backend --method 'Altimate LLM Gateway'` (`altimate-code` on npm installs older than v0.7.1), sign in in the browser, then re-run your request." |
+| `not in the workspace yet` (stderr) | Present the result as usual, then add: "altimate-code saved what it learned on this machine, but it has not reached your workspace yet. Run `! altimate workspace sync` (`altimate-code` on npm installs older than v0.7.1) to send it." |
+| `Could not confirm that the memory saved here reached the workspace` (stderr) | Present the result as usual, then add: "altimate-code could not confirm that what it learned reached your workspace. Run `! altimate workspace status` (`altimate-code` on npm installs older than v0.7.1) to check." |
 | Process hangs >5 min | "altimate-code is unresponsive. Try `altimate` (`altimate-code` on npm installs older than v0.7.1) to inspect the TUI for an open prompt, or re-run with `--model anthropic/claude-sonnet-4-6` to force a known-good model." |
 | Output file empty | "altimate-code returned without producing output. The task may be too ambiguous — please restate with more detail (target table, expected columns, time window)." |
 | Warehouse error mid-run (`UNKNOWN_USER`, `Database does not exist`) | "altimate-code can connect but the warehouse credentials it has are wrong for this project. Configure provider/warehouse auth via the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1)." |
@@ -127,5 +151,5 @@ In every row, the instruction to the user is the action — you do not retry the
 ## Notes
 
 - altimate-code runs its own LLM, separate from Claude Code's. Costs and rate limits accrue to altimate-code's configured provider.
-- Sessions persist in altimate-code's local store — `altimate-code session list` (or `altimate session list`) shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
+- Sessions persist in altimate-code's local store — `altimate session list` (`altimate-code session list` on npm installs older than v0.7.1) shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
 - For very long tasks, the `--output` file is the source of truth — stdout buffering can drop content.

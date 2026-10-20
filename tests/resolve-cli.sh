@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 FILES=(
   plugins/altimate-code/commands/altimate.md:2
   plugins/altimate-code/commands/review.md:1
-  plugins/altimate-code/skills/altimate-code/SKILL.md:2
+  plugins/altimate-code/skills/altimate-code/SKILL.md:3
   plugins/altimate-code/skills/review/SKILL.md:1
 )
 FAILURES=0
@@ -32,6 +32,13 @@ done
 [ "$(printf '%s' "$ALL_BLOCKS" | grep . | sort -u | grep -c .)" -eq 1 ] || fail "resolver blocks differ between files"
 RESOLVER="$(printf '%b' "$(printf '%s' "$ALL_BLOCKS" | head -n1)")"
 
+# A command line that calls the CLI by name skips the resolver. User-typed `!` commands in prose are fine.
+for entry in "${FILES[@]}"; do
+  file="${entry%:*}"
+  bare="$(grep -nE '^[[:space:]]*altimate(-code)? (run|review|workspace|link|auth|session)' "$file")"
+  [ -z "$bare" ] || fail "$file calls the CLI without the resolver: $bare"
+done
+
 STUBS="$(mktemp -d)" && [ -d "$STUBS" ] || { echo "FAIL: could not create a temp dir"; exit 1; }
 trap 'rm -rf "$STUBS"' EXIT
 for stub in only-altimate/altimate only-altimate-code/altimate-code both/altimate both/altimate-code "relative dir/altimate"; do
@@ -51,9 +58,9 @@ expect() {
   out="$(cd "$STUBS" && env -u BASH_ENV -u ENV PATH="$2" "${shell_cmd[@]}" -c "$3
 $RESOLVER
 \"\$ALTIMATE_BIN\"" 2>&1)"
-  status=$?
-  [ "$status" -eq "$4" ] && [ "$out" = "$5" ] \
-    || fail "$1 / PATH=$2 / '${3:-no setup}': expected exit $4 '$5', got exit $status '$out'"
+  rc=$?
+  [ "$rc" -eq "$4" ] && [ "$out" = "$5" ] \
+    || fail "$1 / PATH=$2 / '${3:-no setup}': expected exit $4 '$5', got exit $rc '$out'"
 }
 
 ALIAS_SETUP='shopt -s expand_aliases 2>/dev/null; alias altimate-code=altimate'
@@ -71,6 +78,7 @@ for sh in bash zsh; do
   expect "$sh" "$STUBS/only-altimate-code" 'shopt -s expand_aliases 2>/dev/null; alias altimate-code="echo alias"' 0 'ran altimate-code'
   expect "$sh" "$STUBS/neither" "$ALIAS_SETUP; altimate() { echo function; }" 127 'altimate-code CLI not found (tried altimate, altimate-code)'
   expect "$sh" "$STUBS/broken-altimate:$STUBS/only-altimate-code" '' 0 'ran altimate-code'
+  expect "$sh" "$STUBS/broken-altimate" '' 127 'altimate-code CLI not found (tried altimate, altimate-code)'
   expect "$sh" "relative dir" '' 0 'ran altimate'
 done
 

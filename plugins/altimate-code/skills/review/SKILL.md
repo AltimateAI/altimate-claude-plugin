@@ -29,7 +29,7 @@ description: >-
 
 1. **Verify altimate-code is on PATH.** There is no separate check: the resolver below runs first in the same Bash call as the review, before any `gh pr checkout`. If it exits 127 with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
 
-   The CLI ships under two names: the npm package exposes both `altimate-code` and `altimate`, while the standalone curl/Homebrew/PowerShell installers expose only `altimate`. Every review command below runs through `"$ALTIMATE_BIN"`, in the same Bash call as this resolver (shell state does not persist between calls). The lookup ignores aliases and shell functions, so a user alias such as `alias altimate-code=altimate` cannot be captured as the binary path:
+   The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Every review command below runs through `"$ALTIMATE_BIN"`, in the same Bash call as this resolver (shell state does not persist between calls). The lookup ignores aliases and shell functions, so a user alias such as `alias altimate-code=altimate` cannot be captured as the binary path:
 
    ```bash
    for ALTIMATE_NAME in altimate altimate-code; do
@@ -37,7 +37,7 @@ description: >-
      [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
    done
    [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
-   "$ALTIMATE_BIN" review   # plus any scope/flags from below
+   <the scope command chosen below, run through "$ALTIMATE_BIN">
    ```
 
 2. **Determine review scope from the user's ask** using the table below.
