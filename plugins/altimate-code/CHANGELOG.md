@@ -2,6 +2,19 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.2.0-experimental] — Unreleased — direct MCP use requires an altimate-code build with `mcp serve`
+
+### Added
+- Stdio MCP registration for `altimate-code mcp serve`, without `--allow-write`.
+- Direct data tools: `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns schemas and value profiles in the same call), `sql_materialize` and `answer_commit`; `schema_inspect` and `sql_check` with `mcp serve --all-tools`.
+- `analyst` agent with the rules for value-profile inspection, SQL analysis, cross-connection scratch joins, and correctness checks. `answer_commit` is optional; the analyst may end with a plain `FINAL ANSWER:` line.
+
+### Changed
+- Routing skill and `/altimate-code:altimate` prefer MCP for data questions with Claude Code reasoning. If the MCP tools are unavailable, they fall back to CLI analyst delegation and tell the user which path is used. Released builds without `mcp serve` fail to start the MCP server and use this fallback.
+- Long jobs and capabilities outside the five MCP tools retain CLI delegation and agent-persona guidance.
+- Delegated runs use `builder` (no `fast-edit` persona) and the canonical-binary resolver from 1.1.x.
+- Documentation covers experimental prerequisites, connection discovery, read-only enforcement limits, local result files, and separate reasoning/billing paths.
+
 ## [1.1.1] — 2026-10-20
 
 ### Fixed
