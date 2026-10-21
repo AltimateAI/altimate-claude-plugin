@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "Altimate's Claude Code plugin — direct MCP data tools and CLI delegation for long dbt and warehouse jobs.",
-    "version": "1.0.0"
+    "version": "1.2.0-experimental"
   },
   "plugins": [
     {

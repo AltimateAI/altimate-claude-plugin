@@ -29,6 +29,8 @@ The plugin registers a local stdio MCP server through `.mcp.json`, provides rout
 
 The MCP server makes no separate LLM calls. Delegation uses the separate provider path below.
 
+The delegation path below runs only when the delegation skill or the `/altimate-code:altimate` command fires and invokes the locally installed altimate-code CLI.
+
 ## Data flows when a task is delegated
 
 | Data | Where it goes | Retention |

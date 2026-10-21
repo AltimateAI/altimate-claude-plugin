@@ -6,12 +6,20 @@ LLM cost** for data questions; the stdio MCP server runs no LLM. Long multi-step
 jobs such as dbt project builds, migrations, and FinOps reports can still be
 delegated to `altimate-code run`, which uses its own agent and configured provider.
 
-**1.1.0-experimental: direct MCP use requires an altimate-code build with `mcp serve`.**
+**1.2.0-experimental: direct MCP use requires an altimate-code build with `mcp serve`.**
 This server is in an unreleased branch. Released builds without `mcp serve` fail
 to start the MCP server; the plugin falls back to `altimate-code run` with the
 analyst persona for data questions. It tells you which path is being used.
 
 ## Install
+
+From Anthropic's plugin directory:
+
+```bash
+claude plugin install altimate-code
+```
+
+Or from this repository's marketplace:
 
 ```
 /plugin marketplace add AltimateAI/altimate-claude-plugin
@@ -20,15 +28,18 @@ analyst persona for data questions. It tells you which path is being used.
 
 ## Prerequisites
 
-Put `altimate-code` on PATH where Claude Code can launch it. The CLI requires
-Node 20+. For direct MCP use, install a build containing `mcp serve`. Check your
-build with `altimate-code mcp serve --help`; an unknown command means the MCP
-server cannot start and data questions use CLI delegation instead. Installing
-the latest published npm package alone does not provide the unreleased server.
+Put the CLI on PATH where Claude Code can launch it (it requires Node 20+). Either install method works:
+
+```bash
+npm install -g altimate-code                       # exposes `altimate` and `altimate-code`
+curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes `altimate`
+```
+
+The delegation skill and commands invoke `altimate`, the CLI's canonical name, and fall back to `altimate-code` for npm installs older than v0.7.1. The MCP registration launches `altimate-code mcp serve`: for direct MCP use, install a build containing `mcp serve`. Check your build with `altimate-code mcp serve --help`; an unknown command means the MCP server cannot start and data questions use CLI delegation instead. Installing the latest published npm package alone does not provide the unreleased server.
 
 Configure database connections as described below. Direct MCP use does **not**
 require an altimate-code LLM provider or API key. For delegated jobs only, run
-`altimate-code` to configure its provider (or use its provider environment settings).
+`altimate` to configure its provider (or use its provider environment settings, such as `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`).
 
 ## How it works
 
@@ -50,11 +61,11 @@ computes in SQL, checks correctness where needed, and returns the requested valu
 with a one-line basis. For cross-connection joins, it materializes the smaller
 filtered side and other required inputs into `scratch`, then joins there.
 
-The routing skill and `/altimate <task>` prefer this direct
+The routing skill and `/altimate-code:altimate <task>` prefer this direct
 path for answers, numbers, and lists when the MCP tools are available in the
 session. If the server is missing or fails to start, they delegate data questions
 with `--agent analyst`. Long jobs and capabilities outside the five MCP tools use
-`altimate-code run` with persona selection (`fast-edit`, `analyst`, or `builder`)
+`altimate-code run` with persona selection (`analyst` or `builder`)
 and a private output file. The plugin tells you which path it uses.
 Delegated jobs use the CLI's separate LLM provider,
 costs, and rate limits. `/review` retains the specialized dbt/SQL reviewer.
@@ -89,12 +100,23 @@ for explicitly enabling writes, but this plugin does not enable it.
 `scratch` DuckDB; that local analytical storage does not modify the source
 databases. Large results can also be written to local spill files.
 
+## Use an Altimate workspace
+
+An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's shared skills, knowledge, memory and warehouse integrations. Claude Code reaches it through altimate-code: every task the plugin hands over runs in your project, so it uses the workspace the project is linked to. Nothing in Claude Code needs configuring.
+
+1. **Sign in to Altimate** — `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). It opens your browser. This also sets up the model provider altimate-code uses. You can run it from Claude Code by typing it after `!`.
+2. **Link the project** — ask Claude to link the project to your workspace. It lists your workspaces with `altimate workspace list` and links the one you choose with `altimate link --workspace "<id or name>"`, or creates one with `altimate link --create`. Moving a linked project to a different workspace also needs `--yes`. `workspace list` is in newer altimate-code releases; with an older one, tell Claude the workspace's name. In a terminal, `altimate link` does the same with a picker; the picker does not work after `!` in Claude Code.
+3. **Check it** — `altimate workspace status` shows the linked workspace and its page in the Altimate web app.
+4. **Ask Claude** — questions about your team's conventions, standards or knowledge go to altimate-code, which answers from the workspace. Start a request with `/altimate-code:altimate` to be sure it does: *"/altimate-code:altimate what are our naming conventions for staging models?"*
+
+What altimate-code learns during these tasks is saved to the workspace's memory and shared with your team in the CLI, the IDE and Studio. Skills added to the workspace reach the next task.
+
 ## Example prompts
 
 - "How many orders were completed last month? Return the count and total revenue."
 - "Join customer activity across our two connections and list the ten most active customers."
-- "/altimate Build and test a dbt staging project for these sources."
-- "/altimate Produce a warehouse FinOps report with recommendations."
+- "/altimate-code:altimate Build and test a dbt staging project for these sources."
+- "/altimate-code:altimate Produce a warehouse FinOps report with recommendations."
 - "/review Review my dbt changes."
 
 ## Data handling
@@ -115,19 +137,26 @@ See **[PRIVACY.md](../../PRIVACY.md)** for MCP and delegation data flows;
 
 | Symptom | Fix |
 |---|---|
-| `command not found: altimate-code` | Install altimate-code on Claude Code's PATH for delegation; direct MCP tools additionally require a build with `mcp serve`. |
+| Neither `altimate-code` nor `altimate` on PATH | `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider. Direct MCP tools additionally require a build with `mcp serve`. |
 | Unknown `mcp` or `serve` command | The MCP server fails to start; data questions fall back to CLI analyst delegation. Configure the CLI's LLM provider for delegation, or use a build containing `mcp serve` for direct MCP tools. |
 | No connections / database access error | Check project/global connection files, `ALTIMATE_CODE_CONN_*` environment variables, and database permissions. |
-| `Unauthorized` / `No provider configured` from a delegated job | Configure the CLI's LLM provider; direct MCP data questions do not need it. |
-| Delegated job hangs or returns no output | Check the CLI TUI for pending prompts and provide a precise target and expected result. |
-| Plugin unavailable | Confirm it is enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
+| `Unauthorized` / `No provider configured` | Run `altimate` (`altimate-code` on npm installs older than v0.7.1) to open the TUI and reconfigure your provider via `/connect`, or set the provider API key env var. |
+| Task hangs for several minutes | Open `altimate` (`altimate-code` on npm installs older than v0.7.1) to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
+| Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |
+| `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1) or `profiles.yml`. |
+| `Not signed in to Altimate` | Run `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). |
+| Answers ignore your workspace's skills or knowledge | Run `altimate workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate link` in a terminal. |
+| Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
+
+Still stuck? See [Support](#support).
 
 ## Components
 
 - **MCP server** — `.mcp.json` — direct stdio data tools
-- **Routing skill** — `skills/altimate-code/SKILL.md` — direct questions or CLI delegation
+- **Analyst agent** — `agents/analyst.md` — read-only data analyst for the MCP tools
+- **Routing skill** — `skills/altimate-code/SKILL.md` — direct questions or CLI delegation, workspace guidance
 - **Review skill** — `skills/review/SKILL.md` — specialized dbt/SQL review
-- **Commands** — `commands/altimate.md` and `commands/review.md`
+- **Commands** — `commands/altimate.md` (`/altimate-code:altimate`) and `commands/review.md`
 - **Hook** — `hooks/hooks.json` and `hooks-handlers/session-start.sh`
 
 ## Support

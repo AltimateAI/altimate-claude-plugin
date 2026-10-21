@@ -23,6 +23,14 @@ value profiles, result spill files, and the separate LLM billing for delegated j
 
 ## Install
 
+From Anthropic's plugin directory:
+
+```bash
+claude plugin install altimate-code
+```
+
+Or from this marketplace:
+
 ```
 /plugin marketplace add AltimateAI/altimate-claude-plugin
 /plugin install altimate-code@altimate-claude-plugin
