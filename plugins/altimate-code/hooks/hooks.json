@@ -1,5 +1,6 @@
 {
-  "description": "SessionStart capability description: direct MCP tools for data questions, CLI delegation for long jobs, and the specialized dbt/SQL reviewer.",
+  "description": "SessionStart capability description and experimental SQL results mod.",
+  "modules": ["./data-workspace.mjs"],
   "hooks": {
     "SessionStart": [
       {

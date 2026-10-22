@@ -73,6 +73,19 @@ description: >-
 
 ## Testing changes
 
+The experimental SQL mod lives in `plugins/altimate-code/hooks/data-workspace.mjs`.
+Run its event and UI tests with `claude plugin test ./plugins/altimate-code`.
+Use Claude Code 2.1.307 for the tested API. `claude plugin validate --strict` statically
+lists the mod's events and calls; it does not prove the UI or warehouse workflow works.
+The mod adds no SQL engine; safety checks and linting stay in altimate-code.
+
+For a real local SQLite smoke and optional three-arm comparison, run
+`python3 tests/mod-smoke.py --claude-bin /absolute/path/to/claude --server-command '["altimate-code","mcp","serve"]' --output /tmp/mod-results.json`.
+Pass `--smoke-only` to skip model runs. The comparison uses existing Claude credentials
+and consumes model usage. It creates only synthetic local data, ignores ordinary
+user/project settings, and uses strict MCP configuration to exclude ambient servers.
+Pin the tested Claude executable: another installed version may lack mods.
+
 Manually:
 
 ```bash

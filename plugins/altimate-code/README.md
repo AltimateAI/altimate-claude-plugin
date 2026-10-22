@@ -6,7 +6,7 @@ LLM cost** for data questions; the stdio MCP server runs no LLM. Long multi-step
 jobs such as dbt project builds, migrations, and FinOps reports can still be
 delegated to `altimate-code run`, which uses its own agent and configured provider.
 
-**1.2.0-experimental: direct MCP use requires an altimate-code build with `mcp serve`.**
+**1.3.0-experimental: direct MCP use requires an altimate-code build with `mcp serve`.**
 This server is in an unreleased branch. Released builds without `mcp serve` fail
 to start the MCP server; the plugin falls back to `altimate-code run` with the
 analyst persona for data questions. It tells you which path is being used.
@@ -70,6 +70,24 @@ and a private output file. The plugin tells you which path it uses.
 Delegated jobs use the CLI's separate LLM provider,
 costs, and rate limits. `/review` retains the specialized dbt/SQL reviewer.
 A short SessionStart hook describes these capabilities to Claude.
+
+## Experimental data workspace mod
+
+On Claude Code 2.1.307 (the tested version), this plugin also loads a mod:
+
+- `/altimate-data` opens a pane with recent SQL, connection names, running/completed/error status, and the backend's result text and check findings.
+- `/altimate-query <connection> <SQL>` executes SQL directly through the existing MCP tool. For example, `/altimate-query demo SELECT COUNT(*) FROM orders`. Use a connection name without whitespace, as returned by `warehouse_list`. This command makes no model request. Natural-language questions still use Claude's reasoning loop.
+- The pane observes Claude's `sql_execute` calls too. It does not run an extra query, register extra tools, change prompts, or rewrite results. Open the pane yourself; it never takes focus automatically.
+
+The command uses Claude Code's `tool.call` API, retaining tool permissions and the server's existing SQL safety checks, read-only defaults and result linting. It does not use the permission-bypassing `mcp.call` API, run shell commands, or start another agent. It adds no new SQL validation rules. Source writes remain refused by the default MCP configuration; the read-only limitations above still apply.
+
+Previews retain only the latest eight calls in memory, with each SQL preview capped at 2,000 characters and result preview at 8,000 characters. Clipping affects the pane only. The model and normal tool result keep the original output. Clear previews with the pane's button or `/clear`; closing the pane only hides it. Reloading the mod or starting a session clears previews. Nothing is saved to disk by the mod, but normal Claude transcripts and MCP spill files follow their own retention rules. Previews may contain sensitive query results: screen sharing includes the open pane.
+
+The pane works in the terminal, Desktop and supported VS Code versions; only terminal painting was manually verified. Headless sessions keep text results and do not draw a pane. If mods are disabled by an administrator or hooks settings, these two commands and previews are unavailable; the existing MCP tools and delegation components still work. If the MCP server is unavailable, the direct command reports that no query ran and does not silently delegate to a separately billed model.
+
+Try the draft from a checkout with `claude --plugin-dir ./plugins/altimate-code`. No installation or marketplace change is needed. To compare without the mod, remove `modules` from a **copy** of `hooks/hooks.json`; leave the MCP registration intact. To disable all your own hooks/mods, Claude Code also supports `disableAllHooks`, which disables the existing SessionStart hook too. See [Anthropic's mod controls](https://code.claude.com/docs/en/plugins/mods/overview#turn-mods-on-or-off).
+
+See [the experiment report](../../docs/data-workspace-experiment.md) for measured results and limitations. This is a draft experiment, not a claim that a mod makes Claude's reasoning faster or more accurate.
 
 ## Connections
 
