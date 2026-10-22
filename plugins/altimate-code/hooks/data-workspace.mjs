@@ -55,6 +55,13 @@ export function register(on) {
     return next(e)
   })
 
+  // session.start runs on plugin load, not on every conversation switch.
+  on('session.end', ($, e, next) => {
+    queries = []
+    redraw($)
+    return next(e)
+  })
+
   on('command.run', { command: 'altimate-data' }, async ($) => {
     const placement = await $.ui.open({ id: PANE, title: 'Altimate data', focus: true, closeOnEscape: true })
     return placement.isPlaced ? {} : { text: 'The data pane is unavailable here. SQL results remain in the conversation.' }

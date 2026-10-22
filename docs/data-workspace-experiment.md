@@ -11,7 +11,7 @@ The mod adds a user-opened results pane and an executable SQL command. Claude st
 - Missing MCP: direct command reports recovery and runs no query; existing routing/delegation behavior remains available separately.
 - Source mutation: default server refuses it; the mod never approves or retries it.
 - No mod: existing MCP tools continue to work. No new tools or automatic queries are required for the pane.
-- History: latest eight calls, in-memory previews only, cleared by `/clear`, clear button, session start or module reload. Closing the pane hides it. These limits do not change model-visible results or normal transcript retention.
+- History: latest eight calls, in-memory previews only, cleared by `/clear`, clear button, conversation end (including resume/logout), session start or module reload. Closing the pane hides it. These limits do not change model-visible results or normal transcript retention.
 
 This does not migrate Altimate workspace memory/skills into Claude, provide a connection picker, implement another agent loop, or replace backend authorization. It supports the plugin's existing scoped `sql_execute` tool name, not arbitrary MCP servers with a similarly named tool.
 
@@ -31,7 +31,7 @@ For the explicit SQL command, the paid-order aggregate returned `40 | 12000` in 
 
 The same command's attempted `DELETE` was refused with `Permission denied: sql_execute_write`; an independent SQLite read confirmed all 60 rows remained. A missing-server test returned `No query was run` without delegation. Headless commands ran through real Claude Code and the real MCP server, not API stubs.
 
-In a real Claude Code 2.1.307 terminal session, `/altimate-query` returned the paid-order totals, `/altimate-data` opened the pane with the connection, SQL and `40 | 12000`, Escape closed it, and `/clear` followed by reopening the pane showed the empty-state instructions. The terminal ran with the Team-plan built-in guard and normal tool permissions. Desktop and VS Code element trees were checked with the test kit; their actual painting was not observed. An early lifecycle implementation using `classic.SessionStart` was skipped by that guard; the final mod clears on `command.run` for `/clear` instead.
+In a real Claude Code 2.1.307 terminal session, `/altimate-query` returned the paid-order totals, `/altimate-data` opened the pane with the connection, SQL and `40 | 12000`, Escape closed it, and `/clear` followed by reopening the pane showed the empty-state instructions. The terminal ran with the Team-plan built-in guard and normal tool permissions. Desktop and VS Code element trees were checked with the test kit; their actual painting was not observed. An early lifecycle implementation using `classic.SessionStart` was skipped by that guard; the final mod clears on `command.run` for `/clear` and on `session.end`, which also covers resuming another conversation.
 
 ## Interpretation
 

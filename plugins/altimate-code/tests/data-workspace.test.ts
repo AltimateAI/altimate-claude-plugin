@@ -1,4 +1,5 @@
 import { expect, test } from 'claude-code/testing'
+import { register } from '../hooks/data-workspace.mjs'
 
 // Shapes from Anthropic's mods/test examples and mods/types/claude-code.d.ts.
 const SQL_TOOL = 'mcp__plugin_altimate-code_altimate-code__sql_execute'
@@ -163,4 +164,61 @@ test('/clear removes the previous conversation previews', async ($, on) => {
   expect(await $.command.run({ command: 'clear', args: '' })).toEqual({ text: 'Conversation cleared' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'previous conversation' })).toBeUndefined()
+})
+
+test('conversation switches discard previews even without another session.start', async ($, on) => {
+  boot($, on)
+  on('tool.call', () => ({ result: 'previous conversation' }))
+  on('session.end', () => ({ sessionId: 'old-session' }))
+  await $.tool.call({ tool: SQL_TOOL, query: 'SELECT 1' })
+  await $.session.end({ reason: 'resume', sessionId: 'old-session', resume: { id: 'old-session' } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'previous conversation' })).toBeUndefined()
+})
+
+test('core top-level tool errors are not labelled Completed', async ($, on) => {
+  boot($, on)
+  // ToolCallResult core error variant: isError/text at the top level, not in result.
+  const answer = { result: 'database disconnected', isError: true, text: 'database disconnected' }
+  on('tool.call', () => answer)
+  expect(await $.tool.call({ tool: SQL_TOOL, query: 'SELECT 1' })).toEqual(answer)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: '(default connection) · Refused or failed' })).toBeDefined()
+})
+
+// Supplement engine tests with a rejecting next handler. Throwing from a test-kit
+// stub skips that stub; it does not model an implementation rejecting its call.
+test('thrown and aborted underlying calls are rethrown unchanged and recorded', async () => {
+  for (const aborted of [false, true]) {
+    const handlers = new Map()
+    register((event, matcher, handler) => handlers.set(event + ':' + (matcher?.command ?? ''), handler ?? matcher))
+    const element = props => props
+    const api = { ui: { invalidate() {}, resolve() { return { Box: element, Text: element, Button: element, Code: element } } } }
+    const error = new Error('connection lost')
+    const controller = new AbortController()
+    if (aborted) controller.abort()
+    let calls = 0
+    const next = Object.assign(async () => { calls++; throw error }, { signal: controller.signal })
+    let caught
+    try { await handlers.get('tool.call:')(api, { query: 'SELECT 1' }, next) } catch (e) { caught = e }
+    expect(caught).toBe(error)
+    expect(calls).toBe(1)
+    const pane = handlers.get('ui.render:')(api, PANE, next)
+    expect(JSON.stringify(pane)).toContain(aborted ? 'Interrupted' : 'Failed')
+    // Reset to keep the two direct invocations independent.
+    await handlers.get('session.end:')(api, { reason: 'resume' }, async () => ({}))
+  }
+})
+
+test('direct command reports a thrown tool failure without retry or fallback', async () => {
+  const handlers = new Map()
+  register((event, matcher, handler) => handlers.set(event + ':' + (matcher?.command ?? ''), handler ?? matcher))
+  let calls = 0
+  const api = { tool: {
+    async list() { return [{ name: SQL_TOOL }] },
+    async call() { calls++; throw new Error('interrupted') },
+  } }
+  const answer = await handlers.get('command.run:altimate-query')(api, { args: 'demo SELECT 1' })
+  expect(answer.text).toContain('it was not retried')
+  expect(calls).toBe(1)
 })

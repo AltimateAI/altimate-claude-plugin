@@ -35,13 +35,17 @@ altimate-claude-plugin/
 │       ├── agents/
 │       │   └── analyst.md       # read-only data analyst for the MCP tools
 │       ├── hooks/
-│       │   └── hooks.json       # SessionStart hook config
+│       │   ├── hooks.json       # SessionStart and mod registration
+│       │   └── data-workspace.mjs # query pane, direct command and lifecycle
 │       ├── hooks-handlers/
 │       │   └── session-start.sh # SessionStart hook handler
 │       ├── commands/
 │       │   └── altimate.md      # /altimate-code:altimate slash command
+│       ├── tests/               # mod event and UI tests
 │       ├── README.md            # plugin-specific docs
 │       └── CHANGELOG.md         # plugin-specific changelog
+├── docs/                    # experiment findings
+├── tests/mod-smoke.py        # local SQLite workflow/comparison
 ├── README.md                # repo overview
 ├── SECURITY.md
 ├── CODE_OF_CONDUCT.md
@@ -54,6 +58,7 @@ altimate-claude-plugin/
 - **Routing behavior** (when Claude picks up the skill): edit `plugins/altimate-code/skills/altimate-code/SKILL.md` frontmatter description and/or `plugins/altimate-code/hooks-handlers/session-start.sh` `additionalContext`.
 - **Direct data-question analysis**: edit `plugins/altimate-code/agents/analyst.md` (the server instructions carry the method).
 - **MCP server launch**: edit `plugins/altimate-code/.mcp.json` (`altimate-code mcp serve`, read-only by default).
+- **SQL mod**: edit `plugins/altimate-code/hooks/data-workspace.mjs`; tests are in `plugins/altimate-code/tests/data-workspace.test.ts`, real workflow checks in `tests/mod-smoke.py`, and measured findings in `docs/data-workspace-experiment.md`.
 - **Explicit-invocation UX** (what `/altimate-code:altimate <task>` does): edit `plugins/altimate-code/commands/altimate.md`.
 - **CLI invocation details** (agent selection, flags, follow-up handling): edit the workflow section in `plugins/altimate-code/skills/altimate-code/SKILL.md`.
 
@@ -101,6 +106,7 @@ claude plugin install altimate-code@altimate-claude-plugin
 - **Analyst agent** — `plugins/altimate-code/agents/analyst.md` — read-only data analyst rules for the MCP tools.
 - **MCP registration** — `plugins/altimate-code/.mcp.json` — launches the local stdio server; builds without `mcp serve` fail to start it and use delegation instead.
 - **Hook** — `plugins/altimate-code/hooks/hooks.json` + `plugins/altimate-code/hooks-handlers/session-start.sh` — SessionStart hook that describes the plugin's capabilities in the system prompt so Claude can route to it when the task shape fits.
+- **Mod** — `plugins/altimate-code/hooks/data-workspace.mjs`, loaded by `hooks.json` — observes SQL results, registers `/altimate-data` and `/altimate-query`, and clears previews when conversations end.
 - **Command** — `plugins/altimate-code/commands/altimate.md` — `/altimate-code:altimate` slash command follows the same MCP/delegation routing with agent-persona selection.
 
 ## Reporting bugs / requesting features
