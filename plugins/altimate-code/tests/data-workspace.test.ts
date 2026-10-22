@@ -20,7 +20,7 @@ test('session start registers executable commands without querying a database', 
   on('command.register', ($, e) => { names.push(e.name); return { value: undefined } })
   on('session.start', () => ({ cwd: '/work' }))
   await $.session.start({ surface: 'terminal', isInteractive: true, cwd: '/work' })
-  expect(names).toEqual(['altimate-data', 'altimate-query'])
+  expect(names.filter(name => ['altimate-data', 'altimate-query'].includes(name))).toEqual(['altimate-data', 'altimate-query'])
 })
 
 test('observing a query runs it once and preserves its complete result', async ($, on) => {
@@ -43,6 +43,19 @@ test('observing a query runs it once and preserves its complete result', async (
     expect(await ui.find({ type: 'Text', text: 'count: 42' })).toBeDefined()
     await ui.unmount()
   }
+})
+
+test('workspace engine SQL shares the results pane without an extra execution', async ($, on) => {
+  boot($, on)
+  let calls = 0
+  const answer = { text: 'workspace count: 7', result: 'workspace count: 7' }
+  on('tool.call', () => { calls++; return answer })
+  expect(await $.tool.call({ tool: 'mcp__plugin_altimate-code_altimate-code__workspace_snowflake_execute_database_query', sql: 'SELECT COUNT(*) FROM orders' })).toEqual(answer)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: '(workspace snowflake) · Completed' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: 'workspace count: 7' })).toBeDefined()
+  expect(calls).toBe(1)
+  await ui.unmount()
 })
 
 test('a user command goes through tool.call with SQL as data, with no shell or model', async ($, on) => {
@@ -200,7 +213,7 @@ test('thrown and aborted underlying calls are rethrown unchanged and recorded', 
     let calls = 0
     const next = Object.assign(async () => { calls++; throw error }, { signal: controller.signal })
     let caught
-    try { await handlers.get('tool.call:')(api, { query: 'SELECT 1' }, next) } catch (e) { caught = e }
+    try { await handlers.get('tool.call:')(api, { tool: SQL_TOOL, query: 'SELECT 1' }, next) } catch (e) { caught = e }
     expect(caught).toBe(error)
     expect(calls).toBe(1)
     const pane = handlers.get('ui.render:')(api, PANE, next)

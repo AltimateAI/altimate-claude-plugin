@@ -4,7 +4,7 @@ The Altimate marketplace of Claude Code plugins.
 
 Currently ships one plugin: **[altimate-code](./plugins/altimate-code/)** — gives Claude Code direct MCP data tools from [altimate-code](https://github.com/AltimateAI/altimate-code), with CLI delegation for long dbt and warehouse jobs.
 
-**Experimental: direct MCP use requires an altimate-code build with `mcp serve`.**
+**Experimental: this draft requires an altimate-code build with `mcp serve --workspace-tools`.** See [workspace-aware data mode](docs/workspace-data-mode.md) for workspace selection, opt-in routing and explicit memory saving.
 Released builds without `mcp serve` fail to start the MCP server; the plugin then
 falls back to `altimate-code run` with the analyst persona for data questions,
 using the CLI's configured LLM provider. The plugin tells you which path it uses.

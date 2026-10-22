@@ -36,7 +36,8 @@ altimate-claude-plugin/
 │       │   └── analyst.md       # read-only data analyst for the MCP tools
 │       ├── hooks/
 │       │   ├── hooks.json       # SessionStart and mod registration
-│       │   └── data-workspace.mjs # query pane, direct command and lifecycle
+│       │   ├── data-workspace.mjs # entry point, SQL pane and lifecycle
+│       │   └── data-mode.mjs      # workspace picker and opt-in data mode
 │       ├── hooks-handlers/
 │       │   └── session-start.sh # SessionStart hook handler
 │       ├── commands/
@@ -59,6 +60,7 @@ altimate-claude-plugin/
 - **Direct data-question analysis**: edit `plugins/altimate-code/agents/analyst.md` (the server instructions carry the method).
 - **MCP server launch**: edit `plugins/altimate-code/.mcp.json` (`altimate-code mcp serve`, read-only by default).
 - **SQL mod**: edit `plugins/altimate-code/hooks/data-workspace.mjs`; tests are in `plugins/altimate-code/tests/data-workspace.test.ts`, real workflow checks in `tests/mod-smoke.py`, and measured findings in `docs/data-workspace-experiment.md`.
+- **Workspace data mode**: edit `plugins/altimate-code/hooks/data-mode.mjs`; tests are in `plugins/altimate-code/tests/data-mode.test.ts` and behavior/measurement limits in `docs/workspace-data-mode.md`. The single hooks entry point registers both files. Workspace/auth/memory APIs belong in altimate-code, not this plugin.
 - **Explicit-invocation UX** (what `/altimate-code:altimate <task>` does): edit `plugins/altimate-code/commands/altimate.md`.
 - **CLI invocation details** (agent selection, flags, follow-up handling): edit the workflow section in `plugins/altimate-code/skills/altimate-code/SKILL.md`.
 

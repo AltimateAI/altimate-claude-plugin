@@ -6,7 +6,8 @@ All notable changes to this plugin will be documented in this file.
 
 ### Added
 - Optional SQL-results mod: `/altimate-data` opens a bounded session-only pane; `/altimate-query <connection> <SQL>` invokes the existing MCP tool without a model request.
-- Transparent observation of existing SQL calls, including backend check findings and errors. No added model calls, startup queries, or tool schemas.
+- Transparent observation of existing SQL calls, including backend check findings and errors.
+- Opt-in `/altimate-mode`, workspace inspection/selection and explicit `/altimate-remember`; requires the workspace-enabled MCP build. Adds bounded prompt context and workspace read tools, without another reasoning agent. Workspace selection disables memory backfill.
 - Mod regression tests and a synthetic local workflow/comparison runner. See `docs/data-workspace-experiment.md` for results and limitations.
 
 ## [1.2.0-experimental] — Unreleased — direct MCP use requires an altimate-code build with `mcp serve`

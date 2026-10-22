@@ -17,8 +17,8 @@ import tempfile
 import time
 
 
-def invoke(root, plugin, config, prompt, model, direct=False):
-    command = [CLAUDE, "-p", prompt, "--model", model, "--effort", "medium",
+def invoke(root, plugin, config, prompt, model, direct=False, data_mode=False):
+    command = [CLAUDE, "-p", *([] if data_mode else [prompt]), "--model", model, "--effort", "medium",
                "--setting-sources", "", "--settings", str(root / "settings.json"),
                "--strict-mcp-config", "--mcp-config", str(config),
                "--permission-mode", "dontAsk", "--no-session-persistence",
@@ -30,8 +30,15 @@ def invoke(root, plugin, config, prompt, model, direct=False):
     start = time.monotonic()
     # Keep the experiment out of the parent's Claude session, if run from Claude.
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-    response = subprocess.run(command, cwd=root, env=env, stdin=subprocess.DEVNULL,
-                              capture_output=True, text=True, timeout=180)
+    if data_mode:
+        command += ["--input-format", "stream-json"]
+        messages = [json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+                    for text in ["/altimate-mode on", prompt]]
+        response = subprocess.run(command, cwd=root, env=env, input="\n".join(messages) + "\n",
+                                  capture_output=True, text=True, timeout=180)
+    else:
+        response = subprocess.run(command, cwd=root, env=env, stdin=subprocess.DEVNULL,
+                                  capture_output=True, text=True, timeout=180)
     elapsed = time.monotonic() - start
     events = [json.loads(line) for line in response.stdout.splitlines() if line.startswith("{")]
     results = [event for event in events if event.get("type") == "result"]
@@ -40,6 +47,8 @@ def invoke(root, plugin, config, prompt, model, direct=False):
     result = results[-1]
     if result.get("is_error"):
         raise RuntimeError(result.get("result", "Claude returned an error"))
+    if data_mode and not any("Altimate data mode ON" in event.get("result", "") for event in results):
+        raise RuntimeError("Data mode did not activate before the question: " + response.stdout[-2000:])
     calls = [part["name"] for event in events if event.get("type") == "assistant"
              for part in event.get("message", {}).get("content", []) if part.get("type") == "tool_use"]
     usage = result.get("usage", {})
@@ -53,6 +62,7 @@ def invoke(root, plugin, config, prompt, model, direct=False):
         "wall_seconds": round(elapsed, 3), "tool_calls": calls,
         "altimate_tool_calls": sum(name.startswith("mcp__plugin_altimate-code_altimate-code__") for name in calls),
         "direct_command": direct,
+        "data_mode": data_mode,
         "loaded_plugins": [event.get("plugins") for event in events if event.get("subtype") == "init"],
     }
 
@@ -65,6 +75,7 @@ def main():
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--smoke-only", action="store_true")
+    parser.add_argument("--data-mode", action="store_true", help="Enable data mode before each mod-arm question (streamed SDK inputs)")
     args = parser.parse_args()
     global CLAUDE
     CLAUDE = args.claude_bin
@@ -127,7 +138,8 @@ def main():
                           "(id, region, status, amount). Connection demo also points to this file if tools are available. "
                           f"{question} Reply with just the two requested numbers separated by | and no commas.")
                 result = invoke(root, root / arm if arm != "plain" else None,
-                                root / "mcp.json" if arm != "plain" else root / "empty-mcp.json", prompt, args.model)
+                                root / "mcp.json" if arm != "plain" else root / "empty-mcp.json", prompt, args.model,
+                                data_mode=args.data_mode and arm == "mod")
                 result.update(arm=arm, trial=trial, task=task,
                               correct=result["answer"].strip().replace(" ", "") == expected_answer)
                 print(json.dumps({k: result[k] for k in ["arm", "trial", "task", "correct", "cost_usd", "wall_seconds"]}), flush=True)
