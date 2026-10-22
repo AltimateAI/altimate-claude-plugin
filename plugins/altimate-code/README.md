@@ -2,7 +2,7 @@
 
 Use [altimate-code](https://github.com/AltimateAI/altimate-code) data tools directly
 from Claude Code through MCP. **Claude Code does the reasoning and carries the
-LLM cost** for data questions; the stdio MCP server runs no LLM. Long multi-step
+LLM cost** for local SQL questions; local SQL tools start no separate model. Workspace knowledge and explicit memory publication may use backend models. Long multi-step
 jobs such as dbt project builds, migrations, and FinOps reports can still be
 delegated to `altimate-code run`, which uses its own agent and configured provider.
 
@@ -35,7 +35,7 @@ npm install -g altimate-code                       # exposes `altimate` and `alt
 curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes `altimate`
 ```
 
-The delegation skill and commands invoke `altimate`, the CLI's canonical name, and fall back to `altimate-code` for npm installs older than v0.7.1. The MCP registration launches `altimate-code mcp serve`: for direct MCP use, install a build containing `mcp serve`. Check your build with `altimate-code mcp serve --help`; an unknown command means the MCP server cannot start and data questions use CLI delegation instead. Installing the latest published npm package alone does not provide the unreleased server.
+The delegation skill and commands invoke `altimate`, the CLI's canonical name, and fall back to `altimate-code` for npm installs older than v0.7.1. The MCP registration launches `altimate-code mcp serve --workspace-tools`: for direct MCP use, install a build containing `mcp serve`. Check your build with `altimate-code mcp serve --help`; an unknown command means the MCP server cannot start and data questions use CLI delegation instead. Installing the latest published npm package alone does not provide the unreleased server.
 
 Configure database connections as described below. Direct MCP use does **not**
 require an altimate-code LLM provider or API key. For delegated jobs only, run

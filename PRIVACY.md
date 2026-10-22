@@ -85,3 +85,9 @@ We will update this document in this repository and revise the effective date wh
 
 Altimate Inc. · 440 North Wolfe Road #150, Sunnyvale, CA 94085, USA · +1 (650) 254-6266
 Privacy & general: **info@altimate.ai** · Security: **security@altimate.ai** · Support: **support@altimate.ai**
+
+## Experimental workspace data mode
+
+The experimental MCP registration enables workspace tools. When data mode is on, each user prompt reads bounded context from the linked Altimate workspace: its summary, skill names and project memory. That context is sent to Claude as prompt context. Named skills and workspace knowledge are retrieved on demand; workspace SQL is sent to the selected engine and retains its warehouse costs. Knowledge requests may invoke backend models.
+
+The workspace picker lists workspaces visible to your signed-in account. Selecting one links this project without uploading existing memory. Only a typed `/altimate-remember <id> <text>` command after inspecting the destination saves the supplied text locally and attempts publication to shared project memory; publication may invoke backend models. Failed or uncertain publication is reported without retry. Context retrieval does not delete local memory. Normal Claude transcripts, local memory files and service retention policies apply to their respective data.

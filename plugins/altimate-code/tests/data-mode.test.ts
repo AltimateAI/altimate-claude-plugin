@@ -251,3 +251,22 @@ test('workspace picker renders on terminal, Desktop and VS Code; selecting uses 
   expect(await ui.find({ type: 'Text', text: /Reconnect Altimate/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('pending directory lookup cannot start a workspace write after reset', async () => {
+  for (const action of ['link', 'remember']) {
+    const f = fixture()
+    await f.start()
+    await f.command('altimate-workspace')
+    const before = f.processes.length
+    let resolve
+    f.$.session.cwd = () => new Promise(done => { resolve = done })
+    const pending = action === 'link'
+      ? f.command('altimate-workspace', 'link 35')
+      : f.command('altimate-remember', 'metrics/arr Use booked ARR.')
+    await Promise.resolve()
+    await f.command('clear')
+    resolve('/project')
+    expect((await pending).text).toContain('Conversation changed')
+    expect(f.processes.length).toBe(before)
+  }
+})

@@ -54,6 +54,7 @@ async function link($, id) {
   workspace = undefined
   saveTarget = undefined
   const directory = await $.session.cwd()
+  if (generation !== epoch) return 'Conversation changed; refresh the workspace.'
   // Existing linking can backfill old memory. This selection explicitly does not.
   // No --yes: replacing a link remains an action in the Altimate CLI.
   const result = await $.process.run(['altimate-code', 'link', '--workspace', String(id), '--directory', directory], {
@@ -134,7 +135,9 @@ export function register(on) {
     if (!match || !match[2].trim() || match[2].length > 2048) return { text: 'Usage: /altimate-remember <id> <text, 1–2048 characters>. This saves project memory and attempts workspace publication.' }
     if (!saveTarget?.token) return { text: 'Inspect /altimate-workspace first to see where memory will be saved. Nothing was saved.' }
     const token = saveTarget.token
+    const generation = epoch
     const directory = await $.session.cwd()
+    if (generation !== epoch) return { text: 'Conversation changed. Inspect /altimate-workspace before saving. Nothing was saved.' }
     try {
       const result = jsonOf(await $.process.run(['altimate-code', 'workspace-client', 'remember', '--directory', directory, '--token=' + token, '--id=' + match[1]], {
         cwd: directory, stdin: match[2], timeoutMs: 60000,
