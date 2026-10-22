@@ -13,17 +13,20 @@ from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 
 
-def invoke(root, plugin, config, prompt, model, direct=False, data_mode=False):
+def invoke(root, plugin, config, prompt, model, direct=False, data_mode=False, native_only=False):
     command = [CLAUDE, "-p", *([] if data_mode else [prompt]), "--model", model, "--effort", "medium",
                "--setting-sources", "", "--settings", str(root / "settings.json"),
                "--strict-mcp-config", "--mcp-config", str(config),
                "--permission-mode", "dontAsk", "--no-session-persistence",
                "--output-format", "stream-json", "--verbose"]
     allowed = ["Bash", "Read", "mcp__plugin_altimate-code_altimate-code__*"]
+    if native_only:
+        allowed = ["Read", "mcp__plugin_altimate-code_altimate-code__*"]
     command += ["--allowedTools", *allowed]
     if plugin:
         command += ["--plugin-dir", str(plugin)]
@@ -76,6 +79,7 @@ def main():
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--smoke-only", action="store_true")
     parser.add_argument("--data-mode", action="store_true", help="Enable data mode before each mod-arm question (streamed SDK inputs)")
+    parser.add_argument("--workspace-routing", action="store_true", help="Run a synthetic knowledge-routing fixture with real Claude (no backend writes/delegation)")
     args = parser.parse_args()
     global CLAUDE
     CLAUDE = args.claude_bin
@@ -120,6 +124,22 @@ def main():
         missing = invoke(root, root / "mod", root / "empty-mcp.json", "/altimate-query demo SELECT 1", args.model, True)
         assert "No query was run" in missing["answer"], missing
         report["missing_server"] = missing
+        if args.workspace_routing:
+            fixture = Path(__file__).with_name("workspace-mcp-fixture.py")
+            log = root / "workspace-calls.jsonl"
+            config = root / "workspace-mcp.json"
+            config.write_text(json.dumps({"mcpServers": {"plugin:altimate-code:altimate-code": {
+                "command": sys.executable, "args": [str(fixture), str(log)]}}}))
+            routing = invoke(root, root / "mod", config, "What is our workspace's revenue convention? Answer in one sentence.",
+                             args.model, data_mode=True, native_only=True)
+            answer = routing["answer"].lower()
+            assert "booked" in answer and "arr" in answer and "services" in answer, routing
+            assert "mcp__plugin_altimate-code_altimate-code__workspace_ask_knowledge_base" in routing["tool_calls"], routing
+            assert all(name.startswith("mcp__plugin_altimate-code_altimate-code__") or name in {"ToolSearch", "Read", "Skill"}
+                       for name in routing["tool_calls"]), routing
+            routing["fixture_calls"] = [json.loads(line)["name"] for line in log.read_text().splitlines()]
+            assert "workspace_context" in routing["fixture_calls"], routing
+            report["workspace_routing"] = routing
         if not args.smoke_only:
             tasks = [
                 ("paid_totals", "How many paid orders are there and what is their total amount?", "40|12000"),

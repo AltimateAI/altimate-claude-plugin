@@ -10,7 +10,7 @@ falls back to `altimate-code run` with the analyst persona for data questions,
 using the CLI's configured LLM provider. The plugin tells you which path it uses.
 With MCP available, Claude Code
 supplies the reasoning and LLM cost for direct data questions; the MCP server
-runs no LLM. Tools: `warehouse_list`, `warehouse_add`, `sql_execute` (with `tables`
+runs no separate reasoning agent. Local SQL tools call no LLM; explicit workspace knowledge and memory publication can use backend models. Local tools: `warehouse_list`, `warehouse_add`, `sql_execute` (with `tables`
 for schemas and value profiles), `sql_materialize` (session-local scratch DuckDB for
 cross-database joins) and `answer_commit`.
 

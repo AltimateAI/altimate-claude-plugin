@@ -11,6 +11,7 @@ const WORKSPACE_QUERIES = {
 const PANE = 'altimate-data'
 const LIMIT = 8
 let queries = []
+let generation = 0
 
 function clip(text, limit = 8000) {
   return text.length > limit ? text.slice(0, limit) + '\n[Pane preview clipped; full output remains in the tool result.]' : text
@@ -34,7 +35,7 @@ function begin(input) {
   const query = {
     warehouse: WORKSPACE_QUERIES[input.tool] ? '(workspace ' + WORKSPACE_QUERIES[input.tool] + ')' :
       typeof input.warehouse === 'string' ? clip(input.warehouse, 120) : '(default connection)',
-    sql: clip(typeof input.query === 'string' ? input.query : typeof input.sql === 'string' ? input.sql : typeof input.sql_query === 'string' ? input.sql_query : JSON.stringify({
+    sql: clip(typeof input.query === 'string' ? input.query : typeof input.sql === 'string' ? input.sql : typeof input.sql_query === 'string' ? input.sql_query : typeof input.statement === 'string' ? input.statement : JSON.stringify({
       queries: input.queries, query_from: input.query_from, tables: input.tables,
     }), 2000),
     status: 'Running',
@@ -53,6 +54,7 @@ export function register(on) {
   registerDataMode(on)
   on('session.start', async ($, e, next) => {
     queries = []
+    generation++
     resetMode()
     await $.command.register({ name: 'altimate-data', description: 'Open recent Altimate SQL results', immediate: true })
     await $.command.register({ name: 'altimate-query', description: 'Run SQL through Altimate MCP without a model turn', argumentHint: '<connection> <SQL>' })
@@ -64,6 +66,7 @@ export function register(on) {
 
   on('command.run', { command: 'clear' }, ($, e, next) => {
     queries = []
+    generation++
     resetMode()
     redraw($)
     return next(e)
@@ -72,6 +75,7 @@ export function register(on) {
   // session.start runs on plugin load, not on every conversation switch.
   on('session.end', ($, e, next) => {
     queries = []
+    generation++
     resetMode()
     redraw($)
     return next(e)
@@ -83,9 +87,11 @@ export function register(on) {
   })
 
   on('command.run', { command: 'altimate-query' }, async ($, e) => {
+    const started = generation
     const parts = e.args.trim().match(/^(\S+)\s+([\s\S]+)$/)
     if (!parts) return { text: 'Usage: /altimate-query <connection> <SQL>. Use the connection name from warehouse_list.' }
     const tools = await $.tool.list()
+    if (started !== generation) return { text: 'The conversation changed before execution. No query was run.' }
     if (!tools.some(tool => tool.name === SQL_TOOL)) {
       return { text: 'Altimate MCP is unavailable. Check /mcp and install an Altimate build with mcp serve. No query was run.' }
     }

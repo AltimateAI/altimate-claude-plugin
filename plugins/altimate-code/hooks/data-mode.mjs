@@ -72,6 +72,9 @@ export function register(on) {
   on('command.run', { command: 'altimate-mode' }, async ($, e) => {
     const action = e.args.trim() || 'status'
     if (!['on', 'off', 'status'].includes(action)) return { text: 'Usage: /altimate-mode on|off|status' }
+    if (action !== 'status' && !['composer', 'bridge', 'sdk'].includes(e.origin.kind)) {
+      return { text: 'Enable or disable data mode yourself with /altimate-mode on|off. Other plugins cannot change it.' }
+    }
     if (action === 'on') {
       const generation = epoch
       const tools = await $.tool.list()

@@ -6,6 +6,7 @@ argument-hint: <task description>
 The user invoked `/altimate-code:altimate` to use altimate-code for this task. For a data
 question requesting answers, numbers, or lists, prefer the `altimate-code` MCP
 tools when available in the session and follow the server's analysis method.
+If the current prompt says Altimate data mode is ON, follow the skill's native-data-mode rules: use available MCP tools, report missing capabilities, and keep memory saving under the user's `/altimate-remember` command. The delegation workflow below applies only outside that mode. Workspace knowledge uses `workspace_context`, `workspace_ask_knowledge_base` and `workspace_skill` when available.
 Claude Code does the reasoning; this path needs no CLI LLM provider. If the tools
 are unavailable (server missing or failed to start), use the delegation workflow
 below with `--agent analyst`. Released builds without `mcp serve` can still

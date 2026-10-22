@@ -235,3 +235,24 @@ test('direct command reports a thrown tool failure without retry or fallback', a
   expect(answer.text).toContain('it was not retried')
   expect(calls).toBe(1)
 })
+
+test('a query waiting for tool discovery cannot execute after resume or clear', async () => {
+  for (const reset of ['session.end:', 'command.run:clear']) {
+    const handlers = new Map()
+    register((event, matcher, handler) => handlers.set(event + ':' + (matcher?.command ?? ''), handler ?? matcher))
+    let finish
+    let entered
+    let calls = 0
+    const ready = new Promise(resolve => { entered = resolve })
+    const api = { ui: { invalidate() {} }, tool: {
+      async list() { entered(); return await new Promise(resolve => { finish = resolve }) },
+      async call() { calls++; return { result: 'old result' } },
+    } }
+    const pending = handlers.get('command.run:altimate-query')(api, { args: 'demo SELECT 1' })
+    await ready
+    await handlers.get(reset)(api, { reason: 'resume', command: 'clear' }, async () => ({}))
+    finish([{ name: SQL_TOOL }])
+    expect((await pending).text).toContain('No query was run')
+    expect(calls).toBe(0)
+  }
+})

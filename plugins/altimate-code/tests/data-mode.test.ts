@@ -87,6 +87,17 @@ test('mode refuses absent MCP and does not invoke a fallback CLI model', async (
   expect(f.processes.length).toBe(0)
 })
 
+test('another plugin or notification cannot opt the conversation into data mode', async () => {
+  const f = fixture()
+  await f.start()
+  for (const kind of ['plugin', 'peer', 'task-notification', 'scheduled-trigger', 'unclassified']) {
+    expect((await f.command('altimate-mode', 'on', { kind })).text).toContain('cannot change')
+    expect((await f.command('altimate-mode', 'status')).text).toContain('OFF')
+  }
+  await f.command('altimate-mode', 'on', { kind: 'sdk' })
+  expect((await f.command('altimate-mode', 'status')).text).toContain('ON')
+})
+
 test('denied workspace context reports unknown rather than retaining a prior workspace', async () => {
   const f = fixture()
   await f.start()

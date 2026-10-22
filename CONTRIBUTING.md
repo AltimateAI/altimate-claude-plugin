@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for taking the time to contribute. This plugin lives in one repo (`AltimateAI/altimate-claude-plugin`) and ships a single Claude Code plugin (`altimate-code`). It prefers direct MCP tools for data questions and delegates to the [altimate-code](https://github.com/AltimateAI/altimate-code) CLI for other capabilities and long jobs. When MCP tools are unavailable, data questions also delegate, using the analyst persona. Both paths tell the user which is being used; delegation uses the CLI's separate configured LLM provider.
+Thanks for taking the time to contribute. This plugin lives in one repo (`AltimateAI/altimate-claude-plugin`) and ships a single Claude Code plugin (`altimate-code`). It prefers direct MCP tools for data and workspace questions. Native data mode keeps reasoning in Claude and reports missing capabilities. Outside that mode, other capabilities and long jobs can delegate to the [altimate-code](https://github.com/AltimateAI/altimate-code) CLI; unavailable data MCP tools can use its analyst persona. Both paths identify which is being used; delegation uses the CLI's separate configured LLM provider and can save shared memory.
 
 ## Quick start
 

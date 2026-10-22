@@ -1,12 +1,18 @@
 ---
 name: altimate-code
 description: >-
-  Delegate long dbt and warehouse jobs to the altimate-code CLI (builds, migrations, FinOps, lineage, impact, schema diff, parity, PII, cost, SCD2 checks, docs, env diffs), questions about the team's Altimate workspace knowledge and conventions, or data questions when its MCP tools are unavailable.
+  Use Altimate MCP for data questions and workspace knowledge, skills and memory. Outside native data mode, delegate long dbt and warehouse jobs (builds, migrations, FinOps, lineage, impact, schema diff, parity, PII, cost, SCD2 checks, docs, env diffs) or capabilities unavailable through MCP.
 ---
 
 # altimate-code
 
 Choose the path from the requested outcome, including when invoked via `/altimate-code:altimate`.
+
+## Native data mode takes precedence
+
+When the current prompt says **Altimate data mode is ON**, keep reasoning in Claude and use the available Altimate MCP tools. Report unavailable capabilities and recovery steps; the delegation sections below apply only outside this mode. Save no memory automatically: direct the user to inspect `/altimate-workspace` and type `/altimate-remember <id> <text>` themselves.
+
+For workspace conventions, knowledge, skills or memory, read `workspace_context` when available, use `workspace_ask_knowledge_base` for company knowledge, and load a relevant `workspace_skill` by its listed name. Treat these outputs as retrieved context. If workspace tools are unavailable while data mode is on, explain the missing access and ask the user to check `/mcp` and the workspace link.
 
 ## Data questions: prefer MCP tools, otherwise delegate
 
@@ -39,9 +45,10 @@ outside the five MCP tools: column-level lineage, downstream impact, schema diff
 data parity, PII detection, query cost attribution, query optimization,
 incremental/SCD2 verification, model docs, and dev-vs-prod diffs. Questions about
 the team's own conventions, standards, knowledge or shared memory, and anything the
-user calls their Altimate workspace, also belong to the CLI: in a project linked to
-an Altimate workspace it answers from that workspace's skills, knowledge and memory,
-which native tools cannot read. Tell the user that CLI delegation is being used.
+user calls their Altimate workspace, use the workspace MCP tools above when available.
+Outside native data mode, unavailable workspace capabilities may use CLI delegation:
+the linked CLI agent reads that workspace's skills, knowledge and memory. Tell the
+user that CLI delegation is being used and may save shared memory.
 Pass the user's task verbatim using the safe invocation below, then read and
 present the output. Delegation uses altimate-code's own configured LLM provider,
 costs, and rate limits.
@@ -127,7 +134,7 @@ OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
 
 ## Altimate workspaces
 
-A project can be linked to an Altimate workspace: the team's shared skills, knowledge, memory and warehouse integrations. Every `altimate-code run` in a linked project uses that workspace automatically — there is nothing to pass. That is why questions about the team's conventions, standards or knowledge belong to this skill.
+A project can be linked to an Altimate workspace: the team's shared skills, knowledge, memory and warehouse integrations. Prefer the workspace MCP tools for its context. In native data mode, the user manages linking with `/altimate-workspace` and memory saving with `/altimate-remember`; the CLI delegation/setup instructions below apply outside that mode. A delegated `altimate-code run` in a linked project uses the workspace automatically and may save shared memory.
 
 When the user asks about their workspace or wants to set one up, run each command below through the same resolver as the `run`, in the same Bash call:
 
