@@ -37,13 +37,14 @@ async function inspect($) {
   let status
   try { current = jsonOf(linked); status = 'Workspace context loaded. Select a workspace only to link an unlinked project.' }
   catch (error) { status = errorText(error) }
-  if (generation !== epoch) return
+  if (generation !== epoch) return false
   available = Array.isArray(listed.workspaces) ? listed.workspaces.filter(item => Number.isSafeInteger(item.id) && item.id > 0 && typeof item.name === 'string')
     .slice(0, 100).map(item => ({ id: item.id, name: item.name.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').slice(0, 120) })) : []
   workspace = current?.workspace
   saveTarget = workspace
   message = status
   redraw($)
+  return true
 }
 
 async function link($, id) {
@@ -95,6 +96,7 @@ export function register(on) {
     if (!enabled || !['composer', 'bridge', 'sdk'].includes(e.origin.kind)) return next(e)
     const generation = epoch
     const tools = await $.tool.list()
+    if (generation !== epoch || !enabled) return next(e)
     let context = 'Workspace context unavailable. Use local connections only; do not assume a workspace or its knowledge is available.'
     if (tools.some(tool => tool.name === CONTEXT)) {
       try {
@@ -123,7 +125,7 @@ export function register(on) {
         if (e.origin.kind !== 'composer') return { text: 'Choose the workspace yourself with /altimate-workspace or run altimate-code link in your terminal.' }
         return { text: await link($, match[1]) }
       }
-      await inspect($)
+      if (!await inspect($)) return { text: 'Conversation changed; refresh the workspace.' }
       const placement = await $.ui.open({ id: PANE, title: 'Altimate workspace', focus: true, closeOnEscape: true, rows: 18 })
       return { text: placement.isPlaced ? message : `${message}\n${workspace ? 'Current: ' + workspace.name + ' (' + workspace.id + ')' : ''}\n` + available.map(item => `${item.id}: ${item.name}`).join('\n') }
     } catch (error) { return { text: errorText(error) + '\nUse altimate-code link in your terminal; then reconnect in /mcp.' } }

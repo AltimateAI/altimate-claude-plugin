@@ -10,9 +10,9 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 ## The short version
 
 - When the plugin is enabled, Claude Code launches a local `altimate-code mcp serve` process for direct data tools. This requires a build containing `mcp serve`; if the server cannot start or its tools are unavailable, data questions fall back to CLI delegation.
-- MCP tool results, including sampled column values and query results, enter the Claude Code conversation and therefore reach your configured model provider. The local MCP server makes no separate LLM calls.
+- MCP tool results, including sampled column values and query results, enter the Claude Code conversation and therefore reach your configured model provider. Local SQL tools make no separate model calls; workspace knowledge and explicit memory publication can invoke backend models.
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
-- Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
+- Local connection queries, dbt commands, and file edits use your machine and credentials. Workspace queries use the selected workspace engine and its configured credentials.
 - Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
@@ -27,7 +27,7 @@ The plugin registers a local stdio MCP server through `.mcp.json`, provides rout
 | Schema metadata, sampled column values, and query results returned by tools | Local MCP server → Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
 | Scratch tables and spilled query results | Local session storage or spill files; any content Claude reads enters the conversation and reaches your model provider | Local artifacts; conversation copies follow Claude Code and provider policies |
 
-The MCP server makes no separate LLM calls. Delegation uses the separate provider path below.
+Local SQL tools make no separate model calls. Workspace service flows are described below; delegation uses the separate provider path below.
 
 The delegation path below runs only when the delegation skill or the `/altimate-code:altimate` command fires and invokes the locally installed altimate-code CLI.
 

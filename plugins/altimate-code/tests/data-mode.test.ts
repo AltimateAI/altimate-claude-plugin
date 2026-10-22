@@ -270,3 +270,38 @@ test('pending directory lookup cannot start a workspace write after reset', asyn
     expect(f.processes.length).toBe(before)
   }
 })
+
+
+test('mode-off during discovery prevents a stale workspace read', async () => {
+  const f = fixture()
+  await f.start()
+  await f.command('altimate-mode', 'on')
+  let resolve
+  f.$.tool.list = () => new Promise(done => { resolve = done })
+  const input = { text: 'Count orders', origin: USER }
+  const pending = f.run('prompt.submit', input)
+  await f.command('altimate-mode', 'off')
+  resolve([{ name: CONTEXT }])
+  expect(await pending).toBe(input)
+  expect(f.toolCalls.length).toBe(0)
+})
+
+test('cancelled workspace inspection cannot reopen the picker', async () => {
+  const f = fixture()
+  await f.start()
+  let resolve
+  let opened = 0
+  f.process(() => new Promise(done => { resolve = done }))
+  f.$.ui.open = async () => { opened++; return { isPlaced: false } }
+  const pending = f.command('altimate-workspace')
+  await Promise.resolve()
+  await Promise.resolve()
+  await f.command('clear')
+  resolve({ exitCode: 0, stderr: '', stdout: JSON.stringify({ ok: true, workspaces: [] }) })
+  // Context is also asynchronous; resolve its response after the list resumes.
+  await Promise.resolve()
+  await Promise.resolve()
+  resolve({ exitCode: 0, stderr: '', stdout: JSON.stringify({ ok: true }) })
+  expect((await pending).text).toContain('Conversation changed')
+  expect(opened).toBe(0)
+})
