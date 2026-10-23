@@ -1,36 +1,44 @@
-# Workspace-aware data mode (experimental)
+# Automatic workspace workflow: controlled pilot
 
-The mod lives in this plugin; reusable workspace operations live in Altimate Code. Requires the workspace-enabled MCP build stacked on AltimateAI/altimate-code#1543 and Claude Code 2.1.307. Keep this experiment in draft.
+Status: draft, unpublished. Product PRs remain drafts; merging does not publish an artifact, update the default plugin, or establish production success.
 
-## Try it
+## Behavior changes
 
-1. Sign in to Altimate Code for the intended deployment. The plugin uses the CLI's saved credentials, never its own copy.
-2. Start Claude with this plugin. Its MCP registration now uses `mcp serve --workspace-tools`. Builds without that flag need updating; the mod never silently starts a separately billed reasoning agent.
-3. Run `/altimate-workspace` to inspect the linked workspace and choose an existing workspace. Selection can link an unlinked project. To replace a link, use `altimate-code link` in the terminal. Reconnect Altimate through `/mcp` after linking. Selection disables automatic memory backfill; it never creates a workspace or installs anything.
-4. Run `/altimate-mode on`. Data questions receive bounded workspace context and guidance to use Altimate MCP directly, with Claude reasoning. `/altimate-mode off` restores ordinary prompt handling. Mode starts off and resets on `/clear`, conversation end, resume and logout.
-5. Use `/altimate-data` for recent SQL results or `/altimate-query <connection> <SQL>` for a zero-model SQL command. Workspace tools have the `workspace_` prefix. Knowledge uses `workspace_ask_knowledge_base` when the existing engine provides it; skills load individually through `workspace_skill`.
-6. To save a decision, inspect `/altimate-workspace` first, then type `/altimate-remember <id> <text>`. Text is limited to 2,048 characters. This writes one project memory and attempts workspace publication through the existing sync path. The response distinguishes confirmed publication from a local save with uncertain publication. Interrupted saves are never automatically retried.
+| Trigger / surface | Previous prototype | Automatic pilot |
+| --- | --- | --- |
+| Default marketplace listing | Prototype replaced its MCP registration | Original directory and listing restored to their target-base bytes |
+| Experimental install | User supplied a compatible CLI on PATH | Platform package embeds a verified local CLI build |
+| Relevant data prompt | User enabled data mode | Claude selects a semantic data skill; no activation command |
+| Ordinary coding prompt | Enabled mode read workspace context every prompt | No per-prompt workspace reads or prompt rewriting |
+| Workspace not configured | Manual commands and reconnect | Status-driven setup panel; explicit sign-in/link/install actions; same MCP connection |
+| Completed SQL | User opened results pane | Non-focused results pane opens automatically; dismissal respected |
+| Workspace conventions | Potential legacy agent delegation | Native workspace context/skill/knowledge tools; Claude retains reasoning |
+| Memory publication | Explicit command after inspection | Explicit inspected form or user-only command; receipt-bound, no automatic retry |
+| Workspace engine permissions | Separate discovered host tools | One `workspace_execute` host tool, with a closed read allowlist and schema checks |
 
-The workspace engine must be installed and current. Its connection is pinned to the startup workspace; changing account or binding refuses stale calls until reconnect. The facade exposes a fixed set of known read operations. SQL uses Altimate's existing read-only classifier; use read-only warehouse credentials because classification cannot guarantee that stored functions have no side effects. The default server without `--workspace-tools` keeps its original five tools.
+The split is deliberate: Claude UI/routing belong in this repo; reusable identity, context, setup status, skills and engine gateway belong in altimate-code. The gateway has a stable catalog before and after setup. Context is lazy, coalesced and cached for 30 seconds with identity verification; engine startup happens only when requested. A changed receipt invalidates old operations.
 
-The mod runs the CLI with argument arrays; memory text goes over stdin. It never starts `altimate run` or another reasoning agent. Only user-originated `/altimate-remember` commands invoke saving through the mod. This is a workflow control, not filesystem isolation from a model that already has shell access. Retrieved content cannot authorize saving. Picker state and previews stay in memory; normal transcripts, Altimate memory files and MCP spills retain their normal retention rules.
+## Package and install
 
-## Verification and measured limits
+Build the compatible altimate-code checkout using its documented single-target build. The build emits `bin/altimate-code` and adjacent `build-inputs.json`. Then:
 
-Plugin tests cover events and UI trees; core tests cover identities/credentials, bounded context, named skills, explicit saving and an actual stdio connection to a local protocol fixture. Existing local SQL MCP tests remain applicable. A production read listed 17 visible workspaces and loaded context for a matching selected workspace through a temporary local project. No production project was linked and no production memory was written. The temporary project returned zero memory blocks; that does not prove non-empty production memory delivery or a write round trip. Real workspace-engine queries and Desktop/VS Code painting remain rollout checks.
+```
+python3 scripts/package-experimental.py \
+  --core /absolute/path/to/altimate-code-checkout \
+  --binary /absolute/path/to/target/bin/altimate-code \
+  --output /absolute/path/to/new-pilot-directory
+```
 
-A six-run local smoke used Claude Code 2.1.307, Sonnet 5.5, medium effort, synthetic SQLite orders, one trial each of two questions. Data mode was explicitly enabled through streamed SDK input before each mod-arm question. Plain/MCP/mod all answered 2/2 correctly; both MCP arms used Altimate tools in 2/2 runs, measured from assistant tool-call parts.
+The packager verifies source hashes, added build inputs and CLI capabilities; copies the unmodified MCP registration and a compatible executable; records target, binary hash, source commits and dirty-state flags; and creates a zip. It never downloads `latest`, installs globally, publishes or updates the default listing. Dirty artifacts are development previews; a release artifact must be rebuilt from reviewed commits. Build and verify each supported platform separately.
 
-| Arm | Mean list-price $/run | Mean input tokens, including cache | Mean model requests | Median wall seconds |
-| --- | ---: | ---: | ---: | ---: |
-| Plain Claude | 0.02691 | 30,696.5 | 2 | 6.083 |
-| MCP only | 0.03265 | 50,465 | 3 | 6.877 |
-| Mod, data mode on | 0.03349 | 51,979 | 3 | 6.541 |
+Unzip the prepared platform artifact. In Claude Code, add the extracted directory as a marketplace, then install `altimate-code-experimental@altimate-experimental-pilot`. Disable the original plugin through Claude's plugin UI first. Enabling both is unsupported because skill and tool routing overlap; installation of both is allowed, simultaneous activation is not. No mode, workspace or pane command is needed in daily use. Below 144 terminal columns Claude hides unrequested panes; a button above the prompt opens results/setup with a click. This band yields to surveys and preserves existing band content.
 
-This sample is too small and cache-sensitive to establish latency or cost improvements. Mode adds context and a workspace-context read per user turn. The workspace was unavailable in this isolated SQL comparison, so it measured fallback overhead, not workspace knowledge value. The direct aggregate command returned the correct result with zero model turns/tokens and $0 model cost, taking 2.373 seconds including process/MCP startup. Source mutation was refused; missing MCP produced no query. Prior SQL-pane comparisons remain in [the original report](data-workspace-experiment.md) and describe the earlier implementation.
+The Git marketplace's experimental source entry lacks its runtime until a compatible artifact is published. Do not announce it as a working public installation. To release the pilot, first deliver compatible core capabilities, then prepare clean platform artifacts, verify fresh installations and publish those explicitly to pilot users. Promoting it to default is a later decision.
 
-A separate real-Claude routing trial used a synthetic workspace MCP fixture. Asking for the workspace's revenue convention read `workspace_context`, called `workspace_ask_knowledge_base`, and returned the fixture's booked-ARR policy, excluding professional services. Assistant tool parts showed ToolSearch and the knowledge MCP call, with no Bash/Agent delegation. This validates native routing through the revised plugin guidance, not production knowledge retrieval. Mode changes accept direct terminal, bridge or SDK requests; another plugin cannot toggle mode.
+## Verification and limits
 
-Reproduce with `python3 tests/mod-smoke.py --claude-bin /absolute/path/to/claude --server-command '["altimate-code","mcp","serve","--workspace-tools"]' --trials 1 --data-mode --workspace-routing --output /tmp/data-mode-results.json`. Model runs consume Claude plan/API usage. This is a usability and distribution experiment, not evidence for a reasoning-cost marketing claim.
+The automatic implementation adds event/UI tests for setup statuses, explicit actions, continuation, cancelled/obsolete conversations, actual SQL observation, dismissal, UI failures, explicit memory destination, coexistence detection and terminal/Desktop/VS Code handlers. Core tests exercise a real stdio engine fixture through the stable adapter, including unlinked-to-linked transition, engine installation refresh, receipt changes and concurrent context loading. Fixtures establish protocol behavior, not production warehouse success.
 
-No automatic model call is added by the mod. Explicit knowledge queries may use the engine's backend models; explicit memory publication uses the existing backend extraction path and can incur backend model cost. Warehouse queries retain their costs. Context is bounded, skills load on demand, and no per-row model loop or bulk memory sync is introduced.
+The earlier manual-prototype live demo and six-run comparison are historical evidence only; see `data-workspace-experiment.md`. Those runs did not establish cost or latency savings. The runtime installs in an isolated Claude configuration and passes unchanged-registration MCP/SQLite execution without a compatible CLI on PATH. Real Claude terminal testing caught and fixed a skill/command naming collision. Automatic panes are hidden by Claude below 144 columns; a clickable band opens results or setup without commands. Natural-prompt execution and setup continuation still need live model capacity before pilot readiness. Current Claude account probes return “session limit”; live automatic demo/comparison remain blocked pending renewed capacity. No substitute mock result is labelled live E2E.
+
+Before rollout, verify sign-in/setup continuation in a fresh real Claude install, a real read-only workspace warehouse query, Desktop/VS Code painting and enterprise mod policy. No production binding or memory publication has been performed for this change.

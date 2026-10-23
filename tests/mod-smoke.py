@@ -17,6 +17,8 @@ import sys
 import tempfile
 import time
 
+TOOL_PREFIX = "mcp__plugin_altimate-code_altimate-code__"
+
 
 def invoke(root, plugin, config, prompt, model, direct=False, data_mode=False, native_only=False):
     command = [CLAUDE, "-p", *([] if data_mode else [prompt]), "--model", model, "--effort", "medium",
@@ -24,9 +26,9 @@ def invoke(root, plugin, config, prompt, model, direct=False, data_mode=False, n
                "--strict-mcp-config", "--mcp-config", str(config),
                "--permission-mode", "dontAsk", "--no-session-persistence",
                "--output-format", "stream-json", "--verbose"]
-    allowed = ["Bash", "Read", "mcp__plugin_altimate-code_altimate-code__*"]
+    allowed = ["Bash", "Read", "Skill", "ToolSearch", TOOL_PREFIX + "*"]
     if native_only:
-        allowed = ["Read", "mcp__plugin_altimate-code_altimate-code__*"]
+        allowed = ["Read", "Skill", "ToolSearch", TOOL_PREFIX + "*"]
     command += ["--allowedTools", *allowed]
     if plugin:
         command += ["--plugin-dir", str(plugin)]
@@ -63,7 +65,7 @@ def invoke(root, plugin, config, prompt, model, direct=False, data_mode=False, n
         "output_tokens": usage.get("output_tokens", 0),
         "turns": result.get("num_turns", 0), "model_usage": result.get("modelUsage", {}),
         "wall_seconds": round(elapsed, 3), "tool_calls": calls,
-        "altimate_tool_calls": sum(name.startswith("mcp__plugin_altimate-code_altimate-code__") for name in calls),
+        "altimate_tool_calls": sum(name.startswith(TOOL_PREFIX) for name in calls),
         "direct_command": direct,
         "data_mode": data_mode,
         "loaded_plugins": [event.get("plugins") for event in events if event.get("subtype") == "init"],
@@ -80,15 +82,21 @@ def main():
     parser.add_argument("--smoke-only", action="store_true")
     parser.add_argument("--data-mode", action="store_true", help="Enable data mode before each mod-arm question (streamed SDK inputs)")
     parser.add_argument("--workspace-routing", action="store_true", help="Run a synthetic knowledge-routing fixture with real Claude (no backend writes/delegation)")
+    parser.add_argument("--automatic-pilot", type=Path, help="Packaged experimental plugin directory; use automatic routing without activation (SQL comparison only)")
     args = parser.parse_args()
-    global CLAUDE
+    global CLAUDE, TOOL_PREFIX
     CLAUDE = args.claude_bin
+    if args.data_mode or args.workspace_routing:
+        parser.error("these flags describe the historical manual prototype; use its historical checkout. The current automatic pilot needs no activation")
+    plugin_name = "altimate-code-experimental"
+    TOOL_PREFIX = f"mcp__plugin_{plugin_name}_altimate-code__"
     server = json.loads(args.server_command)
     if not isinstance(server, list) or not server or not all(isinstance(x, str) for x in server):
         parser.error("--server-command must be a nonempty JSON array of strings")
-    source = Path(__file__).resolve().parents[1] / "plugins" / "altimate-code"
+    source = args.automatic_pilot.resolve() if args.automatic_pilot else Path(__file__).resolve().parents[1] / "plugins" / "altimate-code-experimental"
     report = {"claude_version": subprocess.check_output([CLAUDE, "--version"], text=True).strip(),
-              "model": args.model, "trials": args.trials, "runs": []}
+              "model": args.model, "trials": args.trials, "runs": [], "automatic": True,
+              "boundary": "controlled synthetic SQL comparison; registration isolated for equal server configuration; not install or production proof"}
     with tempfile.TemporaryDirectory(prefix="altimate-mod-check-") as tmp:
         root = Path(tmp)
         db = sqlite3.connect(root / "orders.sqlite")
@@ -101,7 +109,7 @@ def main():
         root.joinpath("settings.json").write_text(json.dumps({"enabledPlugins": {}, "disableAllHooks": False}))
         root.joinpath("empty-mcp.json").write_text('{"mcpServers":{}}')
         root.joinpath("mcp.json").write_text(json.dumps({"mcpServers": {
-            "plugin:altimate-code:altimate-code": {"command": server[0], "args": server[1:] + [
+            f"plugin:{plugin_name}:altimate-code": {"command": server[0], "args": server[1:] + [
                 "--connections", str(root / "connections.json"), "--integrations", "local", "--pure"]}}}))
         for name in ["mcp", "mod"]:
             plugin = root / name

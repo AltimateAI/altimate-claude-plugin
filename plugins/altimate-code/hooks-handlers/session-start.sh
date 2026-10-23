@@ -6,6 +6,6 @@ printf '%s\n' '{'
 printf '  "hookSpecificOutput": {\n'
 printf '    "hookEventName": "SessionStart",\n'
 # shellcheck disable=SC2016
-printf '    "additionalContext": "altimate-code: use its MCP tools directly for data and available workspace context, knowledge and skills. When Altimate data mode is ON, keep reasoning in Claude, report missing capabilities, and leave memory saving to the user via /altimate-remember. Outside that mode, the altimate-code skill covers CLI delegation for long jobs and unavailable capabilities; delegation uses a separate model and may save shared memory. /review handles dbt/SQL PRs."\n'
+printf '    "additionalContext": "altimate-code: answer data questions with its MCP tools yourself; for dbt/SQL edits, warehouse-state jobs, questions about the team'"'"'s Altimate workspace knowledge and conventions, or when MCP is unavailable, delegate with `altimate-code run` (altimate-code skill; /review for dbt/SQL PRs)."\n'
 printf '  }\n'
 printf '}\n'

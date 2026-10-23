@@ -1,17 +1,20 @@
 // Claude Code mods API: https://code.claude.com/docs/en/plugins/mods/events
-import { register as registerDataMode, resetMode } from './data-mode.mjs'
+import { register as registerDataMode, resetMode, observeWorkspace, automaticEnabled, workspaceShortcut } from './data-mode.mjs'
 // Keep this display-only middleware transparent to the model and MCP server.
-const SQL_TOOL = 'mcp__plugin_altimate-code_altimate-code__sql_execute'
+const SQL_TOOL = 'mcp__plugin_altimate-code-experimental_altimate-code__sql_execute'
 const WORKSPACE_QUERIES = {
-  'mcp__plugin_altimate-code_altimate-code__workspace_snowflake_execute_database_query': 'snowflake',
-  'mcp__plugin_altimate-code_altimate-code__workspace_bigquery_execute_database_query': 'bigquery',
-  'mcp__plugin_altimate-code_altimate-code__workspace_postgresql_execute_database_query': 'postgresql',
-  'mcp__plugin_altimate-code_altimate-code__workspace_databricks_execute_sql': 'databricks',
+  'mcp__plugin_altimate-code-experimental_altimate-code__workspace_snowflake_execute_database_query': 'snowflake',
+  'mcp__plugin_altimate-code-experimental_altimate-code__workspace_bigquery_execute_database_query': 'bigquery',
+  'mcp__plugin_altimate-code-experimental_altimate-code__workspace_postgresql_execute_database_query': 'postgresql',
+  'mcp__plugin_altimate-code-experimental_altimate-code__workspace_databricks_execute_sql': 'databricks',
 }
+const CONTEXT = 'mcp__plugin_altimate-code-experimental_altimate-code__workspace_context'
+const EXECUTE = 'mcp__plugin_altimate-code-experimental_altimate-code__workspace_execute'
 const PANE = 'altimate-data'
 const LIMIT = 8
 let queries = []
 let generation = 0
+let dismissed = false
 
 function clip(text, limit = 8000) {
   return text.length > limit ? text.slice(0, limit) + '\n[Pane preview clipped; full output remains in the tool result.]' : text
@@ -54,11 +57,12 @@ export function register(on) {
   registerDataMode(on)
   on('session.start', async ($, e, next) => {
     queries = []
+    dismissed = false
     generation++
     resetMode()
     await $.command.register({ name: 'altimate-data', description: 'Open recent Altimate SQL results', immediate: true })
     await $.command.register({ name: 'altimate-query', description: 'Run SQL through Altimate MCP without a model turn', argumentHint: '<connection> <SQL>' })
-    await $.command.register({ name: 'altimate-mode', description: 'Route data work through Altimate using Claude', argumentHint: 'on|off|status' })
+    await $.command.register({ name: 'altimate-mode', description: 'Inspect or disable automatic Altimate presentation (on by default)', argumentHint: 'on|off|status' })
     await $.command.register({ name: 'altimate-workspace', description: 'Inspect or select an Altimate workspace', argumentHint: '[link <id>]' })
     await $.command.register({ name: 'altimate-remember', description: 'Explicitly save one project memory to Altimate', argumentHint: '<id> <text, max 2048 characters>' })
     return next(e)
@@ -66,6 +70,7 @@ export function register(on) {
 
   on('command.run', { command: 'clear' }, ($, e, next) => {
     queries = []
+    dismissed = false
     generation++
     resetMode()
     redraw($)
@@ -75,6 +80,7 @@ export function register(on) {
   // session.start runs on plugin load, not on every conversation switch.
   on('session.end', ($, e, next) => {
     queries = []
+    dismissed = false
     generation++
     resetMode()
     redraw($)
@@ -82,8 +88,10 @@ export function register(on) {
   })
 
   on('command.run', { command: 'altimate-data' }, async ($) => {
-    const placement = await $.ui.open({ id: PANE, title: 'Altimate data', focus: true, closeOnEscape: true })
-    return placement.isPlaced ? {} : { text: 'The data pane is unavailable here. SQL results remain in the conversation.' }
+    dismissed = false
+    await $.ui.open({ id: PANE, title: 'Altimate data', focus: true, closeOnEscape: true })
+    const panes = await $.ui.panes()
+    return panes.some(pane => pane.id === PANE && pane.isPlaced) ? {} : { text: 'The data pane is unavailable here. SQL results remain in the conversation.' }
   })
 
   on('command.run', { command: 'altimate-query' }, async ($, e) => {
@@ -106,9 +114,39 @@ export function register(on) {
     }
   })
 
+  on('ui.close', { id: PANE }, ($, e, next) => { dismissed = true; return next(e) })
+
+  // Claude keeps unrequested panes undrawn below 144 terminal columns. A
+  // clickable band keeps results/setup reachable without stealing focus.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    const previous = await next(e)
+    if (e.props.hasSurvey || e.props.agentId || !automaticEnabled()) return previous
+    const { Box, Button } = $.ui.resolve(e)
+    const shortcut = workspaceShortcut($, e) ?? (!dismissed && queries.length
+      ? Button({ key: 'altimate-results', label: 'View SQL results (' + queries.length + ')', onPress: () => $.ui.open({ id: PANE, title: 'Altimate data', focus: true, closeOnEscape: true, rows: 12 }) }) : undefined)
+    return shortcut ? Box({ flexDirection: 'column', children: [...(previous ? [previous] : []), shortcut] }) : previous
+  })
+
   on('tool.call', async ($, e, next) => {
-    if (e.tool !== SQL_TOOL && !Object.hasOwn(WORKSPACE_QUERIES, e.tool)) return next(e)
-    const query = begin(e)
+    const owns = e.tool.startsWith('mcp__plugin_altimate-code-experimental_altimate-code__')
+    if (owns) {
+      // Both listings have conflicting routing instructions. Do not execute an ambiguous experiment.
+      try {
+        if ((await $.tool.list()).some(tool => tool.name.startsWith('mcp__plugin_altimate-code_altimate-code__'))) {
+          return { deny: 'Both Altimate plugins are enabled. In the Claude plugin panel, disable altimate-code and keep altimate-code-experimental enabled, then retry. No experimental data operation ran.' }
+        }
+      } catch { /* The host still checks permissions on the original call. */ }
+    }
+    if (e.tool === CONTEXT) {
+      const answer = await next(e)
+      try { await observeWorkspace($, e, answer) } catch { /* Preserve the original context/status. */ }
+      return answer
+    }
+    const input = e.tool === EXECUTE && WORKSPACE_QUERIES['mcp__plugin_altimate-code-experimental_altimate-code__workspace_' + e.operation]
+      ? { ...e.arguments, tool: 'mcp__plugin_altimate-code-experimental_altimate-code__workspace_' + e.operation } : e
+    if (input.tool !== SQL_TOOL && !Object.hasOwn(WORKSPACE_QUERIES, input.tool)) return next(e)
+    const started = generation
+    const query = begin(input)
     redraw($)
     try {
       const answer = await next(e)
@@ -120,6 +158,9 @@ export function register(on) {
       query.output = clip(error instanceof Error ? error.message : String(error))
       throw error
     } finally {
+      if (started === generation && !dismissed && automaticEnabled()) {
+        try { await $.ui.open({ id: PANE, title: 'Altimate data', focus: false, closeOnEscape: true, rows: 12 }) } catch { /* UI cannot retry or replace SQL. */ }
+      }
       redraw($)
     }
   })
@@ -130,7 +171,7 @@ export function register(on) {
     return Box({ flexDirection: 'column', children: [
       Text({ children: ['Recent SQL · session only · source permissions enforced by MCP'] }),
       Box({ flexDirection: 'row', children: [
-        Button({ key: 'clear', label: 'Clear previews', onPress: () => { queries = []; redraw($) } }),
+        Button({ key: 'clear', label: 'Clear previews', onPress: () => { queries = []; generation++; redraw($) } }),
         Button({ key: 'close', label: 'Close', onPress: () => $.ui.close({ id: PANE }) }),
       ] }),
       ...(queries.length ? [...queries].reverse().flatMap(query => [

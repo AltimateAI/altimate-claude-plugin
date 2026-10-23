@@ -2,9 +2,9 @@ import { expect, test } from 'claude-code/testing'
 import { register } from '../hooks/data-workspace.mjs'
 
 // Shapes from Anthropic's mods/test examples and mods/types/claude-code.d.ts.
-const SQL_TOOL = 'mcp__plugin_altimate-code_altimate-code__sql_execute'
+const SQL_TOOL = 'mcp__plugin_altimate-code-experimental_altimate-code__sql_execute'
 const PANE = {
-  plugin: 'altimate-code', component: 'Pane', requestId: 'altimate-data',
+  plugin: 'altimate-code-experimental', component: 'Pane', requestId: 'altimate-data',
   viewport: { columns: 120, rows: 40 },
   props: { title: 'Altimate data', isFocused: true, bodyColumns: 60,
     placement: 'inline', scroll: { offset: 0, bodyRows: 30 }, view: {} },
@@ -50,7 +50,7 @@ test('workspace engine SQL shares the results pane without an extra execution', 
   let calls = 0
   const answer = { text: 'workspace count: 7', result: 'workspace count: 7' }
   on('tool.call', () => { calls++; return answer })
-  expect(await $.tool.call({ tool: 'mcp__plugin_altimate-code_altimate-code__workspace_snowflake_execute_database_query', sql: 'SELECT COUNT(*) FROM orders' })).toEqual(answer)
+  expect(await $.tool.call({ tool: 'mcp__plugin_altimate-code-experimental_altimate-code__workspace_snowflake_execute_database_query', sql: 'SELECT COUNT(*) FROM orders' })).toEqual(answer)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: '(workspace snowflake) · Completed' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'workspace count: 7' })).toBeDefined()
@@ -112,10 +112,11 @@ test('MCP error content is visible and remains an error for Claude', async ($, o
   expect(await ui.find({ type: 'Text', text: '(default connection) · Refused or failed' })).toBeDefined()
 })
 
-test('pane is opt-in, closes on demand, and headless mode gives a text fallback', async ($, on) => {
+test('optional pane shortcut closes on demand and has a headless text fallback', async ($, on) => {
   boot($, on)
   let closed = false
   on('ui.open', () => ({ value: { isPlaced: false, reason: 'no surface' } }))
+  on('ui.panes', () => ({ value: [] }))
   on('ui.close', ($, e) => { expect(e.id).toBe('altimate-data'); closed = true; return { value: undefined } })
   const answer = await $.command.run({ command: 'altimate-data', args: '' })
   expect(answer.text).toContain('results remain in the conversation')

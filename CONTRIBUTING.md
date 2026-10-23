@@ -114,3 +114,11 @@ claude plugin install altimate-code@altimate-claude-plugin
 ## Reporting bugs / requesting features
 
 Please open a GitHub issue on this repo. For security-sensitive reports, see [SECURITY.md](./SECURITY.md).
+
+## Automatic experimental pilot
+
+The original `plugins/altimate-code` is preserved. Make automatic UX changes in `plugins/altimate-code-experimental`; its only semantic routing skill and SessionStart guidance must agree. UI and lifecycle code live in `hooks/data-workspace.mjs` and `hooks/data-mode.mjs`. Reusable workspace behavior belongs in altimate-code.
+
+Run `claude plugin test ./plugins/altimate-code-experimental`, and strict validation for the marketplace and both plugin directories. `tests/resolve-cli.sh` still verifies the original plugin's resolver. Package the experimental listing with `scripts/package-experimental.py`; its source registration must remain unchanged in the bundle. Do not commit runtime binaries. See `docs/workspace-data-mode.md` for installation, behavior changes and outstanding live-client verification.
+
+Use `tests/mod-smoke.py --automatic-pilot /absolute/plugin/path` for the automatic synthetic SQL comparison. It deliberately isolates server registration for equal arms; use `tests/packaged-runtime-smoke.py` to verify unchanged packaged registration. Workspace fixture routing remains a historical prototype test.

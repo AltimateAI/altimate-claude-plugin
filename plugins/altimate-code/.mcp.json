@@ -2,7 +2,7 @@
   "mcpServers": {
     "altimate-code": {
       "command": "altimate-code",
-      "args": ["mcp", "serve", "--workspace-tools"]
+      "args": ["mcp", "serve"]
     }
   }
 }

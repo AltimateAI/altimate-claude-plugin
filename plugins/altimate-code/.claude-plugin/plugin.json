@@ -1,7 +1,7 @@
 {
   "name": "altimate-code",
   "displayName": "Altimate Code",
-  "version": "1.3.0-experimental",
+  "version": "1.2.0-experimental",
   "description": "Use altimate-code data tools directly through MCP with Claude Code reasoning, or delegate long dbt and warehouse jobs to the altimate-code CLI agent.",
   "author": {
     "name": "AltimateAI",
