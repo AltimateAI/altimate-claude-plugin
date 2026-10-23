@@ -1,0 +1,23 @@
+{
+  "name": "altimate-code-experimental",
+  "displayName": "Altimate Code Experimental",
+  "version": "1.4.0-experimental",
+  "description": "Ask data questions naturally in Claude Code with Altimate workspace context, native MCP tools and automatic SQL results.",
+  "author": {
+    "name": "AltimateAI",
+    "url": "https://altimate.ai"
+  },
+  "homepage": "https://github.com/AltimateAI/altimate-claude-plugin",
+  "repository": "https://github.com/AltimateAI/altimate-claude-plugin",
+  "license": "MIT",
+  "keywords": [
+    "dbt",
+    "sql",
+    "data-engineering",
+    "warehouse",
+    "snowflake",
+    "bigquery",
+    "databricks",
+    "column-lineage"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "altimate-code": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/runtime/altimate-code",
+      "args": [
+        "mcp",
+        "serve",
+        "--workspace-tools"
+      ]
+    }
+  }
+}

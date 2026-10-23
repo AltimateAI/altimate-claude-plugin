@@ -74,3 +74,11 @@ We will update this document in this repository and revise the effective date wh
 
 Altimate Inc. · 440 North Wolfe Road #150, Sunnyvale, CA 94085, USA · +1 (650) 254-6266
 Privacy & general: **info@altimate.ai** · Security: **security@altimate.ai** · Support: **support@altimate.ai**
+
+## Experimental workspace workflow
+
+The separate experimental plugin reads bounded workspace context only when relevant data work requests it, rather than on every user prompt. Context includes workspace summary, skill names and project memory; it is returned to Claude and cached for up to 30 seconds with identity checks. Named skills and knowledge are retrieved on demand. Workspace SQL goes to the selected engine and retains warehouse costs; knowledge requests may invoke backend models.
+
+The first-use panel lists workspaces visible to the signed-in account. Explicit selection links this project without uploading existing memory. Sign-in and optional engine installation require explicit panel actions and use the native CLI. Authentication output is not inserted into model context.
+
+Explicit workspace inspection exposes a memory-save form; the user-only `/altimate-remember` shortcut is also available. Only the supplied text is saved locally and publication attempted for the displayed project/workspace receipt. Publication may invoke backend models. Failed or uncertain publication is reported without automatic retry. Context retrieval does not delete local memory. Normal Claude transcripts, local memory files and service retention policies apply to their respective data.

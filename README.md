@@ -4,6 +4,10 @@ The Altimate marketplace of Claude Code plugins.
 
 Currently ships one plugin: **[altimate-code](./plugins/altimate-code/)** — delegates dbt and warehouse work to the [altimate-code](https://github.com/AltimateAI/altimate-code) CLI agent.
 
+## Unpublished automatic pilot
+
+A separate [altimate-code-experimental](plugins/altimate-code-experimental/) listing adds automatic data routing, first-use workspace setup and SQL results inside Claude Code. The original plugin and its marketplace entry remain unchanged from main. The pilot requires a platform-specific bundle with its compatible CLI; the Git source listing alone lacks that runtime. See [packaging, installation and verification limits](docs/workspace-data-mode.md). No default release or public pilot artifact is published by this draft.
+
 ## Install
 
 From Anthropic's plugin directory:
