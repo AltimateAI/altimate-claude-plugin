@@ -1,3 +1,5 @@
+> Historical manual-prototype notes. The current implementation is the separate automatic experimental listing; see [current behavior and rollout](workspace-data-mode.md). Paths to the original plugin below describe the earlier prototype, not the preserved main listing.
+
 # Workspace data mode
 
 Extend the experimental plugin with an opt-in data mode. Claude remains the reasoning model; this work must not start `altimate run` or a second agent/model loop. Keep both product PRs draft.

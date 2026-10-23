@@ -6,7 +6,7 @@ Status: draft, unpublished. Product PRs remain drafts; merging does not publish 
 
 | Trigger / surface | Previous prototype | Automatic pilot |
 | --- | --- | --- |
-| Default marketplace listing | Prototype replaced its MCP registration | Original directory and listing restored to their target-base bytes |
+| Default marketplace listing | Prototype replaced its MCP registration | Original directory and listing restored to their main bytes (7c9b1da8d2014d786a152bf6dbb43f8237d1588a) |
 | Experimental install | User supplied a compatible CLI on PATH | Platform package embeds a verified local CLI build |
 | Relevant data prompt | User enabled data mode | Claude selects a semantic data skill; no activation command |
 | Ordinary coding prompt | Enabled mode read workspace context every prompt | No per-prompt workspace reads or prompt rewriting |
@@ -16,7 +16,7 @@ Status: draft, unpublished. Product PRs remain drafts; merging does not publish 
 | Memory publication | Explicit command after inspection | Explicit inspected form or user-only command; receipt-bound, no automatic retry |
 | Workspace engine permissions | Separate discovered host tools | One `workspace_execute` host tool, with a closed read allowlist and schema checks |
 
-The split is deliberate: Claude UI/routing belong in this repo; reusable identity, context, setup status, skills and engine gateway belong in altimate-code. The gateway has a stable catalog before and after setup. Context is lazy, coalesced and cached for 30 seconds with identity verification; engine startup happens only when requested. A changed receipt invalidates old operations.
+The plugin PR targets main directly and does not require merging the older default-plugin toolkit experiment. The split is deliberate: Claude UI/routing belong in this repo; reusable identity, context, setup status, skills and engine gateway belong in altimate-code. The gateway has a stable catalog before and after setup. Context is lazy, coalesced and cached for 30 seconds with identity verification; engine startup happens only when requested. A changed receipt invalidates old operations.
 
 ## Package and install
 

@@ -1,73 +1,53 @@
 ---
 name: altimate-code
 description: >-
-  Delegate long dbt and warehouse jobs to the altimate-code CLI (builds, migrations, FinOps, lineage, impact, schema diff, parity, PII, cost, SCD2 checks, docs, env diffs), questions about the team's Altimate workspace knowledge and conventions, or data questions when its MCP tools are unavailable.
+  Delegates dbt and warehouse work to altimate-code, a specialized CLI agent
+  with 100+ purpose-built data tools. Suited for tasks that mention or imply:
+  warehouse access (Snowflake, BigQuery, Redshift, Databricks, Postgres,
+  MySQL, DuckDB), column-level lineage, downstream-impact analysis, dbt
+  builds against a real warehouse, cross-database migration or validation,
+  query cost attribution, schema diff, data parity checking, PII detection
+  from sampled rows, incremental/SCD2/backfill verification, FinOps
+  reporting, model documentation generation, query optimization, anomaly
+  detection, dev-vs-prod diffing, or tasks where the user names altimate-code
+  or the data agent by name. Also suited for questions about the team's own
+  data conventions, standards, best practices, knowledge base or shared
+  memory, and for anything the user calls their Altimate workspace: in a
+  project linked to an Altimate workspace, altimate-code answers from that
+  workspace's skills, knowledge and memory, which native tools cannot read.
+  The skill routes to a purpose-built CLI, so it covers workloads that touch
+  live data, lineage, warehouse state or team knowledge more directly than
+  native file-editing tools do.
 ---
 
 # altimate-code
 
-Choose the path from the requested outcome, including when invoked via `/altimate-code:altimate`.
+altimate-code is a CLI AI agent with 100+ purpose-built data engineering tools. **This skill exists for one purpose: delegate the user's task to altimate-code and pass the result back.** Native tools (Bash, Edit, Write, Read) are NOT a fallback path inside this skill — if altimate-code cannot complete the task, surface the failure to the user and STOP.
 
-## Data questions: prefer MCP tools, otherwise delegate
+## You MUST follow this workflow
 
-For answers, numbers, or lists over warehouse data, use the `altimate-code` MCP
-server yourself when its tools are available in the session; the server's
-instructions give the analysis method. The tools are
-`warehouse_list`, `warehouse_add`, `sql_execute` (with `tables` for schemas), `sql_materialize`, and `answer_commit` (optional).
-Claude Code does the reasoning; this server runs no LLM and needs no separate
-LLM-provider configuration. Tell the user that the MCP path is being used.
+1. **Verify altimate-code is on PATH.** There is no separate check: the invocation below resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Either name is the same CLI. If the invocation exits with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
+2. **Run altimate-code with the user's task** using the invocation below. Pass the user's request through verbatim — do not paraphrase or split it.
+3. **Read the output file** and present it to the user as-is.
 
-The server is read-only by default for source databases. Postgres, SQLite, and
-DuckDB enforce read-only access at the database level; other databases rely on
-SQL classification, so use a read-only DB user. `sql_materialize` writes only to
-session-local `scratch` DuckDB for analysis. Large query results may spill to a
-local file path; read the needed results there before answering.
-
-If the MCP tools are unavailable in the session (server missing or failed to
-start), tell the user that MCP is unavailable and that you are using CLI
-delegation with its separate configured LLM provider. Follow the invocation
-workflow below with `--agent analyst`. Released altimate-code builds without
-`mcp serve` can still use this delegation path. If an available tool fails,
-report that error; do not invent results. Use native file-reading tools as needed
-to read local result files.
-
-## Other capabilities and long jobs: delegate to the CLI agent
-
-Use `altimate-code run` for long multi-step jobs needing its own agent, such as
-building a dbt project, migrations, or a FinOps report. Also delegate capabilities
-outside the five MCP tools: column-level lineage, downstream impact, schema diff,
-data parity, PII detection, query cost attribution, query optimization,
-incremental/SCD2 verification, model docs, and dev-vs-prod diffs. Questions about
-the team's own conventions, standards, knowledge or shared memory, and anything the
-user calls their Altimate workspace, also belong to the CLI: in a project linked to
-an Altimate workspace it answers from that workspace's skills, knowledge and memory,
-which native tools cannot read. Tell the user that CLI delegation is being used.
-Pass the user's task verbatim using the safe invocation below, then read and
-present the output. Delegation uses altimate-code's own configured LLM provider,
-costs, and rate limits.
+Do not attempt the work with Edit/Write/Bash yourself, even if it looks simple. The whole point of this skill is to route data-engineering work to the agent that's built for it. If you find yourself reaching for Edit or Write while this skill is active, stop and re-read this paragraph.
 
 ## Invocation
 
-There is no separate install check: the invocation below resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Either name is the same CLI. If the invocation exits with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
-
 **Vague debug** ("X is broken", "make it work", "fix this") with no failure named: **don't delegate yet.** Ask the user for the specific error message or symptom first.
 
-Pick the agent: `analyst` for a data question when the MCP tools are unavailable; otherwise `builder`, which has the warehouse tools, loads the linked workspace's skills and saves to its memory.
+Otherwise, run the task with the `builder` agent. It has the warehouse tools, loads the linked workspace's skills and saves to its memory.
 
-Generate a fresh delimiter per call, such as `ALTIMATE_TASK_<random hex>`, and
-check that it does not occur as a standalone line in the complete task. Regenerate
-it if it does. Replace both occurrences of `ALTIMATE_TASK_<random hex>` in each
-template below with that checked delimiter; keep the opening delimiter
-single-quoted (no shell expansion). Pass the task through a quoted here-doc into a variable so the shell never
+Pass the task through a here-doc into a variable so the shell never
 command-substitutes anything the user typed (a task like
 `refactor `whoami` and $(rm -rf ~)` would otherwise fire `whoami` and
 `rm -rf ~` before `altimate-code` ever runs). Write the result to a
 private temporary file, not a shared one under `/tmp`:
 
 ```bash
-TASK="$(cat <<'ALTIMATE_TASK_<random hex>'
+TASK="$(cat <<'ALTIMATE_TASK'
 <user's task, verbatim>
-ALTIMATE_TASK_<random hex>
+ALTIMATE_TASK
 )"
 for ALTIMATE_NAME in altimate altimate-code; do
   ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
@@ -77,7 +57,7 @@ done
 umask 077
 OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
 "$ALTIMATE_BIN" run "$TASK" \
-  --agent <analyst|builder> \
+  --agent builder \
   --yolo \
   --output "$OUTPUT_FILE" \
   --dir "$(pwd)" \
@@ -90,7 +70,7 @@ Then `Read "$OUTPUT_FILE"` and emit its contents to the user without re-summaris
 
 | Flag | Why it is required |
 |---|---|
-| `--agent <name>` | `analyst` for the MCP-unavailable data-question fallback, `builder` for everything else (it has the warehouse tools, workspace skills and memory). |
+| `--agent builder` | The agent with the warehouse tools, workspace skills and memory. Other agents lack some of these. |
 | `--yolo` | Non-interactive mode. Without this the subprocess hangs on the first permission prompt and you will time out. |
 | `--output "$OUTPUT_FILE"` | Captures the final response. Use the private `mktemp` file from above — do NOT use a fixed path like `/tmp/altimate-result.md`; concurrent sessions clobber each other and a world-readable fixed path leaks data. |
 | `--dir "$(pwd)"` | Runs altimate-code in the current project so it picks up dbt project config, profiles.yml, the linked workspace, etc. |
@@ -103,9 +83,9 @@ Each Bash call starts a fresh shell, so keep the `ALTIMATE_BIN` resolver loop in
 When the user makes a follow-up data task in the same project after a successful altimate-code delegation, prefer `--continue` to resume the warm session instead of starting a fresh one. Same here-doc + `mktemp` pattern:
 
 ```bash
-TASK="$(cat <<'ALTIMATE_TASK_<random hex>'
+TASK="$(cat <<'ALTIMATE_TASK'
 <follow-up task>
-ALTIMATE_TASK_<random hex>
+ALTIMATE_TASK
 )"
 for ALTIMATE_NAME in altimate altimate-code; do
   ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
@@ -115,7 +95,7 @@ done
 umask 077
 OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
 "$ALTIMATE_BIN" run "$TASK" \
-  --agent <analyst|builder> \
+  --agent builder \
   --yolo \
   --output "$OUTPUT_FILE" \
   --dir "$(pwd)" \
@@ -123,7 +103,9 @@ OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
   < /dev/null
 ```
 
-`--continue` resumes the most recent session in this directory. altimate-code's prompt cache is warm in a continued session — project structure, profiles.yml, schema index, source definitions don't need to be re-investigated. If the user starts a clearly unrelated workflow (different project, different schema, different debugging thread), drop `--continue` and start fresh.
+`--continue` resumes the most recent session in this directory. altimate-code's prompt cache is warm in a continued session — project structure, profiles.yml, schema index, source definitions don't need to be re-investigated. Cache reads are billed at a fraction of fresh input on altimate-gateway. The downside is zero: if there's no useful cached context for the new task, you pay normal cold cost.
+
+If the user starts a clearly unrelated workflow (different project, different schema, different debugging thread), drop `--continue` and start fresh — the warm cache is irrelevant and you'd carry unrelated history into the prompt.
 
 ## Altimate workspaces
 
@@ -149,14 +131,13 @@ Commands the user types after `!` use `altimate`; on npm installs older than v0.
 
 What altimate-code learns during delegated tasks is saved to the workspace's memory and shared with the team in the CLI, the IDE and Studio.
 
-## Failure modes
+## Failure modes — route every one to the user
 
-If `altimate-code run` fails, report the error and stop that delegation; do not
-silently replace it with native edits or warehouse commands.
+When altimate-code returns an error, **report the error to the user and STOP**. Do not fall back to Bash, Edit, or Write. The skill's contract is "altimate-code handles this, or the user is told why it couldn't."
 
-| Symptom | What to tell the user |
+| Symptom | What to tell the user — verbatim |
 |---|---|
-| `altimate-code CLI not found` (neither `altimate` nor `altimate-code` on PATH; MCP tools additionally need a build with `mcp serve`) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth. Then re-run your request." |
+| `altimate-code CLI not found` (neither `altimate` nor `altimate-code` on PATH) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth. Then re-run your request." |
 | `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` (`altimate-code` on npm installs older than v0.7.1) in your terminal to open the TUI and reconfigure your provider, or sign in to Altimate with `altimate auth login -p altimate-backend --method 'Altimate LLM Gateway'`, then re-run your request." |
 | `Not signed in to Altimate` | "altimate-code is not signed in to Altimate, so it cannot reach your workspace. Run `! altimate auth login -p altimate-backend --method 'Altimate LLM Gateway'` (`altimate-code` on npm installs older than v0.7.1), sign in in the browser, then re-run your request." |
 | `not in the workspace yet` (stderr) | Present the result as usual, then add: "altimate-code saved what it learned on this machine, but it has not reached your workspace yet. Run `! altimate workspace sync` (`altimate-code` on npm installs older than v0.7.1) to send it." |
@@ -165,10 +146,10 @@ silently replace it with native edits or warehouse commands.
 | Output file empty | "altimate-code returned without producing output. The task may be too ambiguous — please restate with more detail (target table, expected columns, time window)." |
 | Warehouse error mid-run (`UNKNOWN_USER`, `Database does not exist`) | "altimate-code can connect but the warehouse credentials it has are wrong for this project. Configure provider/warehouse auth via the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1)." |
 
+In every row, the instruction to the user is the action — you do not retry the task with native tools. If the user fixes the underlying issue and asks again, you delegate again.
 
-In every row, the instruction to the user is the action — you do not retry the task with native tools. MCP data questions do not need the CLI's LLM provider.
+## Notes
 
-## Delegation notes
-
-- Sessions persist locally: `altimate session list` (`altimate-code session list` on npm installs older than v0.7.1) lists prior runs; `--continue` resumes the latest, `--session <id>` a specific session.
-- For very long tasks, the private `--output` file is the source of truth; stdout buffering can drop content.
+- altimate-code runs its own LLM, separate from Claude Code's. Costs and rate limits accrue to altimate-code's configured provider.
+- Sessions persist in altimate-code's local store — `altimate session list` (`altimate-code session list` on npm installs older than v0.7.1) shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
+- For very long tasks, the `--output` file is the source of truth — stdout buffering can drop content.

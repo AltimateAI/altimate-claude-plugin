@@ -1,3 +1,5 @@
+> Historical manual-prototype notes. The current implementation is the separate automatic experimental listing; see [current behavior and rollout](workspace-data-mode.md). Paths to the original plugin below describe the earlier prototype, not the preserved main listing.
+
 # Claude Code data workspace experiment
 
 2026-10-22. Draft, stacked on the direct MCP integration experiment. No rollout or merge recommendation yet.
