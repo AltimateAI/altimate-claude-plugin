@@ -128,6 +128,7 @@ export function register(on) {
   })
 
   on('tool.call', async ($, e, next) => {
+    const started = generation
     const owns = e.tool.startsWith('mcp__plugin_altimate-code-experimental_altimate-code__')
     if (owns) {
       // Both listings have conflicting routing instructions. Do not execute an ambiguous experiment.
@@ -139,13 +140,13 @@ export function register(on) {
     }
     if (e.tool === CONTEXT) {
       const answer = await next(e)
-      try { await observeWorkspace($, e, answer) } catch { /* Preserve the original context/status. */ }
+      try { if (started === generation) await observeWorkspace($, e, answer) } catch { /* Preserve the original context/status. */ }
       return answer
     }
     const input = e.tool === EXECUTE && WORKSPACE_QUERIES['mcp__plugin_altimate-code-experimental_altimate-code__workspace_' + e.operation]
       ? { ...e.arguments, tool: 'mcp__plugin_altimate-code-experimental_altimate-code__workspace_' + e.operation } : e
     if (input.tool !== SQL_TOOL && !Object.hasOwn(WORKSPACE_QUERIES, input.tool)) return next(e)
-    const started = generation
+    if (started !== generation) return next(e)
     const query = begin(input)
     redraw($)
     try {

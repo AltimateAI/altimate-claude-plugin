@@ -121,6 +121,35 @@ test('clearing or changing the last user question during setup never resumes obs
   }
 })
 
+test('context completed after clear cannot reopen setup or bind the new question', async () => {
+  const f = fixture(); await f.start()
+  let finish, entered
+  const started = new Promise(resolve => { entered = resolve })
+  const answer = { text: JSON.stringify({ status: 'needs_workspace', workspaces: [{ id: 35, name: 'Growth' }] }) }
+  const pending = f.run('tool.call', { tool: CONTEXT }, async () => { entered(); return new Promise(resolve => { finish = resolve }) })
+  await started; await f.command('clear'); f.user('Explain a CSS selector')
+  finish(answer)
+  expect(await pending).toBe(answer)
+  expect(f.opened.length).toBe(0)
+  expect(f.processes.length).toBe(0)
+  expect(f.prompts.length).toBe(0)
+})
+
+test('tool discovery delayed across clear cannot register an old SQL preview', async () => {
+  const f = fixture(); await f.start()
+  let finish, entered
+  const started = new Promise(resolve => { entered = resolve })
+  f.$.tool.list = async () => { entered(); return new Promise(resolve => { finish = resolve }) }
+  let calls = 0
+  const answer = { text: 'private old result' }
+  const pending = f.run('tool.call', { tool: PREFIX + 'sql_execute', query: 'SELECT 1' }, async () => { calls++; return answer })
+  await started; await f.command('clear'); finish([{ name: CONTEXT }])
+  expect(await pending).toBe(answer)
+  expect(calls).toBe(1)
+  expect(f.opened.length).toBe(0)
+  expect(await f.run('ui.render', { component: 'AbovePrompt', props: {} }, async () => undefined)).toBeUndefined()
+})
+
 test('cancelled setup and failed setup do not automatically retry or resume', async () => {
   const f = fixture(); await f.start(); await f.context()
   await f.button('close').onPress()
