@@ -43,10 +43,11 @@ NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 CREDENTIALS = os.path.join(os.path.expanduser("~"), ".altimate", "altimate.json")
 # `!` before a backtick starts an inline command; `!` right after a fence opens a command block.
 BANG_BEFORE_BACKTICK = re.compile(r"!(?=`)")
-BANG_AFTER_FENCE = re.compile(r"(`{3,}|~{3,})!")
+BANG_AFTER_FENCE = re.compile(r"(`{3,}|~{3,})!+")
 # Paths Claude Code reads as configuration or components when found in a skills directory or plugin.
+# Compared lowercased: default macOS and Windows filesystems ignore case.
 BLOCKED_DIRS = {"hooks", "skills", "agents", "commands", "output-styles", "monitors", "bin"}
-BLOCKED_FILES = {"SKILL.md", ".mcp.json", ".lsp.json", "settings.json", "settings.local.json", "plugin.json", "hooks.json"}
+BLOCKED_FILES = {"skill.md", ".mcp.json", ".lsp.json", "settings.json", "settings.local.json", "plugin.json", "hooks.json"}
 
 
 def parse_frontmatter(text):
@@ -152,7 +153,7 @@ def is_ours(path):
 
 
 def is_blocked_dir(name):
-    return name.startswith(".") or name in BLOCKED_DIRS
+    return name.startswith(".") or name.lower() in BLOCKED_DIRS
 
 
 def build_copy(source, name, description, body, staging):
@@ -164,7 +165,7 @@ def build_copy(source, name, description, body, staging):
         os.makedirs(os.path.join(staging, rel), exist_ok=True)
         for filename in filenames:
             src = os.path.join(dirpath, filename)
-            if os.path.islink(src) or filename.startswith(".") or filename in BLOCKED_FILES:
+            if os.path.islink(src) or filename.startswith(".") or filename.lower() in BLOCKED_FILES:
                 continue
             shutil.copy(src, os.path.join(staging, rel, filename))
     rendered = render_skill(name, description, body)

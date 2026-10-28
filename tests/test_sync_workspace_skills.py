@@ -144,6 +144,10 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
                     "bin/tool": "#!/bin/sh",
                     "agents/x.md": "x",
                     "commands/x.md": "x",
+                    "Hooks/hooks.json": "{}",
+                    "Skills/payload/skill.md": "x",
+                    "references/Skill.MD": "x",
+                    "Settings.json": "{}",
                 }
             }
         )
