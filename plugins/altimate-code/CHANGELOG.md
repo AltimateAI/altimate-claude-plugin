@@ -2,6 +2,14 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.2.0] — 2026-10-27
+
+### Added
+- Workspace skills: Claude can list the skills altimate-code uses in a project (`skill list`), pull the workspace's skills immediately (`workspace refresh`), and publish one of the project's skills to the linked workspace (`skill publish`), re-running with `--replace` only after the user confirms. Personal skills under the home directory are not copied into the project unless the user asks. These commands need altimate-code 0.12.5 or newer; on an older CLI, Claude suggests `altimate upgrade`.
+- Workspace skills become Claude Code skills: at session start the plugin copies the linked workspace's skills from altimate-code's snapshot into the project's `.claude/skills/`, and refreshes them from the workspace in the background (in projects with an `.altimate-code/` folder). Copies keep only `name`, `description`, the body and supporting files; `allowed-tools`, `hooks`, `!` command blocks and files Claude Code reads as plugin components are not carried over. Only a snapshot for the signed-in tenant is served, and copies are removed when the workspace has none. Same-name skills of the user's are never replaced, and copies are git-ignored. `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns this off.
+- `evals/`: `claude plugin eval` cases for listing, refreshing and publishing skills, for asking before publishing unnamed skills, for not copying personal skills, and for not routing unrelated questions.
+- The skill description and SessionStart context name these skill actions, so a request to share a skill with the team routes to altimate-code.
+
 ## [1.1.1] — 2026-10-20
 
 ### Fixed

@@ -54,6 +54,25 @@ An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's 
 
 What altimate-code learns during these tasks is saved to the workspace's memory and shared with your team in the CLI, the IDE and Studio. Skills added to the workspace reach the next task.
 
+### Workspace skills
+
+Skills added to the workspace reach your delegated tasks on their own: each altimate-code run checks the workspace for new or changed skills when it starts.
+
+They also become Claude Code skills. When a session starts, the plugin copies the workspace's skills into the project's `.claude/skills/<name>/`, then refreshes them from the workspace in the background; Claude Code picks up changes during the session. The copies:
+
+- keep only each skill's name, description, body and supporting files. `allowed-tools`, `hooks` and other frontmatter are dropped, `!` command blocks are turned into plain text, and files Claude Code would read as skills, hooks or plugin components (hidden paths, nested `SKILL.md`, `hooks/`, `skills/`, `agents/`, `commands/`, `bin/`, `.mcp.json`, `settings.json`) are not copied, so a workspace skill cannot pre-approve tools or run commands on your machine;
+- come only from a snapshot fetched for the Altimate tenant you are signed in to, and are removed when you sign in elsewhere or the workspace has no skills left;
+- never replace a skill of yours with the same name: that workspace skill is skipped;
+- carry their own `.gitignore`, so they stay out of version control, and are replaced or removed as the workspace changes. Edit the skill in the workspace (or publish it again), not the copy.
+
+The background refresh runs only in projects altimate-code has worked in (they have an `.altimate-code/` folder). The copy needs `python3`. Set `ALTIMATE_CLAUDE_SKILL_SYNC=0` to turn both off.
+
+From Claude Code you can also ask to (altimate-code 0.12.5 or newer):
+
+- **List skills:** *"which altimate skills can this project use?"* runs `altimate skill list`.
+- **Refresh now:** *"refresh the workspace skills"* runs `altimate workspace refresh`, for a skill a teammate just added.
+- **Share a skill with your team:** *"publish my `staging-conventions` skill to the workspace"* runs `altimate skill publish staging-conventions`. The skill must be one of the project's, for example in `.claude/skills/<name>/`. Personal skills in `~/.claude/skills` are refused until you copy them into the project. To update a shared skill, edit it and publish it again.
+
 ## Example prompts
 
 Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):
@@ -88,7 +107,8 @@ Still stuck? See [Support](#support).
 
 - **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and workspace guidance
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
-- **Hook** — `hooks/hooks.json` — SessionStart capability description (static text only)
+- **Hook** — `hooks/hooks.json` — SessionStart capability description, and the copy of workspace skills into `.claude/skills/` (`hooks-handlers/sync-workspace-skills.py`)
+- **Evals** — `evals/` — `claude plugin eval` cases for skill routing
 
 ## Support
 
