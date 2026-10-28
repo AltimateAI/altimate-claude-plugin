@@ -1,8 +1,8 @@
 {
   "name": "altimate-code",
   "displayName": "Altimate Code",
-  "version": "1.1.1",
-  "description": "Delegates dbt and warehouse work to altimate-code, a specialized CLI agent with 100+ purpose-built data tools (SQL analysis, column-level lineage, dbt build/test/run, warehouse profiling, FinOps, connectivity to Snowflake, BigQuery, Redshift, Databricks, Postgres, MySQL, DuckDB), and to the skills, knowledge and memory of a linked Altimate workspace.",
+  "version": "1.3.0",
+  "description": "Gives Claude Code altimate-code's model-free data tools (column-level lineage, impact analysis, PII detection, data-diff, FinOps, query equivalence, dialect translation, warehouse queries) through its MCP server, or through `altimate tool run` when MCP servers are not allowed, with delegation to the altimate-code agent for long dbt jobs and access to a linked Altimate workspace's knowledge.",
   "author": {
     "name": "AltimateAI",
     "url": "https://altimate.ai"

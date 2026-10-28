@@ -1,42 +1,118 @@
 ---
 name: altimate-code
 description: >-
-  Delegates dbt and warehouse work to altimate-code, a specialized CLI agent
-  with 100+ purpose-built data tools. Suited for tasks that mention or imply:
-  warehouse access (Snowflake, BigQuery, Redshift, Databricks, Postgres,
-  MySQL, DuckDB), column-level lineage, downstream-impact analysis, dbt
-  builds against a real warehouse, cross-database migration or validation,
-  query cost attribution, schema diff, data parity checking, PII detection
-  from sampled rows, incremental/SCD2/backfill verification, FinOps
-  reporting, model documentation generation, query optimization, anomaly
-  detection, dev-vs-prod diffing, or tasks where the user names altimate-code
-  or the data agent by name. Also suited for questions about the team's own
-  data conventions, standards, best practices, knowledge base or shared
-  memory, and for anything the user calls their Altimate workspace: in a
-  project linked to an Altimate workspace, altimate-code answers from that
-  workspace's skills, knowledge and memory, which native tools cannot read.
-  The skill routes to a purpose-built CLI, so it covers workloads that touch
-  live data, lineage, warehouse state or team knowledge more directly than
-  native file-editing tools do.
+  Data tools for work native tools cannot do: column-level lineage and
+  downstream-impact analysis, PII detection, data-diff between tables or
+  databases, FinOps and query cost, query equivalence, dialect translation,
+  dbt manifest and lineage, the team's Altimate workspace knowledge and
+  conventions, and read-only queries and schema lookups against the project's
+  saved warehouse connections. Uses the altimate-code MCP tools when the session
+  has them and the model-free `tool run` CLI otherwise. Also the route for long
+  multi-step dbt jobs (builds, migrations) via delegation, and for tasks where
+  the user names altimate-code. Not needed for plain file edits to SQL or dbt
+  models, or for reasoning about SQL Claude can read directly.
 ---
 
 # altimate-code
 
-altimate-code is a CLI AI agent with 100+ purpose-built data engineering tools. **This skill exists for one purpose: delegate the user's task to altimate-code and pass the result back.** Native tools (Bash, Edit, Write, Read) are NOT a fallback path inside this skill — if altimate-code cannot complete the task, surface the failure to the user and STOP.
+altimate-code provides model-free data tools: each call runs one tool (lineage, data-diff, PII, FinOps, warehouse queries) with no LLM in the loop and returns structured output. Claude does the reasoning. The tools reach Claude in one of two ways, chosen by what the session offers.
 
-## You MUST follow this workflow
+## Pick the mode
 
-1. **Verify altimate-code is on PATH.** There is no separate check: the invocation below resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Either name is the same CLI. If the invocation exits with `altimate-code CLI not found`, jump to "Failure modes" below and stop.
-2. **Run altimate-code with the user's task** using the invocation below. Pass the user's request through verbatim — do not paraphrase or split it.
-3. **Read the output file** and present it to the user as-is.
+- **MCP mode.** The plugin registers an `altimate-code` MCP server (`altimate-code mcp serve`). When tools named `mcp__plugin_altimate-code_altimate-code__*` are available in the session, use them directly and do not shell out. The server's instructions give the analysis method.
+- **CLI mode.** When those tools are not available (an organisation's managed settings disallow MCP servers, the server failed to start, or the installed CLI has no `mcp serve`), use the CLI as described under "Call tools with `tool run`". Everything below that heading works without MCP.
 
-Do not attempt the work with Edit/Write/Bash yourself, even if it looks simple. The whole point of this skill is to route data-engineering work to the agent that's built for it. If you find yourself reaching for Edit or Write while this skill is active, stop and re-read this paragraph.
+Tell the user which mode is in use when it is not obvious.
 
-## Invocation
+## MCP mode
 
-**Vague debug** ("X is broken", "make it work", "fix this") with no failure named: **don't delegate yet.** Ask the user for the specific error message or symptom first.
+Tool names carry the prefix `mcp__plugin_altimate-code_altimate-code__`.
 
-Otherwise, run the task with the `builder` agent. It has the warehouse tools, loads the linked workspace's skills and saves to its memory.
+- `warehouse_list` lists connections; for local databases also tables, columns and a sample row. `warehouse_add` adds a missing connection (find its details in the project: config, `.env`, database files).
+- `sql_execute` runs SQL, read-only by default. Pass `tables` to get columns and value profiles in the same call, and check stored values before filtering or joining. `queries` batches independent queries. Large results spill to a local file: read what is needed there before answering.
+- `sql_materialize` copies a read-only query result from any connection into a session-local `scratch` DuckDB, for joins across connections.
+- `answer_commit` finishes a data question with one field per requested item. It is optional; when used, reply with exactly its `FINAL ANSWER:` text.
+- The server also exposes `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence` and `sql_translate`. Their arguments match the table under "Call tools with `tool run`". Use whatever other tools the session lists.
+
+Source databases are read-only: enforced by the database on Postgres, SQLite and DuckDB, and by SQL classification elsewhere (a read-only database user is the stronger boundary). If a tool fails, report the error; do not invent results.
+
+## Ask before running
+
+- **Vague debug** ("X is broken", "make it work", "fix this") with no failure named: ask for the specific error message or symptom first.
+- **Two readings:** when a request can reasonably mean two things (which table, which environment, which time window, "revenue" gross or net), ask one short clarifying question before running tools. If both readings are cheap to compute, compute both and say which you chose.
+
+## Call tools with `tool run` (CLI mode)
+
+Before the first call in CLI mode, run `"$ALTIMATE_BIN" tool context < /dev/null` once (after the resolver, in the same Bash call). It prints the configured connections, the schema listing and the analyst method, so later calls need not rediscover them. In CLI mode `answer_commit` is also a `tool run` tool.
+
+Resolve the CLI and call the tool in the same Bash call (each Bash call is a fresh shell):
+
+```bash
+for ALTIMATE_NAME in altimate altimate-code; do
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+done
+[ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
+"$ALTIMATE_BIN" tool run <name> --args '<json>' --json < /dev/null
+```
+
+For JSON containing single quotes, or anything long, pass it on stdin with `--args -`:
+
+```bash
+for ALTIMATE_NAME in altimate altimate-code; do
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+done
+[ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
+"$ALTIMATE_BIN" tool run sql_execute --args - --json <<'ALTIMATE_ARGS'
+{"warehouse": "<name from warehouse_list>", "query": "select * from orders where status = 'open' limit 20"}
+ALTIMATE_ARGS
+```
+
+**Discover only when needed.** The table and argument examples below cover the common cases. For a tool not listed, `"$ALTIMATE_BIN" tool list` prints one line per tool; for one tool's exact input schema, run `"$ALTIMATE_BIN" tool schema <name>` (after the resolver). Never dump every schema. A failed call prints the `tool schema` command for that tool: run it once, then fix the arguments.
+
+| Question type | Tools (id prefix) |
+|---|---|
+| Column lineage, downstream impact of a change | `altimate_core_column_lineage`, `lineage_check`, `impact_analysis`, `dbt_lineage` |
+| PII | `schema_detect_pii`, `altimate_core_classify_pii` |
+| Data parity, dev vs prod, cross-database diff | `data_diff` |
+| FinOps, query cost, warehouse spend | `finops_*` |
+| Two queries the same? | `altimate_core_equivalence` |
+| Dialect translation | `sql_translate` |
+| Run, check, optimize or analyze a query | `sql_execute`, `sql_check`, `sql_optimize`, `sql_analyze`, `sql_materialize` |
+| Schema and warehouses | `schema_inspect`, `warehouse_*` |
+| dbt project | `dbt_manifest`, `dbt_profiles`, `dbt_unit_test_gen`, `project_scan` |
+
+Arguments for the most used tools (`?` marks optional):
+
+| Tool | Arguments |
+|---|---|
+| `warehouse_list` | `{}` |
+| `sql_execute` | `{"warehouse", "query", "limit"?}` |
+| `schema_inspect` | `{"table", "schema_name"?, "warehouse"?}` |
+| `schema_search` | `{"query", "warehouse"?}` |
+| `schema_detect_pii` | `{"warehouse"?, "schema_name"?, "table"?}` |
+| `impact_analysis` | `{"model", "change_type", "column"?, "manifest_path"?}` |
+| `dbt_lineage` | `{"manifest_path", "model"}` |
+| `altimate_core_column_lineage` | `{"sql", "dialect"?}` |
+| `data_diff` | `{"source", "target", "key_columns", "source_warehouse"?, "target_warehouse"?, "where_clause"?}` |
+| `altimate_core_equivalence` | `{"sql1", "sql2"}` |
+| `sql_translate` | `{"sql", "source_dialect", "target_dialect"}` |
+| `finops_analyze_credits` | `{"warehouse"?, "days"?}` |
+
+## Read-only by default
+
+`tool run` is read-only unless `--allow-write` is passed; `DROP` and `TRUNCATE` are always blocked. Do not add `--allow-write` on your own: tell the user which statement needs it and why, and wait for a yes. After a yes, add it to that call only.
+
+## Fallback for older CLIs
+
+If `"$ALTIMATE_BIN" tool --help` fails (older CLI without the `tool` subcommand), use the delegation path below for the task. Delegation (`run`) uses the CLI's own LLM provider, so it needs that provider configured.
+
+## Long multi-step jobs: delegate with `run`
+
+Use this only for long, multi-step jobs that need a second agent working on its own: dbt builds against a warehouse, migrations, backfills. For a question or a single analysis, use the MCP tools or `tool run` above. Native tools are not a substitute for a failed `run`: report the failure and stop.
+
+Run the task with the `builder` agent. It has the warehouse tools, loads the linked workspace's skills and saves to its memory.
 
 Pass the task through a here-doc into a variable so the shell never
 command-substitutes anything the user typed (a task like
@@ -133,7 +209,7 @@ What altimate-code learns during delegated tasks is saved to the workspace's mem
 
 ## Failure modes — route every one to the user
 
-When altimate-code returns an error, **report the error to the user and STOP**. Do not fall back to Bash, Edit, or Write. The skill's contract is "altimate-code handles this, or the user is told why it couldn't."
+These apply to `tool run` and `run` alike (a `tool run` that fails for a missing CLI, sign-in or warehouse credentials uses the same messages). When altimate-code returns an error, **report the error to the user and STOP**. Do not fall back to Bash, Edit, or Write. The skill's contract is "altimate-code handles this, or the user is told why it couldn't."
 
 | Symptom | What to tell the user — verbatim |
 |---|---|
@@ -150,6 +226,6 @@ In every row, the instruction to the user is the action — you do not retry the
 
 ## Notes
 
-- altimate-code runs its own LLM, separate from Claude Code's. Costs and rate limits accrue to altimate-code's configured provider.
+- MCP tools and `tool run` run no LLM: Claude Code does the reasoning. Only delegation with `run` uses altimate-code's own LLM, with costs and rate limits on its configured provider.
 - Sessions persist in altimate-code's local store — `altimate session list` (`altimate-code session list` on npm installs older than v0.7.1) shows prior runs; `--continue` resumes the latest, `--session <id>` resumes a specific one.
 - For very long tasks, the `--output` file is the source of truth — stdout buffering can drop content.

@@ -1,18 +1,23 @@
 ---
-description: Delegate a task to altimate-code, the specialised data-engineering CLI agent (warehouse access, column-level lineage, cross-DB, FinOps, query optimization, your Altimate workspace's skills and knowledge)
+description: Use altimate-code for this task. Data questions go through its MCP tools or `tool run` CLI, long dbt and warehouse jobs are delegated to its agent.
 argument-hint: <task description>
 ---
 
-The user explicitly invoked `/altimate-code:altimate` to delegate this task to altimate-code. You MUST run the task via the `altimate-code` CLI — do NOT attempt the work with native `Bash`/`Edit`/`Write` tools, and do not read the project's files first: altimate-code investigates the project itself.
+The user explicitly invoked `/altimate-code:altimate` to use altimate-code for this task. Two paths exist, chosen by what the task and the session offer:
 
-Workflow (follow in order, no skipping):
+- **Data question** (answers, numbers, lists over warehouse data, lineage, impact, PII, diffs): when tools named `mcp__plugin_altimate-code_altimate-code__*` are available in the session, answer with them yourself and follow the server's analysis method. When they are not available (an organisation's managed settings disallow MCP servers, or the server failed to start), delegate with `--agent analyst` as in the workflow below. The `altimate-code` skill's `tool run` path also works for a single analysis. Tell the user which path is being used.
+- **Long multi-step job or Altimate workspace question** (dbt build, migration, FinOps report, team conventions): delegate with the `builder` agent as in the workflow below. Delegation uses the CLI's own LLM provider.
+
+For delegation you MUST run the task via the `altimate-code` CLI — do NOT attempt the work with native `Bash`/`Edit`/`Write` tools, and do not read the project's files first: altimate-code investigates the project itself.
+
+Delegation workflow (follow in order, no skipping):
 
 1. **Verify altimate-code is installed.** There is no separate check: the run command in step 3 resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Either one is fine. If the run exits with `altimate-code CLI not found`, stop and tell the user:
    > altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install | bash`, then run `altimate` once to configure your provider/warehouse auth, then re-run `/altimate-code:altimate <task>`.
 
 2. **Vague debug** ("X is broken") with no failure named: **stop — ask the user for the specific error before delegating.**
 
-3. **Run altimate-code with the `builder` agent**, which has the warehouse tools, workspace skills and memory. Pass `$ARGUMENTS` through a
+3. **Run altimate-code with the chosen agent** (`analyst` for a data question when MCP tools are unavailable, otherwise `builder`), which has the warehouse tools, workspace skills and memory. Pass `$ARGUMENTS` through a
    here-doc into a variable so the shell never command-substitutes anything the
    user typed, write the result to a private `mktemp` file (not a shared
    `/tmp/altimate-result.md` — concurrent invocations clobber each other and a
@@ -32,7 +37,7 @@ Workflow (follow in order, no skipping):
    umask 077
    OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
    "$ALTIMATE_BIN" run "$TASK" \
-     --agent builder \
+     --agent <analyst|builder> \
      --yolo \
      --output "$OUTPUT_FILE" \
      --dir "$(pwd)" \
@@ -54,7 +59,7 @@ Workflow (follow in order, no skipping):
    umask 077
    OUTPUT_FILE="$(mktemp "${TMPDIR:-/tmp}/altimate-result.XXXXXX")"
    "$ALTIMATE_BIN" run "$TASK" \
-     --agent builder \
+     --agent <analyst|builder> \
      --yolo --output "$OUTPUT_FILE" --dir "$(pwd)" \
      --continue \
      < /dev/null
@@ -68,4 +73,4 @@ Workflow (follow in order, no skipping):
 
 5. **On any altimate-code error** (`Unauthorized`, `Token limit reached`, `No provider configured`, `Not signed in to Altimate`, warehouse credentials wrong, process timeout) — surface the error message to the user along with the fix from the skill body's failure-modes table. Do NOT fall back to native tools. The user invoked `/altimate-code:altimate` specifically to use altimate-code; falling back would defeat the purpose.
 
-Task to delegate: $ARGUMENTS
+Task: $ARGUMENTS

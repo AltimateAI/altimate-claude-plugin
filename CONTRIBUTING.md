@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for taking the time to contribute. This plugin lives in one repo (`AltimateAI/altimate-claude-plugin`) and ships a single Claude Code plugin (`altimate-code`) that delegates data-engineering tasks to the [altimate-code](https://github.com/AltimateAI/altimate-code) CLI.
+Thanks for taking the time to contribute. This plugin lives in one repo (`AltimateAI/altimate-claude-plugin`) and ships a single Claude Code plugin (`altimate-code`). It uses the [altimate-code](https://github.com/AltimateAI/altimate-code) data tools through MCP when the session has them, and through the model-free `altimate tool run` CLI when it does not (for example when an organisation disallows MCP servers). Long jobs are delegated to the CLI agent, which uses the CLI's separate configured LLM provider.
 
 ## Quick start
 
@@ -28,9 +28,12 @@ altimate-claude-plugin/
 │   └── altimate-code/
 │       ├── .claude-plugin/
 │       │   └── plugin.json      # plugin manifest
+│       ├── .mcp.json             # local stdio MCP server registration
 │       ├── skills/
 │       │   └── altimate-code/
-│       │       └── SKILL.md     # delegation logic
+│       │       └── SKILL.md     # MCP/delegation routing and CLI invocation
+│       ├── agents/
+│       │   └── analyst.md       # read-only data analyst for the MCP tools
 │       ├── hooks/
 │       │   └── hooks.json       # SessionStart hook config
 │       ├── hooks-handlers/
@@ -49,6 +52,8 @@ altimate-claude-plugin/
 ## What to change where
 
 - **Routing behavior** (when Claude picks up the skill): edit `plugins/altimate-code/skills/altimate-code/SKILL.md` frontmatter description and/or `plugins/altimate-code/hooks-handlers/session-start.sh` `additionalContext`.
+- **Direct data-question analysis**: edit `plugins/altimate-code/agents/analyst.md` (the server instructions carry the method).
+- **MCP server launch**: edit `plugins/altimate-code/.mcp.json` (`altimate-code mcp serve`, read-only by default).
 - **Explicit-invocation UX** (what `/altimate-code:altimate <task>` does): edit `plugins/altimate-code/commands/altimate.md`.
 - **CLI invocation details** (agent selection, flags, follow-up handling): edit the workflow section in `plugins/altimate-code/skills/altimate-code/SKILL.md`.
 
@@ -79,10 +84,20 @@ claude plugin install altimate-code@altimate-claude-plugin
 
 ## Components
 
-- **Skill** — `plugins/altimate-code/skills/altimate-code/SKILL.md` — the delegation logic (`altimate-code run "$USER_TASK"` and surface the result).
+- **Routing skill** — `plugins/altimate-code/skills/altimate-code/SKILL.md` — use the MCP tools when available, otherwise `tool run` (after `tool context`); delegate long jobs with `run`.
+- **Analyst agent** — `plugins/altimate-code/agents/analyst.md` — read-only data analyst that works in both modes.
+- **MCP registration** — `plugins/altimate-code/.mcp.json` — launches the local stdio server; builds without `mcp serve` fail to start it and the CLI mode applies instead.
 - **Hook** — `plugins/altimate-code/hooks/hooks.json` + `plugins/altimate-code/hooks-handlers/session-start.sh` — SessionStart hook that describes the plugin's capabilities in the system prompt so Claude can route to it when the task shape fits.
-- **Command** — `plugins/altimate-code/commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation.
+- **Command** — `plugins/altimate-code/commands/altimate.md` — `/altimate-code:altimate` slash command follows the same routing with agent-persona selection for delegation.
 
 ## Reporting bugs / requesting features
 
 Please open a GitHub issue on this repo. For security-sensitive reports, see [SECURITY.md](./SECURITY.md).
+
+## Automatic experimental pilot
+
+The original `plugins/altimate-code` is preserved. Make automatic UX changes in `plugins/altimate-code-experimental`; its only semantic routing skill and SessionStart guidance must agree. UI and lifecycle code live in `hooks/data-workspace.mjs` and `hooks/data-mode.mjs`. Reusable workspace behavior belongs in altimate-code.
+
+Run `claude plugin test ./plugins/altimate-code-experimental`, and strict validation for the marketplace and both plugin directories. `tests/resolve-cli.sh` still verifies the original plugin's resolver. Package the experimental listing with `scripts/package-experimental.py`; its source registration must remain unchanged in the bundle. Do not commit runtime binaries. See `docs/workspace-data-mode.md` for installation, behavior changes and outstanding live-client verification.
+
+Use `tests/mod-smoke.py --automatic-pilot /absolute/plugin/path` for the automatic synthetic SQL comparison. It deliberately isolates server registration for equal arms; use `tests/packaged-runtime-smoke.py` to verify unchanged packaged registration. Workspace fixture routing remains a historical prototype test.

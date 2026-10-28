@@ -1,8 +1,17 @@
 # Altimate Code — Claude Code plugin
 
-Routes dbt + warehouse tasks from Claude Code to [altimate-code](https://github.com/AltimateAI/altimate-code), a specialized open-source CLI agent with 100+ deterministic data-engineering tools: SQL anti-pattern detection, column-level lineage, dbt build/test/run against real warehouses, FinOps and cost analysis, cross-dialect translation and data parity, and PII detection.
+Gives Claude Code direct access to the model-free data tools of [altimate-code](https://github.com/AltimateAI/altimate-code), an open-source CLI with 100+ deterministic data-engineering tools: column-level lineage and impact analysis, PII detection, data-diff and parity, FinOps and query cost, query equivalence, dialect translation, and queries and schema inspection on connected warehouses.
 
-**Why delegate?** General coding agents can edit SQL files; they can't inspect your live warehouse state. altimate-code gives Claude Code a deterministic data-engineering layer — indexed schemas, real query history, real cost data — instead of guesses.
+**Why call the tools directly?** Claude reasons, the tools compute. Neither the MCP server nor `altimate tool run` runs a second LLM, so answers come back faster and cheaper than handing the whole task to another agent. Long multi-step jobs (dbt builds, migrations) can still be delegated with `altimate run`.
+
+**Two modes, one set of tools.**
+
+| Mode | When | How |
+|---|---|---|
+| MCP | The session has the plugin's MCP tools (`mcp__plugin_altimate-code_altimate-code__*`) | Claude calls them directly. The plugin's `.mcp.json` runs `altimate-code mcp serve`, read-only by default. |
+| CLI | The MCP tools are not available | Claude runs `altimate tool context` once, then `altimate tool run <name> --args '<json>'` through Bash. |
+
+The CLI mode is what keeps the plugin useful for an organisation that disallows MCP servers through managed settings (for example `allowedMcpServers` or `deniedMcpServers`): the plugin's server is then not started, and Claude uses the same tools through the shell. The same applies when the server fails to start or the installed build has no `mcp serve`. At session start the plugin decides which mode applies without starting the CLI: the CLI mode when `altimate-code` is not on PATH or settings deny the server, otherwise MCP (`ALTIMATE_DATA_MODE=cli|mcp` overrides). In the CLI mode it also adds the project routing guidance to the session, so the project's `CLAUDE.md` does not need it; `altimate-code link --claude-md` can still write it there for other clients. The MCP mode adds no routing guidance.
 
 ## Install
 
@@ -29,7 +38,9 @@ curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes 
 altimate                                           # launch the TUI, then run /connect to configure your LLM provider
 ```
 
-The plugin invokes `altimate`, the CLI's canonical name, and falls back to `altimate-code` for npm installs older than v0.7.1, so standalone installs work without an `altimate-code` alias.
+The CLI mode invokes `altimate`, the CLI's canonical name, and falls back to `altimate-code` for npm installs older than v0.7.1, so standalone installs work without an alias.
+
+**MCP mode and the CLI name.** The MCP registration launches `altimate-code mcp serve`. npm and Homebrew installs expose both names, but curl and PowerShell installs expose only `altimate`: there the server cannot start until `altimate-code` is on PATH (for example `ln -s "$(command -v altimate)" ~/.local/bin/altimate-code`), and Claude uses the CLI mode meanwhile. MCP mode also needs a build that contains `mcp serve`; check with `altimate-code mcp serve --help`. Direct MCP and `tool run` need no LLM provider; only delegation (`altimate run`) does.
 
 
 Or configure a provider via environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and 20+ others — see the [altimate-code docs](https://docs.altimate.sh)).
@@ -38,10 +49,22 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 
 ## How it works
 
-1. A **SessionStart hook** adds a static description of altimate-code's capabilities to the session, so Claude Code knows when a task fits.
-2. When a data-engineering task fires the **skill** (or you invoke **`/altimate-code:altimate <task>`** explicitly), Claude Code runs `altimate run "<your task>"` locally with its `builder` agent.
-3. altimate-code plans and executes the task using your configured LLM provider. Warehouse queries, dbt commands, and file edits run **locally under your credentials**.
-4. The result is written to a local output file and surfaced back in your Claude Code conversation.
+1. A **SessionStart hook** adds a static description of the available tools and both modes to the session. It does not invoke the CLI.
+2. **MCP mode.** Claude calls `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns columns and value profiles; large results spill to a local file), `sql_materialize` (session-local `scratch` DuckDB for cross-database joins), `answer_commit`, and `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence`, `sql_translate`.
+3. **CLI mode.** The **skill** has Claude run `altimate tool context` once (connections, schema listing, analyst method), then `altimate tool run <name> --args '<json>'` through Bash and reason over the structured output. `altimate tool list --json` shows every tool and its input schema. A warm process per project starts automatically.
+4. Calls are read-only unless you approve `--allow-write` (CLI mode); `DROP` and `TRUNCATE` are always blocked. Read-only is enforced by the database on Postgres, SQLite and DuckDB and by SQL classification elsewhere, so use a read-only DB user for the strongest boundary.
+5. For long multi-step jobs, or when you invoke **`/altimate-code:altimate <task>`** for work that needs the agent, Claude Code runs `altimate run "<your task>"` locally with the `builder` agent (or `analyst` for a data question when MCP is unavailable), which uses your configured LLM provider.
+6. Warehouse queries and dbt commands run **locally under your credentials**. If the installed CLI predates the `tool` subcommand, the skill falls back to delegation.
+
+Connections come from project and global `.altimate-code/connections.json` files and `ALTIMATE_CODE_CONN_*` environment variables. To pin a file for the MCP server, change the `args` in `.mcp.json` to `["mcp", "serve", "--connections", "/absolute/path/to/connections.json"]`.
+
+### Optional: route warehouse queries to the tools
+
+Set `ALTIMATE_ROUTE_GUARD=1` to enable a PreToolUse hook that denies Bash commands querying a warehouse directly (`psql -c`, `trino --execute`, `docker exec ... clickhouse-client`, `snowsql`, `bq query`) and suggests the matching `tool run`. It is off by default, and never blocks `altimate` commands, dbt, or file operations.
+
+### Optional: analyst agent
+
+`claude --agent altimate-code:analyst` starts a read-only data analyst that answers questions through the MCP tools when present and `tool run` otherwise, and ends with a `FINAL ANSWER:` line.
 
 ## Use an Altimate workspace
 
@@ -65,7 +88,9 @@ Once installed, try these in Claude Code (or prefix any of them with `/altimate-
 
 ## Data handling
 
-Delegating a task passes your prompt text to the altimate-code CLI, which sends it to your configured LLM provider — the Altimate LLM Gateway by default, or your own provider (BYOK), in which case Altimate never sees it. Warehouse credentials and query results stay on your machine.
+MCP tools and `tool run` run locally under your credentials; tool results Claude reads enter the Claude Code conversation and reach its model provider. Neither makes an LLM call of its own.
+
+Delegating a task with `altimate run` passes your prompt text to the altimate-code CLI, which sends it to your configured LLM provider — the Altimate LLM Gateway by default, or your own provider (BYOK), in which case Altimate never sees it. Warehouse credentials and query results stay on your machine.
 
 Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosure: **[SECURITY.md](../../SECURITY.md)** · Terms: **[TERMS.md](../../TERMS.md)**
 
@@ -74,6 +99,7 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | Symptom | Fix |
 |---|---|
 | Neither `altimate-code` nor `altimate` on PATH | `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider. |
+| MCP tools missing from the session | Managed settings may disallow MCP servers, `altimate-code` may not be on PATH (curl installs expose only `altimate`), or the build lacks `mcp serve`. Claude falls back to `altimate tool run`, so no action is required. |
 | `Unauthorized` / `No provider configured` | Run `altimate` (`altimate-code` on npm installs older than v0.7.1) to open the TUI and reconfigure your provider via `/connect`, or set the provider API key env var. |
 | Task hangs for several minutes | Open `altimate` (`altimate-code` on npm installs older than v0.7.1) to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
 | Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |
@@ -86,9 +112,11 @@ Still stuck? See [Support](#support).
 
 ## Components
 
-- **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and workspace guidance
+- **MCP server** — `.mcp.json` — `altimate-code mcp serve`, read-only by default
+- **Skill** — `skills/altimate-code/SKILL.md` — MCP and `tool run` guidance, delegation for long jobs, workspace guidance
+- **Agent** — `agents/analyst.md` — read-only data analyst (MCP or CLI)
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
-- **Hook** — `hooks/hooks.json` — SessionStart capability description (static text only)
+- **Hooks** — `hooks/hooks.json` — SessionStart capability description (static text only); opt-in PreToolUse `warehouse-guard.sh` (needs `ALTIMATE_ROUTE_GUARD=1`)
 
 ## Support
 

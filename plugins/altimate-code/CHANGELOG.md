@@ -2,6 +2,30 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.3.0] — 2026-10-28
+
+### Added
+- MCP registration (`.mcp.json`): the `altimate-code` stdio server runs `altimate-code mcp serve`, read-only by default. Tools: `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns schemas and value profiles in the same call), `sql_materialize`, `answer_commit`, plus `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence` and `sql_translate`. It needs an altimate-code build that contains `mcp serve`, and the CLI on PATH as `altimate-code`; curl installs expose only `altimate`, so they need an `altimate-code` link for the server to start (the CLI mode works either way).
+- The skill, `/altimate-code:altimate`, the `analyst` agent and the SessionStart text describe two modes. When tools named `mcp__plugin_altimate-code_altimate-code__*` are available, they are used. When they are not (an organisation's managed settings disallow MCP servers, the server failed to start, or the build lacks `mcp serve`), the same tools run through `altimate tool run`, starting with one `tool context` call that prints the connections, schema listing and analyst method. An organisation that blocks MCP therefore still gets every tool.
+
+- SessionStart picks the mode without starting the CLI (`hooks-handlers/data-mode.sh`). It uses the CLI mode when `altimate-code` is not on PATH, when managed, user or project settings deny the server (`deniedMcpServers`, an `allowedMcpServers` list without it, or `disabledMcpjsonServers`), or when `ALTIMATE_DATA_MODE=cli`; `ALTIMATE_DATA_MODE=mcp` forces the MCP mode. Only the CLI mode adds the project routing guidance (the same text `altimate-code link --claude-md` writes to `CLAUDE.md`); the MCP mode adds none.
+- Tests: `tests/data-mode.sh`.
+
+### Changed
+- The `analyst` agent works in both modes and ends with `FINAL ANSWER:`, optionally recorded with `answer_commit`.
+- `/altimate-code:altimate` answers data questions with the MCP tools when present and otherwise delegates with the `analyst` agent; long jobs use `builder`.
+
+## [1.2.0] — 2026-10-27
+
+### Changed
+- The `altimate-code` skill now has Claude call the model-free data tools itself with `altimate tool run <name> --args '<json>'` instead of delegating each task to a second agent. It lists which tools fit which question, how to pass arguments, that calls are read-only until the user approves `--allow-write`, and to ask a clarifying question when a request has two readings. Delegation with `altimate run` stays for long multi-step jobs and is the fallback when the CLI has no `tool` subcommand.
+- The skill description and SessionStart context describe the tools directly and no longer claim work Claude does well alone.
+
+### Added
+- Opt-in PreToolUse hook `warehouse-guard.sh`, active only when `ALTIMATE_ROUTE_GUARD=1`. It denies Bash commands that query a warehouse directly and suggests the matching `tool run`. `altimate` commands, dbt and file operations pass.
+- `analyst` agent: a read-only data analyst that works through `tool run`.
+- Tests: `tests/warehouse-guard.sh`.
+
 ## [1.1.1] — 2026-10-20
 
 ### Fixed

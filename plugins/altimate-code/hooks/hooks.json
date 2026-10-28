@@ -1,5 +1,5 @@
 {
-  "description": "SessionStart nudge directing the agent to delegate data-engineering tasks to altimate-code via the altimate-code skill. The UserPromptSubmit pre-run hook was removed because it double-invoked altimate-code (once at hook time, once when the model fired the skill), doubling token consumption on the altimate-gateway without improving delegation rate — the skill body + SessionStart directive already route the model to altimate-code reliably.",
+  "description": "SessionStart context describing altimate-code's data tools; when the MCP server is unavailable or disallowed it also adds the CLI routing guidance, plus an opt-in PreToolUse guard (active only when ALTIMATE_ROUTE_GUARD=1) that points direct warehouse client commands at `altimate tool run`.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,6 +7,17 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/session-start.sh\""
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/warehouse-guard.sh\""
           }
         ]
       }
