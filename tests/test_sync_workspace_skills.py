@@ -148,6 +148,8 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
                     "Skills/payload/skill.md": "x",
                     "references/Skill.MD": "x",
                     "Settings.json": "{}",
+                    "Hooks/run.sh": "x",
+                    "BIN/tool": "x",
                 }
             }
         )
