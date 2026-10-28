@@ -84,8 +84,17 @@ def parse_frontmatter(text):
 
 
 def neutralise_commands(body):
-    """Leave no `!` touching a backtick or fence, so no form of command block survives."""
-    return BANG_BEFORE_BACKTICK.sub("! ", BANG_AFTER_FENCE.sub(r"\1", body))
+    """Leave no `!` touching a backtick or fence, so no form of command block survives.
+    Repeated until stable: one rewrite can form a new marker from its neighbours."""
+    while True:
+        cleaned = BANG_BEFORE_BACKTICK.sub("! ", BANG_AFTER_FENCE.sub(r"\1", body))
+        if cleaned == body:
+            return cleaned
+        body = cleaned
+
+
+def has_command_marker(text):
+    return bool(BANG_BEFORE_BACKTICK.search(text) or BANG_AFTER_FENCE.search(text))
 
 
 def render_skill(name, description, body):
@@ -103,7 +112,7 @@ def signed_in_as():
 
 def read_snapshot(project):
     """[(source dir, name, description, body)] for each usable workspace skill;
-    [] when there is no snapshot for the signed-in tenant; None when it cannot be read."""
+    [] when there is no readable snapshot for the signed-in tenant, so copies are removed."""
     root = os.path.join(project, SNAPSHOT_DIR)
     manifest_path = os.path.join(root, MANIFEST)
     if not os.path.exists(manifest_path):
@@ -114,11 +123,14 @@ def read_snapshot(project):
         ids = list(manifest.get("skills", {}))
         owner = (manifest.get("tenant"), str(manifest.get("apiUrl", "")).rstrip("/"))
     except (OSError, ValueError, AttributeError):
-        return None
+        return []
     if owner != signed_in_as():
         return []
     skills = []
     for skill_id in ids:
+        # Each id is one directory under the snapshot, never a path out of it.
+        if not isinstance(skill_id, str) or not skill_id or skill_id.startswith(".") or "/" in skill_id or "\\" in skill_id:
+            continue
         source = os.path.join(root, skill_id)
         if os.path.islink(source) or not os.path.isdir(source):
             continue
@@ -154,9 +166,12 @@ def build_copy(source, name, description, body, staging):
             src = os.path.join(dirpath, filename)
             if os.path.islink(src) or filename.startswith(".") or filename in BLOCKED_FILES:
                 continue
-            shutil.copyfile(src, os.path.join(staging, rel, filename))
+            shutil.copy(src, os.path.join(staging, rel, filename))
+    rendered = render_skill(name, description, body)
+    if has_command_marker(rendered.split("\n---\n", 1)[1]):
+        raise ValueError(f"workspace skill {name} still has a command marker")
     with open(os.path.join(staging, "SKILL.md"), "w", encoding="utf-8") as f:
-        f.write(render_skill(name, description, body))
+        f.write(rendered)
     with open(os.path.join(staging, ".gitignore"), "w", encoding="utf-8") as f:
         f.write("*\n")
     with open(os.path.join(staging, MARKER), "w", encoding="utf-8") as f:
@@ -181,8 +196,6 @@ def same_tree(a, b):
 
 def sync(project):
     skills = read_snapshot(project)
-    if skills is None:
-        return False
     target_root = os.path.join(project, SKILLS_DIR)
     changed = False
     wanted = set()
@@ -196,7 +209,11 @@ def sync(project):
         os.makedirs(target_root, exist_ok=True)
         staging = tempfile.mkdtemp(prefix=f".{name}.", dir=target_root)
         try:
-            build_copy(source, name, description, body, staging)
+            try:
+                build_copy(source, name, description, body, staging)
+            except (OSError, ValueError) as err:
+                print(f"altimate-code plugin: skipped workspace skill {name}: {err}", file=sys.stderr)
+                continue
             if os.path.isdir(target) and same_tree(staging, target):
                 continue
             if os.path.isdir(target):

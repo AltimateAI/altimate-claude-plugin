@@ -27,6 +27,12 @@ if [ "${ALTIMATE_CLAUDE_SKILL_SYNC:-1}" != "0" ] && command -v python3 >/dev/nul
 
   # Only projects altimate-code has worked in can be linked to a workspace.
   if [ -d "$PROJECT_DIR/.altimate-code" ]; then
+    # Claude Code watches only skill directories that exist when it starts, so
+    # create it now for copies the background refresh adds.
+    if [ ! -d "$PROJECT_DIR/.claude/skills" ] && mkdir -p "$PROJECT_DIR/.claude/skills" 2>/dev/null; then
+      RELOAD=',
+    "reloadSkills": true'
+    fi
     for ALTIMATE_NAME in altimate altimate-code; do
       ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
       [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=

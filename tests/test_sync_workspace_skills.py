@@ -172,13 +172,13 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.run_sync()
         self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
 
-    def test_unreadable_manifest_keeps_existing_copies(self):
+    def test_unreadable_manifest_removes_copies(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
         self.run_sync()
         with open(os.path.join(self.project, SNAPSHOT, ".manifest.json"), "w", encoding="utf-8") as f:
             f.write("{not json")
-        self.assertEqual(self.run_sync()[0], "")
-        self.assertTrue(os.path.isfile(self.skill_path("staging-conventions")))
+        self.assertEqual(self.run_sync()[0], "changed")
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
 
     def test_another_sessions_staging_directory_is_left_alone(self):
         staging = os.path.join(self.project, ".claude", "skills", ".a.x1y2")
@@ -187,6 +187,37 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.write_snapshot({"sk_1": {"SKILL.md": "---\nname: a\ndescription: d\n---\n"}})
         self.run_sync()
         self.assertTrue(os.path.isdir(staging))
+
+    def test_rewrites_cannot_reassemble_a_command(self):
+        tricky = "---\nname: a\ndescription: d\n---\n!` !`id` ```!!`x` ``!``!` ~~~!!\n```!!\nprintf probe\n```\n"
+        self.write_snapshot({"sk_1": {"SKILL.md": tricky}})
+        self.run_sync()
+        body = self.read(self.skill_path("a")).split("---", 2)[2]
+        self.assertNotRegex(body, r"!`")
+        self.assertNotRegex(body, r"(`{3,}|~{3,})!")
+
+    def test_manifest_ids_cannot_point_outside_the_snapshot(self):
+        outside = os.path.join(self.project, "outside")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: escaped\ndescription: d\n---\n")
+        self.write_snapshot({"sk_1": {"SKILL.md": "---\nname: a\ndescription: d\n---\n"}})
+        manifest_path = os.path.join(self.project, SNAPSHOT, ".manifest.json")
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        for bad in ("../../outside", outside, "..", ".hidden"):
+            manifest["skills"][bad] = {}
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        self.run_sync()
+        self.assertTrue(os.path.isfile(self.skill_path("a")))
+        self.assertFalse(os.path.exists(self.skill_path("escaped")))
+
+    def test_executable_helpers_stay_executable(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": "---\nname: a\ndescription: d\n---\n", "scripts/run.sh": "#!/bin/sh\n"}})
+        os.chmod(os.path.join(self.project, SNAPSHOT, "sk_1", "scripts", "run.sh"), 0o755)
+        self.run_sync()
+        self.assertTrue(os.access(self.skill_path("a", "scripts/run.sh"), os.X_OK))
 
     def test_second_run_reports_no_change(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
