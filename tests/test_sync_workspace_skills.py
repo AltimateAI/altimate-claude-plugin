@@ -148,8 +148,6 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
                     "Skills/payload/skill.md": "x",
                     "references/Skill.MD": "x",
                     "Settings.json": "{}",
-                    "Hooks/run.sh": "x",
-                    "BIN/tool": "x",
                 }
             }
         )
@@ -158,6 +156,15 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         for dirpath, _, filenames in os.walk(os.path.join(self.project, ".claude", "skills", "a")):
             copied += [os.path.relpath(os.path.join(dirpath, f), self.skill_path("a", "")) for f in filenames]
         self.assertEqual(sorted(copied), [".altimate-workspace-skill", ".gitignore", "SKILL.md", "references/guide.md"])
+
+    def test_component_directories_are_matched_regardless_of_case(self):
+        self.write_snapshot(
+            {"sk_1": {"SKILL.md": "---\nname: a\ndescription: d\n---\n", "Hooks/run.sh": "x", "BIN/tool": "x", "docs/ok.md": "ok"}}
+        )
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("a", "Hooks")))
+        self.assertFalse(os.path.exists(self.skill_path("a", "BIN")))
+        self.assertTrue(os.path.isfile(self.skill_path("a", "docs/ok.md")))
 
     def test_copies_are_removed_when_the_workspace_has_no_skills_left(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
