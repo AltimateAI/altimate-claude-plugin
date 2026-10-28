@@ -82,6 +82,8 @@ Claude does the reasoning; no altimate-code agent runs. Knowledge questions are 
 4. **Ask Claude** — questions about your team's conventions, definitions or knowledge, and queries on the workspace's warehouses, use the workspace tools: *"How do we define recurring revenue?"*, *"Which Snowflake connections does our workspace have?"* Start a request with `/altimate-code:altimate` to be sure it does.
 5. **Workspace engine** — knowledge and warehouse operations need the workspace engine. If it is missing, Claude asks before installing it with `altimate workspace-client engine-install` (Node.js 20+ and npm).
 
+**Team skills as Claude Code skills.** In both modes, session start copies the linked workspace's skills into the project's `.claude/skills/`, so they load like any project skill. Copies keep only each skill's name and description from the frontmatter, have `!` command blocks neutralised and are served only for the Altimate account you are signed in to. A skill you wrote with the same name is never replaced, and the copies are kept out of git. A project that was not synced for an hour is refreshed in the background (`altimate workspace refresh`); the skills show up when it finishes. Set `ALTIMATE_CLAUDE_SKILL_SYNC=0` to turn the copy off.
+
 **Skills and memory.** Ask Claude to list skills (`altimate skill list`), pull the latest (`altimate workspace refresh`) or share a project skill you name (`altimate skill publish <name>`; replacing needs your confirmation). Claude saves a memory to the workspace only when you ask, after showing you the workspace, id and text, with `altimate workspace-client remember`. What altimate-code learns during delegated `run` tasks is saved to the workspace's memory as before.
 
 ## Example prompts
