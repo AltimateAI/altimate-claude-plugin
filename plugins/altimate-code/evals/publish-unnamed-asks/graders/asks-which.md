@@ -1,5 +1,5 @@
 ---
 type: llm
 ---
-PASS if the reply asks the user which skill or skills to publish, or lists candidates and asks them to choose, before publishing anything.
-FAIL if it says it published skills, or publishes without the user naming them.
+PASS if, without publishing anything, the reply asks the user to say which skill or skills to publish (or lists candidates for them to choose from). It still passes if the reply also reports a problem such as the CLI being missing.
+FAIL if it says it published skills, or publishes without the user naming them, or never asks which skills to share.

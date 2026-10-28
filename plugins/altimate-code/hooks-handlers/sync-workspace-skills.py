@@ -9,8 +9,13 @@ Copies are reduced to what describes a skill. Claude Code honours frontmatter
 that pre-approves tools (`allowed-tools`) or registers hooks (`hooks`), and runs
 `!` command blocks in the body when a skill loads; a workspace skill is written
 by whoever can upload to the workspace, so none of that is carried over: the
-frontmatter keeps only `name` and `description`, and command blocks are made
-inert.
+frontmatter keeps only `name` and `description`, no `!` is left next to a
+backtick or fence, and the bundle's other files are copied except the paths
+Claude Code reads as skills, hooks or other plugin components.
+
+Like altimate-code, it only serves a snapshot fetched for the Altimate tenant
+the user is signed in to; otherwise, or when the workspace has no skills, the
+copies are removed.
 
 Ownership: a copied directory holds MARKER. Only marked directories are
 replaced or removed, so a skill the user wrote with the same name is never
@@ -35,9 +40,13 @@ MARKER = ".altimate-workspace-skill"
 SNAPSHOT_META = {MANIFEST, ".gitignore", ".synced-at"}
 # Claude Code skill names: lowercase letters, digits and hyphens.
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
-INLINE_COMMAND = re.compile(r"!`([^`\n]*)`")
-FENCE_OPEN = re.compile(r"^(\s*)(`{3,}|~{3,})!")
-INERT_NOTE = "(command from a workspace skill, not run automatically)"
+CREDENTIALS = os.path.join(os.path.expanduser("~"), ".altimate", "altimate.json")
+# `!` before a backtick starts an inline command; `!` right after a fence opens a command block.
+BANG_BEFORE_BACKTICK = re.compile(r"!(?=`)")
+BANG_AFTER_FENCE = re.compile(r"(`{3,}|~{3,})!")
+# Paths Claude Code reads as configuration or components when found in a skills directory or plugin.
+BLOCKED_DIRS = {"hooks", "skills", "agents", "commands", "output-styles", "monitors", "bin"}
+BLOCKED_FILES = {"SKILL.md", ".mcp.json", ".lsp.json", "settings.json", "settings.local.json", "plugin.json", "hooks.json"}
 
 
 def parse_frontmatter(text):
@@ -75,29 +84,39 @@ def parse_frontmatter(text):
 
 
 def neutralise_commands(body):
-    """Turn `!` command blocks into plain code so loading the skill runs nothing."""
-    out = []
-    for line in body.split("\n"):
-        fence = FENCE_OPEN.match(line)
-        if fence:
-            out.append(f"{fence.group(1)}{INERT_NOTE}")
-            line = f"{fence.group(1)}{fence.group(2)}" + line[fence.end() :]
-        out.append(INLINE_COMMAND.sub(lambda m: "`" + m.group(1) + "`", line))
-    return "\n".join(out)
+    """Leave no `!` touching a backtick or fence, so no form of command block survives."""
+    return BANG_BEFORE_BACKTICK.sub("! ", BANG_AFTER_FENCE.sub(r"\1", body))
 
 
 def render_skill(name, description, body):
     return f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n{neutralise_commands(body)}"
 
 
-def read_snapshot(project):
-    """[(source dir, name, description, body)] for each usable workspace skill."""
-    root = os.path.join(project, SNAPSHOT_DIR)
+def signed_in_as():
     try:
-        with open(os.path.join(root, MANIFEST), encoding="utf-8") as f:
-            ids = list(json.load(f).get("skills", {}))
+        with open(CREDENTIALS, encoding="utf-8") as f:
+            creds = json.load(f)
+        return creds.get("altimateInstanceName"), creds.get("altimateUrl", "").rstrip("/")
     except (OSError, ValueError, AttributeError):
         return None
+
+
+def read_snapshot(project):
+    """[(source dir, name, description, body)] for each usable workspace skill;
+    [] when there is no snapshot for the signed-in tenant; None when it cannot be read."""
+    root = os.path.join(project, SNAPSHOT_DIR)
+    manifest_path = os.path.join(root, MANIFEST)
+    if not os.path.exists(manifest_path):
+        return []
+    try:
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        ids = list(manifest.get("skills", {}))
+        owner = (manifest.get("tenant"), str(manifest.get("apiUrl", "")).rstrip("/"))
+    except (OSError, ValueError, AttributeError):
+        return None
+    if owner != signed_in_as():
+        return []
     skills = []
     for skill_id in ids:
         source = os.path.join(root, skill_id)
@@ -120,14 +139,20 @@ def is_ours(path):
     return os.path.isfile(os.path.join(path, MARKER)) and not os.path.islink(path)
 
 
+def is_blocked_dir(name):
+    return name.startswith(".") or name in BLOCKED_DIRS
+
+
 def build_copy(source, name, description, body, staging):
     for dirpath, dirnames, filenames in os.walk(source):
-        dirnames[:] = [d for d in dirnames if not os.path.islink(os.path.join(dirpath, d))]
+        dirnames[:] = [
+            d for d in dirnames if not os.path.islink(os.path.join(dirpath, d)) and not is_blocked_dir(d)
+        ]
         rel = os.path.relpath(dirpath, source)
         os.makedirs(os.path.join(staging, rel), exist_ok=True)
         for filename in filenames:
             src = os.path.join(dirpath, filename)
-            if os.path.islink(src) or (rel == "." and filename == "SKILL.md"):
+            if os.path.islink(src) or filename.startswith(".") or filename in BLOCKED_FILES:
                 continue
             shutil.copyfile(src, os.path.join(staging, rel, filename))
     with open(os.path.join(staging, "SKILL.md"), "w", encoding="utf-8") as f:
@@ -183,7 +208,8 @@ def sync(project):
     if os.path.isdir(target_root):
         for entry in os.listdir(target_root):
             path = os.path.join(target_root, entry)
-            if entry not in wanted and is_ours(path):
+            # Staging directories start with "." and never match; another session may be using one.
+            if NAME_PATTERN.match(entry) and entry not in wanted and is_ours(path):
                 shutil.rmtree(path, ignore_errors=True)
                 changed = True
     return changed

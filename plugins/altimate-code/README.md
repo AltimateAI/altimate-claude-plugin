@@ -60,7 +60,8 @@ Skills added to the workspace reach your delegated tasks on their own: each alti
 
 They also become Claude Code skills. When a session starts, the plugin copies the workspace's skills into the project's `.claude/skills/<name>/`, then refreshes them from the workspace in the background; Claude Code picks up changes during the session. The copies:
 
-- keep only each skill's name, description, body and files. `allowed-tools`, `hooks` and other frontmatter are dropped, and `!` command blocks are turned into plain text, so a workspace skill cannot pre-approve tools or run commands on your machine;
+- keep only each skill's name, description, body and supporting files. `allowed-tools`, `hooks` and other frontmatter are dropped, `!` command blocks are turned into plain text, and files Claude Code would read as skills, hooks or plugin components (hidden paths, nested `SKILL.md`, `hooks/`, `skills/`, `agents/`, `commands/`, `bin/`, `.mcp.json`, `settings.json`) are not copied, so a workspace skill cannot pre-approve tools or run commands on your machine;
+- come only from a snapshot fetched for the Altimate tenant you are signed in to, and are removed when you sign in elsewhere or the workspace has no skills left;
 - never replace a skill of yours with the same name: that workspace skill is skipped;
 - carry their own `.gitignore`, so they stay out of version control, and are replaced or removed as the workspace changes. Edit the skill in the workspace (or publish it again), not the copy.
 
