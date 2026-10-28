@@ -16,6 +16,10 @@ Thanks for taking the time to contribute. This plugin lives in one repo (`Altima
    Both must exit clean. **Validating the repo root alone is not sufficient** — the marketplace-level validator does not descend into skills, so skill-frontmatter parse errors go undetected unless you also validate the plugin path.
 
    If you touch the CLI resolver block in a skill or command, run `./tests/resolve-cli.sh` — it checks every copy is identical and resolves correctly in bash and zsh.
+
+   If you touch the workspace skill copy, run `python3 -m unittest discover -s tests -p 'test_*.py'`.
+
+   For routing changes, run the evals: `claude plugin eval ./plugins/altimate-code --allow-tools Bash --scaffold`. They start real Claude sessions and cost money; `--runs 1` is enough for a first check.
 4. Open a PR against `AltimateAI/altimate-claude-plugin:main`.
 
 ## Repo layout
