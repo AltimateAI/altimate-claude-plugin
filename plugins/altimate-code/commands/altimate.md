@@ -6,7 +6,8 @@ argument-hint: <task description>
 The user explicitly invoked `/altimate-code:altimate` to use altimate-code for this task. Two paths exist, chosen by what the task and the session offer:
 
 - **Data question** (answers, numbers, lists over warehouse data, lineage, impact, PII, diffs): when tools named `mcp__plugin_altimate-code_altimate-code__*` are available in the session, answer with them yourself and follow the server's analysis method. When they are not available (an organisation's managed settings disallow MCP servers, or the server failed to start), delegate with `--agent analyst` as in the workflow below. The `altimate-code` skill's `tool run` path also works for a single analysis. Tell the user which path is being used.
-- **Long multi-step job or Altimate workspace question** (dbt build, migration, FinOps report, team conventions): delegate with the `builder` agent as in the workflow below. Delegation uses the CLI's own LLM provider.
+- **Altimate workspace question** (team conventions, definitions, knowledge, workspace skills or memory, a query on a workspace warehouse integration): answer it yourself with `workspace_context`, `workspace_skill` and `workspace_execute`, the MCP tools when present and otherwise `tool run <name> --workspace-tools`, as the `altimate-code` skill's "Altimate workspaces" section describes. Delegate with `builder` only when the CLI has neither (too old for `--workspace-tools`).
+- **Long multi-step job** (dbt build, migration, FinOps report): delegate with the `builder` agent as in the workflow below. Delegation uses the CLI's own LLM provider.
 
 For delegation you MUST run the task via the `altimate-code` CLI — do NOT attempt the work with native `Bash`/`Edit`/`Write` tools, and do not read the project's files first: altimate-code investigates the project itself.
 

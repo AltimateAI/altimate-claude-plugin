@@ -38,7 +38,7 @@ deny() {
   exit 0
 }
 
-SQL_HINT='Direct warehouse query detected. The altimate-code CLI runs this read-only with no extra setup: altimate tool run sql_execute --args with a JSON body holding the sql field --json (schema_inspect for structure, warehouse_list for connections). Use altimate-code if altimate is not on PATH.'
+SQL_HINT='Direct warehouse query detected. The altimate-code CLI runs this read-only with no extra setup: altimate tool run sql_execute --workspace-tools --args with a JSON body holding the warehouse and query fields --json (schema_inspect for structure, warehouse_list for connections). Use altimate-code if altimate is not on PATH.'
 
 if [[ "$CMD" =~ ${PREFIX}(psql|trino|clickhouse-client|clickhouse|snowsql|mysql|sqlcmd|duckdb)([[:space:]]|$) ]]; then
   # Interactive or help invocations without a query are left alone.

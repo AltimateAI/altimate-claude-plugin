@@ -68,14 +68,21 @@ Set `ALTIMATE_ROUTE_GUARD=1` to enable a PreToolUse hook that denies Bash comman
 
 ## Use an Altimate workspace
 
-An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's shared skills, knowledge, memory and warehouse integrations. Claude Code reaches it through altimate-code: every task the plugin hands over runs in your project, so it uses the workspace the project is linked to. Nothing in Claude Code needs configuring.
+An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's shared skills, knowledge, memory and warehouse integrations. Claude reaches the workspace linked to the project directly, with three model-free tools that work the same over MCP and through `altimate tool run --workspace-tools`:
+
+- `workspace_context` reports whether sign-in or linking is needed, and once linked gives the workspace summary, skill names, bounded project memory and (with `include_tools`) the knowledge and warehouse operations available.
+- `workspace_skill` reads one shared skill.
+- `workspace_execute` runs one of those operations: `ask_knowledge_base`, listing the workspace's warehouse connections, or a read-only query on them. Writes are refused.
+
+Claude does the reasoning; no altimate-code agent runs. Knowledge questions are answered by Altimate's backend. Each call carries a workspace receipt from `workspace_context`, so a change of account or link is detected before anything runs. Workspace tools need an altimate-code build with the `tool` CLI and `--workspace-tools`; with an older CLI, workspace questions are delegated to altimate-code, which uses the workspace automatically.
 
 1. **Sign in to Altimate** — `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). It opens your browser. This also sets up the model provider altimate-code uses. You can run it from Claude Code by typing it after `!`.
-2. **Link the project** — ask Claude to link the project to your workspace. It lists your workspaces with `altimate workspace list` and links the one you choose with `altimate link --workspace "<id or name>"`, or creates one with `altimate link --create`. Moving a linked project to a different workspace also needs `--yes`. `workspace list` is in newer altimate-code releases; with an older one, tell Claude the workspace's name. In a terminal, `altimate link` does the same with a picker; the picker does not work after `!` in Claude Code.
+2. **Link the project** — ask Claude to link the project to your workspace. It shows the workspaces `workspace_context` (or `altimate workspace list`) returns and links the one you choose with `altimate link --workspace "<id or name>"`, or creates one with `altimate link --create`. Claude links with `ALTIMATE_DISABLE_MEMORY=1`, so existing memory on this machine is not uploaded. Moving a linked project to a different workspace also needs `--yes`. `workspace list` is in newer altimate-code releases; with an older one, tell Claude the workspace's name. In a terminal, `altimate link` does the same with a picker; the picker does not work after `!` in Claude Code.
 3. **Check it** — `altimate workspace status` shows the linked workspace and its page in the Altimate web app.
-4. **Ask Claude** — questions about your team's conventions, standards or knowledge go to altimate-code, which answers from the workspace. Start a request with `/altimate-code:altimate` to be sure it does: *"/altimate-code:altimate what are our naming conventions for staging models?"*
+4. **Ask Claude** — questions about your team's conventions, definitions or knowledge, and queries on the workspace's warehouses, use the workspace tools: *"How do we define recurring revenue?"*, *"Which Snowflake connections does our workspace have?"* Start a request with `/altimate-code:altimate` to be sure it does.
+5. **Workspace engine** — knowledge and warehouse operations need the workspace engine. If it is missing, Claude asks before installing it with `altimate workspace-client engine-install` (Node.js 20+ and npm).
 
-What altimate-code learns during these tasks is saved to the workspace's memory and shared with your team in the CLI, the IDE and Studio. Skills added to the workspace reach the next task.
+**Skills and memory.** Ask Claude to list skills (`altimate skill list`), pull the latest (`altimate workspace refresh`) or share a project skill you name (`altimate skill publish <name>`; replacing needs your confirmation). Claude saves a memory to the workspace only when you ask, after showing you the workspace, id and text, with `altimate workspace-client remember`. What altimate-code learns during delegated `run` tasks is saved to the workspace's memory as before.
 
 ## Example prompts
 
@@ -105,7 +112,9 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |
 | `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1) or `profiles.yml`. |
 | `Not signed in to Altimate` | Run `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). |
-| Answers ignore your workspace's skills or knowledge | Run `altimate workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate link` in a terminal. |
+| Answers ignore your workspace's skills or knowledge | Run `altimate workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate link` in a terminal. If it is linked, check that your CLI has `tool run --workspace-tools` (`altimate upgrade`). |
+| `Altimate account or workspace changed` | The sign-in or link changed since Claude read the workspace. Claude re-reads `workspace_context` and retries once; if it repeats, ask Claude to check `altimate workspace status`. |
+| Workspace engine `needs_engine` | Let Claude run `altimate workspace-client engine-install`, or run it yourself. |
 | Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 Still stuck? See [Support](#support).
