@@ -2,6 +2,12 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.2.0] — 2026-10-27
+
+### Added
+- Workspace skills: Claude can list the skills altimate-code uses in a project (`skill list`), pull the workspace's skills immediately (`workspace refresh`), and publish one of the project's skills to the linked workspace (`skill publish`), re-running with `--replace` only after the user confirms. Personal skills under the home directory are not copied into the project unless the user asks. These commands need altimate-code 0.12.5 or newer; on an older CLI, Claude suggests `altimate upgrade`.
+- The skill description and SessionStart context name these skill actions, so a request to share a skill with the team routes to altimate-code.
+
 ## [1.1.1] — 2026-10-20
 
 ### Fixed

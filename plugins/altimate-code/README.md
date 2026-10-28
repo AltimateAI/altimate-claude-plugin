@@ -54,6 +54,14 @@ An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's 
 
 What altimate-code learns during these tasks is saved to the workspace's memory and shared with your team in the CLI, the IDE and Studio. Skills added to the workspace reach the next task.
 
+### Workspace skills
+
+Skills added to the workspace reach your delegated tasks on their own: each altimate-code run checks the workspace for new or changed skills, at most every five minutes. They apply to altimate-code's work, not to Claude Code's own skills. From Claude Code you can also ask to (altimate-code 0.12.5 or newer):
+
+- **List skills:** *"which altimate skills can this project use?"* runs `altimate skill list`.
+- **Refresh now:** *"refresh the workspace skills"* runs `altimate workspace refresh`, for a skill a teammate just added.
+- **Share a skill with your team:** *"publish my `staging-conventions` skill to the workspace"* runs `altimate skill publish staging-conventions`. The skill must be one of the project's, for example in `.claude/skills/<name>/`. Personal skills in `~/.claude/skills` are refused until you copy them into the project. To update a shared skill, edit it and publish it again.
+
 ## Example prompts
 
 Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):
