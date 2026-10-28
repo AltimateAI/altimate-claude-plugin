@@ -1,5 +1,5 @@
 {
-  "description": "SessionStart context describing altimate-code's data tools; when the MCP server is unavailable or disallowed it also adds the CLI routing guidance, plus an opt-in PreToolUse guard (active only when ALTIMATE_ROUTE_GUARD=1) that points direct warehouse client commands at `altimate tool run`.",
+  "description": "SessionStart context describing altimate-code's data tools (with the CLI routing guidance when the MCP server is unavailable or disallowed) that also copies the linked Altimate workspace's skills into `.claude/skills/`; a Stop hook that refreshes those skills in the background once they are an hour old; and an opt-in PreToolUse guard (active only when ALTIMATE_ROUTE_GUARD=1) that points direct warehouse client commands at `altimate tool run`.",
   "hooks": {
     "SessionStart": [
       {
@@ -18,6 +18,16 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/warehouse-guard.sh\""
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/refresh-skills.sh\" --if-stale"
           }
         ]
       }

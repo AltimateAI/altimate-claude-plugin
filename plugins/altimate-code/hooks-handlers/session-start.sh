@@ -15,48 +15,31 @@ MODE="$(altimate_data_mode)"
 
 # Both modes: copy the linked Altimate workspace's skills into the project's
 # `.claude/skills/` (see sync-workspace-skills.py) so they load as Claude Code
-# skills. The copy of what is already on disk runs here, before Claude's first
-# reply. A project that was never synced, or not for an hour, is refreshed from
-# the workspace by a detached `workspace refresh`: it takes seconds of network
-# time, so the hook does not wait for it, a lock keeps one refresh per project
-# (a lock older than ten minutes belongs to a refresh that died), and Claude
-# Code's skill watcher picks the copies up when it finishes. Projects altimate-code
-# has never worked in (no `.altimate-code` directory) are skipped silently.
-# Set ALTIMATE_CLAUDE_SKILL_SYNC=0 to turn all of this off.
+# skills. altimate-code writes these copies itself when a project is linked or
+# refreshed; this copy of the snapshot on disk is the safety net for older CLIs
+# and runs before Claude's first reply. A snapshot that was never synced, or not
+# for an hour, is refreshed in the background by refresh-skills.sh without
+# delaying the session; Claude Code's skill watcher loads the copies when it
+# finishes. Set ALTIMATE_CLAUDE_SKILL_SYNC=0 to turn all of this off.
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
-SYNC_SCRIPT="$(dirname "$0")/sync-workspace-skills.py"
+HANDLERS="$(dirname "$0")"
 RELOAD=""
 SKILLS_NOTE=""
 
 if [ "${ALTIMATE_CLAUDE_SKILL_SYNC:-1}" != "0" ] && command -v python3 >/dev/null 2>&1; then
-  if [ "$(python3 -I "$SYNC_SCRIPT" "$PROJECT_DIR" 2>/dev/null)" = "changed" ]; then
+  if [ "$(python3 -I "$HANDLERS/sync-workspace-skills.py" "$PROJECT_DIR" 2>/dev/null)" = "changed" ]; then
     RELOAD=',
     "reloadSkills": true'
   fi
 
   if [ -d "$PROJECT_DIR/.altimate-code" ]; then
-    SNAPSHOT="$PROJECT_DIR/.altimate-code/skill/_workspace"
-    if [ -z "$(find "$SNAPSHOT/.synced-at" -mmin -60 2>/dev/null)" ]; then
-      # Claude Code watches only skill directories that exist when it starts, so
-      # create it now for copies the background refresh adds.
-      if [ ! -d "$PROJECT_DIR/.claude/skills" ] && mkdir -p "$PROJECT_DIR/.claude/skills" 2>/dev/null; then
-        RELOAD=',
+    # Claude Code watches only skill directories that exist when it starts, so
+    # create it now for copies the background refresh adds.
+    if [ ! -d "$PROJECT_DIR/.claude/skills" ] && mkdir -p "$PROJECT_DIR/.claude/skills" 2>/dev/null; then
+      RELOAD=',
     "reloadSkills": true'
-      fi
-      for ALTIMATE_NAME in altimate altimate-code; do
-        ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
-        [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
-      done
-      LOCK="$PROJECT_DIR/.altimate-code/claude-skill-sync.lock"
-      find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null
-      if [ -n "$ALTIMATE_BIN" ] && mkdir "$LOCK" 2>/dev/null; then
-        (
-          "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR"
-          python3 -I "$SYNC_SCRIPT" "$PROJECT_DIR"
-          rmdir "$LOCK"
-        ) </dev/null >/dev/null 2>&1 &
-      fi
     fi
+    CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$HANDLERS/refresh-skills.sh" --if-stale
   fi
 
   # Marked directories are the copies this plugin made; user-written skills do not carry the marker.
