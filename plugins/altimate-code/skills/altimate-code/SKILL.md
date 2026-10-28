@@ -135,7 +135,7 @@ What altimate-code learns during delegated tasks is saved to the workspace's mem
 
 ### Workspace skills
 
-The workspace's skills reach this project without any action: every `altimate-code run` checks the workspace for new or changed skills, at most every five minutes, and copies them into `.altimate-code/skill/_workspace/`. They are altimate-code's skills, not Claude Code's: they apply to delegated tasks. When the user asks to see, refresh or share skills, run these through the same resolver. They need altimate-code 0.12.5 or newer: if one is an unknown command, tell the user to upgrade with `! altimate upgrade`.
+The workspace's skills reach this project without any action: each `altimate-code run` checks the workspace for new or changed skills when it starts (a long run re-checks at most every five minutes) and copies them into `.altimate-code/skill/_workspace/`. They are altimate-code's skills, not Claude Code's: they apply to delegated tasks. When the user asks to see, refresh or share skills, run these through the same resolver. They need altimate-code 0.12.5 or newer: if one is an unknown command, tell the user to upgrade with `! altimate upgrade`.
 
 - **List skills:** `"$ALTIMATE_BIN" skill list < /dev/null` lists every skill altimate-code can use in this project: built-in, personal, the project's own and the workspace's.
 - **Refresh now:** `"$ALTIMATE_BIN" workspace refresh < /dev/null` pulls the workspace's skills immediately, for a skill a teammate just added. Exit code 3 means the project is not linked: offer to link it as above. Show the user the CLI's output, including any skipped skills and why.

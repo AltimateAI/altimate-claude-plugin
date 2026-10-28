@@ -56,7 +56,7 @@ What altimate-code learns during these tasks is saved to the workspace's memory 
 
 ### Workspace skills
 
-Skills added to the workspace reach your delegated tasks on their own: each altimate-code run checks the workspace for new or changed skills, at most every five minutes. They apply to altimate-code's work, not to Claude Code's own skills. From Claude Code you can also ask to (altimate-code 0.12.5 or newer):
+Skills added to the workspace reach your delegated tasks on their own: each altimate-code run checks the workspace for new or changed skills when it starts. They apply to altimate-code's work, not to Claude Code's own skills. From Claude Code you can also ask to (altimate-code 0.12.5 or newer):
 
 - **List skills:** *"which altimate skills can this project use?"* runs `altimate skill list`.
 - **Refresh now:** *"refresh the workspace skills"* runs `altimate workspace refresh`, for a skill a teammate just added.
