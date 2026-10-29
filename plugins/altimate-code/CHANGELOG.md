@@ -14,13 +14,10 @@ All notable changes to this plugin will be documented in this file.
 - `/altimate-code:refresh-skills` refreshes the workspace skills on demand.
 - Tests: `tests/refresh-skills.sh`.
 
-### Fixed
-- Workspace skill copying runs under a per-project lock, reads the snapshot only once it holds it, and swaps each copy with rollback, so concurrent sessions and background refreshes cannot remove each other's copies.
-- A snapshot that exists but cannot be read leaves the copies as they are; a symlinked `SKILL.md`, a symlinked snapshot or a manifest without a tenant is not served.
-- A failed background refresh is retried at most hourly instead of after every turn; `--wait` no longer removes the lock of a refresh that is still running.
-- The SessionStart mode check no longer uses a here-doc, so MCP deny settings are honoured in sandboxes that refuse its temporary file.
-- The warehouse guard allows only a lone altimate command; chained commands are checked.
-- The `analyst` agent no longer reads `.env` files or adds connections.
+- How the copies stay safe: they are served only for the signed-in Altimate account (tenant, URL and the CLI's credential digest); concurrent sessions and refreshes take turns under a lock on `.claude/skills` and swap each copy with rollback; a snapshot that cannot be read, or is briefly missing while the CLI swaps in a new one, leaves the copies alone; symlinked snapshot files and nested `CLAUDE.md` files are not copied; a skill folder without the `.altimate-workspace-skill` marker is never touched; staging left by a killed sync is removed. `ALTIMATE_CLAUDE_SKILL_SYNC=0` also removes the copies.
+- Refresh is per account: a failed refresh is retried at most hourly, and a newly signed-in account refreshes at once. `/altimate-code:refresh-skills` reports when another refresh still holds the lock instead of running alongside it.
+- The mode check reads MCP policy as Claude Code applies it (`managed-mcp.json`, `managed-settings.d/`, merged `allowedMcpServers` and `deniedMcpServers` by name or command, `allowManagedMcpServersOnly`, servers turned off in `/mcp`), and the CLI-mode guidance names the executable on PATH (`altimate` or `altimate-code`).
+- The opt-in warehouse guard (a best-effort nudge, not a security control) allows only a lone `altimate` command, judges each client call by its own arguments and that client's query flags (`psql -tAc` included), and also catches command and process substitution, client paths and quoted names, shell keywords, `sudo`/`env`/`time`/`timeout` wrappers and variable prefixes, `sh -c`, `bq` global flags and DuckDB SQL arguments.
 
 ### Changed
 - The skill, the `analyst` agent and the CLI-mode SessionStart text describe the three workspace features in both modes: team skills as project skills, conventions, knowledge and memory through `workspace_context`, and warehouse reads through `workspace_execute`. With a CLI that turns workspace tools on in linked projects, `tool context` also prints the workspace name and its team skills; the plugin still passes `--workspace-tools` so older CLIs work.

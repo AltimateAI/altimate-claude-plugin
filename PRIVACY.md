@@ -13,7 +13,7 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 - MCP tool results, including sampled column values and query results, enter the Claude Code conversation and therefore reach your configured model provider. The local MCP server makes no separate LLM calls.
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
-- In a project linked to an Altimate workspace, the plugin copies the workspace's team skills into the project's `.claude/skills/` and refreshes them from Altimate in the background at session start and at most hourly. Their text loads into the Claude Code conversation like any project skill. `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns this off.
+- In a project linked to an Altimate workspace, the plugin copies the workspace's team skills into the project's `.claude/skills/` and refreshes them from Altimate in the background at session start and at most hourly. Their text loads into the Claude Code conversation like any project skill. `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns this off and removes the copies at the next session start.
 - Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
@@ -34,10 +34,10 @@ The MCP server makes no separate LLM calls. Delegation uses the separate provide
 
 | Data | Where it goes | Retention |
 |---|---|---|
-| Team skills of the linked Altimate workspace | Fetched by `altimate workspace refresh` from your Altimate tenant (at session start when over an hour old, hourly from the Stop hook, or with `/altimate-code:refresh-skills`) into `.altimate-code/skill/_workspace/`, then copied into `.claude/skills/` | Local files, kept out of git; removed when the workspace drops a skill, the project is unlinked or you sign in to another tenant |
+| Team skills of the linked Altimate workspace | Fetched by `altimate workspace refresh` from your Altimate tenant (at session start when over an hour old, hourly from the Stop hook, or with `/altimate-code:refresh-skills`) into `.altimate-code/skill/_workspace/`, then copied into `.claude/skills/` | Local files, kept out of git; removed at the next session start when the workspace drops a skill, the project is unlinked, you sign in to another account or `ALTIMATE_CLAUDE_SKILL_SYNC=0` is set. Uninstalling the plugin leaves them: delete the `.claude/skills/` folders that contain `.altimate-workspace-skill` |
 | Text of a skill Claude uses | Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
 
-Refresh uses your existing Altimate sign-in. Projects altimate-code has never worked in are skipped. Set `ALTIMATE_CLAUDE_SKILL_SYNC=0` to turn copying and refresh off.
+Refresh uses your existing Altimate sign-in. Projects altimate-code has never worked in are skipped. Set `ALTIMATE_CLAUDE_SKILL_SYNC=0` to turn copying and refresh off and remove the copies.
 
 The delegation path below runs only when the delegation skill or the `/altimate-code:altimate` command fires and invokes the locally installed altimate-code CLI.
 

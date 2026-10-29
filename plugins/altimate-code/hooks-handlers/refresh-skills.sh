@@ -3,9 +3,10 @@
 # them into the project's `.claude/skills/` (see sync-workspace-skills.py). Claude
 # Code watches that directory, so copies added mid-session load without a restart.
 #
-#   refresh-skills.sh --if-stale   background refresh, only when neither a sync nor
-#                                  an attempt happened in STALE_MINUTES (hooks), so a
-#                                  project that cannot refresh retries hourly
+#   refresh-skills.sh --if-stale   background refresh, unless in STALE_MINUTES this
+#                                  account refreshed the snapshot or tried to (hooks),
+#                                  so a project that cannot refresh retries hourly and
+#                                  a newly signed-in account refreshes at once
 #   refresh-skills.sh --wait       refresh now and print the outcome (manual refresh)
 #
 # A lock keeps one refresh per project; a lock older than ten minutes belongs to a
@@ -16,8 +17,6 @@ MODE="${1:---if-stale}"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 SYNC_SCRIPT="$(dirname "$0")/sync-workspace-skills.py"
 LOCK="$PROJECT_DIR/.altimate-code/claude-skill-sync.lock"
-# Outside the project, so it never shows up in a repository that tracks `.altimate-code/`.
-ATTEMPTED="${XDG_CACHE_HOME:-$HOME/.cache}/altimate-code-plugin/skill-refresh-$(printf '%s' "$PROJECT_DIR" | cksum | cut -d' ' -f1).attempted"
 
 say() { [ "$MODE" = "--wait" ] && printf '%s\n' "$1"; }
 
@@ -25,8 +24,14 @@ if [ "${ALTIMATE_CLAUDE_SKILL_SYNC:-1}" = "0" ]; then say "Workspace skill sync 
 command -v python3 >/dev/null 2>&1 || { say "python3 is needed to copy workspace skills."; exit 0; }
 [ -d "$PROJECT_DIR/.altimate-code" ] || { say "This project is not linked to an Altimate workspace."; exit 0; }
 
-if [ "$MODE" = "--if-stale" ] && [ -n "$(find "$PROJECT_DIR/.altimate-code/skill/_workspace/.synced-at" "$ATTEMPTED" -mmin -"$STALE_MINUTES" 2>/dev/null)" ]; then
-  exit 0
+# Per project and account, outside the project so it never shows up in a repository that tracks `.altimate-code/`.
+ACCOUNT="$(python3 -I "$SYNC_SCRIPT" --account 2>/dev/null)"
+ATTEMPTED="${XDG_CACHE_HOME:-$HOME/.cache}/altimate-code-plugin/skill-refresh-$(printf '%s|%s' "$PROJECT_DIR" "$ACCOUNT" | cksum | cut -d' ' -f1).attempted"
+fresh() { [ -n "$(find "$1" -mmin -"$STALE_MINUTES" 2>/dev/null)" ]; }
+if [ "$MODE" = "--if-stale" ]; then
+  fresh "$ATTEMPTED" && exit 0
+  # A recent sync counts only when its snapshot belongs to the signed-in account.
+  fresh "$PROJECT_DIR/.altimate-code/skill/_workspace/.synced-at" && python3 -I "$SYNC_SCRIPT" --owned "$PROJECT_DIR" && exit 0
 fi
 
 for ALTIMATE_NAME in altimate altimate-code; do
@@ -36,7 +41,7 @@ done
 [ -n "$ALTIMATE_BIN" ] || { say "altimate-code CLI not found (tried altimate, altimate-code)."; exit 0; }
 
 # Claude Code watches only skill directories that exist when it starts.
-mkdir -p "$PROJECT_DIR/.claude/skills" 2>/dev/null
+[ -L "$PROJECT_DIR/.claude" ] || mkdir -p "$PROJECT_DIR/.claude/skills" 2>/dev/null
 
 find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null
 if [ "$MODE" = "--wait" ]; then

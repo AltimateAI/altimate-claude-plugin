@@ -4,8 +4,11 @@ Run: python3 -m unittest discover -s tests -p 'test_*.py'
 """
 
 import fcntl
+import importlib.util
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,10 +69,12 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         os.makedirs(self.project)
         self.sign_in(TENANT, API_URL + "/")
 
-    def sign_in(self, tenant, url):
+    def sign_in(self, tenant, url, key="k"):
         os.makedirs(os.path.join(self.home, ".altimate"), exist_ok=True)
         with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
-            json.dump({"altimateUrl": url, "altimateInstanceName": tenant, "altimateApiKey": "k"}, f)
+            json.dump({"altimateUrl": url, "altimateInstanceName": tenant, "altimateApiKey": key}, f)
+        # The CLI's credential digest: URL without trailing slashes.
+        self.account = hashlib.sha256(f"{url.rstrip('/')}|{tenant}|{key}".encode()).hexdigest()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -88,6 +93,7 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
             "version": 2,
             "tenant": TENANT,
             "apiUrl": API_URL,
+            "account": self.account,
             "skills": {sid: {"updatedAt": "x", "files": {}} for sid in skills},
         }
         with open(os.path.join(root, ".manifest.json"), "w", encoding="utf-8") as f:
@@ -234,7 +240,7 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.assertEqual(proc.communicate(timeout=10)[0].strip(), "changed")
 
     def test_another_sessions_staging_directory_is_left_alone(self):
-        staging = os.path.join(self.project, ".claude", "skills", ".a.x1y2")
+        staging = os.path.join(self.project, ".claude", "skills", ".a.altimate-staging-x1y2z3w4")
         os.makedirs(staging)
         open(os.path.join(staging, MARKER), "w").close()
         self.write_snapshot({"sk_1": {"SKILL.md": "---\nname: a\ndescription: d\n---\n"}})
@@ -347,6 +353,125 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         os.symlink(os.path.join(outside, "SKILL.md"), os.path.join(self.project, SNAPSHOT, "sk_1", "SKILL.md"))
         self.run_sync()
         self.assertFalse(os.path.exists(self.skill_path("outside")))
+
+
+    def run_script(self, *args, env=None):
+        return subprocess.run(
+            [sys.executable, "-I", SCRIPT, *args, self.project],
+            capture_output=True, text=True, env={**os.environ, "HOME": self.home, **(env or {})},
+        )
+
+    def test_account_digest_matches_the_cli_for_env_references_and_trailing_slashes(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
+            json.dump({"altimateUrl": API_URL + "//", "altimateInstanceName": TENANT, "altimateApiKey": "${env:AK}"}, f)
+        self.assertEqual(self.run_script("--owned", env={"AK": "k"}).returncode, 0)
+        self.assertEqual(self.run_script("--owned").returncode, 1)  # variable not set: not signed in
+
+    def test_nothing_is_written_or_removed_through_a_symlinked_skills_dir(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        elsewhere = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(os.path.join(elsewhere, "old-copy"))
+        open(os.path.join(elsewhere, "old-copy", MARKER), "w").close()
+        os.makedirs(os.path.join(self.project, ".claude"))
+        os.symlink(elsewhere, os.path.join(self.project, ".claude", "skills"))
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertEqual(self.run_script("--withdraw").stdout.strip(), "")
+        self.assertEqual(sorted(os.listdir(elsewhere)), ["old-copy"])
+
+    def test_another_account_on_the_same_tenant_is_not_served(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        self.sign_in(TENANT, API_URL + "/", key="another-key")
+        self.assertEqual(self.run_sync()[0], "changed")
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_credentials_without_an_api_key_are_not_served(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
+            json.dump({"altimateUrl": API_URL + "/", "altimateInstanceName": TENANT}, f)
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_owned_answers_for_the_signed_in_account_only(self):
+        self.assertEqual(self.run_script("--owned").returncode, 1)
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.assertEqual(self.run_script("--owned").returncode, 0)
+        self.sign_in(TENANT, API_URL + "/", key="another-key")
+        self.assertEqual(self.run_script("--owned").returncode, 1)
+
+    def test_a_renamed_copy_is_left_to_the_user(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        mine = os.path.join(self.project, ".claude", "skills", "staging-conventions-mine")
+        shutil.copytree(os.path.dirname(self.skill_path("staging-conventions")), mine)
+        self.run_sync()
+        self.assertTrue(os.path.isdir(mine))
+        self.write_snapshot({})
+        self.run_sync()
+        self.assertTrue(os.path.isdir(mine))
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_copies_marked_without_a_name_are_still_ours(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        with open(self.skill_path("staging-conventions", MARKER), "w", encoding="utf-8") as f:
+            f.write("Copied from the linked Altimate workspace by the altimate-code plugin. Edits here are replaced.\n")
+        self.write_snapshot({})
+        self.assertEqual(self.run_sync()[0], "changed")
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_nested_claude_md_is_not_copied(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "CLAUDE.md": "x", "ref/claude.local.md": "x", "ref/notes.md": "x"}})
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions", "CLAUDE.md")))
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions", "ref/claude.local.md")))
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions", "ref/notes.md")))
+
+    def test_withdraw_removes_only_our_copies(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        os.makedirs(os.path.dirname(self.skill_path("users-own")))
+        open(self.skill_path("users-own"), "w").close()
+        self.assertEqual(self.run_script("--withdraw").stdout.strip(), "changed")
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+        self.assertTrue(os.path.exists(self.skill_path("users-own")))
+
+    def test_missing_snapshot_while_the_cli_swaps_keeps_copies(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        root = os.path.join(self.project, SNAPSHOT)
+        old = time.time() - 3600
+        os.utime(root, (old, old))  # the rename keeps a snapshot's old mtime
+        retired = os.path.join(self.project, ".altimate-code", "skill-staging", "retired-1-x")
+        os.makedirs(os.path.dirname(retired))
+        os.rename(root, retired)
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+        spec = importlib.util.spec_from_file_location("sync_script", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.SWAP_SECONDS = -1  # a retired snapshot left long ago by a crashed swap
+        self.assertFalse(module.cli_is_swapping(self.project))
+
+    def test_abandoned_staging_is_removed_but_other_hidden_dirs_stay(self):
+        skills = os.path.join(self.project, ".claude", "skills")
+        abandoned = os.path.join(skills, ".alpha.altimate-staging-ab12cd34")
+        fresh = os.path.join(skills, ".beta.altimate-staging-ef56gh78.old")
+        users = [os.path.join(skills, name) for name in (".notes.my-files", ".drafts.archived", ".notes.20240101")]
+        for path in (abandoned, fresh, *users):
+            os.makedirs(path)
+            with open(os.path.join(path, ".gitignore"), "w", encoding="utf-8") as f:
+                f.write("*\n")
+        old = time.time() - 3600
+        for path in (abandoned, *users):
+            os.utime(path, (old, old))
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        self.assertFalse(os.path.exists(abandoned))
+        self.assertTrue(os.path.exists(fresh))
+        for path in users:
+            self.assertTrue(os.path.exists(path), path)
 
 
 if __name__ == "__main__":

@@ -35,11 +35,16 @@ altimate-claude-plugin/
 │       ├── agents/
 │       │   └── analyst.md       # read-only data analyst for the MCP tools
 │       ├── hooks/
-│       │   └── hooks.json       # SessionStart hook config
+│       │   └── hooks.json       # SessionStart, Stop and PreToolUse hook config
 │       ├── hooks-handlers/
-│       │   └── session-start.sh # SessionStart hook handler
+│       │   ├── session-start.sh # SessionStart: capability text, mode, skill copy
+│       │   ├── data-mode.sh     # MCP or CLI mode, from PATH and MCP settings
+│       │   ├── sync-workspace-skills.py # copies workspace skills into .claude/skills
+│       │   ├── refresh-skills.sh # background / on-demand workspace skill refresh
+│       │   └── warehouse-guard.sh # opt-in PreToolUse warehouse-client guard
 │       ├── commands/
-│       │   └── altimate.md      # /altimate-code:altimate slash command
+│       │   ├── altimate.md      # /altimate-code:altimate slash command
+│       │   └── refresh-skills.md # /altimate-code:refresh-skills
 │       ├── README.md            # plugin-specific docs
 │       └── CHANGELOG.md         # plugin-specific changelog
 ├── README.md                # repo overview
@@ -87,7 +92,11 @@ claude plugin install altimate-code@altimate-claude-plugin
 - **Routing skill** — `plugins/altimate-code/skills/altimate-code/SKILL.md` — use the MCP tools when available, otherwise `tool run` (after `tool context`); delegate long jobs with `run`.
 - **Analyst agent** — `plugins/altimate-code/agents/analyst.md` — read-only data analyst that works in both modes.
 - **MCP registration** — `plugins/altimate-code/.mcp.json` — launches the local stdio server; builds without `mcp serve` fail to start it and the CLI mode applies instead.
-- **Hook** — `plugins/altimate-code/hooks/hooks.json` + `plugins/altimate-code/hooks-handlers/session-start.sh` — SessionStart hook that describes the plugin's capabilities in the system prompt so Claude can route to it when the task shape fits.
+- **Hooks** — `plugins/altimate-code/hooks/hooks.json`:
+  - SessionStart (`hooks-handlers/session-start.sh`) describes the plugin's capabilities so Claude can route to it, adds the CLI guidance when `data-mode.sh` picks the CLI mode, and copies the linked workspace's skills (`sync-workspace-skills.py`).
+  - Stop (`refresh-skills.sh --if-stale`) refreshes those skills in the background at most hourly.
+  - PreToolUse (`warehouse-guard.sh`) points direct warehouse clients at `tool run`, only with `ALTIMATE_ROUTE_GUARD=1`.
+- **Tests** — `tests/*.sh` and `python3 -m pytest tests/`; run them all before a PR.
 - **Command** — `plugins/altimate-code/commands/altimate.md` — `/altimate-code:altimate` slash command follows the same routing with agent-persona selection for delegation.
 
 ## Reporting bugs / requesting features
