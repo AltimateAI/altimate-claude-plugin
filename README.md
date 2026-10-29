@@ -11,10 +11,6 @@ The tools reach Claude in two ways:
 
 Source queries are read-only by default: database-enforced on Postgres, SQLite, and DuckDB; classification-only elsewhere, so use a read-only DB user. Connections come from project/global `.altimate-code/connections.json` and `ALTIMATE_CODE_CONN_*` environment variables. See the [plugin README](./plugins/altimate-code/README.md) for setup and details.
 
-## Unpublished automatic pilot
-
-A separate [altimate-code-experimental](plugins/altimate-code-experimental/) listing adds automatic data routing, first-use workspace setup and SQL results inside Claude Code. The pilot does not modify the default plugin. The pilot requires a platform-specific bundle with its compatible CLI; the Git source listing alone lacks that runtime. See [packaging, installation and verification limits](docs/workspace-data-mode.md). No default release or public pilot artifact is published by this draft.
-
 ## Install
 
 From Anthropic's plugin directory:

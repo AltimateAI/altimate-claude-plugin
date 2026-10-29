@@ -15,12 +15,6 @@
       "description": "Gives Claude Code altimate-code's model-free data tools (column-level lineage, impact analysis, PII detection, data-diff, FinOps, query equivalence, dialect translation, warehouse queries) through its MCP server, or through `altimate tool run` when MCP servers are not allowed, with delegation to the altimate-code agent for long dbt jobs and access to a linked Altimate workspace's knowledge.",
       "source": "./plugins/altimate-code",
       "strict": false
-    },
-    {
-      "name": "altimate-code-experimental",
-      "description": "Experimental automatic data workflow: workspace context, native MCP and SQL results inside Claude Code.",
-      "source": "./plugins/altimate-code-experimental",
-      "strict": false
     }
   ]
 }
