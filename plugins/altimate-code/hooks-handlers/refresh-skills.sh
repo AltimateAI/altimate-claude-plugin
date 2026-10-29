@@ -16,7 +16,8 @@ MODE="${1:---if-stale}"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 SYNC_SCRIPT="$(dirname "$0")/sync-workspace-skills.py"
 LOCK="$PROJECT_DIR/.altimate-code/claude-skill-sync.lock"
-ATTEMPTED="$PROJECT_DIR/.altimate-code/claude-skill-sync.attempted"
+# Outside the project, so it never shows up in a repository that tracks `.altimate-code/`.
+ATTEMPTED="${XDG_CACHE_HOME:-$HOME/.cache}/altimate-code-plugin/skill-refresh-$(printf '%s' "$PROJECT_DIR" | cksum | cut -d' ' -f1).attempted"
 
 say() { [ "$MODE" = "--wait" ] && printf '%s\n' "$1"; }
 
@@ -53,7 +54,7 @@ if [ "$MODE" = "--wait" ]; then
 fi
 
 if mkdir "$LOCK" 2>/dev/null; then
-  touch "$ATTEMPTED" 2>/dev/null
+  mkdir -p "$(dirname "$ATTEMPTED")" 2>/dev/null && touch "$ATTEMPTED" 2>/dev/null
   (
     "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR"
     python3 -I "$SYNC_SCRIPT" "$PROJECT_DIR"

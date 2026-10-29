@@ -2,8 +2,9 @@
 # Opt-in PreToolUse hook for Bash. Does nothing unless ALTIMATE_ROUTE_GUARD=1.
 # When enabled, denies commands that query a warehouse directly through a
 # client (psql -c, trino --execute, docker exec ... clickhouse-client, snowsql,
-# bq query) and points at the matching `altimate tool run`. altimate commands,
-# dbt compile/parse and file operations are never blocked. Any parsing problem
+# bq query) and points at the matching `altimate tool run`. A lone altimate
+# command, dbt compile/parse and file operations are never blocked; altimate
+# chained with other commands is checked like any command. Any parsing problem
 # results in allow.
 
 [ "${ALTIMATE_ROUTE_GUARD:-}" = "1" ] || exit 0
