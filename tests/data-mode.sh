@@ -35,4 +35,7 @@ expect "malformed settings are ignored" "$W" '{not json' "" "" mcp
 expect "env forces cli" "$W" "" "" "ALTIMATE_DATA_MODE=cli" cli
 expect "env forces mcp" "$N" "" "" "ALTIMATE_DATA_MODE=mcp" mcp
 
+# session-start.sh and the files it sources must not need a here-doc's temporary file.
+! grep -n '<<' "$HOOK" "$ROOT/plugins/altimate-code/hooks-handlers/data-mode.sh" || { echo "FAIL: here-doc in the SessionStart path"; FAILURES=$((FAILURES + 1)); }
+
 [ "$FAILURES" -eq 0 ] && echo "PASS" || { echo "$FAILURES failure(s)"; exit 1; }

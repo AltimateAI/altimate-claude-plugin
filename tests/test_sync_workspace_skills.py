@@ -3,11 +3,13 @@
 Run: python3 -m unittest discover -s tests -p 'test_*.py'
 """
 
+import fcntl
 import json
 import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 SCRIPT = os.path.join(
@@ -185,13 +187,51 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.run_sync()
         self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
 
-    def test_unreadable_manifest_removes_copies(self):
+    def test_unreadable_manifest_keeps_copies(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
         self.run_sync()
         with open(os.path.join(self.project, SNAPSHOT, ".manifest.json"), "w", encoding="utf-8") as f:
             f.write("{not json")
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_missing_snapshot_removes_copies(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        os.remove(os.path.join(self.project, SNAPSHOT, ".manifest.json"))
         self.assertEqual(self.run_sync()[0], "changed")
         self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_snapshot_without_a_tenant_is_not_served(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        manifest_path = os.path.join(self.project, SNAPSHOT, ".manifest.json")
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        del manifest["tenant"], manifest["apiUrl"]
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
+            json.dump({"altimateApiKey": "k"}, f)
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_waits_for_another_sync_to_finish(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        skills_dir = os.path.join(self.project, ".claude", "skills")
+        os.makedirs(skills_dir)
+        lock = os.open(skills_dir, os.O_RDONLY)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        proc = subprocess.Popen(
+            [sys.executable, "-I", SCRIPT, self.project],
+            stdout=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "HOME": self.home},
+        )
+        time.sleep(0.5)
+        self.assertIsNone(proc.poll())
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+        os.close(lock)
+        self.assertEqual(proc.communicate(timeout=10)[0].strip(), "changed")
 
     def test_another_sessions_staging_directory_is_left_alone(self):
         staging = os.path.join(self.project, ".claude", "skills", ".a.x1y2")
@@ -297,6 +337,16 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         os.symlink(os.path.join(outside, "secret.txt"), os.path.join(self.project, SNAPSHOT, "sk_1", "link.txt"))
         self.run_sync()
         self.assertFalse(os.path.exists(self.skill_path("a", "link.txt")))
+
+    def test_symlinked_skill_file_is_not_followed(self):
+        outside = os.path.join(self.project, "outside")
+        os.makedirs(outside)
+        with open(os.path.join(outside, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: outside\ndescription: d\n---\nsecret\n")
+        self.write_snapshot({"sk_1": {"other.md": "x"}})
+        os.symlink(os.path.join(outside, "SKILL.md"), os.path.join(self.project, SNAPSHOT, "sk_1", "SKILL.md"))
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("outside")))
 
 
 if __name__ == "__main__":

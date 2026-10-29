@@ -21,6 +21,7 @@ cat > "$TMP/bin/altimate" <<'FAKE'
 dir="$4"; snap="$dir/.altimate-code/skill/_workspace"
 sleep "${FAKE_DELAY:-0}"
 echo refresh >> "$dir/refresh.log"
+[ -z "${FAKE_FAIL:-}" ] || exit 1
 mkdir -p "$snap/id-1"
 printf '{"tenant":"acme","apiUrl":"https://api.example.com","skills":{"id-1":{}}}\n' > "$snap/.manifest.json"
 printf -- '---\nname: team-style\ndescription: Team style\n---\nUse `stg_` prefixes.\n' > "$snap/id-1/SKILL.md"
@@ -59,6 +60,13 @@ FAKE_DELAY=1 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
 FAKE_DELAY=1 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
 sleep 2; wait_for "$p/refresh.log"; sleep 0.3
 [ "$(wc -l < "$p/refresh.log" | tr -d ' ')" = "1" ] || fail "two refreshes ran at once"
+
+# A refresh that fails (never writes .synced-at) is not retried at the next Stop.
+p="$TMP/failing"; mkdir -p "$p/.altimate-code"
+FAKE_FAIL=1 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
+wait_for "$p/refresh.log"; sleep 0.3
+FAKE_FAIL=1 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale; sleep 0.5
+[ "$(wc -l < "$p/refresh.log" | tr -d ' ')" = "1" ] || fail "failed refresh was retried within the hour"
 
 # Manual refresh waits and reports.
 p="$TMP/manual"; mkdir -p "$p/.altimate-code"

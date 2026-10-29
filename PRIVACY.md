@@ -9,15 +9,16 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 
 ## The short version
 
-- When the plugin is enabled, Claude Code launches a local `altimate-code mcp serve` process for direct data tools. This requires a build containing `mcp serve`; if the server cannot start or its tools are unavailable, data questions fall back to CLI delegation.
+- When the plugin is enabled, Claude Code launches a local `altimate-code mcp serve` process for direct data tools. This requires a build containing `mcp serve`; if the server cannot start or is disallowed, the same tools run through the model-free `altimate tool run` CLI, which makes no LLM calls either.
 - MCP tool results, including sampled column values and query results, enter the Claude Code conversation and therefore reach your configured model provider. The local MCP server makes no separate LLM calls.
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
+- In a project linked to an Altimate workspace, the plugin copies the workspace's team skills into the project's `.claude/skills/` and refreshes them from Altimate in the background at session start and at most hourly. Their text loads into the Claude Code conversation like any project skill. `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns this off.
 - Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
 
-The plugin registers a local stdio MCP server through `.mcp.json`, provides routing skills and slash commands, and runs a SessionStart hook that prints a fixed capability description. The server reads configured connections and runs data tools under your local credentials. The plugin adds no analytics of its own; CLI telemetry is described below.
+The plugin registers a local stdio MCP server through `.mcp.json`, provides routing skills and slash commands, and runs hooks: SessionStart prints a capability description and, with Stop, keeps the linked workspace's skills copied into the project (see below); an opt-in PreToolUse guard checks Bash commands locally. The server reads configured connections and runs data tools under your local credentials. The plugin adds no analytics of its own; CLI telemetry is described below.
 
 ## Data flows through MCP tools
 
@@ -28,6 +29,15 @@ The plugin registers a local stdio MCP server through `.mcp.json`, provides rout
 | Scratch tables and spilled query results | Local session storage or spill files; any content Claude reads enters the conversation and reaches your model provider | Local artifacts; conversation copies follow Claude Code and provider policies |
 
 The MCP server makes no separate LLM calls. Delegation uses the separate provider path below.
+
+## Data flows for workspace skills
+
+| Data | Where it goes | Retention |
+|---|---|---|
+| Team skills of the linked Altimate workspace | Fetched by `altimate workspace refresh` from your Altimate tenant (at session start when over an hour old, hourly from the Stop hook, or with `/altimate-code:refresh-skills`) into `.altimate-code/skill/_workspace/`, then copied into `.claude/skills/` | Local files, kept out of git; removed when the workspace drops a skill, the project is unlinked or you sign in to another tenant |
+| Text of a skill Claude uses | Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
+
+Refresh uses your existing Altimate sign-in. Projects altimate-code has never worked in are skipped. Set `ALTIMATE_CLAUDE_SKILL_SYNC=0` to turn copying and refresh off.
 
 The delegation path below runs only when the delegation skill or the `/altimate-code:altimate` command fires and invokes the locally installed altimate-code CLI.
 

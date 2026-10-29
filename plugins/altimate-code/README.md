@@ -49,7 +49,7 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 
 ## How it works
 
-1. A **SessionStart hook** adds a static description of the available tools and both modes to the session. It does not invoke the CLI.
+1. A **SessionStart hook** adds a description of the available tools and both modes to the session, and copies the linked workspace's skills (see below). It does not start the MCP server.
 2. **MCP mode.** Claude calls `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns columns and value profiles; large results spill to a local file), `sql_materialize` (session-local `scratch` DuckDB for cross-database joins), `answer_commit`, and `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence`, `sql_translate`.
 3. **CLI mode.** The **skill** has Claude run `altimate tool context` once (connections, schema listing, analyst method), then `altimate tool run <name> --args '<json>'` through Bash and reason over the structured output. `altimate tool list --json` shows every tool and its input schema. A warm process per project starts automatically.
 4. Calls are read-only unless you approve `--allow-write` (CLI mode); `DROP` and `TRUNCATE` are always blocked. Read-only is enforced by the database on Postgres, SQLite and DuckDB and by SQL classification elsewhere, so use a read-only DB user for the strongest boundary.
@@ -82,7 +82,7 @@ Claude does the reasoning; no altimate-code agent runs. Knowledge questions are 
 4. **Ask Claude** — questions about your team's conventions, definitions or knowledge, and queries on the workspace's warehouses, use the workspace tools: *"How do we define recurring revenue?"*, *"Which Snowflake connections does our workspace have?"* Start a request with `/altimate-code:altimate` to be sure it does.
 5. **Workspace engine** — knowledge and warehouse operations need the workspace engine. If it is missing, Claude asks before installing it with `altimate workspace-client engine-install` (Node.js 20+ and npm).
 
-**Team skills as Claude Code skills.** In both modes, session start copies the linked workspace's skills into the project's `.claude/skills/`, so they load like any project skill. Copies keep only each skill's name and description from the frontmatter, have `!` command blocks neutralised and are served only for the Altimate account you are signed in to. A skill you wrote with the same name is never replaced, and the copies are kept out of git. A project that was not synced for an hour is refreshed in the background (`altimate workspace refresh`); the skills show up when it finishes. Set `ALTIMATE_CLAUDE_SKILL_SYNC=0` to turn the copy off.
+**Team skills as Claude Code skills.** In both modes, session start copies the linked workspace's skills into the project's `.claude/skills/`, so they load like any project skill. Copies keep only each skill's name and description from the frontmatter, have `!` command blocks neutralised and are served only for the Altimate account you are signed in to. A skill you wrote with the same name is never replaced, and the copies are kept out of git. A project that was not synced, or not attempted, for an hour is refreshed in the background (`altimate workspace refresh`); the skills show up when it finishes. Set `ALTIMATE_CLAUDE_SKILL_SYNC=0` to turn the copy off.
 
 **Skills and memory.** Ask Claude to list skills (`altimate skill list`), pull the latest (`altimate workspace refresh`) or share a project skill you name (`altimate skill publish <name>`; replacing needs your confirmation). Claude saves a memory to the workspace only when you ask, after showing you the workspace, id and text, with `altimate workspace-client remember`. What altimate-code learns during delegated `run` tasks is saved to the workspace's memory as before.
 
@@ -127,7 +127,7 @@ Still stuck? See [Support](#support).
 - **Skill** — `skills/altimate-code/SKILL.md` — MCP and `tool run` guidance, delegation for long jobs, workspace guidance
 - **Agent** — `agents/analyst.md` — read-only data analyst (MCP or CLI)
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
-- **Hooks** — `hooks/hooks.json` — SessionStart capability description (static text only); opt-in PreToolUse `warehouse-guard.sh` (needs `ALTIMATE_ROUTE_GUARD=1`)
+- **Hooks** — `hooks/hooks.json` — SessionStart capability description and workspace skill copy; Stop hook hourly background skill refresh; opt-in PreToolUse `warehouse-guard.sh` (needs `ALTIMATE_ROUTE_GUARD=1`)
 
 ## Support
 

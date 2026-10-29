@@ -14,6 +14,14 @@ All notable changes to this plugin will be documented in this file.
 - `/altimate-code:refresh-skills` refreshes the workspace skills on demand.
 - Tests: `tests/refresh-skills.sh`.
 
+### Fixed
+- Workspace skill copying runs under a per-project lock, reads the snapshot only once it holds it, and swaps each copy with rollback, so concurrent sessions and background refreshes cannot remove each other's copies.
+- A snapshot that exists but cannot be read leaves the copies as they are; a symlinked `SKILL.md`, a symlinked snapshot or a manifest without a tenant is not served.
+- A failed background refresh is retried at most hourly instead of after every turn; `--wait` no longer removes the lock of a refresh that is still running.
+- The SessionStart mode check no longer uses a here-doc, so MCP deny settings are honoured in sandboxes that refuse its temporary file.
+- The warehouse guard allows only a lone altimate command; chained commands are checked.
+- The `analyst` agent no longer reads `.env` files or adds connections.
+
 ### Changed
 - The skill, the `analyst` agent and the CLI-mode SessionStart text describe the three workspace features in both modes: team skills as project skills, conventions, knowledge and memory through `workspace_context`, and warehouse reads through `workspace_execute`. With a CLI that turns workspace tools on in linked projects, `tool context` also prints the workspace name and its team skills; the plugin still passes `--workspace-tools` so older CLIs work.
 

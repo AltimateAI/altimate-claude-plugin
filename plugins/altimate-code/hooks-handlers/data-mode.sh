@@ -26,7 +26,9 @@ altimate_data_mode() {
   local existing=() f
   for f in "${files[@]}"; do [ -f "$f" ] && existing+=("$f"); done
   if [ "${#existing[@]}" -gt 0 ] && command -v python3 >/dev/null 2>&1; then
-    python3 -I - "${existing[@]}" <<'PY' 2>/dev/null && return
+    # -c, not a here-doc: session-start.sh must work in sandboxes that refuse
+    # the temporary file a here-doc needs.
+    python3 -I -c '
 import json, sys
 names = {"altimate-code", "plugin:altimate-code:altimate-code"}
 def server_names(entries):
@@ -50,7 +52,7 @@ for path in sys.argv[1:]:
     if names & server_names(data.get("disabledMcpjsonServers")):
         blocked = True
 print("cli" if blocked else "mcp")
-PY
+' "${existing[@]}" 2>/dev/null && return
   fi
   printf 'mcp\n'
 }

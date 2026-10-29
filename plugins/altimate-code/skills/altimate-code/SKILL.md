@@ -29,7 +29,7 @@ Tell the user which mode is in use when it is not obvious.
 
 Tool names carry the prefix `mcp__plugin_altimate-code_altimate-code__`.
 
-- `warehouse_list` lists connections; for local databases also tables, columns and a sample row. `warehouse_add` adds a missing connection (find its details in the project: config, `.env`, database files).
+- `warehouse_list` lists connections; for local databases also tables, columns and a sample row. `warehouse_add` adds a missing connection; take its details from the user or from non-secret project config and database files, never by reading secrets out of `.env` or credential files.
 - `sql_execute` runs SQL, read-only by default. Pass `tables` to get columns and value profiles in the same call, and check stored values before filtering or joining. `queries` batches independent queries. Large results spill to a local file: read what is needed there before answering.
 - `sql_materialize` copies a read-only query result from any connection into a session-local `scratch` DuckDB, for joins across connections.
 - `answer_commit` finishes a data question with one field per requested item. It is optional; when used, reply with exactly its `FINAL ANSWER:` text.

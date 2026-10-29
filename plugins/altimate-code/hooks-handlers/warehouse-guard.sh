@@ -22,9 +22,11 @@ elif command -v jq >/dev/null 2>&1; then
 fi
 [ -n "$CMD" ] || exit 0
 
-# Commands that start with the altimate CLI are always allowed.
+# A lone altimate CLI command is always allowed; one chained with other commands
+# is checked like any other command.
 case "$CMD" in
-  altimate\ *|altimate-code\ *|*/altimate\ *|*/altimate-code\ *|\"\$ALTIMATE_BIN\"*|*ALTIMATE_BIN*) exit 0 ;;
+  *[\;\&\|]*|*$'\n'*) ;;
+  altimate\ *|altimate-code\ *|/*/altimate\ *|/*/altimate-code\ *|\"\$ALTIMATE_BIN\"\ *) exit 0 ;;
 esac
 
 # A client is only matched in command position (start, or after ; & | ( or sudo / docker exec),

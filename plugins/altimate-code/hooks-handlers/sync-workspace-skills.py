@@ -14,18 +14,24 @@ backtick or fence, and the bundle's other files are copied except the paths
 Claude Code reads as skills, hooks or other plugin components.
 
 Like altimate-code, it only serves a snapshot fetched for the Altimate tenant
-the user is signed in to; otherwise, or when the workspace has no skills, the
-copies are removed.
+the user is signed in to; otherwise, or when the project has no snapshot or the
+workspace has no skills, the copies are removed. A snapshot that exists but
+cannot be read (for example while a refresh is rewriting it) changes nothing.
 
 Ownership: a copied directory holds MARKER. Only marked directories are
 replaced or removed, so a skill the user wrote with the same name is never
 touched; that workspace skill is skipped instead. Each copy has a `.gitignore`
 of `*`, so copies stay out of version control.
 
+Runs under an exclusive lock on the skills directory itself, so concurrent
+sessions and background refreshes reconcile one at a time.
+
 Prints `changed` when it wrote or removed anything. Never raises: a failure
 leaves existing copies as they were.
 """
 
+import fcntl
+import filecmp
 import json
 import os
 import re
@@ -111,21 +117,29 @@ def signed_in_as():
         return None
 
 
+def read_text_no_follow(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with open(fd, encoding="utf-8") as f:
+        return f.read()
+
+
 def read_snapshot(project):
     """[(source dir, name, description, body)] for each usable workspace skill;
-    [] when there is no readable snapshot for the signed-in tenant, so copies are removed."""
+    [] when the project has no snapshot or it belongs to another tenant, so copies
+    are removed; None when the snapshot exists but cannot be read, so nothing changes."""
     root = os.path.join(project, SNAPSHOT_DIR)
     manifest_path = os.path.join(root, MANIFEST)
-    if not os.path.exists(manifest_path):
+    if not os.path.lexists(manifest_path):
         return []
+    if os.path.islink(root):
+        return None
     try:
-        with open(manifest_path, encoding="utf-8") as f:
-            manifest = json.load(f)
+        manifest = json.loads(read_text_no_follow(manifest_path))
         ids = list(manifest.get("skills", {}))
         owner = (manifest.get("tenant"), str(manifest.get("apiUrl", "")).rstrip("/"))
-    except (OSError, ValueError, AttributeError):
-        return []
-    if owner != signed_in_as():
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None
+    if not owner[0] or owner != signed_in_as():
         return []
     skills = []
     for skill_id in ids:
@@ -135,11 +149,15 @@ def read_snapshot(project):
         source = os.path.join(root, skill_id)
         if os.path.islink(source) or not os.path.isdir(source):
             continue
-        try:
-            with open(os.path.join(source, "SKILL.md"), encoding="utf-8") as f:
-                fields, body = parse_frontmatter(f.read())
-        except (OSError, UnicodeDecodeError):
+        skill_file = os.path.join(source, "SKILL.md")
+        if not os.path.lexists(skill_file) or os.path.islink(skill_file):
             continue
+        try:
+            fields, body = parse_frontmatter(read_text_no_follow(skill_file))
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            return None
         if not fields:
             continue
         name, description = fields.get("name", ""), fields.get("description", "")
@@ -180,24 +198,57 @@ def build_copy(source, name, description, body, staging):
 
 
 def same_tree(a, b):
-    def listing(root):
-        found = {}
+    def file_sizes(root):
+        sizes = {}
         for dirpath, _, filenames in os.walk(root):
             for filename in filenames:
                 path = os.path.join(dirpath, filename)
-                with open(path, "rb") as f:
-                    found[os.path.relpath(path, root)] = f.read()
-        return found
+                sizes[os.path.relpath(path, root)] = os.path.getsize(path)
+        return sizes
 
     try:
-        return listing(a) == listing(b)
+        sizes = file_sizes(a)
+        return sizes == file_sizes(b) and all(
+            filecmp.cmp(os.path.join(a, rel), os.path.join(b, rel), shallow=False) for rel in sizes
+        )
     except OSError:
         return False
 
 
+def replace_dir(staging, target):
+    """Move staging into target's place; on failure the old copy is put back."""
+    if not os.path.isdir(target):
+        os.rename(staging, target)
+        return
+    old = staging + ".old"
+    os.rename(target, old)
+    try:
+        os.rename(staging, target)
+    except OSError:
+        os.rename(old, target)
+        raise
+    shutil.rmtree(old, ignore_errors=True)
+
+
 def sync(project):
-    skills = read_snapshot(project)
     target_root = os.path.join(project, SKILLS_DIR)
+    if not os.path.isdir(target_root):
+        # Nothing to remove; create the directory only when there is something to copy.
+        if not read_snapshot(project):
+            return False
+        os.makedirs(target_root, exist_ok=True)
+    lock = os.open(target_root, os.O_RDONLY)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return reconcile(project, target_root)
+    finally:
+        os.close(lock)
+
+
+def reconcile(project, target_root):
+    skills = read_snapshot(project)
+    if skills is None:
+        return False
     changed = False
     wanted = set()
     for source, name, description, body in skills:
@@ -207,7 +258,6 @@ def sync(project):
         if os.path.lexists(target) and not is_ours(target):
             continue
         wanted.add(name)
-        os.makedirs(target_root, exist_ok=True)
         staging = tempfile.mkdtemp(prefix=f".{name}.", dir=target_root)
         try:
             try:
@@ -217,9 +267,11 @@ def sync(project):
                 continue
             if os.path.isdir(target) and same_tree(staging, target):
                 continue
-            if os.path.isdir(target):
-                shutil.rmtree(target)
-            os.rename(staging, target)
+            try:
+                replace_dir(staging, target)
+            except OSError as err:
+                print(f"altimate-code plugin: could not update workspace skill {name}: {err}", file=sys.stderr)
+                continue
             changed = True
         finally:
             shutil.rmtree(staging, ignore_errors=True)

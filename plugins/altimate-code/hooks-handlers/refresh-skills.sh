@@ -3,8 +3,9 @@
 # them into the project's `.claude/skills/` (see sync-workspace-skills.py). Claude
 # Code watches that directory, so copies added mid-session load without a restart.
 #
-#   refresh-skills.sh --if-stale   background refresh, only when the snapshot was
-#                                  never synced or not for STALE_MINUTES (hooks)
+#   refresh-skills.sh --if-stale   background refresh, only when neither a sync nor
+#                                  an attempt happened in STALE_MINUTES (hooks), so a
+#                                  project that cannot refresh retries hourly
 #   refresh-skills.sh --wait       refresh now and print the outcome (manual refresh)
 #
 # A lock keeps one refresh per project; a lock older than ten minutes belongs to a
@@ -15,6 +16,7 @@ MODE="${1:---if-stale}"
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 SYNC_SCRIPT="$(dirname "$0")/sync-workspace-skills.py"
 LOCK="$PROJECT_DIR/.altimate-code/claude-skill-sync.lock"
+ATTEMPTED="$PROJECT_DIR/.altimate-code/claude-skill-sync.attempted"
 
 say() { [ "$MODE" = "--wait" ] && printf '%s\n' "$1"; }
 
@@ -22,7 +24,7 @@ if [ "${ALTIMATE_CLAUDE_SKILL_SYNC:-1}" = "0" ]; then say "Workspace skill sync 
 command -v python3 >/dev/null 2>&1 || { say "python3 is needed to copy workspace skills."; exit 0; }
 [ -d "$PROJECT_DIR/.altimate-code" ] || { say "This project is not linked to an Altimate workspace."; exit 0; }
 
-if [ "$MODE" = "--if-stale" ] && [ -n "$(find "$PROJECT_DIR/.altimate-code/skill/_workspace/.synced-at" -mmin -"$STALE_MINUTES" 2>/dev/null)" ]; then
+if [ "$MODE" = "--if-stale" ] && [ -n "$(find "$PROJECT_DIR/.altimate-code/skill/_workspace/.synced-at" "$ATTEMPTED" -mmin -"$STALE_MINUTES" 2>/dev/null)" ]; then
   exit 0
 fi
 
@@ -38,7 +40,9 @@ mkdir -p "$PROJECT_DIR/.claude/skills" 2>/dev/null
 find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null
 if [ "$MODE" = "--wait" ]; then
   # A refresh already in flight finishes first; this one then picks up anything newer.
-  for _ in $(seq 1 120); do mkdir "$LOCK" 2>/dev/null && break; sleep 1; done
+  LOCKED=
+  for _ in $(seq 1 120); do mkdir "$LOCK" 2>/dev/null && LOCKED=1 && break; sleep 1; done
+  [ -n "$LOCKED" ] || { say "Another workspace skill refresh is still running; try again when it finishes."; exit 1; }
   "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR" </dev/null
   STATUS=$?
   python3 -I "$SYNC_SCRIPT" "$PROJECT_DIR" >/dev/null
@@ -49,6 +53,7 @@ if [ "$MODE" = "--wait" ]; then
 fi
 
 if mkdir "$LOCK" 2>/dev/null; then
+  touch "$ATTEMPTED" 2>/dev/null
   (
     "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR"
     python3 -I "$SYNC_SCRIPT" "$PROJECT_DIR"
