@@ -86,6 +86,17 @@ Claude does the reasoning; no altimate-code agent runs. Knowledge questions are 
 
 **Skills and memory.** Ask Claude to list skills (`altimate skill list`), pull the latest (`altimate workspace refresh`) or share a project skill you name (`altimate skill publish <name>`; replacing needs your confirmation). Claude saves a memory to the workspace only when you ask, after showing you the workspace, id and text, with `altimate workspace-client remember`. What altimate-code learns during delegated `run` tasks is saved to the workspace's memory as before.
 
+## One-click integrations
+
+The plugin finds GitHub, Jira and Linear credentials you already have and connects them without retyping them:
+
+- `gh`, jira-cli and Linear credentials on this machine, and GitHub, Atlassian or Linear MCP servers configured in Claude Code, are detected when a session starts.
+- A band above the prompt offers **Sync to Altimate** or **Keep local**, and `/integrations` opens a side pane with one row per provider.
+- **Connect in browser** opens a consent page; once you allow it, the credential comes back to the terminal. Leave **Also save to my Altimate workspace** unchecked to keep it on this machine only.
+- **Keep local** blocks syncing for that provider: the credential stays in your OS keychain and is never sent to Altimate.
+
+The side pane and band need a Claude Code build with hooks modules and `altimate integrations` from altimate-code.
+
 ## Example prompts
 
 Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):
