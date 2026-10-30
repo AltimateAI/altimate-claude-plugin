@@ -1,6 +1,6 @@
 export type ProviderId = 'github' | 'jira' | 'linear'
 
-export type ProviderState = 'connected' | 'expired' | 'detected' | 'available' | 'not_found'
+export type ProviderState = 'connected' | 'expired' | 'rejected' | 'detected' | 'available' | 'not_found'
 
 export type SyncState = 'synced' | 'local' | 'pending' | 'blocked'
 
@@ -26,7 +26,32 @@ export type IntegrationsStatus = {
 }
 
 /** The action running now, with what the pane shows while it runs. */
-export type Busy = { provider: ProviderId | 'all'; label: string; url: string | null }
+export type Busy = { provider: ProviderId | 'all'; label: string }
+
+/**
+ * One credential field of a provider's form, as `altimate integrations fields` reports it.
+ * A secret carries no value: only whether it is set and its masked tail.
+ */
+export type FormField = {
+  name: string
+  label: string
+  secret: boolean
+  required: boolean
+  value: string | null
+  hasValue: boolean
+  masked: string | null
+}
+
+export type Form = {
+  provider: ProviderId
+  variant: string
+  variants: string[]
+  fields: FormField[]
+  tokenUrl: string | null
+}
+
+/** Which provider's form is open, and whether it adds credentials or updates them. */
+export type Expanded = { provider: ProviderId; mode: 'connect' | 'update'; variant: string | null }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -35,6 +60,12 @@ declare module 'claude-code' {
       busy: Busy | null
       message: string | null
       isBandHidden: boolean
+      expanded: Expanded | null
+      form: Form | null
+      /** Shown inside the open form: the provider's refusal or the fields still missing. */
+      formMessage: string | null
+      /** Non-secret text typed into the open form, by field name, saved when the form is submitted. */
+      typed: Record<string, string>
     }
   }
 }
