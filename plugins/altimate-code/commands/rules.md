@@ -57,5 +57,6 @@ Workflow (follow in order):
    - `refused`: the workspace refused the content; offer to edit it.
    - `busy`: another session is answering it; skip it for now.
    - `not_open`: it was already answered or closed; move on.
+   - `not_available` saying it "was being answered with" another action: an earlier answer stopped part-way; offer to finish it with that action.
 
 5. **Finish** with one line on what was sent, approved, saved or dismissed, and how many proposals are still waiting. Do not change any project files.
