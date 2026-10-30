@@ -45,6 +45,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import time
@@ -202,8 +203,13 @@ def serves(manifest):
 
 
 def is_link(path):
-    """A symlink, or an NTFS junction (which islink does not report)."""
-    return os.path.islink(path) or getattr(os.path, "isjunction", lambda _: False)(path)
+    """A symlink, or an NTFS junction (which islink does not report; os.path.isjunction is 3.12+)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    junction = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", None)
+    return stat.S_ISLNK(st.st_mode) or (junction is not None and getattr(st, "st_reparse_tag", 0) == junction)
 
 
 def read_text_no_follow(path, encoding="utf-8"):
@@ -240,6 +246,11 @@ def manifest_text_now(project):
     return found[0] if found else None
 
 
+def snapshot_unchanged(project, manifest_text):
+    """The manifest is the one read, and still belongs to the signed-in account (no sign-out or switch since)."""
+    return manifest_text_now(project) == manifest_text and (manifest_text is None or snapshot_is_ours(project))
+
+
 def snapshot_is_ours(project):
     try:
         found = read_manifest(project)
@@ -249,13 +260,14 @@ def snapshot_is_ours(project):
 
 
 def cli_is_swapping(project):
-    """True while the CLI has moved the live snapshot aside to swap a new one in. Judged by
-    ctime: the rename that retires the snapshot updates it, but keeps the old mtime."""
+    """True while the CLI has moved the live snapshot aside to swap a new one in: a `retired-*`
+    entry, in a staging directory changed within SWAP_SECONDS. The rename into it updates the
+    directory's mtime on every platform; the retired tree keeps its old mtime, and on Windows
+    its ctime is the creation time."""
     staging = os.path.join(project, CLI_STAGING_DIR)
     try:
-        return any(
-            entry.startswith("retired-") and time.time() - os.lstat(os.path.join(staging, entry)).st_ctime < SWAP_SECONDS
-            for entry in os.listdir(staging)
+        return time.time() - os.lstat(staging).st_mtime < SWAP_SECONDS and any(
+            entry.startswith("retired-") for entry in os.listdir(staging)
         )
     except OSError:
         return False
@@ -290,9 +302,9 @@ def read_snapshot(project):
         if is_link(source) or not os.path.isdir(source):
             continue
         try:
-            if os.path.islink(skill_file):
+            # A skill without a regular SKILL.md (missing, a link, a directory) is skipped.
+            if not stat.S_ISREG(os.lstat(skill_file).st_mode):
                 continue
-            os.lstat(skill_file)
         except FileNotFoundError:
             continue
         except OSError:  # e.g. a directory that cannot be searched: unknown, so nothing is pruned
@@ -315,14 +327,15 @@ def read_snapshot(project):
 def is_ours(path):
     """A marked, non-symlinked directory whose marker names it. Markers without a name
     (written by earlier versions) still count; a copy the user renamed does not."""
-    if os.path.islink(path):
+    if is_link(path):
         return False
     try:
         with open(os.path.join(path, MARKER), encoding="utf-8") as f:
             marker = f.read()
     except (OSError, UnicodeDecodeError):
         return False
-    names = [line[len("skill: ") :] for line in marker.splitlines() if line.startswith("skill: ")]
+    # Lines split on \r\n, \r or \n only, as the CLI does (splitlines also splits on U+2028 and others).
+    names = [line[len("skill: ") :] for line in re.split(r"\r\n?|\n", marker) if line.startswith("skill: ")]
     return not names or names[0] == os.path.basename(path)
 
 
@@ -342,7 +355,7 @@ def build_copy(source, name, description, body, staging):
     # onerror raises: an unreadable subdirectory skips the skill instead of copying part of it.
     for dirpath, dirnames, filenames in os.walk(source, onerror=raise_error):
         dirnames[:] = [
-            d for d in dirnames if not os.path.islink(os.path.join(dirpath, d)) and not is_blocked_dir(d)
+            d for d in dirnames if not is_link(os.path.join(dirpath, d)) and not is_blocked_dir(d)
         ]
         rel = os.path.relpath(dirpath, source)
         os.makedirs(os.path.join(staging, rel), exist_ok=True)
@@ -397,7 +410,7 @@ def replace_dir(staging, target):
 def sync(project, withdraw=False):
     target_root = os.path.join(project, SKILLS_DIR)
     # A symlinked `.claude` or `.claude/skills` could point outside the project; never write or remove through it.
-    if os.path.islink(os.path.join(project, ".claude")) or os.path.islink(target_root):
+    if is_link(os.path.join(project, ".claude")) or is_link(target_root):
         return False
     if not os.path.isdir(target_root):
         # Nothing to remove; create the directory only when there is something to copy.
@@ -472,7 +485,7 @@ def remove_path(path):
 
 def holds_lock(lock):
     path, token = lock
-    return os.path.isdir(os.path.join(path, token)) and not os.path.islink(path)
+    return os.path.isdir(os.path.join(path, token)) and not is_link(path)
 
 
 def renew_lock(lock):
@@ -539,8 +552,9 @@ def reconcile(project, target_root, skills, lock, manifest_text=None, check_mani
                 continue
             if os.path.isdir(target) and same_tree(staging, target):
                 continue
-            # Building can outlast the lock; a holder taken over meanwhile swaps nothing more.
-            if not renew_lock(lock):
+            # Building can outlast the lock, and the snapshot can be swapped while it is copied:
+            # either way nothing more is published; the next sync picks up the new state.
+            if not renew_lock(lock) or (check_manifest and not snapshot_unchanged(project, manifest_text)):
                 return changed
             try:
                 replace_dir(staging, target)

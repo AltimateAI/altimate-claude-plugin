@@ -688,6 +688,7 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.assertEqual(self.run_sync()[0], "")
         self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
 
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root ignores permissions")
     def test_an_unsearchable_skill_directory_keeps_copies(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
         self.run_sync()
@@ -699,6 +700,7 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
             os.chmod(source, 0o755)
         self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
 
+    @unittest.skipIf(hasattr(os, "getuid") and os.getuid() == 0, "root ignores permissions")
     def test_an_unreadable_bundle_subdirectory_keeps_the_previous_copy(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "ref/notes.md": "one"}})
         self.run_sync()
@@ -710,6 +712,95 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         finally:
             os.chmod(ref, 0o755)
         self.assertEqual(self.read(self.skill_path("staging-conventions", "ref/notes.md")), "one")
+
+
+    def test_a_skill_md_that_is_a_directory_skips_only_that_skill(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}, "sk_2": {"SKILL.md/x": "x"}})
+        self.assertEqual(self.run_sync()[0], "changed")
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_a_snapshot_swapped_while_copying_publishes_nothing(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "notes.md": "one"}})
+        self.run_sync()
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "notes.md": "two"}})
+        module = self.load_module()
+        manifest_path = os.path.join(self.project, SNAPSHOT, ".manifest.json")
+        real_copy = module.shutil.copy
+
+        def copy_then_swap(src, dst):
+            with open(manifest_path, encoding="utf-8") as f:
+                text = f.read()
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                f.write(text.replace('"datamateId": 1', '"datamateId": 2'))
+            return real_copy(src, dst)
+
+        module.shutil.copy = copy_then_swap
+        try:
+            self.assertFalse(module.sync(self.project))
+        finally:
+            module.shutil.copy = real_copy
+        self.assertEqual(self.read(self.skill_path("staging-conventions", "notes.md")), "one")
+
+    def test_a_sync_that_lost_the_lock_publishes_nothing(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        module = self.load_module()
+        target_root = os.path.join(self.project, ".claude", "skills")
+        os.makedirs(target_root)
+        lock = module.acquire_lock(target_root)
+        shutil.rmtree(lock[0])  # taken over as dead
+        skills, text = module.read_snapshot(self.project)
+        self.assertFalse(module.reconcile(self.project, target_root, skills, lock, manifest_text=text))
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_marker_lines_split_like_the_cli(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        other = os.path.join(self.project, ".claude", "skills", "mine")
+        os.makedirs(other)
+        with open(os.path.join(other, MARKER), "w", encoding="utf-8", newline="") as f:
+            f.write("Copied from the linked Altimate workspace.\rskill: staging-conventions\r")
+        self.write_snapshot({})
+        self.run_sync()
+        self.assertTrue(os.path.isdir(other))  # names another skill: the user's
+
+
+    def test_a_lock_lost_while_copying_publishes_nothing(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "notes.md": "x"}})
+        module = self.load_module()
+        target_root = os.path.join(self.project, ".claude", "skills")
+        os.makedirs(target_root)
+        lock = module.acquire_lock(target_root)
+        skills, text = module.read_snapshot(self.project)
+        real_copy = module.shutil.copy
+
+        def copy_and_lose_lock(src, dst):
+            shutil.rmtree(lock[0], ignore_errors=True)  # taken over as dead mid-build
+            return real_copy(src, dst)
+
+        module.shutil.copy = copy_and_lose_lock
+        try:
+            self.assertFalse(module.reconcile(self.project, target_root, skills, lock, manifest_text=text))
+        finally:
+            module.shutil.copy = real_copy
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_a_sign_out_while_copying_publishes_nothing(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "notes.md": "x"}})
+        module = self.load_module()
+        real_copy = module.shutil.copy
+
+        def copy_and_sign_out(src, dst):
+            if os.path.exists(module.CREDENTIALS):
+                os.remove(module.CREDENTIALS)
+            return real_copy(src, dst)
+
+        module.shutil.copy = copy_and_sign_out
+        os.makedirs(os.path.join(self.project, ".claude", "skills"))
+        try:
+            self.assertFalse(module.sync(self.project))
+        finally:
+            module.shutil.copy = real_copy
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
 
 
 if __name__ == "__main__":
