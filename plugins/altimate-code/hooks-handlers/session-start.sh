@@ -1,16 +1,71 @@
 #!/usr/bin/env bash
-# SessionStart hook for the altimate-code plugin. Emits a descriptive statement
-# of the altimate-code skill's capabilities so Claude can route to it when the
-# task shape fits. Deliberately descriptive rather than imperative — see the
-# Claude plugin review-criteria checklist items on "avoid instructing Claude
-# to call other tools" and "don't interfere with tool sequencing."
+# SessionStart hook for the altimate-code plugin. Emits a description of the
+# altimate-code data tools so Claude can route to them when the task shape fits,
+# plus, in CLI mode only, the project guidance for running them through
+# `tool run`. Also keeps the linked workspace's skills copied into the project
+# (below).
 #
 # Uses printf (not a here-doc) so the hook works in restricted sandboxes that
 # refuse to create the temporary file a here-doc needs.
 
+# CLI mode (MCP server unavailable or disallowed) also carries the project routing
+# guidance; MCP mode carries only the description.
+. "$(dirname "$0")/data-mode.sh"
+MODE="$(altimate_data_mode)"
+
+# Both modes: copy the linked Altimate workspace's skills into the project's
+# `.claude/skills/` (see sync-workspace-skills.py) so they load as Claude Code
+# skills. altimate-code writes these copies itself when a project is linked or
+# refreshed; this copy of the snapshot on disk is the safety net for older CLIs
+# and runs before Claude's first reply. A snapshot that was never synced, or not
+# for an hour, is refreshed in the background by refresh-skills.sh without
+# delaying the session; Claude Code's skill watcher loads the copies when it
+# finishes. Set ALTIMATE_CLAUDE_SKILL_SYNC=0 to turn all of this off; the copies
+# made earlier are then removed.
+PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
+HANDLERS="$(dirname "$0")"
+RELOAD=""
+SKILLS_NOTE=""
+
+# The CLI-mode guidance names the executable that is on PATH: curl installs expose only `altimate`.
+CLI_NAME=altimate
+command -v altimate-code >/dev/null 2>&1 && CLI_NAME=altimate-code
+
+if [ "${ALTIMATE_CLAUDE_SKILL_SYNC:-1}" = "0" ] && command -v python3 >/dev/null 2>&1; then
+  # Turned off: copies made earlier would keep loading with no account check, so remove them.
+  if [ "$(python3 -I "$HANDLERS/sync-workspace-skills.py" --withdraw "$PROJECT_DIR" 2>/dev/null)" = "changed" ]; then
+    RELOAD=',
+    "reloadSkills": true'
+  fi
+elif command -v python3 >/dev/null 2>&1; then
+  if [ "$(python3 -I "$HANDLERS/sync-workspace-skills.py" "$PROJECT_DIR" 2>/dev/null)" = "changed" ]; then
+    RELOAD=',
+    "reloadSkills": true'
+  fi
+
+  if [ -d "$PROJECT_DIR/.altimate-code" ]; then
+    # Claude Code watches only skill directories that exist when it starts, so
+    # create it now for copies the background refresh adds.
+    if [ ! -L "$PROJECT_DIR/.claude" ] && [ ! -d "$PROJECT_DIR/.claude/skills" ] && mkdir -p "$PROJECT_DIR/.claude/skills" 2>/dev/null; then
+      RELOAD=',
+    "reloadSkills": true'
+    fi
+    CLAUDE_PROJECT_DIR="$PROJECT_DIR" bash "$HANDLERS/refresh-skills.sh" --if-stale
+  fi
+
+  # Marked directories are workspace skill copies (made by this plugin or the CLI); user-written skills carry no marker.
+  if [ -n "$(find "$PROJECT_DIR/.claude/skills" -mindepth 2 -maxdepth 2 -name .altimate-workspace-skill 2>/dev/null | head -n 1)" ]; then
+    SKILLS_NOTE=' The linked Altimate workspace'"'"'s team skills are available in this session as project skills (copied into `.claude/skills/`), next to the workspace conventions, knowledge and memory that the workspace tools return.'
+  fi
+fi
+
 printf '%s\n' '{'
 printf '  "hookSpecificOutput": {\n'
 printf '    "hookEventName": "SessionStart",\n'
-printf '    "additionalContext": "The altimate-code plugin ships two skills in this session. (1) The `altimate-code` skill routes data-engineering work to the altimate-code CLI — column-level lineage, downstream-impact, cross-database validation, FinOps, PII from sampled rows, query cost attribution, schema diffs, dev-vs-prod diffing. In a project linked to an Altimate workspace it also answers from the shared skills, knowledge and memory of that workspace, so questions about team conventions, standards or best practices fit it too. It is not well-suited for pure file/code edits to dbt models and SQL files that do not touch warehouse state — native Bash/Edit/Write handles those faster. (2) The `review` skill runs the altimate-code dbt PR reviewer on dbt project changes (models/**.sql, schema.yml, dbt_project.yml, sources.yml, macros, snapshots, seeds). It emits a signed verdict envelope with column lineage, query equivalence, dbt anti-pattern detection, and PII screening — none of which native tools or a generic code-review skill can compute. When the user asks to review dbt / SQL / warehouse changes, this is the specialized reviewer available. For non-dbt code review (TypeScript, Python, Go), the `review` skill declines."\n'
+if [ "$MODE" = "cli" ]; then
+  printf '    "additionalContext": "The altimate-code plugin ships two skills in this session. (1) The `altimate-code` skill describes the model-free data tools of altimate-code: column-level lineage, downstream-impact analysis, PII detection, data-diff between tables or databases, FinOps and query cost, query equivalence, dialect translation, dbt manifest and lineage, and read-only queries and schema inspection on connected warehouses. They reach Claude in two ways. When the session has the plugin MCP tools (named `mcp__plugin_altimate-code_altimate-code__*`), those are the tools. When it does not, because the organisation disallows MCP servers or the server did not start, the same tools run from the shell through the altimate CLI `tool run` subcommand, which also returns structured output without a second agent. Neither mode runs a second LLM, and calls are read-only unless the user approves writes. In a project linked to an Altimate workspace, the `workspace_context`, `workspace_skill` and `workspace_execute` tools (MCP, or `tool run` with `--workspace-tools`) give the team conventions, knowledge, shared skills, project memory and read-only queries on the workspace warehouse integrations. Long multi-step jobs such as dbt builds and migrations can be delegated to the altimate-code agent. Plain file edits to dbt models and SQL files need none of this. (2) The `review` skill runs the altimate-code dbt PR reviewer on dbt project changes (models/**.sql, schema.yml, dbt_project.yml, sources.yml, macros, snapshots, seeds). It emits a signed verdict envelope with column lineage, query equivalence, dbt anti-pattern detection, and PII screening, which native tools and a generic code-review skill do not compute. For non-dbt code review (TypeScript, Python, Go), the `review` skill declines. In this session the altimate-code MCP server is not available, so the following project guidance applies. Data work in this project: the warehouses and dbt project of this repository are connected to Altimate Code through its CLI. When a request needs warehouse data or schema, column lineage, downstream impact, PII checks, data diffs or warehouse cost, use the Altimate Code CLI instead of ad-hoc database clients: run `%s tool context` once, then `%s tool run <tool> --workspace-tools --args <json>`; find a tool with `%s tool list --workspace-tools` and its arguments with `%s tool schema <tool> --workspace-tools`. `tool context` also names the linked workspace and lists its team skills. Questions about the team conventions, definitions or workspace data start with `tool run workspace_context --workspace-tools`; warehouse reads through the workspace engine use `tool run workspace_execute --workspace-tools`. It uses the configured connections and is read-only by default. Long multi-step jobs (dbt builds, migrations, backfills) use `%s run`. Code edits, docs, tests and git work that need no warehouse data or lineage use the normal tools.%s"%s\n' "$CLI_NAME" "$CLI_NAME" "$CLI_NAME" "$CLI_NAME" "$CLI_NAME" "$SKILLS_NOTE" "$RELOAD"
+else
+  printf '    "additionalContext": "The altimate-code plugin ships two skills in this session. (1) The `altimate-code` skill describes the model-free data tools of altimate-code: column-level lineage, downstream-impact analysis, PII detection, data-diff between tables or databases, FinOps and query cost, query equivalence, dialect translation, dbt manifest and lineage, and read-only queries and schema inspection on connected warehouses. They reach Claude in two ways. When the session has the plugin MCP tools (named `mcp__plugin_altimate-code_altimate-code__*`), those are the tools. When it does not, because the organisation disallows MCP servers or the server did not start, the same tools run from the shell through the altimate CLI `tool run` subcommand, which also returns structured output without a second agent. Neither mode runs a second LLM, and calls are read-only unless the user approves writes. In a project linked to an Altimate workspace, the `workspace_context`, `workspace_skill` and `workspace_execute` tools (MCP, or `tool run` with `--workspace-tools`) give the team conventions, knowledge, shared skills, project memory and read-only queries on the workspace warehouse integrations. Long multi-step jobs such as dbt builds and migrations can be delegated to the altimate-code agent. Plain file edits to dbt models and SQL files need none of this. (2) The `review` skill runs the altimate-code dbt PR reviewer on dbt project changes (models/**.sql, schema.yml, dbt_project.yml, sources.yml, macros, snapshots, seeds). It emits a signed verdict envelope with column lineage, query equivalence, dbt anti-pattern detection, and PII screening, which native tools and a generic code-review skill do not compute. For non-dbt code review (TypeScript, Python, Go), the `review` skill declines.%s"%s\n' "$SKILLS_NOTE" "$RELOAD"
+fi
 printf '  }\n'
 printf '}\n'

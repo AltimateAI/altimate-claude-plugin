@@ -2,6 +2,52 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.4.0] — 2026-10-28
+
+### Added
+- Team workspace skills as Claude Code skills, in both the MCP and CLI modes. At session start `hooks-handlers/sync-workspace-skills.py` copies the skills of the Altimate workspace linked to the project (from `.altimate-code/skill/_workspace/`) into `.claude/skills/`. Copies keep only `name` and `description` from the frontmatter, have `!` command blocks disarmed, leave out files Claude Code reads as hooks, agents, commands or settings, are served only for the Altimate account the user is signed in to (tenant, URL and key digest), never replace a skill the user wrote (copies carry a marker file; a name clash skips the workspace skill), and get a `.gitignore` so they stay out of version control. When the workspace drops a skill, its copy is removed. The SessionStart context mentions the project skills when copies exist.
+- A project that was never synced, or not for an hour, is refreshed by a detached `altimate workspace refresh` that the hook does not wait for. It is bounded by a per-project lock that expires after ten minutes, and it is skipped silently when no CLI is on PATH or the project has no `.altimate-code` directory. Claude Code's skill watcher loads the copies when it finishes.
+- `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns the skill copy and refresh off.
+- Tests: `tests/test_sync_workspace_skills.py` (`python3 -m pytest tests/`).
+- `hooks-handlers/refresh-skills.sh` holds the refresh: `--if-stale` starts it in the background only when the snapshot is missing or over an hour old, `--wait` refreshes now and reports how many skills were copied. SessionStart never waits on the network.
+- A Stop hook runs the same hourly background refresh in long sessions, so updated or removed workspace skills reach the session.
+- `/altimate-code:refresh-skills` refreshes the workspace skills on demand.
+- Tests: `tests/refresh-skills.sh`.
+
+- How the copies stay safe: they are served only for the signed-in Altimate account (tenant, URL and the CLI's credential digest); concurrent sessions, refreshes and the CLI's own copy take turns under one renewed `mkdir` lock in `.claude/skills` and swap each copy with rollback; a snapshot or credentials that cannot be read, a listed skill directory that is gone, or a snapshot briefly missing or replaced while the CLI swaps in a new one, leaves the copies alone; symlinked snapshot files and nested `CLAUDE.md` files are not copied; a skill folder without the `.altimate-workspace-skill` marker is never touched; staging left by a killed sync is removed. `ALTIMATE_CLAUDE_SKILL_SYNC=0` also removes the copies.
+- Refresh is per account: a failed refresh is retried at most hourly, and a newly signed-in account refreshes at once. `/altimate-code:refresh-skills` reports when another refresh still holds the lock instead of running alongside it.
+- The mode check reads MCP policy as Claude Code applies it (`managed-mcp.json`, `managed-settings.d/`, merged `allowedMcpServers` and `deniedMcpServers` by name or command, `allowManagedMcpServersOnly`, servers turned off in `/mcp`), and the CLI-mode guidance names the executable on PATH (`altimate` or `altimate-code`).
+- The opt-in warehouse guard (a best-effort nudge, not a security control) allows only a lone `altimate` command, judges each client call by its own arguments and that client's query flags (`psql -tAc` included), and also catches command and process substitution, client paths and quoted names, shell keywords, `sudo`/`env`/`time`/`timeout` wrappers and variable prefixes, `sh -c`, `bq` global flags and DuckDB SQL arguments.
+
+### Changed
+- The skill, the `analyst` agent and the CLI-mode SessionStart text describe the three workspace features in both modes: team skills as project skills, conventions, knowledge and memory through `workspace_context`, and warehouse reads through `workspace_execute`. With a CLI that turns workspace tools on in linked projects, `tool context` also prints the workspace name and its team skills; the plugin still passes `--workspace-tools` so older CLIs work.
+
+## [1.3.0] — 2026-10-28
+
+### Added
+- MCP registration (`.mcp.json`): the `altimate-code` stdio server runs `altimate-code mcp serve`, read-only by default. Tools: `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns schemas and value profiles in the same call), `sql_materialize`, `answer_commit`, plus `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence` and `sql_translate`. It needs an altimate-code build that contains `mcp serve`, and the CLI on PATH as `altimate-code`; curl installs expose only `altimate`, so they need an `altimate-code` link for the server to start (the CLI mode works either way).
+- The skill, `/altimate-code:altimate`, the `analyst` agent and the SessionStart text describe two modes. When tools named `mcp__plugin_altimate-code_altimate-code__*` are available, they are used. When they are not (an organisation's managed settings disallow MCP servers, the server failed to start, or the build lacks `mcp serve`), the same tools run through `altimate tool run`, starting with one `tool context` call that prints the connections, schema listing and analyst method. An organisation that blocks MCP therefore still gets every tool.
+
+- SessionStart picks the mode without starting the CLI (`hooks-handlers/data-mode.sh`). It uses the CLI mode when `altimate-code` is not on PATH, when managed, user or project settings deny the server (`deniedMcpServers`, an `allowedMcpServers` list without it, or `disabledMcpjsonServers`), or when `ALTIMATE_DATA_MODE=cli`; `ALTIMATE_DATA_MODE=mcp` forces the MCP mode. Only the CLI mode adds the project routing guidance (the same text `altimate-code link --claude-md` writes to `CLAUDE.md`); the MCP mode adds none.
+- Tests: `tests/data-mode.sh`.
+- Linked Altimate workspaces in both modes, without an altimate-code agent. The MCP server starts with `--workspace-tools`, and in CLI mode every `tool run`, `tool list` and `tool schema` call passes `--workspace-tools` (one warm tool process per project). Claude uses `workspace_context` (setup status, receipt, summary, skills, memory and, with `include_tools`, the operation catalog), `workspace_skill` and `workspace_execute` (`ask_knowledge_base`, workspace warehouse connections and read-only queries). The skill covers setup statuses (`needs_auth`, `needs_workspace`, `disabled`, `unavailable`, `needs_engine`), receipt refresh, engine installation only after the user agrees, linking with `ALTIMATE_DISABLE_MEMORY=1`, skill list/refresh/publish, and memory saving only on explicit request through `workspace-client remember`. Older CLIs without `--workspace-tools` keep delegating workspace questions to `run`.
+- Tests: `tests/workspace-tools.sh` (static checks; with `ALTIMATE_TEST_BIN`, a live check against a CLI build).
+
+### Changed
+- The `analyst` agent works in both modes and ends with `FINAL ANSWER:`, optionally recorded with `answer_commit`.
+- `/altimate-code:altimate` answers data questions with the MCP tools when present and otherwise delegates with the `analyst` agent; long jobs use `builder`.
+
+## [1.2.0] — 2026-10-27
+
+### Changed
+- The `altimate-code` skill now has Claude call the model-free data tools itself with `altimate tool run <name> --args '<json>'` instead of delegating each task to a second agent. It lists which tools fit which question, how to pass arguments, that calls are read-only until the user approves `--allow-write`, and to ask a clarifying question when a request has two readings. Delegation with `altimate run` stays for long multi-step jobs and is the fallback when the CLI has no `tool` subcommand.
+- The skill description and SessionStart context describe the tools directly and no longer claim work Claude does well alone.
+
+### Added
+- Opt-in PreToolUse hook `warehouse-guard.sh`, active only when `ALTIMATE_ROUTE_GUARD=1`. It denies Bash commands that query a warehouse directly and suggests the matching `tool run`. `altimate` commands, dbt and file operations pass.
+- `analyst` agent: a read-only data analyst that works through `tool run`.
+- Tests: `tests/warehouse-guard.sh`.
+
 ## [1.1.1] — 2026-10-20
 
 ### Fixed

@@ -2,7 +2,14 @@
 
 The Altimate marketplace of Claude Code plugins.
 
-Currently ships one plugin: **[altimate-code](./plugins/altimate-code/)** — delegates dbt and warehouse work to the [altimate-code](https://github.com/AltimateAI/altimate-code) CLI agent.
+Currently ships one plugin: **[altimate-code](./plugins/altimate-code/)** — gives Claude Code the data tools of [altimate-code](https://github.com/AltimateAI/altimate-code), with CLI delegation for long dbt and warehouse jobs.
+
+The tools reach Claude in two ways:
+
+- **MCP mode.** The plugin registers `altimate-code mcp serve` as a stdio MCP server. Claude Code does the reasoning and the server runs no LLM. This needs an altimate-code build that contains `mcp serve`, and the CLI on PATH as `altimate-code` (curl installs expose only `altimate`; npm and Homebrew expose both).
+- **CLI mode.** When the MCP tools are not available in the session, because the organisation's managed settings disallow MCP servers, the server failed to start or the build lacks `mcp serve`, the same tools run through `altimate tool run`, which needs no MCP and no LLM either. Long jobs can still be delegated with `altimate run`, which uses the CLI's own LLM provider.
+
+Source queries are read-only by default: database-enforced on Postgres, SQLite, and DuckDB; classification-only elsewhere, so use a read-only DB user. Connections come from project/global `.altimate-code/connections.json` and `ALTIMATE_CODE_CONN_*` environment variables. See the [plugin README](./plugins/altimate-code/README.md) for setup and details.
 
 ## Install
 
