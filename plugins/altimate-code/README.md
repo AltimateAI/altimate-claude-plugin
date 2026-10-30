@@ -60,7 +60,7 @@ With learning on (the workspace's "Learn from sessions", or `altimate learn enab
 
 - **At session start** the plugin gives Claude the team rules for this repository, tells it how many proposed rules are waiting for you, and reports the owner's reviews of your proposals since your last session (approved, or rejected with the reason).
 - **When you correct Claude** ("no, we never use FLOAT for money") the correction is recorded locally. When you correct it on the same topic in two sessions, or correct a team rule it was given, altimate-code words a proposed rule after the turn, in the background.
-- **"Remember this as a team rule: …"**, said to Claude or in a task handed to altimate-code, waits as a proposal the same way.
+- **"Remember this as a team rule: …"**, said to Claude or in a task handed to altimate-code, waits as a proposal the same way. It needs the words "team rule" (or "as a rule"): "remember to run the tests" is just part of the conversation.
 - **`/altimate-code:rules`** shows the proposals waiting for you, the team rules, and the status of the rules you proposed. For each proposal you choose: send it to the workspace owner's review (or approve it, if you are the owner), edit the wording, save it as a memory, or "Not a rule". Nothing reaches teammates until the owner approves it.
 
 Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gateway, or set a provider in altimate-code): if it has none it can use, the next session start says the check failed. The same commands work in a terminal: `altimate learn proposals`, `altimate learn proposals reply <id> --send`. This needs an altimate-code release with workspace rules.

@@ -26,8 +26,20 @@ for ALTIMATE_NAME in altimate altimate-code; do
 done
 [ -n "$ALTIMATE_BIN" ] || exit 0
 
+# Run from the host's directory, not the repository root: a workspace link can be for a folder inside the repository
+# (a dbt project), and the CLI finds the root itself.
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+STATE="$ROOT/.altimate-code/learn/workspace-rules/rules.json"
+
 case "$EVENT" in
   session-start)
+    # Only a repository with workspace rules state, or one the workspace link cache names (the repository or a folder
+    # inside it), can have team rules: elsewhere the CLI is not started at all.
+    if [ ! -f "$STATE" ]; then
+      CACHE="${XDG_STATE_HOME:-$HOME/.local/state}/altimate-code/altimate-workspace-bindings.json"
+      REAL="$(cd "$ROOT" 2>/dev/null && pwd -P)"
+      [ -n "$REAL" ] && grep -qF "\"$REAL" "$CACHE" 2>/dev/null || exit 0
+    fi
     OUTPUT="$(printf '%s' "$INPUT" | "$ALTIMATE_BIN" learn hook session-start --host "$HOST" 2>/dev/null)"
     # Only the hook's JSON: an altimate-code without `learn hook` prints its help instead.
     case "$OUTPUT" in
@@ -35,8 +47,7 @@ case "$EVENT" in
     esac
     ;;
   user-prompt-submit|stop)
-    ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-    [ -f "$ROOT/.altimate-code/learn/workspace-rules/rules.json" ] || exit 0
+    [ -f "$STATE" ] || exit 0
     ( printf '%s' "$INPUT" | nohup "$ALTIMATE_BIN" learn hook "$EVENT" --host "$HOST" & ) >/dev/null 2>&1 </dev/null
     ;;
 esac

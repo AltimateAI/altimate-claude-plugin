@@ -35,7 +35,7 @@ chmod +x "$BIN/altimate-code"
 # hook <dir> <event> <PATH> [STUB_MODE] → prints "exit|stdout"
 hook() {
   local out rc
-  out="$(cd "$1" && printf '{"session_id":"s1","prompt":"no, that is wrong"}' | env PATH="$3" STUB_MODE="${4:-ok}" bash "$HOOK" "$2" 2>&1)"
+  out="$(cd "$1" && printf '{"session_id":"s1","prompt":"no, that is wrong"}' | env PATH="$3" STUB_MODE="${4:-ok}" XDG_STATE_HOME="$WORK/xdg" bash "$HOOK" "$2" 2>&1)"
   rc=$?
   printf '%s|%s' "$rc" "$out"
 }
@@ -44,6 +44,12 @@ SYS="/usr/bin:/bin"
 await_log() { for _ in $(seq 50); do grep -q "$1" "$LOG" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 
 : > "$LOG"
+# Neither workspace rules state nor a workspace link: the CLI is not started at session start.
+[ "$(hook "$WORK/project" session-start "$BIN:$SYS")" = "0|" ] || fail "session start printed output in a project with no link"
+[ ! -s "$LOG" ] || fail "session start ran the CLI in a project with no link: $(cat "$LOG")"
+# A link for a folder inside the repository (a dbt project), started from the repository root: the CLI runs.
+mkdir -p "$WORK/xdg/altimate-code" "$WORK/project/dbt"
+printf '{"bindings":{"%s/dbt":{"datamateId":1}}}' "$(cd "$WORK/project" && pwd -P)" > "$WORK/xdg/altimate-code/altimate-workspace-bindings.json"
 [ "$(hook "$WORK/project" session-start "$BIN:$SYS")" = '0|{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"rules"}}' ] \
   || fail "session start does not print the CLI's hook JSON"
 grep -qx "learn hook session-start --host $HOST|{\"session_id\":\"s1\",\"prompt\":\"no, that is wrong\"}" "$LOG" \

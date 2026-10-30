@@ -48,7 +48,7 @@ Workflow (follow in order):
    )"
    "$ALTIMATE_BIN" learn proposals reply "$PROPOSAL_ID" --json --edit="$WORDING" < /dev/null
    ```
-   Keep `--edit="$WORDING"` in one argument (a wording that starts with `-` is otherwise read as a flag), and start the closing `ALTIMATE_RULE` line at the beginning of its line. For any other choice, run the same command with that flag instead of `--edit="$WORDING"` (and without the here-doc).
+   Keep `--edit="$WORDING"` in one argument (a wording that starts with `-` is otherwise read as a flag), and start the closing `ALTIMATE_RULE` line at the beginning of its line. If the wording itself has a line that is exactly `ALTIMATE_RULE`, use another delimiter. For any other choice, run the same command with that flag instead of `--edit="$WORDING"` (and without the here-doc).
 
    The JSON answer is `{"ok": true, "message": …, "closed": …}` or `{"ok": false, "code": …, "error": …}`. Show the `message` or `error` to the user as it is. Then:
    - `closed: false` after an edit: the proposal is still open with the new wording; ask about it again.
