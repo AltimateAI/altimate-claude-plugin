@@ -25,8 +25,10 @@ name is never touched; that workspace skill is skipped instead. A marked copy
 under another name (a user's renamed copy) is not ours either. Each copy has a `.gitignore`
 of `*`, so copies stay out of version control.
 
-Runs under an exclusive lock on the skills directory itself, so concurrent
-sessions and background refreshes reconcile one at a time.
+Runs under a lock shared with the CLI's own copy (claude-skill-mirror.ts): an
+atomic `mkdir` of SKILLS_DIR/LOCK_DIR, the one lock both runtimes have. A lock
+older than LOCK_STALE_SECONDS belongs to a sync that died; one that is not free
+within LOCK_WAIT_SECONDS leaves the copies as they are.
 
 `--withdraw` removes every copy (copying turned off). `--owned` only answers,
 by exit status, whether the snapshot may be served to the signed-in account;
@@ -36,7 +38,6 @@ Prints `changed` when it wrote or removed anything. Never raises: a failure
 leaves existing copies as they were.
 """
 
-import fcntl
 import filecmp
 import hashlib
 import json
@@ -59,7 +60,10 @@ SWAP_SECONDS = 600
 # Staging directories: tempfile.mkdtemp(prefix=".<name>.altimate-staging-"), and the ".old" a swap
 # moves the previous copy to. The infix keeps a user's own hidden directories from ever matching.
 STAGING_INFIX = ".altimate-staging-"
-STAGING_PATTERN = re.compile(r"^\.[a-z0-9][a-z0-9-]{0,63}\.altimate-staging-[a-z0-9_]{8}(\.old)?$")
+STAGING_PATTERN = re.compile(r"^\.[a-z0-9][a-z0-9-]{0,63}\.altimate-staging-[A-Za-z0-9_]{6,8}(\.old)?$")
+LOCK_DIR = ".altimate-workspace-sync.lock"
+LOCK_STALE_SECONDS = 120
+LOCK_WAIT_SECONDS = 10
 # Claude Code skill names: lowercase letters, digits and hyphens.
 NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 CREDENTIALS = os.path.join(os.path.expanduser("~"), ".altimate", "altimate.json")
@@ -309,13 +313,38 @@ def sync(project, withdraw=False):
         if withdraw or not read_snapshot(project):
             return False
         os.makedirs(target_root, exist_ok=True)
-    lock = os.open(target_root, os.O_RDONLY)
+    if not acquire_lock(target_root):
+        return False
     try:
-        fcntl.flock(lock, fcntl.LOCK_EX)
         remove_abandoned_staging(target_root)
         return reconcile(project, target_root, [] if withdraw else read_snapshot(project))
     finally:
-        os.close(lock)
+        try:
+            os.rmdir(os.path.join(target_root, LOCK_DIR))
+        except OSError:
+            pass
+
+
+def acquire_lock(target_root):
+    lock = os.path.join(target_root, LOCK_DIR)
+    deadline = time.time() + LOCK_WAIT_SECONDS
+    while True:
+        try:
+            os.mkdir(lock)
+            return True
+        except FileExistsError:
+            pass
+        except OSError:
+            return False
+        try:
+            if time.time() - os.lstat(lock).st_mtime > LOCK_STALE_SECONDS:
+                os.rmdir(lock)
+                continue
+        except OSError:
+            continue
+        if time.time() > deadline:
+            return False
+        time.sleep(0.05)
 
 
 def remove_abandoned_staging(target_root):

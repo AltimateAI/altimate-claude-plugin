@@ -3,7 +3,6 @@
 Run: python3 -m unittest discover -s tests -p 'test_*.py'
 """
 
-import fcntl
 import importlib.util
 import hashlib
 import json
@@ -223,10 +222,8 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
 
     def test_waits_for_another_sync_to_finish(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
-        skills_dir = os.path.join(self.project, ".claude", "skills")
-        os.makedirs(skills_dir)
-        lock = os.open(skills_dir, os.O_RDONLY)
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock = os.path.join(self.project, ".claude", "skills", ".altimate-workspace-sync.lock")
+        os.makedirs(lock)
         proc = subprocess.Popen(
             [sys.executable, "-I", SCRIPT, self.project],
             stdout=subprocess.PIPE,
@@ -236,8 +233,30 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         time.sleep(0.5)
         self.assertIsNone(proc.poll())
         self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
-        os.close(lock)
+        os.rmdir(lock)
         self.assertEqual(proc.communicate(timeout=10)[0].strip(), "changed")
+        self.assertFalse(os.path.exists(lock))
+
+    def test_a_stale_lock_is_taken_over(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        lock = os.path.join(self.project, ".claude", "skills", ".altimate-workspace-sync.lock")
+        os.makedirs(lock)
+        old = time.time() - 3600
+        os.utime(lock, (old, old))
+        self.assertEqual(self.run_sync()[0], "changed")
+        self.assertFalse(os.path.exists(lock))
+
+    def test_cli_staging_names_are_recognised(self):
+        skills = os.path.join(self.project, ".claude", "skills")
+        abandoned = os.path.join(skills, ".alpha.altimate-staging-Ab12Cd")
+        os.makedirs(abandoned)
+        with open(os.path.join(abandoned, ".gitignore"), "w", encoding="utf-8") as f:
+            f.write("*\n")
+        old = time.time() - 3600
+        os.utime(abandoned, (old, old))
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        self.assertFalse(os.path.exists(abandoned))
 
     def test_another_sessions_staging_directory_is_left_alone(self):
         staging = os.path.join(self.project, ".claude", "skills", ".a.altimate-staging-x1y2z3w4")
