@@ -9,16 +9,31 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 
 ## The short version
 
-- The plugin itself collects **no data**. It is a routing layer (a skill, a slash command, and a static session hook) that tells Claude Code when to delegate a task to the altimate-code CLI installed on your machine.
+- The plugin itself collects **no data**. It is a routing layer (skills, slash commands, and session hooks) that tells Claude Code when to delegate a task to the altimate-code CLI installed on your machine.
+- In a project linked to an Altimate workspace with learning on, its workspace-rules hooks hand your messages and the session transcript to the local altimate-code CLI, which keeps corrections on your machine and may send a digest to your LLM provider to word a proposed team rule. A proposal reaches your workspace only when you send or approve it. See [Workspace rules](#workspace-rules).
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
 - Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
 
-The plugin contains no executable service of its own. Its only runtime behavior is a SessionStart hook that prints a fixed, static text block describing the skill's capabilities. It does not read your files, does not phone home, and does not collect analytics.
+The plugin contains no executable service of its own. At session start, a hook prints a fixed, static text block describing the skill's capabilities. The workspace-rules hooks (see below) call the locally installed altimate-code CLI. The plugin does not phone home and does not collect analytics.
 
-Data leaves Claude Code's process only when the delegation skill or the `/altimate-code:altimate` command fires and invokes the locally installed altimate-code CLI.
+Data leaves Claude Code's process only when the delegation skill, the `/altimate-code:altimate`, `/altimate-code:review` or `/altimate-code:rules` command, or a workspace-rules hook invokes the locally installed altimate-code CLI.
+
+## Workspace rules
+
+These hooks act only in a project linked to an Altimate workspace, with learning on, workspaces on and you signed in to Altimate. Otherwise the session-start hook reads only local altimate-code state and sends nothing, and the per-turn hooks do not run the CLI at all in a project without workspace rules state.
+
+| Data | Where it goes | Retention |
+|---|---|---|
+| Your workspace's approved team rules | Pulled by the local CLI from your Altimate workspace, given to Claude Code as session context | Mirrored locally in the project's git-ignored `.altimate-code/` directory |
+| Each message you send | The local CLI checks it, with no model call; a message that reads as a correction is kept (secrets redacted) | Local only, in the project's git-ignored `.altimate-code/` directory |
+| The session transcript, after a turn with new corrections | Read locally by the CLI; a bounded, redacted digest goes to your configured LLM provider to word one proposed rule | Local only; the provider's handling is as for delegated tasks above |
+| A proposed rule, with an excerpt of your correction if your workspace allows quotes | Your Altimate workspace's review queue, only when you send or approve it in `/altimate-code:rules` | Per the Altimate Privacy Policy |
+| Rule usage counts (sessions a rule was shown in, corrections after it) | Your Altimate workspace | Per the Altimate Privacy Policy |
+
+Turn this off with `altimate-code learn disable` in the project, `ALTIMATE_LEARN=0`, or the workspace's "Learn from sessions" setting.
 
 ## Data flows when a task is delegated
 

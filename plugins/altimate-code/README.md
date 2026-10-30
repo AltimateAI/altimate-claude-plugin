@@ -38,7 +38,7 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 
 ## How it works
 
-1. A **SessionStart hook** adds a static description of altimate-code's capabilities to the session, so Claude Code knows when a task fits.
+1. A **SessionStart hook** adds a static description of altimate-code's capabilities to the session, so Claude Code knows when a task fits. In a linked project, the [team rules](#team-rules) hooks add the workspace's rules too.
 2. When a data-engineering task fires the **skill** (or you invoke **`/altimate-code:altimate <task>`** explicitly), Claude Code runs `altimate run "<your task>"` locally with its `builder` agent.
 3. altimate-code plans and executes the task using your configured LLM provider. Warehouse queries, dbt commands, and file edits run **locally under your credentials**.
 4. The result is written to a local output file and surfaced back in your Claude Code conversation.
@@ -53,6 +53,17 @@ An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's 
 4. **Ask Claude** — questions about your team's conventions, standards or knowledge go to altimate-code, which answers from the workspace. Start a request with `/altimate-code:altimate` to be sure it does: *"/altimate-code:altimate what are our naming conventions for staging models?"*
 
 What altimate-code learns during these tasks is saved to the workspace's memory and shared with your team in the CLI, the IDE and Studio. Skills added to the workspace reach the next task.
+
+### Team rules
+
+With learning on (the workspace's "Learn from sessions", or `altimate learn enable` in the project), the workspace's approved **team rules** apply to Claude Code itself, not only to the tasks it hands over:
+
+- **At session start** the plugin gives Claude the team rules for this repository, tells it how many proposed rules are waiting for you, and reports the owner's reviews of your proposals since your last session (approved, or rejected with the reason).
+- **When you correct Claude** ("no, we never use FLOAT for money") the correction is recorded locally. When you correct it on the same topic in two sessions, or correct a team rule it was given, altimate-code words a proposed rule after the turn, in the background.
+- **"Remember this as a team rule: …"** in a task handed to altimate-code is proposed the same way.
+- **`/altimate-code:rules`** shows the proposals waiting for you, the team rules, and the status of the rules you proposed. For each proposal you choose: send it to the workspace owner's review (or approve it, if you are the owner), edit the wording, save it as a memory, or "Not a rule". Nothing reaches teammates until the owner approves it.
+
+The same commands work in a terminal: `altimate learn proposals`, `altimate learn proposals reply <id> --send`. This needs an altimate-code release with workspace rules.
 
 ## Example prompts
 
@@ -80,6 +91,7 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1) or `profiles.yml`. |
 | `Not signed in to Altimate` | Run `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). |
 | Answers ignore your workspace's skills or knowledge | Run `altimate workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate link` in a terminal. |
+| Team rules don't appear at session start | Check `altimate learn status` in the project: it needs learning on, a linked workspace and an Altimate sign-in. Update altimate-code if `altimate learn rules` is an unknown command. |
 | Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 Still stuck? See [Support](#support).
@@ -88,7 +100,8 @@ Still stuck? See [Support](#support).
 
 - **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and workspace guidance
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
-- **Hook** — `hooks/hooks.json` — SessionStart capability description (static text only)
+- **Command** — `commands/rules.md` — `/altimate-code:rules` to answer proposed team rules
+- **Hooks** — `hooks/hooks.json` — SessionStart capability description (static text), and the team rules hooks (`hooks-handlers/workspace-rules.sh`): SessionStart, UserPromptSubmit and Stop, which call `altimate learn hook <event>` and never block or fail the session
 
 ## Support
 
