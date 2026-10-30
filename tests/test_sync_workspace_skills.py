@@ -90,6 +90,7 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
                     f.write(content)
         manifest = {
             "version": 2,
+            "datamateId": 1,
             "tenant": TENANT,
             "apiUrl": API_URL,
             "account": self.account,
@@ -467,9 +468,7 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         os.rename(root, retired)
         self.assertEqual(self.run_sync()[0], "")
         self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
-        spec = importlib.util.spec_from_file_location("sync_script", SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = self.load_module()
         module.SWAP_SECONDS = -1  # a retired snapshot left long ago by a crashed swap
         self.assertFalse(module.cli_is_swapping(self.project))
 
@@ -491,6 +490,226 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.assertTrue(os.path.exists(fresh))
         for path in users:
             self.assertTrue(os.path.exists(path), path)
+
+
+    def load_module(self):
+        spec = importlib.util.spec_from_file_location("sync_script", SCRIPT)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.CREDENTIALS = os.path.join(self.home, ".altimate", "altimate.json")
+        return module
+
+    def test_a_listed_skill_missing_keeps_copies(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}, "sk_2": {"SKILL.md": "---\nname: b\ndescription: d\n---\n"}})
+        self.run_sync()
+        shutil.rmtree(os.path.join(self.project, SNAPSHOT, "sk_2"))
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertTrue(os.path.exists(self.skill_path("b")))
+
+    def test_a_listed_skill_without_skill_md_is_skipped(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}, "sk_2": {"SKILL.md": "---\nname: b\ndescription: d\n---\n"}})
+        self.run_sync()
+        os.remove(os.path.join(self.project, SNAPSHOT, "sk_2", "SKILL.md"))
+        self.assertEqual(self.run_sync()[0], "changed")
+        self.assertFalse(os.path.exists(self.skill_path("b")))
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_a_skill_file_with_a_byte_order_mark_is_copied(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": "\ufeff" + RISKY_SKILL}})
+        self.run_sync()
+        self.assertTrue(self.read(self.skill_path("staging-conventions")).startswith("---\nname: staging-conventions\n"))
+
+    def test_unreadable_credentials_keep_copies(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_an_unset_variable_in_the_credentials_keeps_copies(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
+            json.dump({"altimateUrl": API_URL, "altimateInstanceName": TENANT, "altimateApiKey": "${env:NOT_SET_HERE}"}, f)
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_a_snapshot_path_through_a_symlink_is_not_read(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        skill = os.path.join(self.project, ".altimate-code", "skill")
+        os.rename(skill, os.path.join(self.project, "elsewhere"))
+        os.symlink(os.path.join(self.project, "elsewhere"), skill)
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_a_manifest_replaced_during_the_sync_stops_removal(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        module = self.load_module()
+        target_root = os.path.join(self.project, ".claude", "skills")
+        lock = module.acquire_lock(target_root)
+        try:
+            # Read as empty, then a new snapshot lands before the removal pass.
+            self.assertFalse(module.reconcile(self.project, target_root, [], lock, manifest_text="older"))
+        finally:
+            module.release_lock(lock)
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_the_lock_is_released_only_by_its_holder(self):
+        module = self.load_module()
+        target_root = os.path.join(self.project, ".claude", "skills")
+        os.makedirs(target_root)
+        lock = module.acquire_lock(target_root)
+        path = os.path.join(target_root, ".altimate-workspace-sync.lock")
+        os.rename(path, path + ".taken")
+        os.mkdir(path)  # another sync took it over
+        self.assertFalse(module.renew_lock(lock))
+        module.release_lock(lock)
+        self.assertTrue(os.path.isdir(path))
+
+    def test_signed_out_is_never_served_even_an_unattributable_snapshot(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        manifest_path = os.path.join(self.project, SNAPSHOT, ".manifest.json")
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+        del manifest["account"]
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f)
+        os.remove(os.path.join(self.home, ".altimate", "altimate.json"))
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+        self.assertEqual(self.run_script("--owned").returncode, 1)
+
+    def test_a_manifest_the_cli_would_not_attribute_is_not_served(self):
+        for change in ({"datamateId": None}, {"skills": ["sk_1"]}, {"version": 1}):
+            self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+            manifest_path = os.path.join(self.project, SNAPSHOT, ".manifest.json")
+            with open(manifest_path, encoding="utf-8") as f:
+                manifest = json.load(f)
+            manifest.update(change)
+            with open(manifest_path, "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+            self.run_sync()
+            self.assertFalse(os.path.exists(self.skill_path("staging-conventions")), change)
+
+    def test_abandoned_tombs_of_broken_locks_are_removed(self):
+        skills = os.path.join(self.project, ".claude", "skills")
+        tomb = os.path.join(skills, ".altimate-workspace-sync.lock.stale-1-2")
+        os.makedirs(tomb)
+        old = time.time() - 3600
+        os.utime(tomb, (old, old))
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        self.assertFalse(os.path.exists(tomb))
+
+    def test_a_busy_or_unbreakable_lock_gives_up_in_time(self):
+        module = self.load_module()
+        module.LOCK_WAIT_SECONDS = 0.3
+        target_root = os.path.join(self.project, ".claude", "skills")
+        path = os.path.join(target_root, ".altimate-workspace-sync.lock")
+        os.makedirs(path)
+        start = time.time()
+        self.assertIsNone(module.acquire_lock(target_root))  # held and fresh
+        old = time.time() - 3600
+        os.utime(path, (old, old))
+        real_rename = module.os.rename
+        module.os.rename = lambda *a: (_ for _ in ()).throw(PermissionError("read-only"))
+        try:
+            self.assertIsNone(module.acquire_lock(target_root))  # stale but cannot be removed
+        finally:
+            module.os.rename = real_rename
+        self.assertLess(time.time() - start, 3)
+
+
+    def test_parity_with_the_cli_on_edge_inputs(self):
+        # A U+FEFF after the colon is not whitespace: the name is invalid, nothing is copied.
+        self.write_snapshot({"sk_1": {"SKILL.md": "---\nname:\ufeffalpha\ndescription: d\n---\n"}})
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("alpha")))
+        # A manifest apiUrl with a trailing slash is compared exactly, as the CLI does.
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        manifest_path = os.path.join(self.project, SNAPSHOT, ".manifest.json")
+        with open(manifest_path, encoding="utf-8") as f:
+            text = f.read()
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            f.write(text.replace('"apiUrl": "%s"' % API_URL, '"apiUrl": "%s/"' % API_URL))
+        self.run_sync()
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+        # NaN is not JSON: the manifest cannot be read, copies stay.
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            f.write(text.replace('"datamateId": 1', '"datamateId": NaN'))
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_an_unset_variable_in_any_credential_field_keeps_copies(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
+            json.dump({"altimateUrl": API_URL + "/", "altimateInstanceName": TENANT, "altimateApiKey": "k", "mcpUrl": "${env:NOT_SET_HERE}"}, f)
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_special_files_in_a_bundle_are_skipped(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "notes.md": "x"}})
+        os.mkfifo(os.path.join(self.project, SNAPSHOT, "sk_1", "pipe"))
+        self.run_sync()
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions", "notes.md")))
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions", "pipe")))
+
+    def test_a_tomb_that_is_a_file_is_removed(self):
+        skills = os.path.join(self.project, ".claude", "skills")
+        os.makedirs(skills)
+        tomb = os.path.join(skills, ".altimate-workspace-sync.lock.stale-1-2")
+        open(tomb, "w").close()
+        old = time.time() - 3600
+        os.utime(tomb, (old, old))
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        self.assertFalse(os.path.exists(tomb))
+
+
+    def test_final_parity_alignments_with_the_cli(self):
+        manifest_path = os.path.join(self.project, SNAPSHOT, ".manifest.json")
+        # A manifest that is JSON but not an object is not attributable: copies are removed.
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        with open(manifest_path, "w", encoding="utf-8") as f:
+            f.write("[]")
+        self.assertEqual(self.run_sync()[0], "changed")
+        self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
+        # NaN in the credentials is not JSON: unreadable, copies stay.
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
+            f.write('{"altimateUrl": "%s", "altimateInstanceName": "%s", "altimateApiKey": "k", "x": NaN}' % (API_URL, TENANT))
+        self.assertEqual(self.run_sync()[0], "")
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_an_unsearchable_skill_directory_keeps_copies(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        source = os.path.join(self.project, SNAPSHOT, "sk_1")
+        os.chmod(source, 0)
+        try:
+            self.assertEqual(self.run_sync()[0], "")
+        finally:
+            os.chmod(source, 0o755)
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
+    def test_an_unreadable_bundle_subdirectory_keeps_the_previous_copy(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "ref/notes.md": "one"}})
+        self.run_sync()
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "ref/notes.md": "two"}})
+        ref = os.path.join(self.project, SNAPSHOT, "sk_1", "ref")
+        os.chmod(ref, 0)
+        try:
+            self.run_sync()
+        finally:
+            os.chmod(ref, 0o755)
+        self.assertEqual(self.read(self.skill_path("staging-conventions", "ref/notes.md")), "one")
 
 
 if __name__ == "__main__":

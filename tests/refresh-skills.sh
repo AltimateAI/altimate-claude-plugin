@@ -23,7 +23,7 @@ sleep "${FAKE_DELAY:-0}"
 echo refresh >> "$dir/refresh.log"
 [ -z "${FAKE_FAIL:-}" ] || exit 1
 mkdir -p "$snap/id-1"
-printf '{"tenant":"acme","apiUrl":"https://api.example.com","account":"9ac3583027c136a71b25e6b5e396312c22f12f2acf805e383e3281d91dd8d59a","skills":{"id-1":{}}}\n' > "$snap/.manifest.json"
+printf '{"version":2,"datamateId":1,"tenant":"acme","apiUrl":"https://api.example.com","account":"9ac3583027c136a71b25e6b5e396312c22f12f2acf805e383e3281d91dd8d59a","skills":{"id-1":{}}}\n' > "$snap/.manifest.json"
 printf -- '---\nname: team-style\ndescription: Team style\n---\nUse `stg_` prefixes.\n' > "$snap/id-1/SKILL.md"
 date > "$snap/.synced-at"
 FAKE

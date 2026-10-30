@@ -17,7 +17,7 @@ printf '{"altimateInstanceName":"acme","altimateUrl":"https://api.example.com","
 make_project() {
   local dir="$1"
   mkdir -p "$dir/.altimate-code/skill/_workspace/id-1" "$dir/.claude/skills/own"
-  printf '{"tenant":"acme","apiUrl":"https://api.example.com","account":"9ac3583027c136a71b25e6b5e396312c22f12f2acf805e383e3281d91dd8d59a","skills":{"id-1":{}}}\n' > "$dir/.altimate-code/skill/_workspace/.manifest.json"
+  printf '{"version":2,"datamateId":1,"tenant":"acme","apiUrl":"https://api.example.com","account":"9ac3583027c136a71b25e6b5e396312c22f12f2acf805e383e3281d91dd8d59a","skills":{"id-1":{}}}\n' > "$dir/.altimate-code/skill/_workspace/.manifest.json"
   date > "$dir/.altimate-code/skill/_workspace/.synced-at"
   printf -- '---\nname: team-style\ndescription: Team style\n---\nUse `stg_` prefixes.\n' > "$dir/.altimate-code/skill/_workspace/id-1/SKILL.md"
   printf 'mine\n' > "$dir/.claude/skills/own/SKILL.md"

@@ -26,9 +26,10 @@ under another name (a user's renamed copy) is not ours either. Each copy has a `
 of `*`, so copies stay out of version control.
 
 Runs under a lock shared with the CLI's own copy (claude-skill-mirror.ts): an
-atomic `mkdir` of SKILLS_DIR/LOCK_DIR, the one lock both runtimes have. A lock
-older than LOCK_STALE_SECONDS belongs to a sync that died; one that is not free
-within LOCK_WAIT_SECONDS leaves the copies as they are.
+atomic `mkdir` of SKILLS_DIR/LOCK_DIR, the one lock both runtimes have. The
+holder renews it; one not renewed for LOCK_STALE_SECONDS belongs to a sync that
+died and is taken over; one that is not free within LOCK_WAIT_SECONDS leaves the
+copies as they are. Copies are removed only while the manifest is the one read.
 
 `--withdraw` removes every copy (copying turned off). `--owned` only answers,
 by exit status, whether the snapshot may be served to the signed-in account;
@@ -132,36 +133,118 @@ def render_skill(name, description, body):
     return f"---\nname: {name}\ndescription: {json.dumps(description)}\n---\n{neutralise_commands(body)}"
 
 
+class Unreadable(Exception):
+    """The snapshot or the credentials exist but cannot be read: nothing is changed."""
+
+
 def signed_in_as():
-    """(tenant, URL, account) of the signed-in Altimate account, or None. The account is
-    the CLI's credential digest, which it records in the manifest it writes."""
+    """(tenant, URL, account) of the signed-in Altimate account, or None when signed out.
+    Raises Unreadable when the credentials exist but cannot be read. The account is the
+    CLI's credential digest, which it records in the manifest it writes."""
     try:
         with open(CREDENTIALS, encoding="utf-8") as f:
-            creds = json.load(f)
-        # As the CLI reads them: `${env:VAR}` resolved (a missing variable is no sign-in), URL without trailing slashes.
-        tenant, url, key = (
-            ENV_REFERENCE.sub(lambda m: os.environ[m.group(1)], creds.get(field))
-            for field in ("altimateInstanceName", "altimateUrl", "altimateApiKey")
-        )
-        if not (tenant and key):
-            return None
-        url = url.rstrip("/")
-        return tenant, url, hashlib.sha256(f"{url}|{tenant}|{key}".encode()).hexdigest()
-    except (OSError, ValueError, AttributeError, TypeError, KeyError):
+            creds = json.load(f, parse_constant=reject_constant)
+    except FileNotFoundError:
         return None
+    except (OSError, ValueError) as err:
+        raise Unreadable(err) from err
+    if not isinstance(creds, dict):
+        raise Unreadable("credentials are not an object")
+    try:
+        # As the CLI reads them: `${env:VAR}` resolved in every field, URL without trailing slashes.
+        creds = resolve_env(creds)
+        tenant, url, key = (creds[field] for field in ("altimateInstanceName", "altimateUrl", "altimateApiKey"))
+        if not all(isinstance(value, str) for value in (tenant, url, key)):
+            raise TypeError("a credential field is not a string")
+    except (KeyError, TypeError) as err:  # an unset variable, or a field missing: the CLI cannot read them either
+        raise Unreadable(err) from err
+    if not key:  # the CLI checks only the key
+        return None
+    url = url.rstrip("/")
+    return tenant, url, hashlib.sha256(f"{url}|{tenant}|{key}".encode()).hexdigest()
+
+
+def resolve_env(value):
+    if isinstance(value, str):
+        return ENV_REFERENCE.sub(lambda m: os.environ[m.group(1)], value)
+    if isinstance(value, list):
+        return [resolve_env(v) for v in value]
+    if isinstance(value, dict):
+        return {k: resolve_env(v) for k, v in value.items()}
+    return value
+
+
+def reject_constant(name):
+    raise ValueError(f"{name} is not JSON")  # NaN and Infinity: the CLI's JSON.parse rejects them
 
 
 def owner_of(manifest):
-    return manifest.get("tenant"), str(manifest.get("apiUrl", "")).rstrip("/"), manifest.get("account")
+    """The account a manifest was fetched for; None for one the CLI would not attribute
+    (its readManifest checks)."""
+    valid = (
+        isinstance(manifest, dict)
+        and manifest.get("version") == 2
+        and type(manifest.get("datamateId")) in (int, float)
+        and isinstance(manifest.get("tenant"), str)
+        and isinstance(manifest.get("apiUrl"), str)
+        and isinstance(manifest.get("account"), str)
+        and manifest["account"]
+        and isinstance(manifest.get("skills"), dict)
+    )
+    # apiUrl compared exactly, as the CLI does; it writes it without a trailing slash.
+    return (manifest["tenant"], manifest["apiUrl"], manifest["account"]) if valid else None
+
+
+def serves(manifest):
+    """True when the manifest may be served to the signed-in account. Raises Unreadable."""
+    owner, identity = owner_of(manifest), signed_in_as()
+    return owner is not None and identity is not None and owner == identity
+
+
+def is_link(path):
+    """A symlink, or an NTFS junction (which islink does not report)."""
+    return os.path.islink(path) or getattr(os.path, "isjunction", lambda _: False)(path)
+
+
+def read_text_no_follow(path, encoding="utf-8"):
+    # O_NOFOLLOW does not exist on Windows; the callers' islink checks still apply there.
+    # O_BINARY: Windows would otherwise stop a text-mode read at a \x1a byte.
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0))
+    with open(fd, encoding=encoding) as f:
+        return f.read()
+
+
+def read_manifest(project):
+    """(text, manifest) of the snapshot's manifest, or None when there is none.
+    Raises Unreadable when it exists but cannot be read, or its path runs through a symlink."""
+    parts = SNAPSHOT_DIR.split(os.sep) + [MANIFEST]
+    if any(is_link(os.path.join(project, *parts[: i + 1])) for i in range(len(parts))):
+        raise Unreadable("the snapshot path runs through a symlink")
+    try:
+        text = read_text_no_follow(os.path.join(project, SNAPSHOT_DIR, MANIFEST))
+        manifest = json.loads(text, parse_constant=reject_constant)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as err:
+        raise Unreadable(err) from err
+    # A manifest that is not an object is readable but not attributable: owner_of says no.
+    return text, manifest
+
+
+def manifest_text_now(project):
+    """The manifest's text as it is now, None without one, or a value equal to nothing when unreadable."""
+    try:
+        found = read_manifest(project)
+    except Unreadable:
+        return object()
+    return found[0] if found else None
 
 
 def snapshot_is_ours(project):
-    if os.path.islink(os.path.join(project, SNAPSHOT_DIR)):
-        return False
     try:
-        manifest = json.loads(read_text_no_follow(os.path.join(project, SNAPSHOT_DIR, MANIFEST)))
-        return owner_of(manifest) == signed_in_as()
-    except (OSError, ValueError, AttributeError, TypeError):
+        found = read_manifest(project)
+        return found is not None and serves(found[1])
+    except Unreadable:
         return False
 
 
@@ -178,44 +261,45 @@ def cli_is_swapping(project):
         return False
 
 
-def read_text_no_follow(path):
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    with open(fd, encoding="utf-8") as f:
-        return f.read()
-
-
 def read_snapshot(project):
-    """[(source dir, name, description, body)] for each usable workspace skill;
-    [] when the project has no snapshot or it belongs to another account, so copies
-    are removed; None when the snapshot cannot be read or the CLI is swapping it, so
-    nothing changes."""
-    root = os.path.join(project, SNAPSHOT_DIR)
-    manifest_path = os.path.join(root, MANIFEST)
-    if not os.path.lexists(manifest_path):
-        return None if cli_is_swapping(project) else []
-    if os.path.islink(root):
-        return None
+    """(skills, manifest text), skills being [(source dir, name, description, body)].
+    No skills when the project has no snapshot or it belongs to another account, so copies
+    are removed. None, so nothing changes, when the snapshot or the credentials cannot be
+    read, a listed skill directory is missing, or the CLI is swapping the snapshot."""
     try:
-        manifest = json.loads(read_text_no_follow(manifest_path))
-        ids = list(manifest.get("skills", {}))
-        owner = owner_of(manifest)
-    except (OSError, ValueError, AttributeError, TypeError):
+        found = read_manifest(project)
+        if found is None:
+            return None if cli_is_swapping(project) else ([], None)
+        text, manifest = found
+        if not serves(manifest):
+            return [], text
+    except Unreadable:
         return None
-    if owner != signed_in_as():
-        return []
+    root = os.path.join(project, SNAPSHOT_DIR)
     skills = []
-    for skill_id in ids:
+    for skill_id in manifest["skills"]:  # owner_of checked it is an object
         # Each id is one directory under the snapshot, never a path out of it.
         if not isinstance(skill_id, str) or not skill_id or skill_id.startswith(".") or "/" in skill_id or "\\" in skill_id:
             continue
         source = os.path.join(root, skill_id)
-        if os.path.islink(source) or not os.path.isdir(source):
-            continue
         skill_file = os.path.join(source, "SKILL.md")
-        if not os.path.lexists(skill_file) or os.path.islink(skill_file):
+        # A listed directory that is gone means the snapshot changed under us; a skill
+        # without a SKILL.md is skipped, as the CLI does.
+        if not os.path.lexists(source):
+            return None
+        if is_link(source) or not os.path.isdir(source):
             continue
         try:
-            fields, body = parse_frontmatter(read_text_no_follow(skill_file))
+            if os.path.islink(skill_file):
+                continue
+            os.lstat(skill_file)
+        except FileNotFoundError:
+            continue
+        except OSError:  # e.g. a directory that cannot be searched: unknown, so nothing is pruned
+            return None
+        try:
+            # utf-8-sig: a byte-order mark is dropped, as the CLI's decoder does.
+            fields, body = parse_frontmatter(read_text_no_follow(skill_file, "utf-8-sig"))
         except UnicodeDecodeError:
             continue
         except OSError:
@@ -223,14 +307,14 @@ def read_snapshot(project):
         if not fields:
             continue
         name, description = fields.get("name", ""), fields.get("description", "")
-        if NAME_PATTERN.match(name) and description:
+        if NAME_PATTERN.fullmatch(name) and description:
             skills.append((source, name, description, body))
-    return skills
+    return skills, text
 
 
 def is_ours(path):
     """A marked, non-symlinked directory whose marker names it. Markers without a name
-    (written by the CLI) still count; a copy the user renamed does not."""
+    (written by earlier versions) still count; a copy the user renamed does not."""
     if os.path.islink(path):
         return False
     try:
@@ -246,11 +330,17 @@ def is_blocked_dir(name):
     return name.startswith(".") or name.lower() in BLOCKED_DIRS
 
 
+def raise_error(err):
+    raise err
+
+
 def build_copy(source, name, description, body, staging):
     # First, so a copy interrupted part-way is still kept out of git.
-    with open(os.path.join(staging, ".gitignore"), "w", encoding="utf-8") as f:
+    # newline="\n": the same bytes on every platform, as the CLI writes them.
+    with open(os.path.join(staging, ".gitignore"), "w", encoding="utf-8", newline="\n") as f:
         f.write("*\n")
-    for dirpath, dirnames, filenames in os.walk(source):
+    # onerror raises: an unreadable subdirectory skips the skill instead of copying part of it.
+    for dirpath, dirnames, filenames in os.walk(source, onerror=raise_error):
         dirnames[:] = [
             d for d in dirnames if not os.path.islink(os.path.join(dirpath, d)) and not is_blocked_dir(d)
         ]
@@ -258,15 +348,16 @@ def build_copy(source, name, description, body, staging):
         os.makedirs(os.path.join(staging, rel), exist_ok=True)
         for filename in filenames:
             src = os.path.join(dirpath, filename)
-            if os.path.islink(src) or filename.startswith(".") or filename.lower() in BLOCKED_FILES:
+            # Regular files only, as the CLI copies: no symlinks, FIFOs or devices.
+            if os.path.islink(src) or not os.path.isfile(src) or filename.startswith(".") or filename.lower() in BLOCKED_FILES:
                 continue
             shutil.copy(src, os.path.join(staging, rel, filename))
     rendered = render_skill(name, description, body)
     if has_command_marker(rendered.split("\n---\n", 1)[1]):
         raise ValueError(f"workspace skill {name} still has a command marker")
-    with open(os.path.join(staging, "SKILL.md"), "w", encoding="utf-8") as f:
+    with open(os.path.join(staging, "SKILL.md"), "w", encoding="utf-8", newline="\n") as f:
         f.write(rendered)
-    with open(os.path.join(staging, MARKER), "w", encoding="utf-8") as f:
+    with open(os.path.join(staging, MARKER), "w", encoding="utf-8", newline="\n") as f:
         f.write(f"{MARKER_TEXT}skill: {name}\n")
 
 
@@ -310,49 +401,111 @@ def sync(project, withdraw=False):
         return False
     if not os.path.isdir(target_root):
         # Nothing to remove; create the directory only when there is something to copy.
-        if withdraw or not read_snapshot(project):
+        snapshot = None if withdraw else read_snapshot(project)
+        if not snapshot or not snapshot[0]:
             return False
         os.makedirs(target_root, exist_ok=True)
-    if not acquire_lock(target_root):
+    lock = acquire_lock(target_root)
+    if lock is None:
         return False
     try:
         remove_abandoned_staging(target_root)
-        return reconcile(project, target_root, [] if withdraw else read_snapshot(project))
+        if withdraw:
+            return reconcile(project, target_root, [], lock, check_manifest=False)
+        snapshot = read_snapshot(project)
+        if snapshot is None:
+            return False
+        return reconcile(project, target_root, snapshot[0], lock, manifest_text=snapshot[1])
     finally:
-        try:
-            os.rmdir(os.path.join(target_root, LOCK_DIR))
-        except OSError:
-            pass
+        release_lock(lock)
 
 
 def acquire_lock(target_root):
-    lock = os.path.join(target_root, LOCK_DIR)
+    """(path, token) once this process holds the lock, or None when it is not free within
+    LOCK_WAIT_SECONDS. Ownership is an empty `<token>` directory inside the lock, which git
+    does not show and which no other holder can have."""
+    path = os.path.join(target_root, LOCK_DIR)
+    token = f"{os.getpid()}-{time.time_ns()}"
     deadline = time.time() + LOCK_WAIT_SECONDS
     while True:
         try:
-            os.mkdir(lock)
-            return True
+            os.mkdir(path)
+            os.mkdir(os.path.join(path, token))
+            return path, token
         except FileExistsError:
             pass
         except OSError:
-            return False
-        try:
-            if time.time() - os.lstat(lock).st_mtime > LOCK_STALE_SECONDS:
-                os.rmdir(lock)
-                continue
-        except OSError:
-            continue
+            return None
+        break_stale_lock(path)
         if time.time() > deadline:
-            return False
+            return None
         time.sleep(0.05)
 
 
+def break_stale_lock(path):
+    """Remove a lock whose holder stopped renewing it. The rename lets one taker win. A lock
+    renewed meanwhile goes back only while the path is free; otherwise its holder finds its
+    token gone and stops."""
+    tomb = f"{path}.stale-{os.getpid()}-{time.monotonic_ns()}"
+    try:
+        if time.time() - os.lstat(path).st_mtime <= LOCK_STALE_SECONDS:
+            return
+        os.rename(path, tomb)
+        if time.time() - os.lstat(tomb).st_mtime <= LOCK_STALE_SECONDS and not os.path.lexists(path):
+            os.rename(tomb, path)
+            return
+    except OSError:
+        return
+    remove_path(tomb)
+
+
+def remove_path(path):
+    """A directory with its contents, or a file."""
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, ignore_errors=True)
+    else:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def holds_lock(lock):
+    path, token = lock
+    return os.path.isdir(os.path.join(path, token)) and not os.path.islink(path)
+
+
+def renew_lock(lock):
+    """Keep a held lock fresh, so a long sync is not taken for a dead one. False once it is lost."""
+    if not holds_lock(lock):
+        return False
+    try:
+        os.utime(lock[0])
+    except OSError:
+        pass
+    return True
+
+
+def release_lock(lock):
+    """Remove the lock only while it is still this process's."""
+    if holds_lock(lock):
+        shutil.rmtree(lock[0], ignore_errors=True)
+
+
 def remove_abandoned_staging(target_root):
-    """Staging directories (`.<name>.XXXX`, `.<name>.XXXX.old`) left by a sync that was killed.
-    Only our staging names match, and under the lock no other sync of ours runs; the age is a
-    margin for a sync that has not taken the lock yet."""
+    """Staging directories (`.<name>.altimate-staging-XXXXXX`, and `.old`) left by a sync
+    that was killed. Only our staging names match, and under the lock no other sync runs;
+    the age is a margin for a sync that has not taken the lock yet."""
     for entry in os.listdir(target_root):
         path = os.path.join(target_root, entry)
+        if entry.startswith(LOCK_DIR + ".stale-") and not os.path.islink(path):
+            # A lock taken over from a dead sync whose removal was interrupted.
+            try:
+                if time.time() - os.lstat(path).st_mtime > LOCK_STALE_SECONDS:
+                    remove_path(path)
+            except OSError:
+                pass
+            continue
         if not STAGING_PATTERN.match(entry) or os.path.islink(path) or not os.path.isdir(path):
             continue
         try:
@@ -365,9 +518,7 @@ def remove_abandoned_staging(target_root):
             pass
 
 
-def reconcile(project, target_root, skills):
-    if skills is None:
-        return False
+def reconcile(project, target_root, skills, lock, manifest_text=None, check_manifest=True):
     changed = False
     wanted = set()
     for source, name, description, body in skills:
@@ -377,6 +528,8 @@ def reconcile(project, target_root, skills):
         if os.path.lexists(target) and not is_ours(target):
             continue
         wanted.add(name)
+        if not renew_lock(lock):
+            return changed  # taken over as dead: the new holder finishes the job
         staging = tempfile.mkdtemp(prefix=f".{name}{STAGING_INFIX}", dir=target_root)
         try:
             try:
@@ -386,6 +539,9 @@ def reconcile(project, target_root, skills):
                 continue
             if os.path.isdir(target) and same_tree(staging, target):
                 continue
+            # Building can outlast the lock; a holder taken over meanwhile swaps nothing more.
+            if not renew_lock(lock):
+                return changed
             try:
                 replace_dir(staging, target)
             except OSError as err:
@@ -394,13 +550,15 @@ def reconcile(project, target_root, skills):
             changed = True
         finally:
             shutil.rmtree(staging, ignore_errors=True)
-    if os.path.isdir(target_root):
-        for entry in os.listdir(target_root):
-            path = os.path.join(target_root, entry)
-            # Staging directories start with "." and never match.
-            if NAME_PATTERN.match(entry) and entry not in wanted and is_ours(path):
-                shutil.rmtree(path, ignore_errors=True)
-                changed = True
+    # Removal only for the snapshot read above: one swapped in meanwhile is the next sync's.
+    if not renew_lock(lock) or (check_manifest and manifest_text_now(project) != manifest_text):
+        return changed
+    for entry in os.listdir(target_root):
+        path = os.path.join(target_root, entry)
+        # Staging and lock directories start with "." and never match.
+        if NAME_PATTERN.fullmatch(entry) and entry not in wanted and is_ours(path):
+            shutil.rmtree(path, ignore_errors=True)
+            changed = True
     return changed
 
 
@@ -409,7 +567,10 @@ def main():
     paths = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
     project = paths[0] if paths else os.getcwd()
     if "--account" in flags:
-        identity = signed_in_as()
+        try:
+            identity = signed_in_as()
+        except Unreadable:
+            identity = None
         print(identity[2] if identity else "")
         return
     if "--owned" in flags:
