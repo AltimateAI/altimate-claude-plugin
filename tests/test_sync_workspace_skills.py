@@ -210,14 +210,14 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
 
     def test_snapshot_without_a_tenant_is_not_served(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.run_sync()
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
         manifest_path = os.path.join(self.project, SNAPSHOT, ".manifest.json")
         with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
         del manifest["tenant"], manifest["apiUrl"]
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f)
-        with open(os.path.join(self.home, ".altimate", "altimate.json"), "w", encoding="utf-8") as f:
-            json.dump({"altimateApiKey": "k"}, f)
         self.run_sync()
         self.assertFalse(os.path.exists(self.skill_path("staging-conventions")))
 

@@ -28,7 +28,9 @@ for tool in workspace_context workspace_skill workspace_execute; do
   grep -q "$tool" "$PLUGIN/skills/altimate-code/SKILL.md" || fail "SKILL.md does not describe $tool"
 done
 
-out="$(env -i HOME="$(mktemp -d)" PATH="/usr/bin:/bin" ALTIMATE_DATA_MODE=cli bash "$PLUGIN/hooks-handlers/session-start.sh")"
+HOOK_TMP="$(mktemp -d)"
+out="$(env -i HOME="$HOOK_TMP" CLAUDE_PROJECT_DIR="$HOOK_TMP" PATH="/usr/bin:/bin" ALTIMATE_DATA_MODE=cli bash "$PLUGIN/hooks-handlers/session-start.sh")"
+rm -rf "$HOOK_TMP"
 printf '%s' "$out" | python3 -I -c '
 import json, sys
 text = json.load(sys.stdin)["hookSpecificOutput"]["additionalContext"]

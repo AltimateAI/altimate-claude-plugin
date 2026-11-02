@@ -43,7 +43,7 @@ KEYWORD='(then|do|else|elif|if|while|until|[{]|!)[[:space:]]+'
 WRAP='([^[:space:]]*/)?(sudo|env|command|time|exec|nice|nohup|timeout)([[:space:]]+(-[^[:space:]]*([[:space:]]+[^-[:space:]][^[:space:]]*)?|[0-9][^[:space:]]*))*[[:space:]]+'
 ASSIGN='[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+'
 DOCKER='(docker|podman|kubectl)[[:space:]]+(exec|compose[[:space:]]+exec)[^;&|]*[[:space:]]'
-PREFIX="(${START}(${KEYWORD}|${WRAP}|${ASSIGN})*|${DOCKER})"
+PREFIX="${START}(${KEYWORD}|${WRAP}|${ASSIGN}|${DOCKER})*"
 CLIENT="([^[:space:];&|()\`\"']*/)?[\"'\\\\]?(psql|trino|clickhouse-client|clickhouse|snowsql|mysql|sqlcmd|duckdb)[\"']?"
 
 deny() {

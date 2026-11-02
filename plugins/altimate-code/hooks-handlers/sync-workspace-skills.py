@@ -55,7 +55,6 @@ MANIFEST = ".manifest.json"
 SKILLS_DIR = os.path.join(".claude", "skills")
 MARKER = ".altimate-workspace-skill"
 MARKER_TEXT = "Copied from the linked Altimate workspace by the altimate-code plugin. Edits here are replaced.\n"
-SNAPSHOT_META = {MANIFEST, ".gitignore", ".synced-at"}
 # Where the CLI moves the live snapshot aside while it swaps a new one in.
 CLI_STAGING_DIR = os.path.join(".altimate-code", "skill-staging")
 SWAP_SECONDS = 600

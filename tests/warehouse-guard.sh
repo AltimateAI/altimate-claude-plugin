@@ -32,6 +32,13 @@ command -v python3 >/dev/null || { echo "skip: python3 not installed"; exit 0; }
 deny 'docker exec -it trino trino --execute "select 1"'
 deny 'docker exec ch clickhouse-client --query "select 1"'
 deny 'docker exec -i pg psql -U postgres -c "select 1"'
+deny 'sudo docker exec -i pg psql -c "select 1"'
+allow "git commit -m 'docker exec -i pg psql -c select 1'"
+deny 'env X=1 docker exec -i pg psql -c "select 1"'
+deny 'bash -c "docker exec -i pg psql -c 1"'
+deny 'kubectl exec -it pod -- psql -c "select 1"'
+deny 'cd x && podman exec pg psql -c "select 1"'
+deny 'true; docker compose exec db mysql -e "select 1"'
 deny 'trino --server localhost:8080 --execute "show tables"'
 deny 'psql -h db -c "select count(*) from t"'
 deny 'snowsql -q "select 1"'

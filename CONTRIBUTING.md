@@ -91,7 +91,7 @@ claude plugin install altimate-code@altimate-claude-plugin
 
 - **Routing skill** — `plugins/altimate-code/skills/altimate-code/SKILL.md` — use the MCP tools when available, otherwise `tool run` (after `tool context`); delegate long jobs with `run`.
 - **Analyst agent** — `plugins/altimate-code/agents/analyst.md` — read-only data analyst that works in both modes.
-- **MCP registration** — `plugins/altimate-code/.mcp.json` — launches the local stdio server; builds without `mcp serve` fail to start it and the CLI mode applies instead.
+- **MCP registration** — `plugins/altimate-code/.mcp.json` — launches the local stdio server; builds without `mcp serve` fail to start it; the session stays in MCP mode and the skill falls back to `tool run`.
 - **Hooks** — `plugins/altimate-code/hooks/hooks.json`:
   - SessionStart (`hooks-handlers/session-start.sh`) describes the plugin's capabilities so Claude can route to it, adds the CLI guidance when `data-mode.sh` picks the CLI mode, and copies the linked workspace's skills (`sync-workspace-skills.py`).
   - Stop (`refresh-skills.sh --if-stale`) refreshes those skills in the background at most hourly.
