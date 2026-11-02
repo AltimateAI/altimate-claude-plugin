@@ -65,7 +65,10 @@ const toolsCache = new Map<string, { graph: LineageGraph; id: string; columns: C
 // Per conversation: reset on session start and end (a /clear ends one).
 let paneOpened = false
 /** The latest follow: an older one still reading its manifest must not write over it. */
-let followSeq = 0
+// Follows run concurrently. Each takes a number when it starts; one that finds its model claims the
+// pane unless a newer one already has. A follow that fails claims nothing, so it cancels nobody.
+let startedSeq = 0
+let claimedSeq = 0
 const contextGiven = new Set<string>()
 
 const LENS_COLOR: Record<string, string> = {
@@ -268,6 +271,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const say = async (text: string, always = false) => {
     if (!input.auto || (always && !isPackage)) await update($, messageAtom, () => text)
   }
+  const seq = ++startedSeq
   const current = await read($, focusAtom)
   const sessionRoot = await $.session.root().catch(() => '.')
   const given = input.manifest ? normalize(/^([\\/]|[A-Za-z]:)/.test(input.manifest) ? input.manifest : `${sessionRoot}/${input.manifest}`) : null
@@ -344,12 +348,13 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     return false
   }
   const readMs = Math.round((await $.clock.now()) - began)
-  // Only a follow that found its model claims the pane: a later one that fails (a macro read in the
-  // same batch) must not cancel it. From here on, a newer successful follow wins.
-  const seq = ++followSeq
-  const superseded = () => seq !== followSeq
+  if (claimedSeq > seq) return false
+  claimedSeq = seq
+  const superseded = () => claimedSeq !== seq
+  // Compared with the focus as it is now: another follow may have landed while this one resolved.
+  const latest = await read($, focusAtom)
   // The same unique_id in another project, or after a recompile, is a different focus.
-  const isNew = current?.model !== id || current.manifest !== manifest || current.mtimeMs !== stat.mtimeMs || !!input.refresh
+  const isNew = latest?.model !== id || latest.manifest !== manifest || latest.mtimeMs !== stat.mtimeMs || !!input.refresh
   const node = graph.nodes[id]!
   await update($, focusAtom, () => ({ model: id!, root, manifest, via, readMs, mtimeMs: stat.mtimeMs }))
   if (superseded()) return false
@@ -357,12 +362,12 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   if (superseded()) return false
   await update($, messageAtom, () => null)
   if (isNew) {
-    if (current?.model !== id) await update($, expandedAtom, () => ({ up: false, down: false }))
+    if (latest?.model !== id) await update($, expandedAtom, () => ({ up: false, down: false }))
     await update($, columnsAtom, () => null)
     await update($, reachAtom, () => null)
     await update($, warehouseAtom, () => null)
-    if (current?.model !== id) await update($, columnAtom, () => null)
-    if (current?.model !== id) $.ui.log(`lineage-pane · following ${node.name} →`)
+    if (latest?.model !== id) await update($, columnAtom, () => null)
+    if (latest?.model !== id) $.ui.log(`lineage-pane · following ${node.name} →`)
     $.ui.log(`lineage-pane · ${relative(root, manifest)} · ${elapsed(readMs)}${via === 'tools' ? ' · via altimate-code' : ' · offline'}`)
   }
   if (superseded()) return false

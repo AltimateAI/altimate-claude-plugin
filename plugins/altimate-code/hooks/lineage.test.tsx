@@ -475,3 +475,15 @@ test('a failing follow started after a good one does not cancel it', async ($, o
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('an older follow that resolves after a newer one does not overwrite it', async ($, on) => {
+  const { clock } = await start($, on)
+  // fct_orders by name first, then int_orders: the second claims the pane; the first, landing later, yields.
+  const run = (args: string) => $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await run('fct_orders')
+  await run('int_orders')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
+  await ui.unmount()
+})
