@@ -64,6 +64,8 @@ let manifestCache: { path: string; mtimeMs: number; graph: LineageGraph } | null
 const toolsCache = new Map<string, { graph: LineageGraph; id: string; columns: ColumnLineage | null } | null>()
 // Per conversation: reset on session start and end (a /clear ends one).
 let paneOpened = false
+/** The latest follow: an older one still reading its manifest must not write over it. */
+let followSeq = 0
 const contextGiven = new Set<string>()
 
 const LENS_COLOR: Record<string, string> = {
@@ -160,6 +162,12 @@ function textOf(content: unknown): string {
     .join('\n')
 }
 
+/** A file:// URI as a filesystem path; a Windows drive path keeps no leading slash. */
+function fileUriPath(uri: string): string {
+  const path = decodeURIComponent(new URL(uri).pathname)
+  return /^\/[A-Za-z]:/.test(path) ? path.slice(1) : path
+}
+
 /**
  * Runs one altimate-code data tool: through the plugin's MCP server when it is connected (no
  * permission prompt, structured content when the build sends it), else `altimate tool run --json`.
@@ -176,7 +184,10 @@ async function runTool($: EngineInterface, name: string, args: Record<string, un
       const link = result.content.find((block: any) => block?.type === 'resource_link' && String(block.uri).startsWith('file://')) as
         | { uri: string }
         | undefined
-      if (link) text = await $.fs.read(decodeURIComponent(new URL(link.uri).pathname)).catch(() => text)
+      // An unreadable link leaves only the preview: fetch the whole answer through the CLI instead.
+      const full = link ? await $.fs.read(fileUriPath(link.uri)).catch(() => null) : text
+      if (full === null) throw new Error('the full result could not be read')
+      text = full
       // Claude Code hands a tool's structured content over as one JSON text block in place of the
       // text; the structured content carries the text report as `report`.
       const structured = (result.structuredContent ?? (text.trim().startsWith('{') ? parseJson(text) : null)) as any
@@ -244,6 +255,8 @@ type FollowInput = {
   auto?: boolean
   /** Re-read the manifest (and, unless a large manifest's cached columns stand, the column lineage) even when the model is unchanged. */
   refresh?: boolean
+  /** `model` may end in `.column`: read so only when the whole text is not itself a model (a unique_id or path has dots). */
+  dottedColumn?: boolean
   /** The manifest a tool call named (Claude's own dbt_lineage call): its project is the one to follow. */
   manifest?: string
 }
@@ -255,6 +268,8 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const say = async (text: string, always = false) => {
     if (!input.auto || (always && !isPackage)) await update($, messageAtom, () => text)
   }
+  const seq = ++followSeq
+  const superseded = () => seq !== followSeq
   const current = await read($, focusAtom)
   const sessionRoot = await $.session.root().catch(() => '.')
   const given = input.manifest ? normalize(/^([\\/]|[A-Za-z]:)/.test(input.manifest) ? input.manifest : `${sessionRoot}/${input.manifest}`) : null
@@ -280,7 +295,13 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     manifestCache = null
     for (const key of toolsCache.keys()) if (key.startsWith(`${manifest}\u0000`)) toolsCache.delete(key)
   }
-  const wanted = input.file ? relative(root, input.file) : input.model!
+  let wanted = input.file ? relative(root, input.file) : input.model!
+  let column = input.column
+  // The text before the last dot, when that is a model and the whole is not.
+  const withoutColumn = () => {
+    const at = wanted.lastIndexOf('.')
+    return input.dottedColumn && at > 0 ? { model: wanted.slice(0, at), column: wanted.slice(at + 1) } : null
+  }
   const began = await $.clock.now()
   let graph: LineageGraph | null
   try {
@@ -290,15 +311,27 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     return false
   }
   let id = graph ? findModel(graph, wanted) : null
+  if (graph && !id) {
+    const split = withoutColumn()
+    const model = split ? findModel(graph, split.model) : null
+    if (split && model) [id, wanted, column] = [model, split.model, split.column]
+  }
   let via: LineageFocus['via'] = 'manifest'
   let columns = input.columns ?? null
   if (!graph) {
     const name = input.file ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
     let failure: string | null = null
-    const built = await graphFromTools($, manifest, stat.mtimeMs, name, input.file ? wanted : undefined).catch(error => {
-      failure = String(error?.message ?? error)
-      return null
-    })
+    const lookUp = (model: string) =>
+      graphFromTools($, manifest, stat.mtimeMs, model, input.file ? wanted : undefined).catch(error => {
+        failure = String(error?.message ?? error)
+        return null
+      })
+    let built = await lookUp(name)
+    const split = withoutColumn()
+    if (!built && !failure && split) {
+      built = await lookUp(split.model)
+      if (built) [wanted, column] = [split.model, split.column]
+    }
     if (failure) {
       await say(`The manifest is over 4 MiB; reading it through altimate-code ${failure}.`, true)
       return false
@@ -313,11 +346,14 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     return false
   }
   const readMs = Math.round((await $.clock.now()) - began)
+  if (superseded()) return false
   // The same unique_id in another project, or after a recompile, is a different focus.
   const isNew = current?.model !== id || current.manifest !== manifest || current.mtimeMs !== stat.mtimeMs || !!input.refresh
   const node = graph.nodes[id]!
   await update($, focusAtom, () => ({ model: id!, root, manifest, via, readMs, mtimeMs: stat.mtimeMs }))
+  if (superseded()) return false
   await update($, graphAtom, () => (via === 'manifest' ? subgraph(graph!, id!) : graph!))
+  if (superseded()) return false
   await update($, messageAtom, () => null)
   if (isNew) {
     if (current?.model !== id) await update($, expandedAtom, () => ({ up: false, down: false }))
@@ -328,9 +364,10 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     if (current?.model !== id) $.ui.log(`lineage-pane · following ${node.name} →`)
     $.ui.log(`lineage-pane · ${relative(root, manifest)} · ${elapsed(readMs)}${via === 'tools' ? ' · via altimate-code' : ' · offline'}`)
   }
-  if (input.column !== undefined && input.column !== (await read($, columnAtom))) {
+  if (superseded()) return false
+  if (column !== undefined && column !== (await read($, columnAtom))) {
     // Another column's reach is not this one's.
-    await update($, columnAtom, () => input.column ?? null)
+    await update($, columnAtom, () => column ?? null)
     await update($, reachAtom, () => null)
   }
   if (input.open || (!paneOpened && input.auto)) {
@@ -356,7 +393,7 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
       const began = await $.clock.now()
       const result = await runTool($, 'dbt_lineage', { manifest_path: focus.manifest, model: focus.model }).catch(() => null)
       if (!sameFocus(await read($, focusAtom), focus)) return
-      const columns = result?.ok ? (columnsFromMetadata(result.metadata) ?? (result.text ? parseDbtLineage(result.text) : null)) : null
+      const columns = result?.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
       await update($, columnsAtom, () => columns)
       if (!result?.ok) await update($, messageAtom, () => `dbt_lineage failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}`)
       const ms = Math.round((await $.clock.now()) - began)
@@ -494,12 +531,14 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
   const { before, after } = await editTexts($, e)
   // Every column the edit touches is traced (up to three): picking one from raw dbt SQL is a guess,
   // and a wrong guess would hide the column that changed.
-  const touched = touchedColumns(before, after, [...new Set([...known, ...node.columns])]).slice(0, MAX_EDIT_COLUMNS)
+  const everyTouched = touchedColumns(before, after, [...new Set([...known, ...node.columns])])
+  const touched = everyTouched.slice(0, MAX_EDIT_COLUMNS)
 
   let reach: ColumnReachView | null = null
   const traced: string[] = []
   // Touched columns whose check failed or ran out of time: what they reach is unknown.
-  const unchecked: string[] = []
+  // Columns beyond the cap are never traced either.
+  const unchecked: string[] = everyTouched.slice(MAX_EDIT_COLUMNS)
   if (touched.length > 0) {
     const began = await $.clock.now()
     // Each column has the whole hold: a slow one does not discard the others.
@@ -539,7 +578,7 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
   lines.push(
     `- ${node.name} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'downstream model')} in all (${counts.direct} direct, ${counts.transitive} transitive), ${plural(counts.tests, 'test')}${counts.exposures.length ? ` and ${plural(counts.exposures.length, 'exposure')} (${counts.exposures.join(', ')})` : ''}.`,
   )
-  if (unchecked.length) lines.push(`- columns not checked (no answer in time): ${unchecked.join(', ')}; what they reach is unknown`)
+  if (unchecked.length) lines.push(`- columns not checked (over the limit or no answer in time): ${unchecked.join(', ')}; what they reach is unknown`)
   lines.push('Keep these consumers working, or tell the user which of them this edit changes.')
   return {
     // The columns touched and those left unchecked are part of what Claude was told.
@@ -563,20 +602,27 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
 
 /** dbt_lineage's answer as a ToolResult row carries it: structured content, or its text. */
 function lineageFromOutput(output: unknown): ColumnLineage | null {
-  const structured = columnsFromMetadata((output as any)?.structuredContent ?? output)
+  // A result the server cut for size may hold only part of the lineage: let the pane fetch it whole.
+  const body = (output as any)?.structuredContent ?? output
+  if ((body as any)?.truncated === true) return null
+  const structured = columnsFromMetadata(body)
   if (structured) return structured
   let text = textOf(output)
   if (text.trim().startsWith('{')) {
     const json = parseJson<any>(text)
+    if (json?.truncated === true) return null
     const fromJson = columnsFromMetadata(json)
     if (fromJson) return fromJson
-    // A result the server cut for size may hold only part of the lineage: let the pane fetch it whole.
-    if (json?.truncated === true) return null
     text = typeof json?.report === 'string' ? json.report : ''
   }
-  const parsed = text.includes('Column Mappings:') ? parseDbtLineage(text) : null
-  // Nothing parsed means nothing known: let the pane fetch the lineage itself.
-  return parsed && (parsed.columns.length > 0 || parsed.edges.length > 0) ? parsed : null
+  return text.includes('Column Mappings:') ? parsedLineage(text) : null
+}
+
+/** dbt_lineage's text report as columns; null when it holds none (an error or a preview), so nothing is cached as known. */
+function parsedLineage(text: string | undefined): ColumnLineage | null {
+  if (!text) return null
+  const parsed = parseDbtLineage(text)
+  return parsed.columns.length > 0 || parsed.edges.length > 0 ? parsed : null
 }
 
 /** Registers /lineage; called from the plugin's one session.start hook. */
@@ -656,7 +702,7 @@ export function registerLineage(on: On) {
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
-    const [model, column] = e.args.trim().split('.')
+    const model = e.args.trim()
     const current = await read($, focusAtom)
     if (!model && !current) {
       await update($, messageAtom, () => 'Read or edit a dbt model, or run /lineage <model>[.column].')
@@ -666,7 +712,7 @@ export function registerLineage(on: On) {
     } catch (error) {
       return { text: `Could not open Altimate lineage: ${String(error)}` }
     }
-    if (model) later($, async () => void (await follow($, { model, column: column ?? null, open: true })))
+    if (model) later($, async () => void (await follow($, { model, dottedColumn: true, open: true })))
     else if (current) later($, () => loadDetails($, null, false))
     return { text: `Altimate lineage${model ? ` for ${e.args.trim()}` : ''} opened in the side pane.` }
   })
@@ -868,7 +914,7 @@ export function registerLineage(on: On) {
             {reach ? (
               <Box flexDirection="column">
                 <Text>
-                  read by <Text color="warning">{reach.models.length} models</Text> ·{' '}
+                  read by <Text color="warning">{reach.uncertain.length + reach.untraced.length > 0 || reach.truncated ? 'at least ' : ''}{reach.models.length} models</Text> ·{' '}
                   <Text color="warning">{reach.exposures.length} dashboards</Text>
                   {reach.truncated ? <Text dimColor> (stopped early)</Text> : null}
                 </Text>

@@ -268,7 +268,17 @@ export function touchedColumns(before: string[], after: string[], columns: strin
   const lines = (texts: string[]) => texts.flatMap(text => text.split('\n').map(line => line.trim()))
   const was = lines(before)
   const now = lines(after)
-  const changed = [...now.filter(line => !was.includes(line)), ...was.filter(line => !now.includes(line))]
+  // A line repeated in one text and not in the other counts once per extra copy.
+  const surplus = (from: string[], other: string[]) => {
+    const left = new Map<string, number>()
+    for (const line of other) left.set(line, (left.get(line) ?? 0) + 1)
+    return from.filter(line => {
+      const n = left.get(line) ?? 0
+      if (n > 0) left.set(line, n - 1)
+      return n === 0
+    })
+  }
+  const changed = [...surplus(now, was), ...surplus(was, now)]
   const named = counts(changed)
   // The output columns whose select item the edit rewrote, added or removed come first.
   const outBefore = selectItems(before.join('\n'))
@@ -290,33 +300,33 @@ export function touchedColumns(before: string[], after: string[], columns: strin
  * implicit alias, or the column itself (`t.col`); casts and table aliases are not outputs.
  */
 export function selectItems(sql: string): Map<string, string> {
-  type Token = { text: string; depth: number; word: string | null; at: number }
+  type Token = { text: string; depth: number; word: string | null }
   const tokens: Token[] = []
   let depth = 0
   for (let i = 0; i < sql.length; ) {
     const rest = sql.slice(i)
     const skip = /^(--[^\n]*|\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\})/.exec(rest)
     if (skip) {
-      tokens.push({ text: ' ', depth, word: null, at: i })
+      tokens.push({ text: ' ', depth, word: null })
       i += skip[0].length
       continue
     }
     const whole = /^('(?:[^']|'')*'|"(?:[^"]|"")*"|`[^`]*`|\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\})/.exec(rest)
     if (whole) {
-      tokens.push({ text: whole[0], depth, word: null, at: i })
+      tokens.push({ text: whole[0], depth, word: null })
       i += whole[0].length
       continue
     }
     const word = /^[A-Za-z_]\w*/.exec(rest)
     if (word) {
-      tokens.push({ text: word[0], depth, word: word[0].toLowerCase(), at: i })
+      tokens.push({ text: word[0], depth, word: word[0].toLowerCase() })
       i += word[0].length
       continue
     }
     const ch = sql[i]!
     // A parenthesis belongs to the group it opens or closes.
     if (ch === '(') depth++
-    tokens.push({ text: ch, depth, word: null, at: i })
+    tokens.push({ text: ch, depth, word: null })
     if (ch === ')') depth = Math.max(0, depth - 1)
     i++
   }
@@ -373,8 +383,8 @@ export function warehouseEdges(result: any): WarehouseEdge[] {
   return records
     .filter((one: any) => typeof one?.target_table === 'string' || typeof one?.source_table === 'string')
     .map((one: any) => ({
-      source: one.source_table ?? null,
-      target: one.target_table ?? null,
+      source: typeof one.source_table === 'string' ? one.source_table : null,
+      target: typeof one.target_table === 'string' ? one.target_table : null,
       hop: Number(one.hop) || 1,
     }))
 }

@@ -38,7 +38,7 @@ export const MANIFEST = {
     'model.shop.int_orders': model('int_orders', ['stg_orders', 'stg_payments', 'stg_refunds']),
     'model.shop.fct_orders': model('fct_orders', ['int_orders', 'stg_customers'], {
       config: { materialized: 'table' },
-      columns: { order_id: { name: 'order_id' }, revenue: { name: 'revenue' }, gross_revenue: { name: 'gross_revenue' } },
+      columns: { order_id: { name: 'order_id' }, revenue: { name: 'revenue' }, gross_revenue: { name: 'gross_revenue' }, status: { name: 'status' } },
     }),
     'model.shop.fct_revenue_daily': model('fct_revenue_daily', ['fct_orders']),
     'model.shop.mart_cohort_ltv': model('mart_cohort_ltv', ['fct_orders']),
@@ -197,6 +197,11 @@ test('column reach, warehouse records and edited columns read as the pane needs 
   expect(
     warehouseEdges({ data: { records: [{ source_table: 'shop.main.fct_orders', target_table: 'shop.main.fct_revenue_daily', hop: 1 }, { nothing: true }] } }),
   ).toEqual([{ source: 'shop.main.fct_orders', target: 'shop.main.fct_revenue_daily', hop: 1 }])
+
+  // A record with one malformed side keeps only the string side.
+  expect(warehouseEdges({ records: [{ source_table: 'a', target_table: 123 }] })).toEqual([{ source: 'a', target: null, hop: 1 }])
+  // Dropping one of two identical lines is a change.
+  expect(touchedColumns(['revenue,', 'revenue,', 'order_id'], ['revenue,', 'order_id'], ['order_id', 'revenue'])).toEqual(['revenue'])
 
   // The rewritten expression's column, not one that only sits on the same line unchanged, comes first.
   expect(

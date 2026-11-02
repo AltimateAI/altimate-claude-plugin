@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; toolResult?: (e: { tool: string }) => unknown; failColumn?: string }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -94,7 +94,7 @@ async function start($: any, on: any, options: Options = {}) {
     calls.push(`mcp:${e.tool}${e.args?.column ? `:${e.args.column}` : ''}`)
     // Claude Code passes structured content on as a JSON text block in place of the text.
     if (e.tool === 'dbt_lineage') {
-      const text = structured ? JSON.stringify({ ...LINEAGE, report: LINEAGE_TEXT }) : LINEAGE_TEXT
+      const text = options.lineageText ?? (structured ? JSON.stringify({ ...LINEAGE, report: LINEAGE_TEXT }) : LINEAGE_TEXT)
       return { value: { content: [{ type: 'text', text }], isError: false } }
     }
     // Over its size cap the server sends the report alone, marked truncated.
@@ -403,7 +403,7 @@ test('a touched column whose check fails keeps the combined count a lower bound'
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
   expect(toasts[0]).toContain('fct_orders.revenue is read by at least 2 models')
-  expect(edit.context?.[0]).toContain('columns not checked (no answer in time): order_id')
+  expect(edit.context?.[0]).toContain('columns not checked (over the limit or no answer in time): order_id')
 })
 
 test('a new unchecked column in the same turn still reaches Claude', async ($, on) => {
@@ -412,5 +412,56 @@ test('a new unchecked column in the same turn still reaches Claude', async ($, o
   const second: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
   expect(first.context?.[0]).toContain('fct_orders.revenue')
-  expect(second.context?.[0]).toContain('columns not checked (no answer in time): order_id')
+  expect(second.context?.[0]).toContain('columns not checked (over the limit or no answer in time): order_id')
+})
+
+test('columns beyond the cap are named as unchecked and make the count a lower bound', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on)
+  const edit: any = await $.tool.call({
+    tool: 'Edit',
+    file_path: FILE,
+    old_string: 'a',
+    new_string: 'select order_id + 0 as order_id, revenue + 0 as revenue, gross_revenue + 0 as gross_revenue, status + 0 as status',
+  })
+  await clock.settle()
+  expect(calls.filter(call => call.startsWith('mcp:impact_analysis'))).toHaveLength(3)
+  expect(toasts[0]).toContain('is read by at least 2 models')
+  expect(edit.context?.[0]).toMatch(/columns not checked \(over the limit or no answer in time\): \w+;/)
+})
+
+test('/lineage takes a unique_id or a path whole, and only a trailing column off a model name', async ($, on) => {
+  const { clock, calls } = await start($, on)
+  const run = (args: string) =>
+    $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await run('model.shop.fct_orders')
+  await clock.settle()
+  await run('models/fct_orders.sql')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
+  expect(calls.filter(call => call.startsWith('mcp:impact_analysis'))).toEqual([])
+  await ui.unmount()
+  await run('model.shop.fct_orders.revenue')
+  await clock.settle()
+  expect(calls).toContain('mcp:impact_analysis:revenue')
+})
+
+test('a dbt_lineage text without lineage is not cached as an empty lineage', async ($, on) => {
+  const { clock, calls } = await start($, on, { structured: false, lineageText: 'Error: preview unavailable' })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /no columns known/ })).toBeUndefined()
+  await ui.unmount()
+  expect(calls.filter(call => call === 'mcp:dbt_lineage')).toHaveLength(1)
+})
+
+test("Claude's truncated dbt_lineage result is not preloaded as the whole lineage", async ($, on) => {
+  const { clock, calls } = await start($, on, {
+    toolResult: e => (e.tool === 'mcp__altimate_code__dbt_lineage' ? { structuredContent: { ...LINEAGE, truncated: true } } : undefined),
+  })
+  await $.tool.call({ tool: 'mcp__altimate_code__dbt_lineage', model: 'fct_orders' } as any)
+  await clock.settle()
+  expect(calls).toContain('mcp:dbt_lineage')
 })
