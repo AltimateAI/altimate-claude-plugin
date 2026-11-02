@@ -47,7 +47,8 @@ find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null
 if [ "$MODE" = "--wait" ]; then
   # A refresh already in flight finishes first; this one then picks up anything newer.
   LOCKED=
-  for _ in $(seq 1 120); do mkdir "$LOCK" 2>/dev/null && LOCKED=1 && break; sleep 1; done
+  i=0
+  while [ "$i" -lt 120 ]; do mkdir "$LOCK" 2>/dev/null && LOCKED=1 && break; sleep 1; i=$((i + 1)); done
   [ -n "$LOCKED" ] || { say "Another workspace skill refresh is still running; try again when it finishes."; exit 1; }
   "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR" </dev/null
   STATUS=$?
