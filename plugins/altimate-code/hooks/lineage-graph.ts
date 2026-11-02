@@ -41,6 +41,8 @@ function nodeOf(id: string, node: any): GraphNode {
 
 /** `"db"."schema"."orders"` → `db.schema.orders`, lower-cased: how the warehouse names the relation. */
 function relationOf(node: any): string | null {
+  // dbt writes relation_name: null for a node with no table (an ephemeral model): there is none.
+  if (node && 'relation_name' in node && node.relation_name === null) return null
   if (typeof node?.relation_name === 'string' && node.relation_name) {
     return node.relation_name.replace(/[`"\[\]]/g, '').toLowerCase()
   }
@@ -239,7 +241,11 @@ export function reachFromMetadata(metadata: any, model: string, column: string):
   return {
     model,
     column,
-    models: reach.models.map((one: any) => ({ name: String(one?.name ?? ''), columns: Array.isArray(one?.columns) ? one.columns.map(String) : [] })),
+    models: reach.models.map((one: any) => ({
+      name: String(one?.name ?? ''),
+      ...(typeof one?.unique_id === 'string' && { id: one.unique_id }),
+      columns: Array.isArray(one?.columns) ? one.columns.map(String) : [],
+    })),
     exposures: labels(reach.exposures),
     uncertainExposures: labels(reach.uncertain_exposures),
     uncertain: unsure(reach.uncertain),
@@ -250,7 +256,11 @@ export function reachFromMetadata(metadata: any, model: string, column: string):
 
 const labels = (list: unknown) => (Array.isArray(list) ? list : []).map((one: any) => String(one?.label ?? one?.name ?? ''))
 const unsure = (list: unknown) =>
-  (Array.isArray(list) ? list : []).map((one: any) => ({ name: String(one?.name ?? ''), reason: String(one?.reason ?? '') }))
+  (Array.isArray(list) ? list : []).map((one: any) => ({
+    name: String(one?.name ?? ''),
+    ...(typeof one?.unique_id === 'string' && { id: one.unique_id }),
+    reason: String(one?.reason ?? ''),
+  }))
 
 const IDENT = /[A-Za-z_][A-Za-z0-9_]*/g
 

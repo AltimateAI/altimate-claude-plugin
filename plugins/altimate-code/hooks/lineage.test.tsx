@@ -465,3 +465,13 @@ test("Claude's truncated dbt_lineage result is not preloaded as the whole lineag
   await clock.settle()
   expect(calls).toContain('mcp:dbt_lineage')
 })
+
+test('a failing follow started after a good one does not cancel it', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/macros/cents.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+})

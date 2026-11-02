@@ -105,14 +105,15 @@ export type ColumnLineage = {
 export type ColumnReachView = {
   model: string
   column: string
-  models: { name: string; columns: string[] }[]
+  /** `id` is the model's unique_id: names repeat across packages and versions. */
+  models: { name: string; id?: string; columns: string[] }[]
   exposures: string[]
   /** Dashboards on models that may read it or could not be traced. */
   uncertainExposures: string[]
   /** Models that may read it: only outside their select list, or through an ambiguous table name. */
-  uncertain: { name: string; reason: string }[]
+  uncertain: { name: string; id?: string; reason: string }[]
   /** Models the lineage engine could not trace (no compiled SQL, unparseable SQL). */
-  untraced: { name: string; reason: string }[]
+  untraced: { name: string; id?: string; reason: string }[]
   truncated: boolean
 }
 

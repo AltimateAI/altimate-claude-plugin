@@ -268,8 +268,6 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const say = async (text: string, always = false) => {
     if (!input.auto || (always && !isPackage)) await update($, messageAtom, () => text)
   }
-  const seq = ++followSeq
-  const superseded = () => seq !== followSeq
   const current = await read($, focusAtom)
   const sessionRoot = await $.session.root().catch(() => '.')
   const given = input.manifest ? normalize(/^([\\/]|[A-Za-z]:)/.test(input.manifest) ? input.manifest : `${sessionRoot}/${input.manifest}`) : null
@@ -346,7 +344,10 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     return false
   }
   const readMs = Math.round((await $.clock.now()) - began)
-  if (superseded()) return false
+  // Only a follow that found its model claims the pane: a later one that fails (a macro read in the
+  // same batch) must not cancel it. From here on, a newer successful follow wins.
+  const seq = ++followSeq
+  const superseded = () => seq !== followSeq
   // The same unique_id in another project, or after a recompile, is a different focus.
   const isNew = current?.model !== id || current.manifest !== manifest || current.mtimeMs !== stat.mtimeMs || !!input.refresh
   const node = graph.nodes[id]!
@@ -480,24 +481,25 @@ async function editTexts($: EngineInterface, e: any): Promise<{ before: string[]
 function mergeReach(reaches: ColumnReachView[]): ColumnReachView | null {
   if (reaches.length === 0) return null
   if (reaches.length === 1) return reaches[0]!
-  const models = new Map<string, Set<string>>()
+  // Keyed by unique_id where altimate-code gives one: two packages or versions may share a name.
+  const key = (one: { name: string; id?: string }) => one.id ?? one.name
+  const models = new Map<string, { name: string; id?: string; columns: Set<string> }>()
   for (const reach of reaches) {
     for (const one of reach.models) {
-      const columns = models.get(one.name) ?? new Set<string>()
-      for (const col of one.columns) columns.add(col)
-      models.set(one.name, columns)
+      const entry = models.get(key(one)) ?? { name: one.name, ...(one.id && { id: one.id }), columns: new Set<string>() }
+      for (const col of one.columns) entry.columns.add(col)
+      models.set(key(one), entry)
     }
   }
-  const unique = <T,>(list: T[], key: (one: T) => string) => [...new Map(list.map(one => [key(one), one])).values()]
-  const readers = new Set(models.keys())
+  const unique = <T,>(list: T[], by: (one: T) => string) => [...new Map(list.map(one => [by(one), one])).values()]
   return {
     model: reaches[0]!.model,
     column: reaches.map(one => one.column).join(', '),
-    models: [...models].map(([name, cols]) => ({ name, columns: [...cols] })),
+    models: [...models.values()].map(one => ({ ...one, columns: [...one.columns] })),
     exposures: unique(reaches.flatMap(one => one.exposures), one => one),
     uncertainExposures: unique(reaches.flatMap(one => one.uncertainExposures), one => one).filter(one => !reaches.some(r => r.exposures.includes(one))),
-    uncertain: unique(reaches.flatMap(one => one.uncertain), one => one.name).filter(one => !readers.has(one.name)),
-    untraced: unique(reaches.flatMap(one => one.untraced), one => one.name),
+    uncertain: unique(reaches.flatMap(one => one.uncertain), key).filter(one => !models.has(key(one))),
+    untraced: unique(reaches.flatMap(one => one.untraced), key),
     truncated: reaches.some(one => one.truncated),
   }
 }

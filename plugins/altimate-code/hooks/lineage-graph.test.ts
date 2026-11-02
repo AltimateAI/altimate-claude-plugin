@@ -279,3 +279,8 @@ test('select items map each output name to its expression', () => {
     ['b', 'coalesce(b, 0) b'],
   ])
 })
+
+test('an explicit null relation_name (an ephemeral model) has no warehouse relation', () => {
+  const graph = buildGraph({ nodes: { 'model.s.eph': { ...model('eph', []), relation_name: null, database: 'db', schema: 'main' } }, sources: {}, exposures: {} })
+  expect(graph.nodes['model.s.eph']!.relation).toBeNull()
+})
