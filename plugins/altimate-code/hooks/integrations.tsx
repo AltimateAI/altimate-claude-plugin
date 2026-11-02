@@ -6,13 +6,26 @@ import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, Wo
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
 const COMMAND = 'integrations'
-// Testing a credential and saving it to the workspace are two network calls.
-const CONNECT_TIMEOUT_MS = 60_000
+// The CLI waits up to 30 s for its state lock and each of its network calls is
+// cut off after 20 s (15 s for a provider check), so every timeout here is well
+// above the calls a command can make before and while holding the lock.
+// Local state and a status read: 30 s lock wait + a workspace read + a catalog fetch.
+const DEFAULT_TIMEOUT_MS = 90_000
+// Sync and disconnect of one provider: a workspace lookup + 30 s lock wait + a provider
+// check + up to 8 workspace calls.
+// Connect and update add a catalog fetch and a second lock wait before the lock, and
+// two binding lookups inside it, so they sit at the top of this budget; a run that
+// outlasts it is reported as failed and is never started again.
+const WORKSPACE_TIMEOUT_MS = 300_000
+// Sync all runs the three providers one after the other.
+const SYNC_ALL_TIMEOUT_MS = 600_000
+// The browser sign-in waits for the person to finish in the browser.
+const SIGN_IN_TIMEOUT_MS = 300_000
 
 // Bump the shape tag when IntegrationsStatus changes: a stored value of an
 // older shape is dropped instead of being drawn with missing fields.
 const status = atom({ plugin: 'altimate-code', key: 'status' } as const, null, {
-  shape: 'integrations-status-3',
+  shape: 'integrations-status-4',
 })
 const busy = atom({ plugin: 'altimate-code', key: 'busy' } as const, null as Busy | null)
 const message = atom({ plugin: 'altimate-code', key: 'message' } as const, null as string | null)
@@ -53,16 +66,21 @@ const STATE_COLOR: Record<Provider['state'], string> = {
 // older npm installs only have `altimate-code`.
 const CLI_NAMES = ['altimate', 'altimate-code'] as const
 
-async function runCli($: EngineInterface, args: string[], timeoutMs = 30_000) {
+// A command that cannot start rejects; only that moves on to the next name, so a
+// timeout never reruns a command that may have taken effect.
+const MISSING_BINARY = /ENOENT|not found|no such file|(cannot|could not|failed to) (start|spawn|run)/i
+
+async function runCli($: EngineInterface, args: string[], timeoutMs = DEFAULT_TIMEOUT_MS) {
   return runAltimate($, ['integrations', ...args], timeoutMs)
 }
 
-async function runAltimate($: EngineInterface, args: string[], timeoutMs = 30_000) {
+async function runAltimate($: EngineInterface, args: string[], timeoutMs = DEFAULT_TIMEOUT_MS) {
   let lastError: unknown = null
   for (const bin of CLI_NAMES) {
     try {
       return await $.process.run([bin, ...args], { timeoutMs })
     } catch (error) {
+      if (!MISSING_BINARY.test(String(error))) throw error
       lastError = error
     }
   }
@@ -96,6 +114,15 @@ async function runJson<T extends { message?: string | null }>($: EngineInterface
   return { data, failure }
 }
 
+/**
+ * Why a failed CLI call failed: a `sync` report's own lines, else the `message` or `error` of the JSON the
+ * CLI prints to stdout, else the first line of stderr.
+ */
+function failureText(result: { stdout: string; stderr: string }, command?: string): string {
+  const data = parseJson<{ message?: string; error?: string }>(result.stdout)
+  return (command === 'sync' ? syncText(result.stdout) : null) ?? data?.message ?? data?.error ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
+}
+
 async function refresh($: EngineInterface, subcommand: 'status' | 'detect' = 'status') {
   try {
     const result = await runCli($, [subcommand, '--json'])
@@ -103,9 +130,14 @@ async function refresh($: EngineInterface, subcommand: 'status' | 'detect' = 'st
     if (next) {
       await update($, status, () => next)
       showStatusLine($, next)
+    } else {
+      const failure = parseJson<{ message?: string }>(result.stdout)?.message ?? firstLine(result.stderr.replace(ANSI, ''))
+      await update($, message, () => failure ?? 'altimate returned no integrations status.')
     }
-  } catch {
-    await update($, message, () => 'altimate CLI not found: install it to use one-click integrations.')
+  } catch (error) {
+    await update($, message, () =>
+      MISSING_BINARY.test(String(error)) ? 'altimate CLI not found: install it to use one-click integrations.' : `Could not run altimate: ${String(error)}`,
+    )
   }
 }
 
@@ -123,10 +155,16 @@ function showStatusLine($: EngineInterface, current: IntegrationsStatus) {
 
 // A press has a short budget, so a press only schedules its work; the work then
 // runs on the clock, outside the press.
-function later($: EngineInterface, work: () => Promise<void>) {
+function later($: EngineInterface, work: () => Promise<unknown>) {
   $.clock.after(0, () => {
     void work()
   })
+}
+
+/** The timeout that fits what the command runs: one provider, or every provider in turn. */
+function timeoutFor(args: string[]) {
+  if (args[0] === 'sync') return args.includes('--all') ? SYNC_ALL_TIMEOUT_MS : WORKSPACE_TIMEOUT_MS
+  return args[0] === 'disconnect' ? WORKSPACE_TIMEOUT_MS : undefined
 }
 
 /** Runs one CLI action, keeping the pane's progress line and the status current. */
@@ -139,14 +177,37 @@ async function act($: EngineInterface, target: ProviderId | 'all', label: string
     let failure: string | null = null
     let detail: string | null = null
     for (const args of commands) {
-      const result = await runCli($, args)
+      const result = await runCli($, args, timeoutFor(args))
       if (result.exitCode !== 0) {
-        failure = firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
+        failure = failureText(result, args[0])
         break
       }
       if (args[0] === 'sync') detail = syncText(result.stdout)
+      if (args[0] === 'disconnect') detail = disconnectText(result.stdout, target)
     }
     const text = failure ?? detail ?? summarize(verb, target)
+    await update($, message, () => text)
+    $.ui.toast(text)
+  } catch (error) {
+    await update($, message, () => `Could not run altimate: ${String(error)}`)
+  } finally {
+    await update($, busy, () => null)
+    await refresh($)
+  }
+}
+
+/** Opens the browser sign-in; sync stays off until it completes, so only this click opens the browser. */
+async function signIn($: EngineInterface) {
+  if (await read($, busy)) return
+  await update($, busy, () => ({ provider: 'all', label: 'Waiting for the browser sign-in…' }))
+  await update($, message, () => null)
+  try {
+    const result = await runAltimate(
+      $,
+      ['auth', 'login', '-p', 'altimate-backend', '--method', 'Altimate LLM Gateway'],
+      SIGN_IN_TIMEOUT_MS,
+    )
+    const text = result.exitCode === 0 ? 'Signed in to Altimate' : (firstLine(result.stderr.replace(ANSI, '')) ?? 'Sign-in did not finish.')
     await update($, message, () => text)
     $.ui.toast(text)
   } catch (error) {
@@ -167,7 +228,7 @@ async function listWorkspaces($: EngineInterface) {
     const result = await runAltimate($, ['workspace', 'list', '--json'])
     const data = parseJson<{ ok?: boolean; workspaces?: WorkspaceChoice[] }>(result.stdout)
     if (result.exitCode !== 0 || !Array.isArray(data?.workspaces)) {
-      await update($, message, () => firstLine(result.stderr.replace(ANSI, '')) ?? 'Could not list workspaces.')
+      await update($, message, () => failureText(result) === 'failed' ? 'Could not list workspaces.' : failureText(result))
     } else if (data.workspaces.length === 0) {
       await update($, message, () => 'No workspaces found for this account.')
     } else {
@@ -186,15 +247,15 @@ async function linkWorkspace($: EngineInterface, choice: WorkspaceChoice) {
   await update($, busy, () => ({ provider: 'all', label: `Linking ${choice.name}…` }))
   await update($, message, () => null)
   try {
-    const link = await runAltimate($, ['link', '--workspace', String(choice.id), '-y'], CONNECT_TIMEOUT_MS)
+    const link = await runAltimate($, ['link', '--workspace', String(choice.id), '-y'], WORKSPACE_TIMEOUT_MS)
     if (link.exitCode !== 0) {
-      await update($, message, () => firstLine(link.stderr.replace(ANSI, '')) ?? 'Could not link the workspace.')
+      await update($, message, () => (failureText(link) === 'failed' ? 'Could not link the workspace.' : failureText(link)))
       return
     }
     await update($, workspaces, () => null)
     await update($, busy, () => ({ provider: 'all', label: 'Syncing…' }))
-    const sync = await runCli($, ['sync', '--all', '--json'], CONNECT_TIMEOUT_MS)
-    const detail = sync.exitCode === 0 ? syncText(sync.stdout) : firstLine(sync.stderr.replace(ANSI, ''))
+    const sync = await runCli($, ['sync', '--all', '--json'], SYNC_ALL_TIMEOUT_MS)
+    const detail = syncText(sync.stdout) ?? (sync.exitCode === 0 ? null : failureText(sync))
     const text = `Linked to ${choice.name}${detail ? ` · ${detail}` : ''}`
     await update($, message, () => text)
     $.ui.toast(text)
@@ -221,8 +282,16 @@ async function loadForm($: EngineInterface, open: Expanded) {
   }
 }
 
+/** Forgets what was typed or pasted for a provider, so an abandoned form cannot leak into the next connect. */
+async function discardEntries($: EngineInterface, provider: ProviderId) {
+  try {
+    await runJson($, ['discard', provider, '--json'])
+  } catch {}
+}
+
 async function openForm($: EngineInterface, provider: ProviderId, mode: Expanded['mode'], note: string | null = null) {
   const open: Expanded = { provider, mode, variant: null }
+  await discardEntries($, provider)
   await update($, expanded, () => open)
   await update($, form, () => null)
   await update($, typed, () => ({}))
@@ -236,6 +305,11 @@ async function closeForm($: EngineInterface) {
   await update($, form, () => null)
   await update($, typed, () => ({}))
   await update($, formMessage, () => null)
+}
+
+async function cancelForm($: EngineInterface, provider: ProviderId) {
+  await discardEntries($, provider)
+  await closeForm($)
 }
 
 async function openPane($: EngineInterface) {
@@ -321,6 +395,12 @@ function switchVariant($: EngineInterface, variant: string) {
   })
 }
 
+/** What a successful connect did, with the CLI's own note (not linked, sync blocked, could not detach) when it sent one. */
+function connectedText(name: string, result: Outcome): string {
+  if (result.sync === 'synced') return result.message ? `${name} saved · ${result.message}` : `${name} synced to your Altimate workspace`
+  return result.message ? `${name} connected · kept local · ${result.message}` : `${name} connected · kept local`
+}
+
 /** Test and save the form's credentials: connect or update, local or shared with the workspace. */
 function submitForm($: EngineInterface, localOnly: boolean) {
   later($, async () => {
@@ -334,14 +414,13 @@ function submitForm($: EngineInterface, localOnly: boolean) {
       // Keep local always goes through connect: it is how an update switches to local.
       const verb = open.mode === 'update' && !localOnly ? 'update' : 'connect'
       const variant = open.variant ? ['--variant', open.variant] : []
-      const run = await runJson<Outcome>($, [verb, open.provider, ...(localOnly ? ['--local-only'] : []), ...variant, '--json'], CONNECT_TIMEOUT_MS)
+      const run = await runJson<Outcome>($, [verb, open.provider, ...(localOnly ? ['--local-only'] : []), ...variant, '--json'], WORKSPACE_TIMEOUT_MS)
       outcome = run.data ?? { status: 'failed', message: run.failure }
     })
     const result = outcome as Outcome | null
     if (!result) return
     if (result.status === 'connected') {
-      const base = result.sync === 'synced' ? (result.message ? `${name} saved · ${result.message}` : `${name} synced to your Altimate workspace`) : `${name} connected · kept local`
-      const text = `${base}${result.account ? ` as ${result.account}` : ''}`
+      const text = `${connectedText(name, result)}${result.account ? ` as ${result.account}` : ''}`
       await closeForm($)
       await update($, message, () => text)
       $.ui.toast(text)
@@ -363,8 +442,8 @@ function connectFound($: EngineInterface, providers: Provider[], localOnly: bool
     try {
       for (const one of providers) {
         await update($, busy, () => ({ provider: one.id, label: `Testing ${one.name}…` }))
-        const { data, failure } = await runJson<Outcome>($, ['connect', one.id, ...(localOnly ? ['--local-only'] : []), '--json'], CONNECT_TIMEOUT_MS)
-        if (data?.status === 'connected') lines.push(data.sync === 'synced' ? (data.message ? `${one.name} saved · ${data.message}` : `${one.name} synced to your workspace`) : `${one.name} kept local`)
+        const { data, failure } = await runJson<Outcome>($, ['connect', one.id, ...(localOnly ? ['--local-only'] : []), '--json'], WORKSPACE_TIMEOUT_MS)
+        if (data?.status === 'connected') lines.push(connectedText(one.name, data))
         else {
           if (data?.status === 'missing_fields') needsInput = needsInput ?? one.id
           lines.push(`${one.name}: ${data?.message ?? failure ?? 'not connected'}`)
@@ -407,7 +486,7 @@ function firstLine(text: string): string | null {
   return text.trim().split('\n')[0] || null
 }
 
-type SyncReport = { results?: { id: string; result?: string; reason?: string; steps?: (string | { label: string; ok: boolean })[] }[] }
+type SyncReport = { results?: { id: string; result?: string; reason?: string; steps?: { label: string; ok: boolean }[] }[] }
 
 /** One line per synced, skipped or failed provider from `sync --json`; null when the output is not that JSON. */
 function syncText(stdout: string): string | null {
@@ -417,8 +496,7 @@ function syncText(stdout: string): string | null {
     .map(one => {
       const who = ['github', 'jira', 'linear'].includes(one.id) ? nameOf(one.id as ProviderId) : one.id
       if (one.result !== 'synced') return `${who}: ${one.reason ?? one.result ?? 'not synced'}`
-      // The CLI's --json prints each step as its label; the object form is accepted too.
-      const steps = (one.steps ?? []).map(step => (typeof step === 'string' ? { label: step, ok: !step.startsWith('Not linked') } : step))
+      const steps = one.steps ?? []
       const bad = steps.filter(step => !step.ok).map(step => step.label)
       const last = steps.filter(step => step.ok).pop()?.label
       const detail = bad.length > 0 ? `${bad.join(', ')} failed` : last
@@ -427,13 +505,21 @@ function syncText(stdout: string): string | null {
     .join(' · ')
 }
 
+/** What a disconnect did: the CLI says whether anything was stored and whether a workspace copy went. */
+function disconnectText(stdout: string, target: ProviderId | 'all'): string | null {
+  const data = parseJson<{ removed?: boolean; removedFromWorkspace?: number; detached?: boolean; message?: string }>(stdout)
+  if (!data) return null
+  const who = target === 'all' ? 'Integrations' : nameOf(target)
+  if (!data.removed) return `${who}: nothing was stored`
+  const done = data.removedFromWorkspace ? `${who} disconnected · removed from your Altimate workspace` : `${who} disconnected`
+  return data.detached === false ? `${done} · ${data.message ?? 'it could not be detached from the linked workspace'}` : done
+}
+
 function summarize(verb: string | undefined, target: ProviderId | 'all'): string {
   const who = target === 'all' ? 'Integrations' : nameOf(target)
   switch (verb) {
     case 'sync':
       return `${who} synced to your Altimate workspace`
-    case 'block':
-      return `${who} will stay on this machine only`
     case 'unblock':
       return `${who} can sync to your Altimate workspace`
     case 'disconnect':
@@ -477,12 +563,12 @@ export const register: Register = on => {
     const stopped = current.providers.filter(one => one.state === 'rejected' || one.state === 'expired')
     const found = current.providers.filter(one => one.state === 'detected')
     const remote = current.providers.filter(one => one.state === 'available')
-    const pending = current.providers.filter(one => one.state === 'connected' && one.sync === 'pending')
-    if (stopped.length + found.length + remote.length + pending.length === 0) return next(e)
+    if (stopped.length + found.length + remote.length === 0) return next(e)
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const running = await read($, busy)
-    const ready = [...found, ...pending]
+    const ready = found
+    const signedOut = current.workspace.signedIn === false
     const foundText = ready.map(one => `${one.name} (${one.source?.label ?? 'local'})`).join(', ')
 
     return (
@@ -508,7 +594,7 @@ export const register: Register = on => {
                 onPress={() =>
                   later($, async () => {
                     await openPane($)
-                    await openForm($, one.id, 'update')
+                    await openForm($, one.id, one.managed === false ? 'connect' : 'update')
                   })
                 }
               />
@@ -519,8 +605,9 @@ export const register: Register = on => {
           <Text dimColor>{running.label}</Text>
         ) : ready.length + remote.length === 0 ? null : (
           <Box>
-            {ready.length > 0 && <Button key="connect-all" label="Connect" onPress={() => connectFound($, ready, false)} />}
+            {ready.length > 0 && !signedOut && <Button key="connect-all" label="Connect" onPress={() => connectFound($, ready, false)} />}
             {ready.length > 0 && <Button key="keep-local" label="Keep local" onPress={() => connectFound($, ready, true)} />}
+            {signedOut && <Button key="sign-in" label="Sign in to sync" onPress={() => later($, () => signIn($))} />}
             <Button key="details" label="Review" onPress={() => later($, () => openPane($))} />
             <Button key="hide" label="Later" onPress={() => update($, isBandHidden, () => true)} />
           </Box>
@@ -552,12 +639,19 @@ export const register: Register = on => {
       )
     }
 
+    const signedOut = current.workspace.signedIn === false
+
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
           <Text bold>One-click integrations</Text>
-          <Text dimColor>Workspace: {current.workspace.linked === false ? 'not linked' : current.workspace.name}</Text>
-          {current.workspace.linked === false && !running && !choices && (
+          <Text dimColor>Workspace: {signedOut ? 'not signed in · everything stays on this machine' : current.workspace.linked === false ? 'not linked' : current.workspace.name}</Text>
+          {signedOut && !running && (
+            <Box>
+              <Button key="sign-in" label="Sign in to sync" onPress={() => later($, () => signIn($))} />
+            </Box>
+          )}
+          {!signedOut && current.workspace.linked === false && !running && !choices && (
             <Box>
               <Button key="link-workspace" label="Link workspace" onPress={() => later($, () => listWorkspaces($))} />
             </Box>
@@ -643,13 +737,15 @@ export const register: Register = on => {
                   <Text color="warning">{'  '}{running.label}</Text>
                 ) : (
                   <Box>
-                    <Button
-                      key={`${one.id}-submit`}
-                      label={open.mode === 'update' ? 'Update' : 'Connect & sync'}
-                      onPress={() => submitForm($, false)}
-                    />
+                    {(open.mode === 'update' || !signedOut) && (
+                      <Button
+                        key={`${one.id}-submit`}
+                        label={open.mode === 'update' ? 'Update' : 'Connect & sync'}
+                        onPress={() => submitForm($, false)}
+                      />
+                    )}
                     <Button key={`${one.id}-keep-local`} label="Keep local" onPress={() => submitForm($, true)} />
-                    <Button key={`${one.id}-cancel`} label="Cancel" onPress={() => later($, () => closeForm($))} />
+                    <Button key={`${one.id}-cancel`} label="Cancel" onPress={() => later($, () => cancelForm($, one.id))} />
                   </Box>
                 )}
               </Box>
@@ -658,14 +754,14 @@ export const register: Register = on => {
                 <Text color="warning">{'  '}{running.label}</Text>
               </Box>
             ) : (
-              <Box>{actionsFor($, one, Button)}</Box>
+              <Box>{actionsFor($, one, Button, signedOut)}</Box>
             )}
           </Box>
         ))}
         {note && <Text color="suggestion">{note}</Text>}
         <Box>
           <Button key="refresh" label="Rescan" onPress={() => later($, () => act($, 'all', 'Rescanning…', ['detect', '--json']))} />
-          <Button key="sync-everything" label="Sync all" onPress={() => later($, () => act($, 'all', 'Syncing…', ['sync', '--all', '--json']))} />
+          {!signedOut && <Button key="sync-everything" label="Sync all" onPress={() => later($, () => act($, 'all', 'Syncing…', ['sync', '--all', '--json']))} />}
         </Box>
       </Box>
     )
@@ -673,40 +769,41 @@ export const register: Register = on => {
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added
-// or updated in the row's form; there is no browser sign-in button.
-function actionsFor($: EngineInterface, one: Provider, Button: any) {
+// or updated in the row's form; signed out, nothing offers to sync.
+function actionsFor($: EngineInterface, one: Provider, Button: any, signedOut: boolean) {
   const buttons = []
   const addCredentials = () => (
     <Button key={`${one.id}-add`} label="Add credentials" onPress={() => later($, () => openForm($, one.id, 'connect'))} />
   )
   if (one.state === 'detected') {
     buttons.push(
-      <Button key={`${one.id}-use`} label="Connect" onPress={() => connectFound($, [one], false)} />,
+      ...(signedOut ? [] : [<Button key={`${one.id}-use`} label="Connect" onPress={() => connectFound($, [one], false)} />]),
       <Button key={`${one.id}-local`} label="Keep local" onPress={() => connectFound($, [one], true)} />,
       addCredentials(),
     )
   }
   if (one.state === 'available' || one.state === 'not_found') buttons.push(addCredentials())
-  if (one.state === 'expired' || one.state === 'rejected') {
+  // A connection made by hand in the web app is managed there: from here it can only be replaced by adding credentials.
+  if (one.managed === false && one.state !== 'detected') return [addCredentials()]
+  // The connection this tool made can be replaced even when the row shows a newer one made by hand and still valid.
+  if (one.state === 'expired' || one.state === 'rejected' || (one.state === 'connected' && one.sync === 'synced')) {
     buttons.push(<Button key={`${one.id}-update`} label="Update" onPress={() => later($, () => openForm($, one.id, 'update'))} />)
   }
   if (one.state === 'connected' || one.state === 'expired' || one.state === 'rejected') {
     // A local credential that is not blocked only waits for a sync; a blocked one
-    // is unblocked and synced in the same click.
-    if (one.state === 'connected' && (one.sync === 'pending' || one.sync === 'local')) {
+    // is unblocked and synced in the same click. One saved in the workspace has no
+    // local copy to keep: Update (above) offers Keep local, which moves it here.
+    if (!signedOut && one.state === 'connected' && one.sync === 'local') {
       buttons.push(<Button key={`${one.id}-sync`} label="Sync" onPress={() => later($, () => act($, one.id, 'Syncing…', ['sync', one.id, '--json']))} />)
     }
     if (one.sync === 'blocked') {
-      buttons.push(
+      if (!signedOut) buttons.push(
         <Button
           key={`${one.id}-allow`}
           label="Allow sync"
           onPress={() => later($, () => act($, one.id, 'Syncing…', ['unblock', one.id, '--json'], ['sync', one.id, '--json']))}
         />,
       )
-    } else if (one.sync !== 'local') {
-      // Already local: Sync is the only move left, so Keep local would do nothing.
-      buttons.push(<Button key={`${one.id}-block`} label="Keep local" onPress={() => later($, () => act($, one.id, 'Updating…', ['block', one.id, '--json']))} />)
     }
     buttons.push(<Button key={`${one.id}-off`} label="Disconnect" onPress={() => later($, () => act($, one.id, 'Disconnecting…', ['disconnect', one.id, '--json']))} />)
   }

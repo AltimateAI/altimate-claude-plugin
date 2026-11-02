@@ -35,7 +35,11 @@ altimate-claude-plugin/
 │       ├── agents/
 │       │   └── analyst.md       # read-only data analyst for the MCP tools
 │       ├── hooks/
-│       │   └── hooks.json       # SessionStart, Stop and PreToolUse hook config
+│       │   ├── hooks.json       # SessionStart, Stop and PreToolUse hook config
+│       │   ├── integrations.tsx # one-click integrations band and /integrations pane (mod)
+│       │   └── integrations.test.tsx # its tests (claude plugin test .)
+│       ├── types/
+│       │   └── index.d.ts       # types for the mod
 │       ├── hooks-handlers/
 │       │   ├── session-start.sh # SessionStart: capability text, mode, skill copy
 │       │   ├── data-mode.sh     # MCP or CLI mode, from PATH and MCP settings

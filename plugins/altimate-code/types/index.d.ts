@@ -15,13 +15,15 @@ export type Provider = {
   syncable: boolean
   sync: SyncState
   updatedAt: string | null
-  /** ISO time the access token stops working; null when it does not expire. */
+  /** ISO time the access token stops working; null when it does not expire or the provider does not report it. */
   expiresAt?: string | null
   note: string | null
+  /** False for a connection made by hand in the web app, which this tool does not manage. */
+  managed?: boolean
 }
 
 export type IntegrationsStatus = {
-  workspace: { name: string; tenant: string | null; linked?: boolean; id?: number | null }
+  workspace: { name: string; tenant: string | null; linked?: boolean; id?: number | null; signedIn?: boolean }
   providers: Provider[]
 }
 
