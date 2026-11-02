@@ -270,10 +270,100 @@ export function touchedColumns(before: string[], after: string[], columns: strin
   const now = lines(after)
   const changed = [...now.filter(line => !was.includes(line)), ...was.filter(line => !now.includes(line))]
   const named = counts(changed)
+  // The output columns whose select item the edit rewrote, added or removed come first.
+  const outBefore = selectItems(before.join('\n'))
+  const outAfter = selectItems(after.join('\n'))
+  const rewritten = new Set([...new Set([...outBefore.keys(), ...outAfter.keys()])].filter(name => outBefore.get(name) !== outAfter.get(name)))
   const wasCount = counts(before)
   const nowCount = counts(after)
   const shift = (column: string) => Math.abs((nowCount.get(column.toLowerCase()) ?? 0) - (wasCount.get(column.toLowerCase()) ?? 0))
-  return columns.filter(column => named.has(column.toLowerCase())).sort((a, b) => shift(b) - shift(a))
+  const rank = (column: string) => (rewritten.has(column.toLowerCase()) ? 1000 : 0) + shift(column)
+  return columns.filter(column => named.has(column.toLowerCase()) || rewritten.has(column.toLowerCase())).sort((a, b) => rank(b) - rank(a))
+}
+
+/**
+ * Output name → expressions for every select item in a piece of SQL, across every SELECT scope
+ * (CTEs and subqueries included). The scan keeps string literals and Jinja blocks whole (their
+ * commas, parentheses and keywords do not count) and drops comments. A scope's list runs from its
+ * SELECT to the FROM at the same depth, or to the closing parenthesis or the end. A fragment with no
+ * SELECT (an Edit's old/new strings) is read as one list. Names come from `AS name`, a trailing
+ * implicit alias, or the column itself (`t.col`); casts and table aliases are not outputs.
+ */
+export function selectItems(sql: string): Map<string, string> {
+  type Token = { text: string; depth: number; word: string | null; at: number }
+  const tokens: Token[] = []
+  let depth = 0
+  for (let i = 0; i < sql.length; ) {
+    const rest = sql.slice(i)
+    const skip = /^(--[^\n]*|\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\})/.exec(rest)
+    if (skip) {
+      tokens.push({ text: ' ', depth, word: null, at: i })
+      i += skip[0].length
+      continue
+    }
+    const whole = /^('(?:[^']|'')*'|"(?:[^"]|"")*"|`[^`]*`|\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\})/.exec(rest)
+    if (whole) {
+      tokens.push({ text: whole[0], depth, word: null, at: i })
+      i += whole[0].length
+      continue
+    }
+    const word = /^[A-Za-z_]\w*/.exec(rest)
+    if (word) {
+      tokens.push({ text: word[0], depth, word: word[0].toLowerCase(), at: i })
+      i += word[0].length
+      continue
+    }
+    const ch = sql[i]!
+    // A parenthesis belongs to the group it opens or closes.
+    if (ch === '(') depth++
+    tokens.push({ text: ch, depth, word: null, at: i })
+    if (ch === ')') depth = Math.max(0, depth - 1)
+    i++
+  }
+
+  const lists: Token[][][] = []
+  const collect = (from: number, d: number) => {
+    const items: Token[][] = [[]]
+    for (let k = from; k < tokens.length; k++) {
+      const t = tokens[k]!
+      if (t.depth < d || (t.depth === d && t.text === ')')) break
+      if (t.depth === d && t.word === 'from') break
+      if (t.depth === d && t.text === ',') items.push([])
+      else items[items.length - 1]!.push(t)
+    }
+    lists.push(items)
+  }
+  const selects = tokens.map((t, k) => (t.word === 'select' ? k : -1)).filter(k => k >= 0)
+  // A fragment whose SELECTs are all nested (an Edit of one item holding a subquery) is a list itself.
+  if (!selects.some(k => tokens[k]!.depth === 0)) collect(0, 0)
+  for (const k of selects) collect(k + 1, tokens[k]!.depth)
+
+  const out = new Map<string, string>()
+  for (const items of lists) {
+    for (const item of items) {
+      // Whitespace collapses between tokens only: a literal keeps its own spacing.
+      let text = ''
+      for (const t of item) text += /^\s$/.test(t.text) ? (text.endsWith(' ') ? '' : ' ') : t.text
+      text = text.trim().replace(/^(?:distinct|all)\s+/i, '')
+      if (!text) continue
+      // Jinja control tags ({% if %} … {% endif %}) wrap an item; the alias is inside them.
+      const bare = item
+        .filter(t => !/^\{%/.test(t.text))
+        .map(t => (/^\s$/.test(t.text) ? ' ' : t.text))
+        .join('')
+        .replace(/\s+/g, ' ')
+        .trim()
+      const name =
+        /\bas\s+["`]?([A-Za-z_]\w*)["`]?$/i.exec(bare)?.[1] ??
+        /[\s)]["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1] ??
+        /^(?:[A-Za-z_]\w*\.)*["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1]
+      if (!name) continue
+      const key = name.toLowerCase()
+      // The same name in several scopes (a CTE and the outer select): any of them changing counts.
+      out.set(key, out.has(key) ? `${out.get(key)}\u0000${text}` : text)
+    }
+  }
+  return out
 }
 
 /** table_lineage records (SaaS MCP) → edges, keeping only well-formed ones. */

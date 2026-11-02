@@ -41,6 +41,8 @@ const TOOL_TIMEOUT_MS = 60_000
 // How long an edit waits for the column reach before it goes ahead without it.
 const HOLD_MS = 6_000
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
+// The most columns one edit's impact check traces.
+const MAX_EDIT_COLUMNS = 3
 
 const focusAtom = atom({ plugin: 'altimate-code', key: 'lineageFocus' } as const, null, { shape: 'lineage-focus-1' })
 const graphAtom = atom({ plugin: 'altimate-code', key: 'lineageGraph' } as const, null, { shape: 'lineage-graph-1' })
@@ -435,6 +437,32 @@ async function editTexts($: EngineInterface, e: any): Promise<{ before: string[]
   return { before: [await $.fs.read(String(e.file_path)).catch(() => '')], after: [String(e.content ?? '')] }
 }
 
+/** Several columns' reach as one: models and dashboards that read any of them, each named once. */
+function mergeReach(reaches: ColumnReachView[]): ColumnReachView | null {
+  if (reaches.length === 0) return null
+  if (reaches.length === 1) return reaches[0]!
+  const models = new Map<string, Set<string>>()
+  for (const reach of reaches) {
+    for (const one of reach.models) {
+      const columns = models.get(one.name) ?? new Set<string>()
+      for (const col of one.columns) columns.add(col)
+      models.set(one.name, columns)
+    }
+  }
+  const unique = <T,>(list: T[], key: (one: T) => string) => [...new Map(list.map(one => [key(one), one])).values()]
+  const readers = new Set(models.keys())
+  return {
+    model: reaches[0]!.model,
+    column: reaches.map(one => one.column).join(', '),
+    models: [...models].map(([name, cols]) => ({ name, columns: [...cols] })),
+    exposures: unique(reaches.flatMap(one => one.exposures), one => one),
+    uncertainExposures: unique(reaches.flatMap(one => one.uncertainExposures), one => one).filter(one => !reaches.some(r => r.exposures.includes(one))),
+    uncertain: unique(reaches.flatMap(one => one.uncertain), one => one.name).filter(one => !readers.has(one.name)),
+    untraced: unique(reaches.flatMap(one => one.untraced), one => one.name),
+    truncated: reaches.some(one => one.truncated),
+  }
+}
+
 type ImpactNote = { key: string; toast: string; context: string; view: ImpactView }
 
 /**
@@ -462,21 +490,32 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
   if (downstream === 0 && counts.exposures.length === 0) return null
   const known = (await read($, focusAtom))?.model === id ? ((await read($, columnsAtom))?.columns.map(one => one.name) ?? []) : []
   const { before, after } = await editTexts($, e)
-  const column = touchedColumns(before, after, [...new Set([...known, ...node.columns])])[0] ?? null
+  // Every column the edit touches is traced (up to three): picking one from raw dbt SQL is a guess,
+  // and a wrong guess would hide the column that changed.
+  const touched = touchedColumns(before, after, [...new Set([...known, ...node.columns])]).slice(0, MAX_EDIT_COLUMNS)
 
   let reach: ColumnReachView | null = null
-  if (column) {
+  const traced: string[] = []
+  // Touched columns whose check failed or ran out of time: what they reach is unknown.
+  const unchecked: string[] = []
+  if (touched.length > 0) {
     const began = await $.clock.now()
-    const result = await within($, HOLD_MS, runTool($, 'impact_analysis', { manifest_path: manifest, model: id, column, change_type: 'modify' }))
-    reach = result?.ok ? reachFromMetadata(result.metadata, node.name, column) : null
+    // Each column has the whole hold: a slow one does not discard the others.
+    const results = await Promise.all(
+      touched.map(col => within($, HOLD_MS, runTool($, 'impact_analysis', { manifest_path: manifest, model: id, column: col, change_type: 'modify' }))),
+    )
+    const reaches = results.map((result, i) => (result?.ok ? reachFromMetadata(result.metadata, node.name, touched[i]!) : null))
+    reaches.forEach((one, i) => (one ? traced : unchecked).push(touched[i]!))
+    reach = mergeReach(reaches.filter((one): one is ColumnReachView => !!one))
     const ms = Math.round((await $.clock.now()) - began)
-    if (reach) $.ui.log(`impact-first · impact_analysis(${node.name}.${column}) · ${elapsed(ms)}`)
+    if (reach) $.ui.log(`impact-first · impact_analysis(${node.name}.${traced.join(', ')}) · ${elapsed(ms)}`)
   }
+  const column = traced.length ? traced.join(', ') : null
 
   const target = column && reach ? `${node.name}.${column}` : node.name
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
   // What the engine could not settle keeps the count a lower bound, never a confident zero.
-  const unsettled = reach ? reach.uncertain.length + reach.untraced.length + (reach.truncated ? 1 : 0) : 0
+  const unsettled = reach ? reach.uncertain.length + reach.untraced.length + (reach.truncated ? 1 : 0) + unchecked.length : 0
   const atLeast = unsettled > 0 ? 'at least ' : ''
   // Dashboards on models that may read the column count too: a rename breaks a filter for certain.
   const dashboards = reach ? [...reach.exposures, ...reach.uncertainExposures] : counts.exposures
@@ -492,6 +531,7 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
     if (reach.exposures.length) lines.push(`- dashboards on them: ${reach.exposures.join(', ')}`)
     if (reach.uncertainExposures.length) lines.push(`- dashboards on models that may read it: ${reach.uncertainExposures.join(', ')}`)
     if (reach.truncated) lines.push('- the trace stopped at its model limit; more models may read it')
+    if (unchecked.length) lines.push(`- not checked (no answer in time): ${unchecked.join(', ')}`)
     if (reach.uncertain.length) lines.push(`- may also read it: ${reach.uncertain.slice(0, 10).map(one => `${one.name} (${one.reason})`).join(', ')}`)
     if (reach.untraced.length) lines.push(`- could not be traced: ${reach.untraced.slice(0, 10).map(one => `${one.name} (${one.reason})`).join(', ')}`)
   }

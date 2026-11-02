@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; toolResult?: (e: { tool: string }) => unknown }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; toolResult?: (e: { tool: string }) => unknown; failColumn?: string }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -98,6 +98,7 @@ async function start($: any, on: any, options: Options = {}) {
       return { value: { content: [{ type: 'text', text }], isError: false } }
     }
     // Over its size cap the server sends the report alone, marked truncated.
+    if (e.tool === 'impact_analysis' && e.args?.column === options.failColumn) return { value: { content: [{ type: 'text', text: 'boom' }], isError: true } }
     if (e.tool === 'impact_analysis') {
       const body = capped ? { report: 'Impact', truncated: true } : { ...reach, report: 'Impact' }
       return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } }
@@ -385,4 +386,22 @@ test('the impact toast shows before the edit runs', async ($, on) => {
   const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
   expect(result.result).toEqual({ toastsSoFar: 1 })
+})
+
+test('an edit touching two columns traces both and reports their combined reach', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on)
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
+  await clock.settle()
+  expect(calls).toContain('mcp:impact_analysis:revenue')
+  expect(calls).toContain('mcp:impact_analysis:order_id')
+  expect(toasts[0]).toContain('fct_orders.')
+  expect(toasts[0]).toContain('is read by 2 models and 1 dashboard')
+})
+
+test('a touched column whose check fails keeps the combined count a lower bound', async ($, on) => {
+  const { clock, toasts } = await start($, on, { failColumn: 'order_id' })
+  const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
+  await clock.settle()
+  expect(toasts[0]).toContain('fct_orders.revenue is read by at least 2 models')
+  expect(edit.context?.[0]).toContain('not checked (no answer in time): order_id')
 })

@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import {
   buildGraph,
+  selectItems,
   columnsFromMetadata,
   downstreamArt,
   findModel,
@@ -206,6 +207,53 @@ test('column reach, warehouse records and edited columns read as the pane needs 
     ),
   ).toEqual(['revenue', 'gross_revenue'])
   expect(touchedColumns(['sum(amount) as revenue'], ['sum(amount) - sum(refunds) as revenue'], ['order_id', 'revenue'])).toEqual(['revenue'])
+  // An edit that splits a line: the column it defines comes before one it only reads, even when
+  // the manifest lists that one first.
+  expect(
+    touchedColumns(
+      ['select i.order_id, i.order_date, i.status,\n       i.revenue, i.gross_amount as gross_revenue'],
+      ["select i.order_id, i.order_date, i.status,\n       case when i.status = 'cancelled' then 0 else i.revenue end as revenue,\n       i.gross_amount as gross_revenue"],
+      ['order_id', 'status', 'revenue', 'gross_revenue'],
+    )[0],
+  ).toBe('revenue')
+  // Casts, table aliases and unchanged neighbouring aliases are not what the edit changes.
+  expect(touchedColumns(['select order_id as order_id, revenue from orders'], ['select order_id as order_id, coalesce(revenue, 0) revenue from orders'], ['order_id', 'revenue'])[0]).toBe('revenue')
+  expect(touchedColumns(['select created_at, date from events'], ['select cast(created_at as date) created_at, date from events'], ['created_at', 'date'])[0]).toBe('created_at')
+  expect(
+    touchedColumns(['select order_id, revenue.revenue from orders as revenue'], ['select coalesce(order_id, 0) order_id, revenue.revenue from orders as revenue'], ['order_id', 'revenue'])[0],
+  ).toBe('order_id')
+  // A change inside a CTE marks only the CTE's column; a changed literal is a change.
+  expect(
+    touchedColumns(
+      ['with base as (select status, revenue from orders)\nselect status, revenue from base'],
+      ['with base as (select status, coalesce(revenue, 0) as revenue from orders)\nselect status, revenue from base'],
+      ['status', 'revenue'],
+    )[0],
+  ).toBe('revenue')
+  expect(
+    touchedColumns(
+      ["select status, case when status = 'paid' then revenue else 0 end as revenue from orders"],
+      ["select status, case when status = 'cancelled' then revenue else 0 end as revenue from orders"],
+      ['status', 'revenue'],
+    )[0],
+  ).toBe('revenue')
+  expect(
+    touchedColumns(
+      ["select status, case when status = '{{ var(\"paid\") }}' then revenue end as revenue from orders"],
+      ["select status, case when status = '{{ var(\"cancelled\") }}' then revenue end as revenue from orders"],
+      ['status', 'revenue'],
+    )[0],
+  ).toBe('revenue')
+  // Literal spacing, a subquery inside the edited item, and Jinja control tags around it.
+  const first = (before: string, after: string) => touchedColumns([before], [after], ['status', 'revenue'])[0]
+  expect(first("select status, case when status = 'not paid' then revenue else 0 end as revenue from orders", "select status, case when status = 'not  paid' then revenue else 0 end as revenue from orders")).toBe('revenue')
+  expect(first("case when exists (select 1 from refunds r where r.status = 'pending') then 0 else i.revenue end as revenue", "case when exists (select 1 from refunds r where r.status = 'cancelled') then 0 else i.revenue end as revenue")).toBe('revenue')
+  expect(
+    first(
+      "select status, {% if var('x') %} case when status = 'paid' then revenue else 0 end as revenue {% endif %} from orders",
+      "select status, {% if var('x') %} case when status = 'cancelled' then revenue else 0 end as revenue {% endif %} from orders",
+    ),
+  ).toBe('revenue')
   // A column only in unchanged context lines is not touched.
   expect(touchedColumns(['select order_id,\n  1 as a'], ['select order_id,\n  2 as a'], ['order_id'])).toEqual([])
 })
@@ -216,4 +264,13 @@ test('the desktop SVG names every drawn node and escapes markup', () => {
   expect(svg.startsWith('<svg')).toBe(true)
   const tricky = buildGraph({ nodes: { 'model.s.a<b': model('a<b', []) }, sources: {}, exposures: {} })
   expect(toSvg(tricky, 'model.s.a<b')).toContain('a&lt;b')
+})
+
+test('select items map each output name to its expression', () => {
+  expect([...selectItems("select i.order_id, cast(x as date) d, sum(a) as total, coalesce(b, 0) b from t as o where k = ','").entries()]).toEqual([
+    ['order_id', 'i.order_id'],
+    ['d', 'cast(x as date) d'],
+    ['total', 'sum(a) as total'],
+    ['b', 'coalesce(b, 0) b'],
+  ])
 })
