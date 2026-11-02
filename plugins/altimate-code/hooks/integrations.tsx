@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
+import { lineageBand, registerLineage, startLineage } from './lineage'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -454,6 +455,7 @@ export const register: Register = on => {
       name: COMMAND,
       description: 'One-click GitHub, Jira and Linear integrations for your Altimate workspace',
     })
+    await startLineage($)
     void refresh($, 'detect')
 
     return started
@@ -471,14 +473,18 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // One band per plugin: the lineage impact line rides under the integrations one, or alone.
+    if (e.props.hasSurvey) return next(e)
+    const lineage = await lineageBand($, $.ui.resolve(e))
+    const pass = async () => lineage ?? next(e)
     const current = await read($, status)
-    if (e.props.hasSurvey || !current || (await read($, isBandHidden))) return next(e)
+    if (!current || (await read($, isBandHidden))) return pass()
 
     const stopped = current.providers.filter(one => one.state === 'rejected' || one.state === 'expired')
     const found = current.providers.filter(one => one.state === 'detected')
     const remote = current.providers.filter(one => one.state === 'available')
     const pending = current.providers.filter(one => one.state === 'connected' && one.sync === 'pending')
-    if (stopped.length + found.length + remote.length + pending.length === 0) return next(e)
+    if (stopped.length + found.length + remote.length + pending.length === 0) return pass()
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const running = await read($, busy)
@@ -525,6 +531,7 @@ export const register: Register = on => {
             <Button key="hide" label="Later" onPress={() => update($, isBandHidden, () => true)} />
           </Box>
         )}
+        {lineage}
       </Box>
     )
   })
@@ -670,6 +677,8 @@ export const register: Register = on => {
       </Box>
     )
   })
+
+  registerLineage(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added

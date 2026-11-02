@@ -56,6 +56,87 @@ export type Form = {
 /** Which provider's form is open, and whether it adds credentials or updates them. */
 export type Expanded = { provider: ProviderId; mode: 'connect' | 'update'; variant: string | null }
 
+/** One node of the dbt graph, as the lineage pane draws it. */
+export type GraphNode = {
+  id: string
+  name: string
+  /** An exposure's label (a dashboard's display name); null for other nodes. */
+  label: string | null
+  /** dbt resource type: model, source, seed, snapshot, exposure, test, … */
+  type: string
+  /** Project-relative file path. */
+  path: string | null
+  materialized: string | null
+  /** database.schema.table, lower-cased: how the warehouse names it. */
+  relation: string | null
+  /** Columns documented in the manifest. */
+  columns: string[]
+}
+
+export type LineageGraph = {
+  nodes: Record<string, GraphNode>
+  parents: Record<string, string[]>
+  children: Record<string, string[]>
+}
+
+/** One column edge from dbt_lineage: an upstream column feeding an output column. */
+export type ColumnEdge = {
+  source: string
+  target: string
+  lineageType: 'direct' | 'indirect'
+  /** altimate-core's lens: Original, Alias, Transformation, Not sure, Non select. */
+  lens: string
+  expression: string | null
+}
+
+/** dbt_lineage for one model. */
+export type ColumnLineage = {
+  model: string
+  confidence: 'high' | 'low'
+  note: string | null
+  upstream: string[]
+  columns: { name: string; sources: string[] }[]
+  edges: ColumnEdge[]
+}
+
+/** impact_analysis' column reach: the downstream models whose SQL reads a column. */
+export type ColumnReachView = {
+  model: string
+  column: string
+  models: { name: string; columns: string[] }[]
+  exposures: string[]
+  truncated: boolean
+}
+
+/** A table_lineage edge from a SaaS MCP server: what the warehouse's query history shows. */
+export type WarehouseEdge = { source: string | null; target: string | null; hop: number }
+
+/** The model the lineage pane follows, and where its manifest is. */
+export type LineageFocus = {
+  model: string
+  root: string
+  manifest: string
+  /** How the graph was read: the manifest file, or altimate-code's tools for a manifest over 4 MiB. */
+  via: 'manifest' | 'tools'
+  /** Milliseconds the graph took to read. */
+  readMs: number
+}
+
+export type WarehouseView = { server: string; tool: string; table: string; edges: WarehouseEdge[] }
+
+/** What the band reports after Claude edits a model. */
+export type ImpactView = {
+  model: string
+  column: string | null
+  severity: 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH'
+  direct: number
+  transitive: number
+  tests: number
+  exposures: string[]
+  /** Downstream models that read the edited column; null when no column was traced. */
+  readers: number | null
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -71,6 +152,24 @@ declare module 'claude-code' {
       workspaces: WorkspaceChoice[] | null
       /** Non-secret text typed into the open form, by field name, saved when the form is submitted. */
       typed: Record<string, string>
+      /** The model the lineage pane follows; null until Claude reads or edits one, or /lineage names one. */
+      lineageFocus: Shaped<LineageFocus | null>
+      /** The graph the pane draws, for the followed model's project. */
+      lineageGraph: Shaped<LineageGraph | null>
+      /** dbt_lineage for the followed model. */
+      lineageColumns: Shaped<ColumnLineage | null>
+      /** The column the pane's column box is about. */
+      lineageColumn: string | null
+      lineageReach: Shaped<ColumnReachView | null>
+      /** Warehouse lineage from a connected SaaS MCP server's table_lineage; null when none is connected. */
+      lineageWarehouse: Shaped<WarehouseView | null>
+      /** Whether the upstream and downstream sections show every node. */
+      lineageExpanded: { up: boolean; down: boolean }
+      lineageImpact: Shaped<ImpactView | null>
+      /** Why there is no lineage to show, or what the last step reported. */
+      lineageMessage: string | null
+      lineageLoading: boolean
+      isLineageBandHidden: boolean
     }
   }
 }

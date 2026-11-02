@@ -1,0 +1,479 @@
+// The lineage pane's data, with no engine calls: the model graph read from a dbt manifest, the
+// column lineage dbt_lineage returns (as structured metadata, or parsed from its text for older
+// altimate-code builds), impact_analysis' severity thresholds, and the desktop SVG.
+
+import type {
+  ColumnEdge,
+  ColumnLineage,
+  ColumnReachView,
+  GraphNode,
+  LineageGraph,
+  WarehouseEdge,
+} from '../types'
+
+/** A dbt manifest, as far as the pane reads it. */
+type Manifest = {
+  nodes?: Record<string, any>
+  sources?: Record<string, any>
+  exposures?: Record<string, any>
+  metrics?: Record<string, any>
+  semantic_models?: Record<string, any>
+  parent_map?: Record<string, string[]>
+  child_map?: Record<string, string[]>
+}
+
+function nodeOf(id: string, node: any): GraphNode {
+  const type: string = node?.resource_type ?? id.split('.')[0] ?? 'unknown'
+  const columns = Object.entries<any>(node?.columns ?? {}).map(([key, col]) => String(col?.name ?? key))
+  return {
+    id,
+    name: node?.name ?? id.split('.').pop() ?? id,
+    label: type === 'exposure' ? node?.label || node?.name || id : null,
+    type,
+    path: node?.original_file_path ?? null,
+    materialized: node?.config?.materialized ?? null,
+    relation: relationOf(node),
+    columns,
+  }
+}
+
+/** `"db"."schema"."orders"` → `db.schema.orders`, lower-cased: how the warehouse names the relation. */
+function relationOf(node: any): string | null {
+  if (typeof node?.relation_name === 'string' && node.relation_name) {
+    return node.relation_name.replace(/[`"\[\]]/g, '').toLowerCase()
+  }
+  const parts = [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(
+    (part): part is string => typeof part === 'string' && part !== '',
+  )
+  return parts.length === 3 ? parts.join('.').toLowerCase() : null
+}
+
+/** The manifest's graph: dbt's own parent_map / child_map, rebuilt from depends_on when absent. */
+export function buildGraph(manifest: Manifest): LineageGraph {
+  const nodes: Record<string, GraphNode> = {}
+  const groups = [manifest.nodes, manifest.sources, manifest.exposures, manifest.metrics, manifest.semantic_models]
+  for (const group of groups) for (const [id, node] of Object.entries<any>(group ?? {})) nodes[id] = nodeOf(id, node)
+
+  let parents: Record<string, string[]>
+  let children: Record<string, string[]>
+  if (manifest.parent_map && manifest.child_map) {
+    parents = manifest.parent_map
+    children = manifest.child_map
+  } else {
+    parents = {}
+    children = {}
+    for (const group of groups) {
+      for (const [id, node] of Object.entries<any>(group ?? {})) {
+        parents[id] = node?.depends_on?.nodes ?? []
+        for (const parent of parents[id]!) (children[parent] ??= []).push(id)
+      }
+    }
+  }
+  return { nodes, parents, children }
+}
+
+/** The model a file path (project-relative, forward slashes) or a name or unique_id names. */
+export function findModel(graph: LineageGraph, wanted: string): string | null {
+  if (graph.nodes[wanted]?.type === 'model') return wanted
+  const lowered = wanted.toLowerCase()
+  for (const node of Object.values(graph.nodes)) {
+    if (node.type !== 'model') continue
+    if (node.path === wanted || node.name.toLowerCase() === lowered) return node.id
+  }
+  return null
+}
+
+const isTest = (node: GraphNode | undefined, id: string) => (node?.type ?? id.split('.')[0]) === 'test'
+
+/** Direct parents, each with its own parents: the two levels the pane draws upstream. */
+export function upstreamOf(graph: LineageGraph, id: string): { node: GraphNode; parents: GraphNode[] }[] {
+  const named = (ids: string[] | undefined) =>
+    (ids ?? []).filter(one => !isTest(graph.nodes[one], one)).map(one => graph.nodes[one] ?? nodeOf(one, null))
+  return named(graph.parents[id]).map(node => ({ node, parents: named(graph.parents[node.id]) }))
+}
+
+export type DownstreamRow = { node: GraphNode; depth: number; via: string }
+
+/**
+ * Everything downstream, breadth-first, so each node carries its shortest distance; tests are
+ * counted, not listed. The order matches impact_analysis' walk.
+ */
+export function downstreamOf(graph: LineageGraph, id: string): { rows: DownstreamRow[]; tests: number } {
+  const rows: DownstreamRow[] = []
+  const seen = new Set([id])
+  let tests = 0
+  let frontier = [id]
+  for (let depth = 1; frontier.length > 0; depth++) {
+    const next: string[] = []
+    for (const parent of frontier) {
+      for (const child of graph.children[parent] ?? []) {
+        if (seen.has(child)) continue
+        seen.add(child)
+        const node = graph.nodes[child] ?? nodeOf(child, null)
+        if (isTest(graph.nodes[child], child)) {
+          tests++
+          continue
+        }
+        rows.push({ node, depth, via: parent })
+        next.push(child)
+      }
+    }
+    frontier = next
+  }
+  return { rows, tests }
+}
+
+export type Severity = 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH'
+
+/** impact_analysis' thresholds, over downstream models. */
+export function severityOf(downstreamModels: number): Severity {
+  return downstreamModels === 0 ? 'SAFE' : downstreamModels <= 3 ? 'LOW' : downstreamModels <= 10 ? 'MEDIUM' : 'HIGH'
+}
+
+export type ImpactCounts = { direct: number; transitive: number; tests: number; exposures: string[]; severity: Severity }
+
+export function impactOf(graph: LineageGraph, id: string): ImpactCounts {
+  const { rows, tests } = downstreamOf(graph, id)
+  const models = rows.filter(row => row.node.type === 'model')
+  return {
+    direct: models.filter(row => row.depth === 1).length,
+    transitive: models.filter(row => row.depth > 1).length,
+    tests,
+    exposures: rows.filter(row => row.node.type === 'exposure').map(row => row.node.label ?? row.node.name),
+    severity: severityOf(models.length),
+  }
+}
+
+// altimate-core quotes identifiers: '"int_orders"."revenue"' → int_orders.revenue
+export function sourceName(source: unknown): string {
+  const text = typeof source === 'string' ? source : String((source as any)?.source ?? '')
+  return text.replace(/[`"\[\]]/g, '')
+}
+
+/** dbt_lineage's structured metadata (altimate-code builds that send it) → the pane's columns. */
+export function columnsFromMetadata(metadata: any): ColumnLineage | null {
+  if (!metadata || typeof metadata !== 'object' || !metadata.columns || typeof metadata.columns !== 'object') return null
+  const edges: ColumnEdge[] = (Array.isArray(metadata.edges) ? metadata.edges : []).map((edge: any) => ({
+    source: sourceName(edge?.source),
+    target: String(edge?.target ?? ''),
+    lineageType: edge?.lineage_type === 'indirect' ? 'indirect' : 'direct',
+    lens: String(edge?.lens_type ?? 'Not sure'),
+    expression: firstTransform(edge?.lens_code),
+  }))
+  return {
+    model: String(metadata.model_name ?? ''),
+    confidence: metadata.confidence === 'high' ? 'high' : 'low',
+    note: Array.isArray(metadata.confidence_factors) && metadata.confidence_factors[0] ? String(metadata.confidence_factors[0]) : null,
+    upstream: Array.isArray(metadata.upstream) ? metadata.upstream.map(String) : [],
+    columns: Object.entries<any>(metadata.columns).map(([name, sources]) => ({
+      name,
+      sources: (Array.isArray(sources) ? sources : [sources]).map(sourceName),
+    })),
+    edges,
+  }
+}
+
+function firstTransform(code: unknown): string | null {
+  if (!Array.isArray(code)) return null
+  const step = code.find((one: any) => one?.step_type === 'transform' && typeof one?.expression === 'string')
+  return step ? String(step.expression) : null
+}
+
+function safeJson(text: string): any {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * dbt_lineage's text (formatDbtLineage): the "Column Mappings" and "Lineage Edges" sections, one
+ * JSON value per line. For altimate-code builds whose dbt_lineage sends no structured metadata.
+ */
+export function parseDbtLineage(text: string): ColumnLineage {
+  const mappings: Record<string, unknown> = {}
+  const edges: any[] = []
+  let section: 'map' | 'edges' | null = null
+  for (const line of text.split('\n')) {
+    if (line === 'Column Mappings:') {
+      section = 'map'
+      continue
+    }
+    if (line === 'Lineage Edges:') {
+      section = 'edges'
+      continue
+    }
+    if (!line.startsWith('  ')) {
+      section = null
+      continue
+    }
+    if (section === 'map') {
+      const at = line.indexOf(' ← ')
+      if (at > 0) mappings[line.slice(2, at)] = safeJson(line.slice(at + 3))
+    } else if (section === 'edges') {
+      const edge = safeJson(line.trim())
+      if (edge) edges.push(edge)
+    }
+  }
+  const model = /^Model: (.+)$/m.exec(text)?.[1] ?? ''
+  const note = /^\s+Note: (.+)$/m.exec(text)?.[1] ?? null
+  return columnsFromMetadata({
+    model_name: model,
+    confidence: /^Confidence: low/m.test(text) || note ? 'low' : 'high',
+    confidence_factors: note ? [note] : [],
+    columns: mappings,
+    edges,
+  })!
+}
+
+/** impact_analysis' column_reach metadata → the pane's column box; null for builds without it. */
+export function reachFromMetadata(metadata: any, model: string, column: string): ColumnReachView | null {
+  const reach = metadata?.column_reach
+  if (!reach || !Array.isArray(reach.models)) return null
+  return {
+    model,
+    column,
+    models: reach.models.map((one: any) => ({ name: String(one?.name ?? ''), columns: Array.isArray(one?.columns) ? one.columns.map(String) : [] })),
+    exposures: (Array.isArray(reach.exposures) ? reach.exposures : []).map((one: any) => String(one?.label ?? one?.name ?? '')),
+    truncated: reach.truncated === true,
+  }
+}
+
+const IDENT = /[A-Za-z_][A-Za-z0-9_]*/g
+
+/** The model's columns an edit names, in the order the model lists them. */
+export function touchedColumns(texts: string[], columns: string[]): string[] {
+  const words = new Set(texts.flatMap(text => (text.match(IDENT) ?? []).map(word => word.toLowerCase())))
+  return columns.filter(column => words.has(column.toLowerCase()))
+}
+
+/** table_lineage records (SaaS MCP) → edges, keeping only well-formed ones. */
+export function warehouseEdges(result: any): WarehouseEdge[] {
+  const data = result?.data ?? result
+  const records = Array.isArray(data?.records) ? data.records : []
+  return records
+    .filter((one: any) => typeof one?.target_table === 'string' || typeof one?.source_table === 'string')
+    .map((one: any) => ({
+      source: one.source_table ?? null,
+      target: one.target_table ?? null,
+      hop: Number(one.hop) || 1,
+    }))
+}
+
+const escape = (text: string) => text.replace(/[&<>"]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[ch]!)
+
+/**
+ * The desktop drawing: upstream (two levels) on the left, the model in the middle, downstream (two
+ * levels) on the right, one column per level.
+ */
+export function toSvg(graph: LineageGraph, id: string, maxPerColumn = 8): string {
+  const focus = graph.nodes[id]
+  if (!focus) return '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>'
+  const up = upstreamOf(graph, id)
+  const { rows } = downstreamOf(graph, id)
+  const unique = (nodes: GraphNode[]) => [...new Map(nodes.map(node => [node.id, node])).values()].slice(0, maxPerColumn)
+  const columns: GraphNode[][] = [
+    unique(up.flatMap(one => one.parents)),
+    unique(up.map(one => one.node)),
+    [focus],
+    unique(rows.filter(row => row.depth === 1).map(row => row.node)),
+    unique(rows.filter(row => row.depth === 2).map(row => row.node)),
+  ]
+  const colWidth = 170
+  const rowHeight = 34
+  const height = Math.max(...columns.map(col => col.length), 1) * rowHeight + 20
+  const width = colWidth * columns.length + 20
+  const place = new Map<string, { x: number; y: number }>()
+  columns.forEach((col, ci) => {
+    const offset = (height - col.length * rowHeight) / 2
+    col.forEach((node, ri) => place.set(node.id, { x: 10 + ci * colWidth, y: offset + ri * rowHeight }))
+  })
+  const links: string[] = []
+  for (const [child, at] of place) {
+    for (const parent of graph.parents[child] ?? []) {
+      const from = place.get(parent)
+      if (!from) continue
+      links.push(
+        `<path d="M${from.x + 140},${from.y + 13} C${from.x + 155},${from.y + 13} ${at.x - 15},${at.y + 13} ${at.x},${at.y + 13}" fill="none" stroke="#8b8d93" stroke-width="1.2"/>`,
+      )
+    }
+  }
+  const boxes = [...place].map(([nodeId, at]) => {
+    const node = graph.nodes[nodeId]!
+    const isFocus = nodeId === id
+    const isExposure = node.type === 'exposure'
+    const fill = isFocus ? '#f5c86b' : isExposure ? '#e3defa' : '#f1f0ec'
+    const text = (isExposure ? '◆ ' : '') + (node.label ?? node.name)
+    const short = text.length > 20 ? text.slice(0, 19) + '…' : text
+    return (
+      `<g><title>${escape(`${text} · ${node.type}${node.materialized ? ` · ${node.materialized}` : ''}`)}</title>` +
+      `<rect x="${at.x}" y="${at.y}" width="140" height="26" rx="5" fill="${fill}" stroke="#55585f" stroke-width="${isFocus ? 1.6 : 0.6}"/>` +
+      `<text x="${at.x + 8}" y="${at.y + 17}" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#17181c">${escape(short)}</text></g>`
+    )
+  })
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${links.join('')}${boxes.join('')}</svg>`
+}
+
+/** What the SVG shows, for a reader that cannot see it. */
+export function describeGraph(graph: LineageGraph, id: string): string {
+  const name = graph.nodes[id]?.name ?? id
+  const up = upstreamOf(graph, id).map(one => one.node.name)
+  const { rows } = downstreamOf(graph, id)
+  const direct = rows.filter(row => row.depth === 1).map(row => row.node.label ?? row.node.name)
+  return `${name} is built from ${up.join(', ') || 'nothing upstream'}; ${direct.length} node${direct.length === 1 ? '' : 's'} read it directly${direct.length ? `: ${direct.slice(0, 8).join(', ')}` : ''}.`
+}
+
+/**
+ * The part of the graph the pane draws for one model: two levels up, everything downstream, and the
+ * links between them. Kept in state in place of the whole manifest graph.
+ */
+export function subgraph(graph: LineageGraph, id: string): LineageGraph {
+  const keep = new Set([id])
+  for (const parent of graph.parents[id] ?? []) {
+    keep.add(parent)
+    for (const grand of graph.parents[parent] ?? []) keep.add(grand)
+  }
+  for (const row of downstreamOf(graph, id).rows) keep.add(row.node.id)
+  const nodes: Record<string, GraphNode> = {}
+  const parents: Record<string, string[]> = {}
+  const children: Record<string, string[]> = {}
+  for (const one of keep) {
+    nodes[one] = graph.nodes[one] ?? nodeOf(one, null)
+    parents[one] = (graph.parents[one] ?? []).filter(other => keep.has(other))
+    children[one] = (graph.children[one] ?? []).filter(other => {
+      if (keep.has(other)) return true
+      // Tests stay as ids so downstream counts them; they are never drawn.
+      if (!isTest(graph.nodes[other], other)) return false
+      nodes[other] ??= { ...nodeOf(other, null), type: 'test' }
+      return true
+    })
+  }
+  return { nodes, parents, children }
+}
+
+/** One run of text in a drawn row; `node` makes it a control that follows that node. */
+export type Segment = { text: string; node?: string; color?: string; dim?: boolean; bold?: boolean }
+
+const label = (node: GraphNode) => (node.type === 'exposure' ? `◆ ${node.label ?? node.name}` : node.name)
+const pad = (text: string, width: number) => ' '.repeat(Math.max(0, width - text.length))
+
+/**
+ * Upstream as the pane draws it: each parent's own parents bracket into it, and the parents bracket
+ * into the model.
+ *
+ *   stg_orders   ─┐
+ *   stg_payments ─┼─▶ int_orders    ─┐
+ *   stg_refunds  ─┘                  ├─▶ ■ fct_orders
+ *                     stg_customers ─┘
+ */
+export function upstreamArt(graph: LineageGraph, id: string, expanded = false): Segment[][] {
+  const focus = graph.nodes[id]
+  if (!focus) return []
+  const all = upstreamOf(graph, id)
+  const shown = expanded ? all : all.slice(0, 4)
+  if (shown.length === 0) return [[{ text: 'no upstream nodes', dim: true }]]
+  const grandOf = (one: (typeof all)[number]) => (expanded ? one.parents : one.parents.slice(0, 3))
+  const w1 = Math.max(0, ...shown.flatMap(one => grandOf(one).map(node => label(node).length)))
+  const w2 = Math.max(...shown.map(one => label(one.node).length))
+  const rows: Segment[][] = []
+  const parentRows: number[] = []
+  for (const one of shown) {
+    const grands = grandOf(one)
+    const hidden = one.parents.length - grands.length
+    const count = Math.max(1, grands.length + (hidden > 0 ? 1 : 0))
+    const middle = Math.floor((count - 1) / 2)
+    for (let r = 0; r < count; r++) {
+      const row: Segment[] = []
+      const isGrand = r < grands.length
+      const lastIndex = count - 1
+      if (grands.length > 0 || hidden > 0) {
+        if (isGrand) row.push({ text: label(grands[r]!), node: grands[r]!.id }, { text: pad(label(grands[r]!), w1) })
+        else if (r === grands.length && hidden > 0) row.push({ text: `+${hidden} more`.padEnd(w1), dim: true })
+        else row.push({ text: ' '.repeat(w1) })
+        const mark =
+          count === 1 ? '─' : r === middle ? (r === 0 ? '┬' : r === lastIndex ? '┴' : '┼') : r === 0 ? '┐' : r === lastIndex ? '┘' : '┤'
+        row.push({ text: ` ─${mark}${r === middle ? '─▶ ' : '   '}`, dim: true })
+      } else if (w1 > 0) {
+        row.push({ text: ' '.repeat(w1 + 6) })
+      }
+      if (r === middle) {
+        row.push({ text: label(one.node), node: one.node.id }, { text: pad(label(one.node), w2) })
+        parentRows.push(rows.length)
+      } else {
+        row.push({ text: ' '.repeat(w2) })
+      }
+      rows.push(row)
+    }
+  }
+  const first = parentRows[0]!
+  const last = parentRows[parentRows.length - 1]!
+  const middle = parentRows[Math.floor((parentRows.length - 1) / 2)]!
+  rows.forEach((row, g) => {
+    if (g < first || g > last) return
+    const isParent = parentRows.includes(g)
+    let mark: string
+    if (parentRows.length === 1) mark = '─'
+    else if (g === middle) mark = g === first ? '┬' : g === last ? '┴' : '┼'
+    else if (isParent) mark = g === first ? '┐' : g === last ? '┘' : '┤'
+    else mark = '│'
+    row.push({ text: `${isParent ? ' ─' : '  '}${mark}${g === middle ? '─▶ ' : ''}`, dim: true })
+    if (g === middle) row.push({ text: '■ ', color: 'warning' }, { text: focus.name, color: 'warning', bold: true })
+  })
+  if (all.length > shown.length) rows.push([{ text: `+${all.length - shown.length} more upstream · [u] to show`, dim: true }])
+  return rows
+}
+
+/**
+ * Downstream as the pane draws it: one row per direct child, with what reads that child.
+ *
+ *   ■ fct_orders ─▶ fct_revenue_daily ─▶ ◆ Exec Revenue
+ *                ─▶ mart_cohort_ltv   ─▶ ◆ Cohort LTV
+ *                ─▶ 9 more models
+ */
+export function downstreamArt(graph: LineageGraph, id: string, expanded = false): Segment[][] {
+  const focus = graph.nodes[id]
+  if (!focus) return []
+  const kids = (one: string) => (graph.children[one] ?? []).map(child => graph.nodes[child]).filter((node): node is GraphNode => !!node && node.type !== 'test')
+  const direct = kids(id)
+  if (direct.length === 0) return [[{ text: '■ ', color: 'warning' }, { text: focus.name, color: 'warning', bold: true }, { text: ' nothing reads this model', dim: true }]]
+  // Children that lead somewhere first: their reach is what a change risks.
+  const ranked = [...direct].sort((a, b) => kids(b.id).length - kids(a.id).length || a.name.localeCompare(b.name))
+  const shown = expanded ? ranked : ranked.slice(0, ranked.length > 4 ? 3 : 4)
+  const width = Math.max(...shown.map(node => label(node).length))
+  const indent = ' '.repeat(focus.name.length + 2)
+  const rows: Segment[][] = shown.map((child, i) => {
+    const row: Segment[] =
+      i === 0 ? [{ text: '■ ', color: 'warning' }, { text: focus.name, color: 'warning', bold: true }] : [{ text: indent }]
+    row.push(
+      { text: ' ─▶ ', dim: true },
+      { text: label(child), node: child.id, color: child.type === 'exposure' ? 'suggestion' : undefined },
+    )
+    const next = kids(child.id)
+    if (next.length > 0) {
+      row.push({ text: pad(label(child), width) }, { text: ' ─▶ ', dim: true })
+      const exposures = next.filter(node => node.type === 'exposure')
+      const models = next.filter(node => node.type !== 'exposure')
+      const parts: Segment[][] = exposures.slice(0, 2).map(node => [{ text: label(node), node: node.id, color: 'suggestion' }])
+      if (exposures.length > 2) parts.push([{ text: `+${exposures.length - 2} dashboards`, color: 'suggestion' }])
+      if (models.length === 1) parts.push([{ text: models[0]!.name, node: models[0]!.id }])
+      else if (models.length > 1) parts.push([{ text: `${models.length} more models`, dim: true }])
+      parts.forEach((part, at) => {
+        if (at > 0) row.push({ text: ', ', dim: true })
+        row.push(...part)
+      })
+    }
+    return row
+  })
+  if (ranked.length > shown.length) {
+    const rest = ranked.slice(shown.length)
+    const models = rest.filter(node => node.type !== 'exposure').length
+    const others = rest.length - models
+    rows.push([
+      { text: indent },
+      { text: ' ─▶ ', dim: true },
+      { text: [models ? `${models} more model${models === 1 ? '' : 's'}` : '', others ? `${others} more` : ''].filter(Boolean).join(', '), dim: true },
+    ])
+  }
+  return rows
+}
