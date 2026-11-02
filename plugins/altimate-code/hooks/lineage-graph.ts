@@ -72,18 +72,21 @@ export function buildGraph(manifest: Manifest): LineageGraph {
   return { nodes, parents, children }
 }
 
-/** The model a file path (project-relative, forward slashes) or a name or unique_id names. */
+/** Nodes the pane can follow: they have SQL that dbt_lineage traces. */
+export const FOLLOWABLE = new Set(['model', 'snapshot'])
+
+/** The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. */
 export function findModel(graph: LineageGraph, wanted: string): string | null {
-  if (graph.nodes[wanted]?.type === 'model') return wanted
+  if (FOLLOWABLE.has(graph.nodes[wanted]?.type ?? '')) return wanted
   const lowered = wanted.toLowerCase()
   for (const node of Object.values(graph.nodes)) {
-    if (node.type !== 'model') continue
+    if (!FOLLOWABLE.has(node.type)) continue
     if (node.path === wanted || node.name.toLowerCase() === lowered) return node.id
   }
   return null
 }
 
-const isTest = (node: GraphNode | undefined, id: string) => (node?.type ?? id.split('.')[0]) === 'test'
+const isTest = (node: GraphNode | undefined, id: string) => ['test', 'unit_test'].includes(node?.type ?? id.split('.')[0] ?? '')
 
 /** Direct parents, each with its own parents: the two levels the pane draws upstream. */
 export function upstreamOf(graph: LineageGraph, id: string): { node: GraphNode; parents: GraphNode[] }[] {
@@ -95,8 +98,8 @@ export function upstreamOf(graph: LineageGraph, id: string): { node: GraphNode; 
 export type DownstreamRow = { node: GraphNode; depth: number; via: string }
 
 /**
- * Everything downstream, breadth-first, so each node carries its shortest distance; tests are
- * counted, not listed. The order matches impact_analysis' walk.
+ * Everything downstream, breadth-first, so each node carries its shortest distance (impact_analysis
+ * walks depth-first, so in a diamond it may report a longer path); tests are counted, not listed.
  */
 export function downstreamOf(graph: LineageGraph, id: string): { rows: DownstreamRow[]; tests: number } {
   const rows: DownstreamRow[] = []
@@ -134,7 +137,7 @@ export type ImpactCounts = { direct: number; transitive: number; tests: number; 
 
 export function impactOf(graph: LineageGraph, id: string): ImpactCounts {
   const { rows, tests } = downstreamOf(graph, id)
-  const models = rows.filter(row => row.node.type === 'model')
+  const models = rows.filter(row => FOLLOWABLE.has(row.node.type))
   return {
     direct: models.filter(row => row.depth === 1).length,
     transitive: models.filter(row => row.depth > 1).length,
@@ -236,16 +239,37 @@ export function reachFromMetadata(metadata: any, model: string, column: string):
     column,
     models: reach.models.map((one: any) => ({ name: String(one?.name ?? ''), columns: Array.isArray(one?.columns) ? one.columns.map(String) : [] })),
     exposures: (Array.isArray(reach.exposures) ? reach.exposures : []).map((one: any) => String(one?.label ?? one?.name ?? '')),
+    uncertain: unsure(reach.uncertain),
+    untraced: unsure(reach.untraced),
     truncated: reach.truncated === true,
   }
 }
 
+const unsure = (list: unknown) =>
+  (Array.isArray(list) ? list : []).map((one: any) => ({ name: String(one?.name ?? ''), reason: String(one?.reason ?? '') }))
+
 const IDENT = /[A-Za-z_][A-Za-z0-9_]*/g
 
-/** The model's columns an edit names, in the order the model lists them. */
-export function touchedColumns(texts: string[], columns: string[]): string[] {
-  const words = new Set(texts.flatMap(text => (text.match(IDENT) ?? []).map(word => word.toLowerCase())))
-  return columns.filter(column => words.has(column.toLowerCase()))
+function counts(texts: string[]): Map<string, number> {
+  const found = new Map<string, number>()
+  for (const text of texts) for (const word of text.match(IDENT) ?? []) found.set(word.toLowerCase(), (found.get(word.toLowerCase()) ?? 0) + 1)
+  return found
+}
+
+/**
+ * The model's columns an edit changes: those named on a line the edit adds or removes (lines only
+ * in unchanged context do not count), the ones whose number of mentions changed most first.
+ */
+export function touchedColumns(before: string[], after: string[], columns: string[]): string[] {
+  const lines = (texts: string[]) => texts.flatMap(text => text.split('\n').map(line => line.trim()))
+  const was = lines(before)
+  const now = lines(after)
+  const changed = [...now.filter(line => !was.includes(line)), ...was.filter(line => !now.includes(line))]
+  const named = counts(changed)
+  const wasCount = counts(before)
+  const nowCount = counts(after)
+  const shift = (column: string) => Math.abs((nowCount.get(column.toLowerCase()) ?? 0) - (wasCount.get(column.toLowerCase()) ?? 0))
+  return columns.filter(column => named.has(column.toLowerCase())).sort((a, b) => shift(b) - shift(a))
 }
 
 /** table_lineage records (SaaS MCP) → edges, keeping only well-formed ones. */
@@ -434,7 +458,8 @@ export function upstreamArt(graph: LineageGraph, id: string, expanded = false): 
 export function downstreamArt(graph: LineageGraph, id: string, expanded = false): Segment[][] {
   const focus = graph.nodes[id]
   if (!focus) return []
-  const kids = (one: string) => (graph.children[one] ?? []).map(child => graph.nodes[child]).filter((node): node is GraphNode => !!node && node.type !== 'test')
+  const kids = (one: string) =>
+    (graph.children[one] ?? []).map(child => graph.nodes[child]).filter((node): node is GraphNode => !!node && !isTest(node, node.id))
   const direct = kids(id)
   if (direct.length === 0) return [[{ text: '■ ', color: 'warning' }, { text: focus.name, color: 'warning', bold: true }, { text: ' nothing reads this model', dim: true }]]
   // Children that lead somewhere first: their reach is what a change risks.
@@ -453,11 +478,14 @@ export function downstreamArt(graph: LineageGraph, id: string, expanded = false)
     if (next.length > 0) {
       row.push({ text: pad(label(child), width) }, { text: ' ─▶ ', dim: true })
       const exposures = next.filter(node => node.type === 'exposure')
-      const models = next.filter(node => node.type !== 'exposure')
+      const models = next.filter(node => FOLLOWABLE.has(node.type))
       const parts: Segment[][] = exposures.slice(0, 2).map(node => [{ text: label(node), node: node.id, color: 'suggestion' }])
       if (exposures.length > 2) parts.push([{ text: `+${exposures.length - 2} dashboards`, color: 'suggestion' }])
       if (models.length === 1) parts.push([{ text: models[0]!.name, node: models[0]!.id }])
       else if (models.length > 1) parts.push([{ text: `${models.length} more models`, dim: true }])
+      // Semantic models, metrics and saved queries read the child too.
+      const others = next.length - exposures.length - models.length
+      if (others > 0) parts.push([{ text: `${others} other node${others === 1 ? '' : 's'}`, dim: true }])
       parts.forEach((part, at) => {
         if (at > 0) row.push({ text: ', ', dim: true })
         row.push(...part)
@@ -467,7 +495,7 @@ export function downstreamArt(graph: LineageGraph, id: string, expanded = false)
   })
   if (ranked.length > shown.length) {
     const rest = ranked.slice(shown.length)
-    const models = rest.filter(node => node.type !== 'exposure').length
+    const models = rest.filter(node => FOLLOWABLE.has(node.type)).length
     const others = rest.length - models
     rows.push([
       { text: indent },

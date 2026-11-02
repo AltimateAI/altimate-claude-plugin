@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { buildGraph, subgraph } from './lineage-graph'
 import { MANIFEST } from './lineage-graph.test'
 
 const ROOT = '/repo'
@@ -54,14 +55,14 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
  * session beneath the plugin. Every call the mod makes is recorded in `calls`, in order.
  */
 async function start($: any, on: any, options: Options = {}) {
-  const { mcp = true, warehouse = false, structured = true } = options
+  const { mcp = true, warehouse = false, structured = true, size = 5000, mtime = () => 1, reach = REACH, capped = false } = options
   const clock = mock.clock(on)
   const calls: string[] = []
   const toasts: string[] = []
@@ -83,7 +84,7 @@ async function start($: any, on: any, options: Options = {}) {
     return <Box key="engine" />
   })
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` || e.path === MANIFEST_PATH }))
-  on('fs.stat', () => ({ value: { kind: 'file', size: 5000, mtimeMs: 1, isLink: false } }))
+  on('fs.stat', () => ({ value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }))
   on('fs.read', (_: unknown, e: { path: string }) => ({ value: e.path === MANIFEST_PATH ? JSON.stringify(MANIFEST) : 'select 1' }))
   on('tool.list', () => ({
     value: warehouse ? [{ name: 'mcp__altimate_saas__table_lineage', description: 'Snowflake table lineage', mcp: true }] : [],
@@ -96,7 +97,11 @@ async function start($: any, on: any, options: Options = {}) {
       const text = structured ? JSON.stringify({ ...LINEAGE, report: LINEAGE_TEXT }) : LINEAGE_TEXT
       return { value: { content: [{ type: 'text', text }], isError: false } }
     }
-    if (e.tool === 'impact_analysis') return { value: { content: [{ type: 'text', text: JSON.stringify({ ...REACH, report: 'Impact' }) }], isError: false } }
+    // Over its size cap the server sends the report alone, marked truncated.
+    if (e.tool === 'impact_analysis') {
+      const body = capped ? { report: 'Impact', truncated: true } : { ...reach, report: 'Impact' }
+      return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } }
+    }
     if (e.tool === 'table_lineage') {
       return {
         value: {
@@ -112,8 +117,14 @@ async function start($: any, on: any, options: Options = {}) {
     const [, command, , tool] = e.argv
     // The integrations half of the plugin asks the CLI for its status at session start.
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
-    calls.push(`cli:${tool}`)
-    const body = tool === 'dbt_lineage' ? { status: 'ok', output: LINEAGE_TEXT, metadata: { model_name: 'fct_orders', confidence: 'high' } } : { status: 'ok', output: '', metadata: REACH }
+    const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
+    calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}`)
+    // altimate-code's dbt_lineage with include_graph returns the subgraph the pane would build itself.
+    const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
+    const body =
+      tool === 'dbt_lineage'
+        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...graph } : { model_name: 'fct_orders', confidence: 'high' } }
+        : { status: 'ok', output: '', metadata: reach }
     return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '' } }
   })
   // The tool itself, beneath the plugin.
@@ -252,5 +263,83 @@ test('/lineage names a model and column; an unknown model says so', async ($, on
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /No dbt model matches "nope"/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a manifest over 4 MiB is read through altimate-code: the graph comes from dbt_lineage with include_graph', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { size: 6 * 1024 * 1024 })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls).toEqual(['tool:Read', 'cli:dbt_lineage:graph'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'UPSTREAM · altimate-code' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
+  await ui.unmount()
+
+  // Impact-first works on the same path.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  expect(toasts[0]).toContain('fct_orders.revenue is read by 2 models')
+})
+
+test('a recompiled manifest is a new focus: the column lineage is read again', async ($, on) => {
+  let mtime = 1
+  const { clock, calls } = await start($, on, { mtime: () => mtime })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls.filter(call => call === 'mcp:dbt_lineage')).toHaveLength(1)
+  mtime = 2
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls.filter(call => call === 'mcp:dbt_lineage')).toHaveLength(2)
+})
+
+test('a subagent gets the lineage context the main agent already got, and an untraced model keeps the count a lower bound', async ($, on) => {
+  const reach = { ...REACH, column_reach: { ...REACH.column_reach, untraced: [{ name: 'mart_cohort_ltv', reason: 'No compiled SQL found' }], uncertain: [] } }
+  const { clock, toasts } = await start($, on, { reach })
+  const edit = { tool: 'Edit' as const, file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' }
+  const main: any = await $.tool.call(edit)
+  const sub: any = await $.tool.call({ ...edit, agentId: 'sub-1' } as any)
+  await clock.settle()
+  expect(toasts[0]).toContain('is read by at least 2 models')
+  expect(main.context?.[0]).toContain('could not be traced: mart_cohort_ltv (No compiled SQL found)')
+  expect(sub.context?.[0]).toContain('read by at least 2 downstream models')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /read by at least 2 models/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('a read Claude makes outside a dbt project stays quiet', async ($, on) => {
+  const { clock, calls } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: '/elsewhere/query.sql' })
+  await clock.settle()
+  expect(calls).toEqual(['tool:Read'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Not inside a dbt project/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a result the MCP server left out for size is fetched again through the CLI', async ($, on) => {
+  const { clock, calls } = await start($, on, { capped: true })
+  const run = (args: string) =>
+    $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await run('fct_orders.revenue')
+  await clock.settle()
+  expect(calls).toContain('mcp:impact_analysis:revenue')
+  expect(calls).toContain('cli:impact_analysis')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboards/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("following Claude's own dbt_lineage call uses the manifest it named", async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'mcp__plugin_altimate-code_altimate-code__dbt_lineage', manifest_path: 'target/manifest.json', model: 'int_orders' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
 })

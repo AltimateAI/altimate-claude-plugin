@@ -77,6 +77,8 @@ export type LineageGraph = {
   nodes: Record<string, GraphNode>
   parents: Record<string, string[]>
   children: Record<string, string[]>
+  /** Set by altimate-code when downstream stopped at its node limit. */
+  truncated?: boolean
 }
 
 /** One column edge from dbt_lineage: an upstream column feeding an output column. */
@@ -105,6 +107,10 @@ export type ColumnReachView = {
   column: string
   models: { name: string; columns: string[] }[]
   exposures: string[]
+  /** Models that may read it: only outside their select list, or through an ambiguous table name. */
+  uncertain: { name: string; reason: string }[]
+  /** Models the lineage engine could not trace (no compiled SQL, unparseable SQL). */
+  untraced: { name: string; reason: string }[]
   truncated: boolean
 }
 
@@ -120,6 +126,8 @@ export type LineageFocus = {
   via: 'manifest' | 'tools'
   /** Milliseconds the graph took to read. */
   readMs: number
+  /** The manifest's modification time when it was read: a recompile is a new focus. */
+  mtimeMs: number
 }
 
 export type WarehouseView = { server: string; tool: string; table: string; edges: WarehouseEdge[] }
@@ -135,6 +143,8 @@ export type ImpactView = {
   exposures: string[]
   /** Downstream models that read the edited column; null when no column was traced. */
   readers: number | null
+  /** Models that may read it or could not be traced: `readers` is then a lower bound. */
+  unsettled: number
 }
 
 declare module 'claude-code' {

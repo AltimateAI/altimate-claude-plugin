@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
+import { later, parseJson, runAltimate } from './altimate-cli'
 import { lineageBand, registerLineage, startLineage } from './lineage'
 
 const PANE = 'altimate-integrations'
@@ -50,36 +51,8 @@ const STATE_COLOR: Record<Provider['state'], string> = {
   not_found: 'inactive',
 }
 
-// `altimate` is the name the standalone installer and npm v0.7.1+ put on PATH;
-// older npm installs only have `altimate-code`.
-const CLI_NAMES = ['altimate', 'altimate-code'] as const
-
 async function runCli($: EngineInterface, args: string[], timeoutMs = 30_000) {
   return runAltimate($, ['integrations', ...args], timeoutMs)
-}
-
-async function runAltimate($: EngineInterface, args: string[], timeoutMs = 30_000) {
-  let lastError: unknown = null
-  for (const bin of CLI_NAMES) {
-    try {
-      return await $.process.run([bin, ...args], { timeoutMs })
-    } catch (error) {
-      lastError = error
-    }
-  }
-  throw lastError ?? new Error('altimate CLI not found')
-}
-
-// The CLI pretty-prints its JSON, so read the whole text first, then fall back
-// to the last line for a CLI that logs before printing one compact line.
-function parseJson<T>(text: string): T | null {
-  const body = text.trim()
-  for (const candidate of [body, body.split('\n').pop() ?? '']) {
-    try {
-      return JSON.parse(candidate) as T
-    } catch {}
-  }
-  return null
 }
 
 function parseStatus(text: string): IntegrationsStatus | null {
@@ -120,14 +93,6 @@ function showStatusLine($: EngineInterface, current: IntegrationsStatus) {
   if (synced > 0) parts.push(`${synced} synced`)
   if (waiting > 0) parts.push(`${waiting} found`)
   $.ui.status(parts.join(' · '))
-}
-
-// A press has a short budget, so a press only schedules its work; the work then
-// runs on the clock, outside the press.
-function later($: EngineInterface, work: () => Promise<void>) {
-  $.clock.after(0, () => {
-    void work()
-  })
 }
 
 /** Runs one CLI action, keeping the pane's progress line and the status current. */

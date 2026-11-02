@@ -86,7 +86,7 @@ test('downstream shows three children with what reads them, the rest folded unti
   expect(text(downstreamArt(graph, 'model.shop.rpt_a'))).toEqual(['■ rpt_a nothing reads this model'])
 })
 
-test('impact counts and severity match impact_analysis', () => {
+test('impact counts over models and snapshots, with impact_analysis\' severity thresholds', () => {
   const graph = buildGraph(MANIFEST)
   expect(impactOf(graph, 'model.shop.fct_orders')).toEqual({
     direct: 5,
@@ -96,6 +96,15 @@ test('impact counts and severity match impact_analysis', () => {
     severity: 'MEDIUM',
   })
   expect([0, 3, 4, 10, 11].map(severityOf)).toEqual(['SAFE', 'LOW', 'MEDIUM', 'MEDIUM', 'HIGH'])
+})
+
+test('a snapshot is followable like a model', () => {
+  const graph = buildGraph({
+    ...MANIFEST,
+    nodes: { ...MANIFEST.nodes, 'snapshot.shop.snap': { ...model('snap', ['fct_orders']), resource_type: 'snapshot' } },
+  })
+  expect(findModel(graph, 'snapshot.shop.snap')).toBe('snapshot.shop.snap')
+  expect(impactOf(graph, 'model.shop.fct_orders').direct).toBe(6)
 })
 
 test('dbt parent_map and child_map are used when present, and a model is found by path or name', () => {
@@ -172,18 +181,32 @@ test('column reach, warehouse records and edited columns read as the pane needs 
       'fct_orders',
       'revenue',
     ),
-  ).toEqual({ model: 'fct_orders', column: 'revenue', models: [{ name: 'fct_revenue_daily', columns: ['revenue'] }], exposures: ['Exec Revenue'], truncated: false })
+  ).toEqual({
+    model: 'fct_orders',
+    column: 'revenue',
+    models: [{ name: 'fct_revenue_daily', columns: ['revenue'] }],
+    exposures: ['Exec Revenue'],
+    uncertain: [],
+    untraced: [],
+    truncated: false,
+  })
   expect(reachFromMetadata({ severity: 'LOW' }, 'fct_orders', 'revenue')).toBeNull()
 
   expect(
     warehouseEdges({ data: { records: [{ source_table: 'shop.main.fct_orders', target_table: 'shop.main.fct_revenue_daily', hop: 1 }, { nothing: true }] } }),
   ).toEqual([{ source: 'shop.main.fct_orders', target: 'shop.main.fct_revenue_daily', hop: 1 }])
 
-  expect(touchedColumns(['sum(amount) as revenue', 'gross_revenue - refunds'], ['order_id', 'revenue', 'gross_revenue'])).toEqual([
-    'revenue',
-    'gross_revenue',
-  ])
-  expect(touchedColumns(['-- comment only'], ['revenue'])).toEqual([])
+  // The rewritten expression's column, not one that only sits on the same line unchanged, comes first.
+  expect(
+    touchedColumns(
+      ['  i.revenue, i.gross_amount as gross_revenue\nfrom x'],
+      ["  case when i.status = 'x' then 0 else i.revenue end as revenue, i.gross_amount as gross_revenue\nfrom x"],
+      ['order_id', 'gross_revenue', 'revenue'],
+    ),
+  ).toEqual(['revenue', 'gross_revenue'])
+  expect(touchedColumns(['sum(amount) as revenue'], ['sum(amount) - sum(refunds) as revenue'], ['order_id', 'revenue'])).toEqual(['revenue'])
+  // A column only in unchanged context lines is not touched.
+  expect(touchedColumns(['select order_id,\n  1 as a'], ['select order_id,\n  2 as a'], ['order_id'])).toEqual([])
 })
 
 test('the desktop SVG names every drawn node and escapes markup', () => {

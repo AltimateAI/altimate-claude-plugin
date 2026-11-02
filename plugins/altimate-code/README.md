@@ -103,12 +103,12 @@ The plugin's lineage pane follows the dbt model Claude reads or edits, read from
 
 - **Upstream and downstream.** Two levels upstream bracket into the model. Downstream lists each direct child with what reads it, dashboards (exposures) marked ◆. `u` and `d` unfold the rest. Press a model to follow it.
 - **Columns.** Each output column with its source columns and how it is derived, from altimate-code's `dbt_lineage`.
-- **Column reach.** `c` picks a column; the pane shows the downstream models whose SQL reads it and the dashboards on them, from `impact_analysis` (it traces each downstream model's compiled SQL, renames included).
+- **Column reach.** `c` picks a column; the pane shows the downstream models whose SQL reads it and the dashboards on them, from `impact_analysis` (it traces each downstream model's compiled SQL, renames included). Models that name the column only in a filter or join, or that could not be traced (no compiled SQL), are listed apart, and the count is then a lower bound.
 - **Impact first.** Before an edit to a model's SQL lands, the plugin checks what reads the model and, when the edit names one of its columns, that column's reach. It shows the result as a toast, adds it to Claude's context with the edit's result, and leaves a band above the prompt with the severity (impact_analysis' thresholds) and counts.
-- **Warehouse lineage.** When a connected MCP server offers Altimate's `table_lineage` (Snowflake) or `databricks_table_lineage`, the pane adds what the warehouse's query history shows for the model's table.
+- **Warehouse lineage.** When a connected MCP server offers Altimate's `table_lineage` (Snowflake) or `databricks_table_lineage`, the pane adds what the warehouse's query history shows for the model's table. The plugin calls a tool of that name on whichever connected server offers it, itself and without a permission prompt, with the followed model's `database.schema.table` each time it follows a new model.
 - **Claude's own lineage calls.** A `dbt_lineage` result is drawn as a list of edges colored by how each column is derived; ctrl+o keeps the original output under it.
 
-`/lineage <model>[.column]` opens the pane on a model. Lineage calls go to the plugin's MCP server without a permission prompt, or to `altimate tool run` when the server is not available. A manifest over 4 MiB is read through altimate-code's tools. Run `dbt parse` or `dbt compile` first; column lineage and reach need compiled SQL.
+`/lineage <model>[.column]` opens the pane on a model. Lineage calls go to the plugin's MCP server without a permission prompt, or to `altimate tool run` when the server is not available. A manifest over 4 MiB is read through altimate-code (`dbt_lineage` with `include_graph`). Run `dbt parse` or `dbt compile` first; column lineage and reach need compiled SQL.
 
 ## Example prompts
 
