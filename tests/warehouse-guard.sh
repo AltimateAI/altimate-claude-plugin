@@ -98,6 +98,30 @@ deny "env --split-string='psql -c 1'"
 deny "echo \"\$(printf '%s' ')'; psql -c 1)\""
 deny 'echo "$(echo "a;b"; psql -c 1)"'
 deny 'x=`psql -c 1`'
+deny "$(printf 'psql -d db <<'"'"'SQL'"'"'\n-- don'"'"'t touch\nselect 1;\nSQL')"
+deny "$(printf 'psql "$DB" <<SQL\nselect 1;\nSQL')"
+deny "$(printf 'psql -c 1 && git commit -m "$(cat <<'"'"'EOF'"'"'\ndon'"'"'t\nEOF\n)"')"
+allow "$(printf 'git commit -m "$(cat <<'"'"'EOF'"'"'\nfix `psql -f migrate.sql`, don'"'"'t (psql -c 1) | psql\nEOF\n)"')"
+allow "$(printf 'TASK="$(cat <<'"'"'ALTIMATE_TASK'"'"'\nwhy does `psql -c 1` fail\nALTIMATE_TASK\n)"\nALTIMATE_BIN="$(command -v altimate)"\n"$ALTIMATE_BIN" run "$TASK" < /dev/null')"
+allow "$(printf 'cat <<'"'"'EOF'"'"'\n$(psql -c 1)\nhello; psql -c 1\nEOF')"
+deny "$(printf 'cat <<EOF\n$(psql -c 1)\nEOF')"
+deny "$(printf 'cat <<-EOF\n\tx\n\tEOF\npsql -c 1')"
+allow "env GIT_PAGER=cat git log -S 'psql -c x'"
+deny '(cat a.sql; cat b.sql)|psql db'
+allow "$(printf 'duckdb --version\necho done')"
+allow "$(printf 'psql --version\nls -f')"
+deny "$(printf 'cd x\npsql -c 1')"
+deny "$(printf 'psql \\\n  -c 1')"
+deny "$(printf 'psql -\\\nc 1')"
+deny 'echo `echo "a`; psql -c 1'
+allow 'echo ok # ; psql -c select'
+allow 'echo ok # $(psql -c select)'
+allow 'echo ok # | psql'
+allow 'env echo -S "psql -c select"'
+allow 'env echo --split-string "psql -c select"'
+deny 'echo a#b; psql -c 1'
+deny "$(printf '# note\npsql -c 1')"
+deny 'echo "#"; psql -c 1'
 deny 'kubectl exec -it pod -- psql -c "select 1"'
 deny 'cd x && podman exec pg psql -c "select 1"'
 deny 'true; docker compose exec db mysql -e "select 1"'
@@ -176,5 +200,7 @@ allow 'sqlcmd -S srv -Usa -Pquiz'
 allow 'duckdb -version'
 allow 'duckdb -json my.duckdb'
 [ -z "$(printf 'not json' | ALTIMATE_ROUTE_GUARD=1 bash "$GUARD")" ] || fail "bad input should allow"
+# Without python3 every command passes.
+[ -z "$(payload 'psql -c 1' 2>/dev/null | env -i PATH=/nonexistent ALTIMATE_ROUTE_GUARD=1 /bin/bash "$GUARD")" ] || fail "guard without python3 should allow"
 
 [ "$FAILURES" -eq 0 ] && echo "PASS" || { echo "$FAILURES failure(s)"; exit 1; }

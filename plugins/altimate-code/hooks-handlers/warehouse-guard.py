@@ -9,9 +9,9 @@ messages, echo arguments, JSON) is never taken for a command. Each simple comman
 judged after its prefixes: shell keywords, VAR=value, sudo/env/command/time/exec/nice/
 nohup/timeout and docker/podman/docker-compose/kubectl exec, each with the options it
 takes. A bash/sh/zsh/dash/ksh -c string, an env -S string and every $(...) or `...`
-substitution are judged as commands of their own. Newlines are not separators, so a
-client at the start of a line of a multi-line message is not judged (an unquoted ; & | (
-or ) inside a heredoc body still separates). Commands handed to another program as
+substitution are judged as commands of their own. Newlines separate commands, as in the
+shell. A heredoc body is data: it is not judged, except for the substitutions in the body
+of an unquoted delimiter, which the shell runs. Commands handed to another program as
 arguments (ssh, watch, xargs) are not judged. Any parsing problem results in allow: this
 is a routing nudge, not a security control.
 """
@@ -32,6 +32,8 @@ SEPARATORS = set(";&|()")
 # Separators inside quotes or escaped are words, not operators: masked before splitting.
 MASK = {ord(c): 0xE000 + n for n, c in enumerate(";&|()")}
 UNMASK = {v: k for k, v in MASK.items()}
+PLACEHOLDER = "\ue005"  # stands in for a substitution, which is judged on its own
+HEREDOC = re.compile(r"<<(-?)[ \t]*((?:[^\s;&|()<>'\"\\]|'[^']*'|\"[^\"]*\"|\\.)+)")
 KEYWORDS = {"then", "do", "else", "elif", "if", "while", "until", "{", "!"}
 ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # Options that take a separate value: (short letters, long names). Any other option takes none.
@@ -83,54 +85,76 @@ def skip_options(words, i, spec, dash_dash=True):
     return i
 
 
-def substitution_end(text, i):
-    """Index just past the $(...) or `...` starting at i, honouring quotes inside it."""
+def scan(text, i=0, nested=False):
+    """(text with quoted and escaped separators masked, substitutions replaced by a placeholder,
+    newlines turned into ; and heredoc bodies dropped; the substitution bodies; the index just
+    past the closing parenthesis when nested inside $( )). Quotes inside a substitution are its
+    own; a heredoc body is data, so only an unquoted delimiter's body has substitutions."""
+    out, subs, quote, depth, heredocs = [], [], None, 0, []
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and quote != "'" and i + 1 < len(text):
+            if text[i + 1] != "\n":  # a backslash-newline joins the lines
+                out.append(c + text[i + 1].translate(MASK))
+            i += 2
+        elif quote != "'" and (text.startswith("$(", i) or c == "`"):
+            i = substitution(text, i, subs)
+            out.append(PLACEHOLDER)
+        elif quote:
+            quote = None if c == quote else quote
+            out.append(c if quote is None else c.translate(MASK))
+            i += 1
+        elif c in "'\"":
+            quote = c
+            out.append(c)
+            i += 1
+        elif nested and c in "()" and (depth := depth + (1 if c == "(" else -1)) < 0:
+            return "".join(out), subs, i + 1
+        elif (heredoc := HEREDOC.match(text, i)) and not text.startswith("<<<", i):
+            word = heredoc.group(2)
+            delimiter = re.sub(r"[\"'\\]", "", word)
+            heredocs.append((delimiter, delimiter != word, heredoc.group(1) == "-"))
+            out.append("<<" + PLACEHOLDER)  # the << stays visible to the query-input check
+            i = heredoc.end()
+        elif c == "\n":
+            out.append(";")  # newlines separate commands, as in the shell
+            i += 1
+            for delimiter, quoted, strip_tabs in heredocs:
+                while i < len(text):
+                    end = text.find("\n", i)
+                    end = len(text) if end < 0 else end
+                    line, i = text[i:end], end + 1
+                    if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                        break
+                    k = 0
+                    while not quoted and k < len(line):
+                        k = substitution(line, k, subs) if line.startswith("$(", k) or line[k] == "`" else k + 1
+            heredocs = []
+        elif c == "#" and (i == 0 or text[i - 1] in " \t;&|()"):
+            # A comment runs to the end of the line; the newline still separates.
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out), subs, i
+
+
+def substitution(text, i, subs):
+    """Records the body of the $(...) or `...` at i; returns the index just past it."""
     if text[i] == "`":
         j = i + 1
         while j < len(text) and text[j] != "`":
             j += 2 if text[j] == "\\" else 1
+        subs.append(text[i + 1 : j])
         return min(j + 1, len(text))
-    depth, j, quote = 1, i + 2, None
-    while j < len(text) and depth:
-        c = text[j]
-        if c == "\\" and quote != "'":
-            j += 2
-            continue
-        if quote:
-            quote = None if c == quote else quote
-        elif c in "'\"":
-            quote = c
-        else:
-            depth += {"(": 1, ")": -1}.get(c, 0)
-        j += 1
+    j = scan(text, i + 2, nested=True)[2]
+    subs.append(text[i + 2 : j - 1])
     return j
 
 
-def scan(text):
-    """(text with quoted and escaped separators masked, bodies of its substitutions)."""
-    out, subs, i, quote = [], [], 0, None
-    while i < len(text):
-        c = text[i]
-        if c == "\\" and quote != "'" and i + 1 < len(text):
-            out.append(c + text[i + 1].translate(MASK))
-            i += 2
-        elif quote != "'" and (text.startswith("$(", i) or c == "`"):
-            end = substitution_end(text, i)
-            subs.append(text[i + (1 if c == "`" else 2) : end - 1])
-            out.append(text[i:end].translate(MASK))
-            i = end
-        else:
-            if quote:
-                quote = None if c == quote else quote
-            elif c in "'\"":
-                quote = c
-            out.append(c.translate(MASK) if quote and c != quote else c)
-            i += 1
-    return "".join(out), subs
-
-
 def simple_commands(text):
-    """(words, piped) per simple command; newlines stay inside words like other whitespace."""
+    """(words, piped) per simple command of text that scan() prepared."""
     lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()")
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -139,7 +163,7 @@ def simple_commands(text):
         if token and set(token) <= SEPARATORS:
             if words:
                 yield words, piped
-            words, piped = [], token in ("|", "|&")
+            words, piped = [], token.lstrip(")") in ("|", "|&")
         else:
             words.append(token.translate(UNMASK))
     if words:
@@ -165,10 +189,14 @@ def is_query(name, args):
 def judge(text, depth=0):
     if depth > 5:
         return False
-    masked, subs = scan(text)
+    masked, subs, _ = scan(text)
     if any(judge(body, depth + 1) for body in subs):
         return True
-    for words, piped in simple_commands(masked):
+    try:
+        commands = list(simple_commands(masked))
+    except ValueError:  # unbalanced quotes: not a command this can judge
+        return False
+    for words, piped in commands:
         i = 0
         while i < len(words):
             name = os.path.basename(words[i])
@@ -176,7 +204,7 @@ def judge(text, depth=0):
                 i += 1
             elif name in WRAPPERS:
                 if name == "env":  # env -S "<command line>" runs the split string
-                    for k, word in enumerate(words[i + 1 :], i + 1):
+                    for k, word in enumerate(words[i + 1 : skip_options(words, i + 1, WRAPPERS["env"])], i + 1):
                         split = word[2:] if word.startswith("-S") and len(word) > 2 else word.partition("=")[2] if word.startswith("--split-string=") else None
                         if split is None and word in ("-S", "--split-string") and k + 1 < len(words):
                             split = words[k + 1]
@@ -228,13 +256,12 @@ def main():
         r'(/\S*/)?(altimate|altimate-code) |"\$ALTIMATE_BIN" ', command
     ):
         return
-    try:
-        denied = judge(command)
-    except ValueError:  # unbalanced quotes: not a command this can judge
-        return
-    if denied:
+    if judge(command):
         print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": HINT}}))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:  # a parsing problem allows the command
+        pass
