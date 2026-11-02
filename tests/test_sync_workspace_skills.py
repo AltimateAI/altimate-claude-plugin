@@ -151,6 +151,11 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.assertTrue(index)
         self.assertLessEqual(len(json.dumps(index)[1:-1]), 4000)
 
+    def test_index_shows_descriptions_as_written(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": '---\nname: team\ndescription: Café — a\\b and "quoted"\n---\nbody\n'}})
+        self.run_sync()
+        self.assertEqual(self.run_index(), '- team: Café — a\\b and "quoted"')
+
     def test_index_is_empty_without_copies(self):
         self.assertEqual(self.run_index(), "")
 

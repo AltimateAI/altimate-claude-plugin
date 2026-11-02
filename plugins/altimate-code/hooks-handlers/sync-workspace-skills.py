@@ -595,10 +595,20 @@ def index(project):
         if not NAME_PATTERN.fullmatch(entry) or not is_ours(path):
             continue
         try:
-            fields, _ = parse_frontmatter(read_text_no_follow(os.path.join(path, "SKILL.md"), "utf-8-sig"))
+            text = read_text_no_follow(os.path.join(path, "SKILL.md"), "utf-8-sig")
         except (OSError, UnicodeDecodeError):
             continue
-        description = " ".join(((fields or {}).get("description") or "").split())
+        fields, _ = parse_frontmatter(text)
+        description = (fields or {}).get("description") or ""
+        # Copies store the description as a JSON string (render_skill, and the CLI the same way);
+        # decode it so non-ASCII text, backslashes and newlines read as written.
+        quoted = re.search(r'^description: ("(?:[^"\\\n]|\\.)*")$', text.split("\n---", 1)[0], re.M)
+        if quoted:
+            try:
+                description = json.loads(quoted.group(1))
+            except ValueError:
+                pass
+        description = " ".join(description.split())
         if len(description) > INDEX_DESCRIPTION_CHARS:
             description = description[: INDEX_DESCRIPTION_CHARS - 1].rsplit(" ", 1)[0] + "…"
         line = f"- {entry}: {description}" if description else f"- {entry}"
