@@ -324,21 +324,27 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     if (current?.model !== id) $.ui.log(`lineage-pane · following ${node.name} →`)
     $.ui.log(`lineage-pane · ${relative(root, manifest)} · ${elapsed(readMs)}${via === 'tools' ? ' · via altimate-code' : ' · offline'}`)
   }
-  if (input.column !== undefined) await update($, columnAtom, () => input.column ?? null)
+  if (input.column !== undefined && input.column !== (await read($, columnAtom))) {
+    // Another column's reach is not this one's.
+    await update($, columnAtom, () => input.column ?? null)
+    await update($, reachAtom, () => null)
+  }
   if (input.open || (!paneOpened && input.auto)) {
     paneOpened = true
     await $.ui.open({ id: PANE, title: PANE_TITLE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
   }
-  later($, () => loadDetails($, columns, isNew))
+  const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs: stat.mtimeMs }
+  later($, () => loadDetails($, columns, isNew, focus))
   return true
 }
 
 /** Column lineage, then the selected column's reach, then warehouse lineage: each redraws as it lands. */
-async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, isNew: boolean) {
+async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, isNew: boolean, expected?: LineageFocus) {
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
   const node = focus && graph ? graph.nodes[focus.model] : null
-  if (!focus || !node) return
+  // Scheduled for a focus that has since moved on: its preloaded columns belong to that one.
+  if (!focus || !node || (expected && !sameFocus(focus, expected))) return
   await update($, loadingAtom, () => true)
   try {
     if (preloaded) await update($, columnsAtom, () => preloaded)
@@ -521,7 +527,8 @@ function lineageFromOutput(output: unknown): ColumnLineage | null {
     const json = parseJson<any>(text)
     const fromJson = columnsFromMetadata(json)
     if (fromJson) return fromJson
-    // A result the server cut for size carries only its report.
+    // A result the server cut for size may hold only part of the lineage: let the pane fetch it whole.
+    if (json?.truncated === true) return null
     text = typeof json?.report === 'string' ? json.report : ''
   }
   const parsed = text.includes('Column Mappings:') ? parseDbtLineage(text) : null
@@ -627,6 +634,8 @@ export function registerLineage(on: On) {
     const isSql = !!file && /\.sql$/i.test(file)
     const isEdit = isSql && EDIT_TOOLS.has(e.tool)
     const note = isEdit ? await within($, HOLD_MS + 2_000, impactFirst($, e, file!)) : null
+    // Before the edit runs: the point is to see what it reaches first.
+    if (note) $.ui.toast(note.toast, { timeoutMs: 8000 })
     const result = await next(e)
     if (result.deny || result.isError) return result
 
@@ -641,8 +650,6 @@ export function registerLineage(on: On) {
       if (files.length) later($, async () => void (await follow($, { file: files[files.length - 1]!, auto: true })))
     }
     if (note) {
-      // Shown only when the lookup finished inside the hold, so the toast never trails a released edit.
-      $.ui.toast(note.toast, { timeoutMs: 8000 })
       await update($, impactAtom, () => note.view)
       await update($, bandHiddenAtom, () => false)
       if (!contextGiven.has(note.key)) {

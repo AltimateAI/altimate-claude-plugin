@@ -365,3 +365,24 @@ test('dashboards on models that may read the column are counted and named', asyn
   expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by at least 2 models and 2 dashboards · Exec Revenue · Ops Board')
   expect(edit.context?.[0]).toContain('dashboards on models that may read it: Ops Board')
 })
+
+test('/lineage on the same model with another column traces that column', async ($, on) => {
+  const { clock, calls } = await start($, on)
+  const run = (args: string) =>
+    $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await run('fct_orders.revenue')
+  await clock.settle()
+  await run('fct_orders.order_id')
+  await clock.settle()
+  expect(calls).toContain('mcp:impact_analysis:order_id')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'COLUMN · order_id' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the impact toast shows before the edit runs', async ($, on) => {
+  const { clock, toasts } = await start($, on, { toolResult: e => (e.tool === 'Edit' ? { toastsSoFar: toasts.length } : undefined) })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  expect(result.result).toEqual({ toastsSoFar: 1 })
+})
