@@ -298,7 +298,8 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     for (const key of toolsCache.keys()) if (key.startsWith(`${manifest}\u0000`)) toolsCache.delete(key)
   }
   let wanted = input.file ? relative(root, input.file) : input.model!
-  let column = input.column
+  // /lineage <model> with no column clears the selected one.
+  let column = input.column ?? (input.dottedColumn ? null : undefined)
   // The text before the last dot, when that is a model and the whole is not.
   const withoutColumn = () => {
     const at = wanted.lastIndexOf('.')
@@ -350,6 +351,8 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const readMs = Math.round((await $.clock.now()) - began)
   if (claimedSeq > seq) return false
   claimedSeq = seq
+  // update() may retry its write after a conflict, so each write below re-checks ownership inside
+  // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
   const superseded = () => claimedSeq !== seq
   // Compared with the focus as it is now: another follow may have landed while this one resolved.
   const latest = await read($, focusAtom)
@@ -358,25 +361,25 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const differs = (one: LineageFocus | null) => one?.model !== id || one.manifest !== manifest || one.mtimeMs !== stat.mtimeMs
   const isNew = differs(latest) || differs(current) || !!input.refresh
   const node = graph.nodes[id]!
-  await update($, focusAtom, () => ({ model: id!, root, manifest, via, readMs, mtimeMs: stat.mtimeMs }))
+  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs: stat.mtimeMs })))
   if (superseded()) return false
-  await update($, graphAtom, () => (via === 'manifest' ? subgraph(graph!, id!) : graph!))
+  await update($, graphAtom, prev => (superseded() ? prev : (via === 'manifest' ? subgraph(graph!, id!) : graph!)))
   if (superseded()) return false
-  await update($, messageAtom, () => null)
+  await update($, messageAtom, prev => (superseded() ? prev : null))
   if (isNew) {
-    if (latest?.model !== id) await update($, expandedAtom, () => ({ up: false, down: false }))
-    await update($, columnsAtom, () => null)
-    await update($, reachAtom, () => null)
-    await update($, warehouseAtom, () => null)
-    if (latest?.model !== id) await update($, columnAtom, () => null)
+    if (latest?.model !== id) await update($, expandedAtom, prev => (superseded() ? prev : ({ up: false, down: false })))
+    await update($, columnsAtom, prev => (superseded() ? prev : null))
+    await update($, reachAtom, prev => (superseded() ? prev : null))
+    await update($, warehouseAtom, prev => (superseded() ? prev : null))
+    if (latest?.model !== id) await update($, columnAtom, prev => (superseded() ? prev : null))
     if (latest?.model !== id) $.ui.log(`lineage-pane · following ${node.name} →`)
     $.ui.log(`lineage-pane · ${relative(root, manifest)} · ${elapsed(readMs)}${via === 'tools' ? ' · via altimate-code' : ' · offline'}`)
   }
   if (superseded()) return false
   if (column !== undefined && column !== (await read($, columnAtom))) {
     // Another column's reach is not this one's.
-    await update($, columnAtom, () => column ?? null)
-    await update($, reachAtom, () => null)
+    await update($, columnAtom, prev => (superseded() ? prev : column ?? null))
+    await update($, reachAtom, prev => (superseded() ? prev : null))
   }
   if (input.open || (!paneOpened && input.auto)) {
     paneOpened = true

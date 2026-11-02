@@ -499,3 +499,15 @@ test('an older follow that resolves after a newer one does not overwrite it', as
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('/lineage <model> with no column clears the selected column', async ($, on) => {
+  const { clock } = await start($, on)
+  const run = (args: string) => $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await run('fct_orders.revenue')
+  await clock.settle()
+  await run('fct_orders')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'COLUMN · revenue' })).toBeUndefined()
+  await ui.unmount()
+})
