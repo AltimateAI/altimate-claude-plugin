@@ -5,14 +5,20 @@ All notable changes to this plugin will be documented in this file.
 ## [1.4.0] — 2026-10-28
 
 ### Added
-- Team workspace skills as Claude Code skills, in both the MCP and CLI modes. At session start `hooks-handlers/sync-workspace-skills.py` copies the skills of the Altimate workspace linked to the project (from `.altimate-code/skill/_workspace/`) into `.claude/skills/`. Copies keep only `name` and `description` from the frontmatter, have `!` command blocks disarmed, leave out files Claude Code reads as hooks, agents, commands or settings, are served only for the Altimate tenant the user is signed in to, never replace a skill the user wrote (copies carry a marker file; a name clash skips the workspace skill), and get a `.gitignore` so they stay out of version control. When the workspace drops a skill, its copy is removed. The SessionStart context mentions the project skills when copies exist.
+- Team workspace skills as Claude Code skills, in both the MCP and CLI modes. At session start `hooks-handlers/sync-workspace-skills.py` copies the skills of the Altimate workspace linked to the project (from `.altimate-code/skill/_workspace/`) into `.claude/skills/`. Copies keep only `name` and `description` from the frontmatter, have `!` command blocks disarmed, leave out files Claude Code reads as hooks, agents, commands or settings, are served only for the Altimate account the user is signed in to (tenant, URL and key digest), never replace a skill the user wrote (copies carry a marker file; a name clash skips the workspace skill), and get a `.gitignore` so they stay out of version control. When the workspace drops a skill, its copy is removed. The SessionStart context mentions the project skills when copies exist.
 - A project that was never synced, or not for an hour, is refreshed by a detached `altimate workspace refresh` that the hook does not wait for. It is bounded by a per-project lock that expires after ten minutes, and it is skipped silently when no CLI is on PATH or the project has no `.altimate-code` directory. Claude Code's skill watcher loads the copies when it finishes.
+- The SessionStart context lists each workspace skill copy with its description (250 characters per skill, 4,000 in all; past that, names only). Claude Code shows skill descriptions only while its skill listing fits a size budget (about 1% of the context window), and past it project skills appear as bare names that Claude cannot match to a request.
 - `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns the skill copy and refresh off.
 - Tests: `tests/test_sync_workspace_skills.py` (`python3 -m pytest tests/`).
 - `hooks-handlers/refresh-skills.sh` holds the refresh: `--if-stale` starts it in the background only when the snapshot is missing or over an hour old, `--wait` refreshes now and reports how many skills were copied. SessionStart never waits on the network.
 - A Stop hook runs the same hourly background refresh in long sessions, so updated or removed workspace skills reach the session.
 - `/altimate-code:refresh-skills` refreshes the workspace skills on demand.
 - Tests: `tests/refresh-skills.sh`.
+
+- How the copies stay safe: they are served only for the signed-in Altimate account (tenant, URL and the CLI's credential digest); concurrent sessions, refreshes and the CLI's own copy take turns under one renewed `mkdir` lock in `.claude/skills` and swap each copy with rollback; a snapshot or credentials that cannot be read, a listed skill directory that is gone, or a snapshot briefly missing or replaced while the CLI swaps in a new one, leaves the copies alone; symlinked snapshot files and nested `CLAUDE.md` files are not copied; a skill folder without the `.altimate-workspace-skill` marker is never touched; staging left by a killed sync is removed. `ALTIMATE_CLAUDE_SKILL_SYNC=0` also removes the copies.
+- Refresh is per account: a failed refresh is retried at most hourly, and a newly signed-in account refreshes at once. `/altimate-code:refresh-skills` reports when another refresh still holds the lock instead of running alongside it.
+- The mode check reads MCP policy as Claude Code applies it (`managed-mcp.json`, `managed-settings.d/`, merged `allowedMcpServers` and `deniedMcpServers` by name or command, `allowManagedMcpServersOnly`, servers turned off in `/mcp`), and the CLI-mode guidance names the executable on PATH (`altimate` or `altimate-code`).
+- The opt-in warehouse guard (a best-effort nudge, not a security control) allows only a lone `altimate` command, judges each client call by its own arguments and that client's query flags (`psql -tAc` included), and also catches command and process substitution, client paths and quoted names, shell keywords, `sudo`/`env`/`time`/`timeout` wrappers and variable prefixes, `sh -c`, `bq` global flags and DuckDB SQL arguments.
 
 ### Changed
 - The skill, the `analyst` agent and the CLI-mode SessionStart text describe the three workspace features in both modes: team skills as project skills, conventions, knowledge and memory through `workspace_context`, and warehouse reads through `workspace_execute`. With a CLI that turns workspace tools on in linked projects, `tool context` also prints the workspace name and its team skills; the plugin still passes `--workspace-tools` so older CLIs work.
@@ -39,7 +45,7 @@ All notable changes to this plugin will be documented in this file.
 - The skill description and SessionStart context describe the tools directly and no longer claim work Claude does well alone.
 
 ### Added
-- Opt-in PreToolUse hook `warehouse-guard.sh`, active only when `ALTIMATE_ROUTE_GUARD=1`. It denies Bash commands that query a warehouse directly and suggests the matching `tool run`. `altimate` commands, dbt and file operations pass.
+- Opt-in PreToolUse hook `warehouse-guard.sh`, active only when `ALTIMATE_ROUTE_GUARD=1`. It denies Bash commands that query a warehouse directly and suggests the matching `tool run`. `altimate` commands, dbt and file operations pass. Needs `python3`.
 - `analyst` agent: a read-only data analyst that works through `tool run`.
 - Tests: `tests/warehouse-guard.sh`.
 
