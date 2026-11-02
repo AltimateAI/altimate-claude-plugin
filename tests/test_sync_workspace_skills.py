@@ -135,11 +135,21 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         with open(os.path.join(own, "SKILL.md"), "w", encoding="utf-8") as f:
             f.write("---\nname: own\ndescription: mine\n---\n")
         lines = self.run_index().split("\n")
-        self.assertEqual([line.split(":")[0] for line in lines], [f"- team-{i:02d}" for i in range(20)])
-        self.assertTrue(all(len(line) <= len("- team-00: ") + 250 for line in lines))
+        listed = lines[:-1]
+        self.assertEqual([line.split(":")[0] for line in listed], [f"- team-{i:02d}" for i in range(len(listed))])
+        self.assertLess(len(listed), 20)
+        self.assertEqual(lines[-1], f"- … and {20 - len(listed)} more in .claude/skills/")
+        self.assertTrue(all(len(line) <= len("- team-00: ") + 250 for line in listed))
         self.assertTrue(lines[0].endswith("…"))
-        self.assertEqual(lines[-1], "- team-19")  # past the total cap, names only
-        self.assertLessEqual(len("\n".join(lines)), 4000 + 300 + 20 * 12)
+        self.assertLessEqual(len(json.dumps("\n".join(lines))[1:-1]), 4000)
+        self.assertLessEqual(len("\n".join(lines)), 4000)
+
+    def test_large_unicode_index_fits_serialized_hook_budget(self):
+        self.write_snapshot({f"sk_{i}": {"SKILL.md": f"---\nname: team-{i:03d}\ndescription: {'漢' * 200}\n---\nbody\n"} for i in range(120)})
+        self.run_sync()
+        index = self.run_index()
+        self.assertTrue(index)
+        self.assertLessEqual(len(json.dumps(index)[1:-1]), 4000)
 
     def test_index_is_empty_without_copies(self):
         self.assertEqual(self.run_index(), "")

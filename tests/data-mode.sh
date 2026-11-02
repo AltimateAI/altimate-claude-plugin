@@ -33,7 +33,7 @@ expect "bare name does not match the plugin server" "$W" '{"deniedMcpServers":[{
 expect "allowlist without the server" "$W" '{"allowedMcpServers":[{"serverName":"github"}]}' "" "" cli
 expect "allowlist with the plugin server" "$W" '{"allowedMcpServers":[{"serverName":"plugin:altimate-code:altimate-code"}]}' "" "" mcp
 expect "allowlist with only the bare name" "$W" '{"allowedMcpServers":[{"serverName":"altimate-code"}]}' "" "" cli
-expect "disabledMcpjsonServers covers project .mcp.json servers only" "$W" "" '{"disabledMcpjsonServers":["altimate-code"]}' "" mcp
+expect "disabledMcpjsonServers is ignored for the plugin server" "$W" "" '{"disabledMcpjsonServers":["altimate-code"]}' "" mcp
 expect "turned off in /mcp for this project" "$W" "" "" "" cli '{"projects":{"'"$TMP/project"'":{"disabledMcpServers":["plugin:altimate-code:altimate-code"]}}}'
 expect "turned off in /mcp for another project" "$W" "" "" "" mcp '{"projects":{"/elsewhere":{"disabledMcpServers":["plugin:altimate-code:altimate-code"]}}}'
 expect "denylist names the command" "$W" '{"deniedMcpServers":[{"serverCommand":["altimate-code","mcp","serve","--workspace-tools"]}]}' "" "" cli
@@ -46,6 +46,14 @@ expect "unrelated denylist" "$W" '{"deniedMcpServers":[{"serverName":"github"}]}
 expect "malformed settings are ignored" "$W" '{not json' "" "" mcp
 expect "env forces cli" "$W" "" "" "ALTIMATE_DATA_MODE=cli" cli
 expect "env forces mcp" "$N" "" "" "ALTIMATE_DATA_MODE=mcp" mcp
+
+mkdir -p "$TMP/programfiles/ClaudeCode"
+printf '%s' '{"deniedMcpServers":[{"serverName":"plugin:altimate-code:altimate-code"}]}' > "$TMP/programfiles/ClaudeCode/managed-settings.json"
+expect "Windows managed settings deny server" "$W" "" "" "PROGRAMFILES=$TMP/programfiles" cli
+rm "$TMP/programfiles/ClaudeCode/managed-settings.json"
+printf '{}' > "$TMP/programfiles/ClaudeCode/managed-mcp.json"
+expect "Windows managed MCP is exclusive" "$W" "" "" "PROGRAMFILES=$TMP/programfiles" cli
+rm "$TMP/programfiles/ClaudeCode/managed-mcp.json"
 
 # With CLAUDE_CONFIG_DIR set, a .claude.json in HOME is not Claude Code's.
 printf '%s' '{"projects":{"'"$TMP/project"'":{"disabledMcpServers":["plugin:altimate-code:altimate-code"]}}}' > "$TMP/.claude.json"

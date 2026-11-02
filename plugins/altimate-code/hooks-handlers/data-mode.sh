@@ -24,7 +24,7 @@ altimate_data_mode() {
   local project="${CLAUDE_PROJECT_DIR:-$PWD}"
   local config="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
   local args=() dir f
-  for dir in "/Library/Application Support/ClaudeCode" "/etc/claude-code"; do
+  for dir in "/Library/Application Support/ClaudeCode" "/etc/claude-code" "${PROGRAMFILES:-C:/Program Files}/ClaudeCode"; do
     [ -f "$dir/managed-mcp.json" ] && { printf 'cli\n'; return; }
     for f in "$dir/managed-settings.json" "$dir"/managed-settings.d/*.json; do
       [ -f "$f" ] && args+=("managed:$f")
