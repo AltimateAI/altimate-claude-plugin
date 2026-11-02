@@ -5,8 +5,9 @@ import type { EngineInterface } from 'claude-code'
 // older npm installs only have `altimate-code`.
 const CLI_NAMES = ['altimate', 'altimate-code'] as const
 
-/** A run that timed out: the binary exists, so the other name would only wait as long again. */
-const isTimeout = (error: unknown) => /tim(?:ed|e)\s?out|ETIMEDOUT/i.test(String((error as any)?.code ?? '') + String((error as any)?.message ?? error))
+// A command that cannot start rejects; only that moves on to the next name, so a timeout never
+// reruns a command that may have taken effect.
+export const MISSING_BINARY = /ENOENT|not found|no such file|(cannot|could not|failed to) (start|spawn|run)/i
 
 /** Runs the altimate CLI under the first name that is installed. */
 export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 30_000) {
@@ -15,8 +16,8 @@ export async function runAltimate($: EngineInterface, args: string[], timeoutMs 
     try {
       return await $.process.run([bin, ...args], { timeoutMs })
     } catch (error) {
+      if (!MISSING_BINARY.test(String(error))) throw error
       lastError = error
-      if (isTimeout(error)) throw error
     }
   }
   throw lastError ?? new Error('altimate CLI not found')
@@ -36,7 +37,7 @@ export function parseJson<T>(text: string): T | null {
 
 // A press has a short budget, so a press only schedules its work; the work then
 // runs on the clock, outside the press.
-export function later($: EngineInterface, work: () => Promise<void>) {
+export function later($: EngineInterface, work: () => Promise<unknown>) {
   $.clock.after(0, () => {
     void work()
   })

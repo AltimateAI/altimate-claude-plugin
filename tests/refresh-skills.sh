@@ -13,7 +13,7 @@ fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
 TMP="$(mktemp -d)" && [ -d "$TMP" ] || { echo "FAIL: could not create a temp dir"; exit 1; }
 trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/home/.altimate" "$TMP/bin"
-printf '{"altimateInstanceName":"acme","altimateUrl":"https://api.example.com"}\n' > "$TMP/home/.altimate/altimate.json"
+printf '{"altimateInstanceName":"acme","altimateUrl":"https://api.example.com","altimateApiKey":"k"}\n' > "$TMP/home/.altimate/altimate.json"
 # Fake CLI: `workspace refresh --directory D` sleeps FAKE_DELAY, logs the call and writes a snapshot.
 cat > "$TMP/bin/altimate" <<'FAKE'
 #!/usr/bin/env bash
@@ -21,15 +21,17 @@ cat > "$TMP/bin/altimate" <<'FAKE'
 dir="$4"; snap="$dir/.altimate-code/skill/_workspace"
 sleep "${FAKE_DELAY:-0}"
 echo refresh >> "$dir/refresh.log"
+[ -z "${FAKE_FAIL:-}" ] || exit 1
 mkdir -p "$snap/id-1"
-printf '{"tenant":"acme","apiUrl":"https://api.example.com","skills":{"id-1":{}}}\n' > "$snap/.manifest.json"
+printf '{"version":2,"datamateId":1,"tenant":"acme","apiUrl":"https://api.example.com","account":"9ac3583027c136a71b25e6b5e396312c22f12f2acf805e383e3281d91dd8d59a","skills":{"id-1":{}}}\n' > "$snap/.manifest.json"
 printf -- '---\nname: team-style\ndescription: Team style\n---\nUse `stg_` prefixes.\n' > "$snap/id-1/SKILL.md"
 date > "$snap/.synced-at"
 FAKE
 chmod +x "$TMP/bin/altimate"
-export HOME="$TMP/home" PATH="$TMP/bin:$PATH"
+export HOME="$TMP/home" XDG_CACHE_HOME="$TMP/cache" PATH="$TMP/bin:$PATH"
 
-wait_for() { for _ in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
+# Up to 20 s: the background refresh is slow on a loaded machine.
+wait_for() { for _ in $(seq 1 200); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 
 # Never synced: SessionStart returns at once, the slow refresh copies the skill later.
 p="$TMP/first"; mkdir -p "$p/.altimate-code"
@@ -48,6 +50,14 @@ CLAUDE_PROJECT_DIR="$p" bash "$TMP/bin/altimate" workspace refresh --directory "
 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale; sleep 0.5
 [ ! -e "$p/refresh.log" ] || fail "fresh snapshot was refreshed"
 
+# Fresh snapshot of another account (same tenant, other key): refreshed at once.
+creds="$TMP/home/.altimate/altimate.json"; cp "$creds" "$TMP/creds.bak"
+printf '{"altimateInstanceName":"acme","altimateUrl":"https://api.example.com","altimateApiKey":"other"}\n' > "$creds"
+CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
+wait_for "$p/refresh.log" || fail "another account's fresh snapshot was not refreshed"
+sleep 0.3; rm -f "$p/refresh.log"; mv "$TMP/creds.bak" "$creds"
+CLAUDE_PROJECT_DIR="$p" bash "$TMP/bin/altimate" workspace refresh --directory "$p"; rm "$p/refresh.log"
+
 # Hour-old snapshot: refreshed.
 touch -t "$(date -v-2H +%Y%m%d%H%M 2>/dev/null || date -d '-2 hour' +%Y%m%d%H%M)" "$p/.altimate-code/skill/_workspace/.synced-at"
 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
@@ -59,6 +69,13 @@ FAKE_DELAY=1 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
 FAKE_DELAY=1 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
 sleep 2; wait_for "$p/refresh.log"; sleep 0.3
 [ "$(wc -l < "$p/refresh.log" | tr -d ' ')" = "1" ] || fail "two refreshes ran at once"
+
+# A refresh that fails (never writes .synced-at) is not retried at the next Stop.
+p="$TMP/failing"; mkdir -p "$p/.altimate-code"
+FAKE_FAIL=1 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
+wait_for "$p/refresh.log"; sleep 0.3
+FAKE_FAIL=1 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale; sleep 0.5
+[ "$(wc -l < "$p/refresh.log" | tr -d ' ')" = "1" ] || fail "failed refresh was retried within the hour"
 
 # Manual refresh waits and reports.
 p="$TMP/manual"; mkdir -p "$p/.altimate-code"
