@@ -68,7 +68,7 @@ Set `ALTIMATE_ROUTE_GUARD=1` to enable a PreToolUse hook that denies Bash comman
 
 ## Use an Altimate workspace
 
-An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's shared skills, knowledge, memory and warehouse integrations. Claude reaches the workspace linked to the project directly, with three model-free tools that work the same over MCP and through `altimate tool run --workspace-tools`:
+An [Altimate workspace](https://help.altimate.ai/workspaces/) holds your team's shared skills, knowledge, memory and warehouse integrations. Claude reaches the workspace linked to the project directly, with three tools that run no model of their own (knowledge questions are answered by Altimate's backend models) and work the same over MCP and through `altimate tool run --workspace-tools`:
 
 - `workspace_context` reports whether sign-in or linking is needed, and once linked gives the workspace summary, skill names, bounded project memory and (with `include_tools`) the knowledge and warehouse operations available.
 - `workspace_skill` reads one shared skill.

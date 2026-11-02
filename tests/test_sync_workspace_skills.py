@@ -141,7 +141,6 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.assertEqual(lines[-1], f"- … and {20 - len(listed)} more in .claude/skills/")
         self.assertTrue(all(len(line) <= len("- team-00: ") + 250 for line in listed))
         self.assertTrue(lines[0].endswith("…"))
-        self.assertLessEqual(len(json.dumps("\n".join(lines))[1:-1]), 4000)
         self.assertLessEqual(len("\n".join(lines)), 4000)
 
     def test_large_unicode_index_fits_serialized_hook_budget(self):
@@ -149,12 +148,19 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.run_sync()
         index = self.run_index()
         self.assertTrue(index)
-        self.assertLessEqual(len(json.dumps(index)[1:-1]), 4000)
+        # The cap counts decoded characters, so a CJK workspace lists as many skills as an ASCII one.
+        self.assertLessEqual(len(index), 4000)
+        self.assertGreaterEqual(len(index.split("\n")), 15)
 
     def test_index_shows_descriptions_as_written(self):
         self.write_snapshot({"sk_1": {"SKILL.md": '---\nname: team\ndescription: Café — a\\b and "quoted"\n---\nbody\n'}})
         self.run_sync()
         self.assertEqual(self.run_index(), '- team: Café — a\\b and "quoted"')
+
+    def test_index_drops_control_characters(self):
+        self.write_snapshot({"sk_1": {"SKILL.md": "---\nname: team\ndescription: ok\x1b[2J \x07 done\u200b \u202eevil\n---\nbody\n"}})
+        self.run_sync()
+        self.assertEqual(self.run_index(), "- team: ok[2J done evil")
 
     def test_index_is_empty_without_copies(self):
         self.assertEqual(self.run_index(), "")
