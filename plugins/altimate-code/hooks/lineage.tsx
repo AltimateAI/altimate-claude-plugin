@@ -384,7 +384,8 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   }
   if (superseded()) return false
   if (column !== undefined && column !== (await read($, columnAtom))) {
-    // Another column's reach is not this one's.
+    // Another column's reach is not this one's: an answer still on its way for it is dropped.
+    reachSeq++
     await update($, columnAtom, prev => (superseded() ? prev : column ?? null))
     await update($, reachAtom, prev => (superseded() ? prev : null))
   }
