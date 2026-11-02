@@ -539,10 +539,12 @@ type ImpactNote = { key: string; toast: string; context: string; view: ImpactVie
  * columns, which downstream models and dashboards read that column. Shown as a toast, then added to
  * Claude's context with the edit's result.
  */
-async function impactFirst($: EngineInterface, e: any, file: string): Promise<ImpactNote | null> {
+async function impactFirst($: EngineInterface, e: any, file: string, deadline: number, progress: { project: boolean }): Promise<ImpactNote | null> {
   const root = await projectRoot($, file, true)
   if (!root) return null
   const manifest = `${root}/target/manifest.json`
+  // A dbt project with a manifest: from here, running out of time is worth telling.
+  progress.project = await $.fs.exists(manifest).catch(() => false)
   let graph = await readGraph($, manifest).catch(() => null)
   let id = graph ? findModel(graph, relative(root, file)) : null
   if (!graph) {
@@ -573,7 +575,11 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
     const began = await $.clock.now()
     // Each column has the whole hold: a slow one does not discard the others.
     const results = await Promise.all(
-      touched.map(col => within($, HOLD_MS, runTool($, 'impact_analysis', { manifest_path: manifest, model: id, column: col, change_type: 'modify' }))),
+      // Each column gets what is left before the deadline (at most HOLD_MS), so a slow graph lookup
+      // leaves the columns unchecked instead of losing the whole note.
+      touched.map(async col =>
+        within($, Math.max(0, Math.min(HOLD_MS, deadline - (await $.clock.now()))), runTool($, 'impact_analysis', { manifest_path: manifest, model: id, column: col, change_type: 'modify' })),
+      ),
     )
     const reaches = results.map((result, i) => (result?.ok ? reachFromMetadata(result.metadata, node.name, touched[i]!) : null))
     reaches.forEach((one, i) => (one ? traced : unchecked).push(touched[i]!))
@@ -752,7 +758,17 @@ export function registerLineage(on: On) {
     const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? String(e.file_path) : null
     const isSql = !!file && /\.sql$/i.test(file)
     const isEdit = isSql && EDIT_TOOLS.has(e.tool)
-    const note = isEdit ? await within($, HOLD_TOTAL_MS, impactFirst($, e, file!)) : null
+    let lookup: Promise<ImpactNote | null> | null = null
+    let finished = false
+    const progress = { project: false }
+    if (isEdit) {
+      // The columns stop half a second before the hold ends, leaving time to write the note.
+      lookup = impactFirst($, e, file!, (await $.clock.now()) + HOLD_TOTAL_MS - 500, progress)
+      lookup.then(() => (finished = true), () => (finished = true))
+    }
+    const note = lookup ? await within($, HOLD_TOTAL_MS, lookup) : null
+    // Out of time before even the model-level lookup finished: say so, rather than nothing.
+    if (lookup && !note && !finished && progress.project) $.ui.toast('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it', { timeoutMs: 8000 })
     // Before the edit runs: the point is to see what it reaches first.
     if (note) $.ui.toast(note.toast, { timeoutMs: 8000 })
     const result = await next(e)

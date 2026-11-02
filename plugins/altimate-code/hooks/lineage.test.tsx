@@ -533,3 +533,21 @@ test('an older column-reach answer does not replace the newer one', async ($, on
   expect(await ui.find({ type: 'Text', text: /stale_reader/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('when the whole lookup runs out of time, a toast says the edit went ahead without lineage', async ($, on) => {
+  const { clock, toasts } = await start($, on, { holdFirstManifestRead: new Promise<void>(() => {}) })
+  const call = $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.advance(9_000)
+  await call
+  await clock.settle()
+  expect(toasts).toContain('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
+})
+
+test('a .sql file outside any dbt project gets no timeout toast', async ($, on) => {
+  const { clock, toasts } = await start($, on)
+  const call = $.tool.call({ tool: 'Edit', file_path: '/elsewhere/migrations/001.sql', old_string: 'a', new_string: 'b' })
+  await clock.advance(9_000)
+  await call
+  await clock.settle()
+  expect(toasts).toEqual([])
+})
