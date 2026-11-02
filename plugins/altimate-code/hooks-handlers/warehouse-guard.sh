@@ -38,7 +38,7 @@ esac
 # one named after ( ; | & or a backtick inside quoted text is still taken as a command.
 # Best effort, not a shell parser: it nudges, it does not enforce.
 NL=$'\n'
-START="(^|[;&|(\`]|(bash|sh|zsh)[[:space:]]+-c[[:space:]]+[\"'])[[:space:]]*"
+START="(^|[;&|(\`]|(bash|sh|zsh)[[:space:]]+-[A-Za-z]*c[[:space:]]+[\"'])[[:space:]]*"
 KEYWORD='(then|do|else|elif|if|while|until|[{]|!)[[:space:]]+'
 WRAP='([^[:space:]]*/)?(sudo|env|command|time|exec|nice|nohup|timeout)([[:space:]]+(-[^[:space:]]*([[:space:]]+[^-[:space:]][^[:space:]]*)?|[0-9][^[:space:]]*))*[[:space:]]+'
 ASSIGN='[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+'

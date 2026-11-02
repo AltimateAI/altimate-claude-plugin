@@ -36,6 +36,9 @@ deny 'sudo docker exec -i pg psql -c "select 1"'
 allow "git commit -m 'docker exec -i pg psql -c select 1'"
 deny 'env X=1 docker exec -i pg psql -c "select 1"'
 deny 'bash -c "docker exec -i pg psql -c 1"'
+deny 'bash -lc "docker exec -i pg psql -c 1"'
+deny "sh -ec 'docker exec pg psql -c 1'"
+deny 'zsh -lc "psql -c 1"'
 deny 'kubectl exec -it pod -- psql -c "select 1"'
 deny 'cd x && podman exec pg psql -c "select 1"'
 deny 'true; docker compose exec db mysql -e "select 1"'
