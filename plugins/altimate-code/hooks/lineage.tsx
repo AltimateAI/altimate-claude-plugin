@@ -69,6 +69,12 @@ let paneOpened = false
 // pane unless a newer one already has. A follow that fails claims nothing, so it cancels nobody.
 let startedSeq = 0
 let claimedSeq = 0
+// The focus that owns the pane (model, manifest, revision), set when a follow claims it. Detail
+// answers are written only while it is still the focus they were asked for; a re-follow of the same
+// model keeps it, so its in-flight answers still land.
+let ownerKey = ''
+// Each column-reach request takes a number; only the newest one's answer is shown.
+let reachSeq = 0
 const contextGiven = new Set<string>()
 
 const LENS_COLOR: Record<string, string> = {
@@ -351,6 +357,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const readMs = Math.round((await $.clock.now()) - began)
   if (claimedSeq > seq) return false
   claimedSeq = seq
+  ownerKey = `${id}\u0000${manifest}\u0000${stat.mtimeMs}`
   // update() may retry its write after a conflict, so each write below re-checks ownership inside
   // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
   const superseded = () => claimedSeq !== seq
@@ -392,9 +399,9 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
 
 /** Column lineage, then the selected column's reach, then warehouse lineage: each redraws as it lands. */
 async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, isNew: boolean, expected?: LineageFocus) {
-  // Its answers are written only while the follow it started under still owns the pane (see follow).
-  const owner = claimedSeq
-  const mine = () => claimedSeq === owner
+  // Its answers are written only while the focus they were asked for still owns the pane.
+  const owner = ownerKey
+  const mine = () => ownerKey === owner
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
   const node = focus && graph ? graph.nodes[focus.model] : null
@@ -422,9 +429,10 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
 
 /** The downstream models and dashboards that read the selected column (impact_analysis' column reach). */
 async function loadReach($: EngineInterface) {
-  // Its answers are written only while the follow it started under still owns the pane (see follow).
-  const owner = claimedSeq
-  const mine = () => claimedSeq === owner
+  // Its answer is written only for the focus it was asked for, and only if no newer reach was asked.
+  const owner = ownerKey
+  const request = ++reachSeq
+  const mine = () => ownerKey === owner && reachSeq === request
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
   const column = await read($, columnAtom)
@@ -453,9 +461,9 @@ async function loadReach($: EngineInterface) {
 
 /** Warehouse lineage for the model's relation from a connected SaaS MCP server's table_lineage, when there is one. */
 async function loadWarehouse($: EngineInterface) {
-  // Its answers are written only while the follow it started under still owns the pane (see follow).
-  const owner = claimedSeq
-  const mine = () => claimedSeq === owner
+  // Its answers are written only while the focus they were asked for still owns the pane.
+  const owner = ownerKey
+  const mine = () => ownerKey === owner
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
   const node = focus && graph ? graph.nodes[focus.model] : null

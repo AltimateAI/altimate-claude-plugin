@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void> }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> } }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -107,6 +107,12 @@ async function start($: any, on: any, options: Options = {}) {
     }
     // Over its size cap the server sends the report alone, marked truncated.
     if (e.tool === 'impact_analysis' && e.args?.column === options.failColumn) return { value: { content: [{ type: 'text', text: 'boom' }], isError: true } }
+    if (e.tool === 'impact_analysis' && options.holdReach && e.args?.column === options.holdReach.column) {
+      // The held column answers late, and with a reader of its own, so a stale write would show.
+      return options.holdReach.until.then(() => ({
+        value: { content: [{ type: 'text', text: JSON.stringify({ severity: 'LOW', column_reach: { models: [{ name: 'stale_reader', columns: [] }], exposures: [] }, report: 'x' }) }], isError: false },
+      }))
+    }
     if (e.tool === 'impact_analysis') {
       const body = capped ? { report: 'Impact', truncated: true } : { ...reach, report: 'Impact' }
       return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } }
@@ -509,5 +515,21 @@ test('/lineage <model> with no column clears the selected column', async ($, on)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'COLUMN · revenue' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('an older column-reach answer does not replace the newer one', async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, { holdReach: { column: 'revenue', until: new Promise<void>(resolve => (release = resolve)) } })
+  const run = (args: string) => $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await run('fct_orders.revenue')
+  await clock.settle()
+  await run('fct_orders.order_id')
+  await clock.settle()
+  release()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'COLUMN · order_id' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /stale_reader/ })).toBeUndefined()
   await ui.unmount()
 })
