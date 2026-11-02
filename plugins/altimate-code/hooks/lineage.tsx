@@ -39,7 +39,9 @@ const WAREHOUSE_TOOL = /^mcp__(.+)__((?:databricks_)?table_lineage)$/
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 const TOOL_TIMEOUT_MS = 60_000
 // How long an edit waits for the column reach before it goes ahead without it.
-const HOLD_MS = 6_000
+const HOLD_MS = 5_000
+// The whole lookup (project, manifest, columns) before an edit runs; inside the hook's 10 s budget.
+const HOLD_TOTAL_MS = 8_500
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
 // The most columns one edit's impact check traces.
 const MAX_EDIT_COLUMNS = 3
@@ -531,16 +533,17 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
     if (reach.exposures.length) lines.push(`- dashboards on them: ${reach.exposures.join(', ')}`)
     if (reach.uncertainExposures.length) lines.push(`- dashboards on models that may read it: ${reach.uncertainExposures.join(', ')}`)
     if (reach.truncated) lines.push('- the trace stopped at its model limit; more models may read it')
-    if (unchecked.length) lines.push(`- not checked (no answer in time): ${unchecked.join(', ')}`)
     if (reach.uncertain.length) lines.push(`- may also read it: ${reach.uncertain.slice(0, 10).map(one => `${one.name} (${one.reason})`).join(', ')}`)
     if (reach.untraced.length) lines.push(`- could not be traced: ${reach.untraced.slice(0, 10).map(one => `${one.name} (${one.reason})`).join(', ')}`)
   }
   lines.push(
     `- ${node.name} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'downstream model')} in all (${counts.direct} direct, ${counts.transitive} transitive), ${plural(counts.tests, 'test')}${counts.exposures.length ? ` and ${plural(counts.exposures.length, 'exposure')} (${counts.exposures.join(', ')})` : ''}.`,
   )
+  if (unchecked.length) lines.push(`- columns not checked (no answer in time): ${unchecked.join(', ')}; what they reach is unknown`)
   lines.push('Keep these consumers working, or tell the user which of them this edit changes.')
   return {
-    key: `${e.agentId ?? 'main'}\u0000${manifest}\u0000${id}\u0000${column ?? ''}`,
+    // The columns touched and those left unchecked are part of what Claude was told.
+    key: `${e.agentId ?? 'main'}\u0000${manifest}\u0000${id}\u0000${traced.join(',')}\u0000${unchecked.join(',')}`,
     toast: toastText,
     context: lines.join('\n'),
     view: {
@@ -673,7 +676,7 @@ export function registerLineage(on: On) {
     const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? String(e.file_path) : null
     const isSql = !!file && /\.sql$/i.test(file)
     const isEdit = isSql && EDIT_TOOLS.has(e.tool)
-    const note = isEdit ? await within($, HOLD_MS + 2_000, impactFirst($, e, file!)) : null
+    const note = isEdit ? await within($, HOLD_TOTAL_MS, impactFirst($, e, file!)) : null
     // Before the edit runs: the point is to see what it reaches first.
     if (note) $.ui.toast(note.toast, { timeoutMs: 8000 })
     const result = await next(e)

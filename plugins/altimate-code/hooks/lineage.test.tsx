@@ -403,5 +403,14 @@ test('a touched column whose check fails keeps the combined count a lower bound'
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
   expect(toasts[0]).toContain('fct_orders.revenue is read by at least 2 models')
-  expect(edit.context?.[0]).toContain('not checked (no answer in time): order_id')
+  expect(edit.context?.[0]).toContain('columns not checked (no answer in time): order_id')
+})
+
+test('a new unchecked column in the same turn still reaches Claude', async ($, on) => {
+  const { clock } = await start($, on, { failColumn: 'order_id' })
+  const first: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  const second: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
+  await clock.settle()
+  expect(first.context?.[0]).toContain('fct_orders.revenue')
+  expect(second.context?.[0]).toContain('columns not checked (no answer in time): order_id')
 })
