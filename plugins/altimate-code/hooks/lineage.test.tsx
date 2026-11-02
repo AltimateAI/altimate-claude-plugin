@@ -465,10 +465,10 @@ test('a dbt_lineage text without lineage is not cached as an empty lineage', asy
   const { clock, calls } = await start($, on, { structured: false, lineageText: 'Error: preview unavailable' })
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /no columns known/ })).toBeUndefined()
-  await ui.unmount()
-  expect(calls.filter(call => call === 'mcp:dbt_lineage')).toHaveLength(1)
+  // Nothing was cached, so reading the same model again asks again; a cached empty lineage would not.
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls.filter(call => call === 'mcp:dbt_lineage')).toHaveLength(2)
 })
 
 test("Claude's truncated dbt_lineage result is not preloaded as the whole lineage", async ($, on) => {
