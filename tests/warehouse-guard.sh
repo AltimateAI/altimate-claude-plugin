@@ -122,6 +122,25 @@ allow 'env echo --split-string "psql -c select"'
 deny 'echo a#b; psql -c 1'
 deny "$(printf '# note\npsql -c 1')"
 deny 'echo "#"; psql -c 1'
+allow "$(printf 'echo hi\n# $(psql -c 1)\ntrue')"
+deny "$(printf 'echo hi\n# note\npsql -c 1')"
+allow "$(printf 'cat <<EOF\nUse \\$(psql -c 1) literally\nEOF')"
+deny "$(printf 'cat <<EOF\nUse \\\\\\\\$(psql -c 1) here\nEOF')"
+deny "$(printf 'cat <<EOF\n$(echo hi\npsql -c 1)\nEOF')"
+allow 'cat <<< "$HOME" && echo psql'
+deny "$(printf 'cat <<< x\npsql -c 1')"
+deny 'psql <<< "select 1"'
+deny "$(printf 'cat a.sql |\n  psql db')"
+deny "$(printf 'true &&\n  psql -c 1')"
+deny "env -iS'psql -c 1'"
+allow "env -uS echo 'psql -c 1'"
+deny 'echo x\ #$(psql -c 1)'
+deny 'echo $(echo hi)#$(psql -c 1)'
+allow '(echo a)#$(psql -c 1)'
+deny "$(printf 'cat <<'"'"'E"O'"'"'\ntext\nE"O\npsql -c 1')"
+deny "$(printf 'cat <<\\EOF\ntext\nEOF\npsql -c 1')"
+deny "$(printf 'cat <<EOF\n$(\npsql -c 1\n)\nEOF')"
+deny "$(printf 'printf sql |&\npsql')"
 deny 'kubectl exec -it pod -- psql -c "select 1"'
 deny 'cd x && podman exec pg psql -c "select 1"'
 deny 'true; docker compose exec db mysql -e "select 1"'
@@ -201,6 +220,7 @@ allow 'duckdb -version'
 allow 'duckdb -json my.duckdb'
 [ -z "$(printf 'not json' | ALTIMATE_ROUTE_GUARD=1 bash "$GUARD")" ] || fail "bad input should allow"
 # Without python3 every command passes.
-[ -z "$(payload 'psql -c 1' 2>/dev/null | env -i PATH=/nonexistent ALTIMATE_ROUTE_GUARD=1 /bin/bash "$GUARD")" ] || fail "guard without python3 should allow"
+out="$(payload 'psql -c 1' 2>/dev/null | env -i PATH=/nonexistent ALTIMATE_ROUTE_GUARD=1 /bin/bash "$GUARD" 2>&1)"; rc=$?
+[ "$rc" -eq 0 ] && [ -z "$out" ] || fail "guard without python3 should allow quietly (rc=$rc out=$out)"
 
 [ "$FAILURES" -eq 0 ] && echo "PASS" || { echo "$FAILURES failure(s)"; exit 1; }

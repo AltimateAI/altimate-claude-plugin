@@ -110,27 +110,42 @@ def scan(text, i=0, nested=False):
             i += 1
         elif nested and c in "()" and (depth := depth + (1 if c == "(" else -1)) < 0:
             return "".join(out), subs, i + 1
-        elif (heredoc := HEREDOC.match(text, i)) and not text.startswith("<<<", i):
+        elif text.startswith("<<<", i):  # a here-string: its word follows, there is no body
+            out.append("<<<")
+            i += 3
+        elif heredoc := HEREDOC.match(text, i):
             word = heredoc.group(2)
-            delimiter = re.sub(r"[\"'\\]", "", word)
+            delimiter = "".join(shlex.split(word))  # quote removal, as the shell does
             heredocs.append((delimiter, delimiter != word, heredoc.group(1) == "-"))
             out.append("<<" + PLACEHOLDER)  # the << stays visible to the query-input check
             i = heredoc.end()
         elif c == "\n":
-            out.append(";")  # newlines separate commands, as in the shell
+            # Newlines separate commands, as in the shell, except after | or & (a pipeline or
+            # list continued on the next line).
+            last = next((piece for piece in reversed(out) if piece.strip(" \t")), "")
+            out.append(" " if last.rstrip(" \t")[-1:] in ("|", "&") else ";")
             i += 1
             for delimiter, quoted, strip_tabs in heredocs:
+                lines = []
                 while i < len(text):
                     end = text.find("\n", i)
                     end = len(text) if end < 0 else end
                     line, i = text[i:end], end + 1
                     if (line.lstrip("\t") if strip_tabs else line) == delimiter:
                         break
-                    k = 0
-                    while not quoted and k < len(line):
-                        k = substitution(line, k, subs) if line.startswith("$(", k) or line[k] == "`" else k + 1
+                    lines.append(line)
+                # An unquoted delimiter's body expands like a double-quoted string: a
+                # backslash escapes $ and `, and a substitution may span lines.
+                body, k = "\n".join(lines), 0
+                while not quoted and k < len(body):
+                    if body[k] == "\\":
+                        k += 2
+                    elif body.startswith("$(", k) or body[k] == "`":
+                        k = substitution(body, k, subs)
+                    else:
+                        k += 1
             heredocs = []
-        elif c == "#" and (i == 0 or text[i - 1] in " \t;&|()"):
+        elif c == "#" and (not out or out[-1] in (" ", "\t", ";", "&", "|", "(", ")")):  # at a word start
             # A comment runs to the end of the line; the newline still separates.
             end = text.find("\n", i)
             i = len(text) if end < 0 else end
@@ -205,9 +220,15 @@ def judge(text, depth=0):
             elif name in WRAPPERS:
                 if name == "env":  # env -S "<command line>" runs the split string
                     for k, word in enumerate(words[i + 1 : skip_options(words, i + 1, WRAPPERS["env"])], i + 1):
-                        split = word[2:] if word.startswith("-S") and len(word) > 2 else word.partition("=")[2] if word.startswith("--split-string=") else None
-                        if split is None and word in ("-S", "--split-string") and k + 1 < len(words):
-                            split = words[k + 1]
+                        following = words[k + 1] if k + 1 < len(words) else ""
+                        split = ""
+                        if word == "--split-string" or word.startswith("--split-string="):
+                            split = word.partition("=")[2] if "=" in word else following
+                        elif word[:1] == "-" and word[1:2] != "-":
+                            # In a flag cluster the first letter taking a value takes the rest or the next word.
+                            j = next((j for j, c in enumerate(word[1:], 1) if c in WRAPPERS["env"][0]), None)
+                            if j and word[j] == "S":
+                                split = word[j + 1 :] or following
                         if split and judge(split, depth + 1):
                             return True
                 i = skip_options(words, i + 1, WRAPPERS[name])
