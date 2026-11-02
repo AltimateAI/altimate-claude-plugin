@@ -185,3 +185,45 @@ test('a sync the CLI skipped shows its reason, not synced', async ($, on) => {
   expect(await ui.find({ type: 'Text', text: /synced to your Altimate workspace/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('an unlinked folder offers Link workspace; choosing one links, then syncs', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const calls: string[][] = []
+  let linked = false
+  on('process.run', (_: unknown, e: { argv: string[] }) => {
+    const argv = e.argv.slice(1)
+    calls.push(argv)
+    const reply = (body: unknown) => ({ value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '' } })
+    if (argv[0] === 'workspace') return reply({ ok: true, workspaces: [{ id: 7, name: 'Analytics' }, { id: 9, name: 'Finance' }] })
+    if (argv[0] === 'link') {
+      linked = true
+      return reply({})
+    }
+    if (argv[1] === 'sync') return reply({ results: [{ id: 'github', result: 'synced', steps: ['Attached to workspace'] }] })
+    return reply({ ...STATUS, workspace: { name: linked ? 'Analytics' : 'acme', tenant: 'acme', linked, id: linked ? 7 : null } })
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Workspace: not linked/ })).toBeDefined()
+  await ui.press({ key: 'link-workspace' })
+  await clock.settle()
+  expect(calls).toContainEqual(['workspace', 'list', '--json'])
+  expect(await ui.find({ key: 'link-9' })).toBeDefined()
+  expect(await ui.find({ key: 'link-cancel' })).toBeDefined()
+
+  await ui.press({ key: 'link-7' })
+  await clock.settle()
+  const run = calls.filter(argv => argv[0] === 'link' || argv[1] === 'sync')
+  expect(run).toEqual([
+    ['link', '--workspace', '7', '-y'],
+    ['integrations', 'sync', '--all', '--json'],
+  ])
+  expect(await ui.find({ type: 'Text', text: /Linked to Analytics · GitHub synced/ })).toBeDefined()
+  expect(await ui.find({ key: 'link-workspace' })).toBeUndefined()
+  await ui.unmount()
+})

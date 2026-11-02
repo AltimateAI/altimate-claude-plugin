@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId } from '../types'
+import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -20,6 +20,8 @@ const isBandHidden = atom({ plugin: 'altimate-code', key: 'isBandHidden' } as co
 const expanded = atom({ plugin: 'altimate-code', key: 'expanded' } as const, null as Expanded | null)
 const form = atom({ plugin: 'altimate-code', key: 'form' } as const, null as Form | null)
 const formMessage = atom({ plugin: 'altimate-code', key: 'formMessage' } as const, null as string | null)
+// The workspaces the user can link this folder to; null while the picker is closed.
+const workspaces = atom({ plugin: 'altimate-code', key: 'workspaces' } as const, null as WorkspaceChoice[] | null)
 const typed = atom({ plugin: 'altimate-code', key: 'typed' } as const, {} as Record<string, string>)
 
 const ICON: Record<Provider['state'], string> = {
@@ -52,10 +54,14 @@ const STATE_COLOR: Record<Provider['state'], string> = {
 const CLI_NAMES = ['altimate', 'altimate-code'] as const
 
 async function runCli($: EngineInterface, args: string[], timeoutMs = 30_000) {
+  return runAltimate($, ['integrations', ...args], timeoutMs)
+}
+
+async function runAltimate($: EngineInterface, args: string[], timeoutMs = 30_000) {
   let lastError: unknown = null
   for (const bin of CLI_NAMES) {
     try {
-      return await $.process.run([bin, 'integrations', ...args], { timeoutMs })
+      return await $.process.run([bin, ...args], { timeoutMs })
     } catch (error) {
       lastError = error
     }
@@ -141,6 +147,55 @@ async function act($: EngineInterface, target: ProviderId | 'all', label: string
       if (args[0] === 'sync') detail = syncText(result.stdout)
     }
     const text = failure ?? detail ?? summarize(verb, target)
+    await update($, message, () => text)
+    $.ui.toast(text)
+  } catch (error) {
+    await update($, message, () => `Could not run altimate: ${String(error)}`)
+  } finally {
+    await update($, busy, () => null)
+    await refresh($)
+  }
+}
+
+// ---------------------------------------------------------------- link workspace
+
+async function listWorkspaces($: EngineInterface) {
+  if (await read($, busy)) return
+  await update($, busy, () => ({ provider: 'all', label: 'Loading workspaces…' }))
+  await update($, message, () => null)
+  try {
+    const result = await runAltimate($, ['workspace', 'list', '--json'])
+    const data = parseJson<{ ok?: boolean; workspaces?: WorkspaceChoice[] }>(result.stdout)
+    if (result.exitCode !== 0 || !Array.isArray(data?.workspaces)) {
+      await update($, message, () => firstLine(result.stderr.replace(ANSI, '')) ?? 'Could not list workspaces.')
+    } else if (data.workspaces.length === 0) {
+      await update($, message, () => 'No workspaces found for this account.')
+    } else {
+      await update($, workspaces, () => data.workspaces ?? null)
+    }
+  } catch (error) {
+    await update($, message, () => `Could not run altimate: ${String(error)}`)
+  } finally {
+    await update($, busy, () => null)
+  }
+}
+
+/** Links this folder to the workspace, then syncs so connections already saved attach to it. */
+async function linkWorkspace($: EngineInterface, choice: WorkspaceChoice) {
+  if (await read($, busy)) return
+  await update($, busy, () => ({ provider: 'all', label: `Linking ${choice.name}…` }))
+  await update($, message, () => null)
+  try {
+    const link = await runAltimate($, ['link', '--workspace', String(choice.id), '-y'], CONNECT_TIMEOUT_MS)
+    if (link.exitCode !== 0) {
+      await update($, message, () => firstLine(link.stderr.replace(ANSI, '')) ?? 'Could not link the workspace.')
+      return
+    }
+    await update($, workspaces, () => null)
+    await update($, busy, () => ({ provider: 'all', label: 'Syncing…' }))
+    const sync = await runCli($, ['sync', '--all', '--json'], CONNECT_TIMEOUT_MS)
+    const detail = sync.exitCode === 0 ? syncText(sync.stdout) : firstLine(sync.stderr.replace(ANSI, ''))
+    const text = `Linked to ${choice.name}${detail ? ` · ${detail}` : ''}`
     await update($, message, () => text)
     $.ui.toast(text)
   } catch (error) {
@@ -486,6 +541,7 @@ export const register: Register = on => {
     const fields = await read($, form)
     const inForm = await read($, formMessage)
     const draft = await read($, typed)
+    const choices = await read($, workspaces)
     const now = await $.clock.now()
 
     if (!current) {
@@ -500,7 +556,23 @@ export const register: Register = on => {
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
           <Text bold>One-click integrations</Text>
-          <Text dimColor>Workspace: {current.workspace.name}</Text>
+          <Text dimColor>Workspace: {current.workspace.linked === false ? 'not linked' : current.workspace.name}</Text>
+          {current.workspace.linked === false && !running && !choices && (
+            <Box>
+              <Button key="link-workspace" label="Link workspace" onPress={() => later($, () => listWorkspaces($))} />
+            </Box>
+          )}
+          {choices && !running && (
+            <Box flexDirection="column">
+              <Text dimColor>Link this folder to:</Text>
+              <Box>
+                {choices.map(one => (
+                  <Button key={`link-${one.id}`} label={one.name} onPress={() => later($, () => linkWorkspace($, one))} />
+                ))}
+                <Button key="link-cancel" label="Cancel" onPress={() => later($, () => update($, workspaces, () => null))} />
+              </Box>
+            </Box>
+          )}
         </Box>
         {current.providers.map(one => (
           <Box key={one.id} flexDirection="column">

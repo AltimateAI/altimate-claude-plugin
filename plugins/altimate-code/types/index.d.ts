@@ -21,9 +21,12 @@ export type Provider = {
 }
 
 export type IntegrationsStatus = {
-  workspace: { name: string; tenant: string | null }
+  workspace: { name: string; tenant: string | null; linked?: boolean; id?: number | null }
   providers: Provider[]
 }
+
+/** A workspace this folder can be linked to. */
+export type WorkspaceChoice = { id: number; name: string }
 
 /** The action running now, with what the pane shows while it runs. */
 export type Busy = { provider: ProviderId | 'all'; label: string }
@@ -64,6 +67,8 @@ declare module 'claude-code' {
       form: Form | null
       /** Shown inside the open form: the provider's refusal or the fields still missing. */
       formMessage: string | null
+      /** Workspaces offered for linking this folder; null when the picker is closed. */
+      workspaces: WorkspaceChoice[] | null
       /** Non-secret text typed into the open form, by field name, saved when the form is submitted. */
       typed: Record<string, string>
     }
