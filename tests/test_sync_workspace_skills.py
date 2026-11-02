@@ -116,6 +116,34 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             return f.read()
 
+    def run_index(self):
+        result = subprocess.run(
+            [sys.executable, "-I", SCRIPT, "--index", self.project],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "HOME": self.home},
+        )
+        return json.loads('"' + result.stdout.strip() + '"')
+
+    def test_index_lists_only_copies_and_caps_descriptions(self):
+        long = "word " * 100
+        self.write_snapshot({f"sk_{i}": {"SKILL.md": f"---\nname: team-{i:02d}\ndescription: {long}\n---\nbody\n"} for i in range(20)})
+        self.run_sync()
+        own = os.path.join(self.project, ".claude", "skills", "own")
+        os.makedirs(own)
+        with open(os.path.join(own, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: own\ndescription: mine\n---\n")
+        lines = self.run_index().split("\n")
+        self.assertEqual([line.split(":")[0] for line in lines], [f"- team-{i:02d}" for i in range(20)])
+        self.assertTrue(all(len(line) <= len("- team-00: ") + 250 for line in lines))
+        self.assertTrue(lines[0].endswith("…"))
+        self.assertEqual(lines[-1], "- team-19")  # past the total cap, names only
+        self.assertLessEqual(len("\n".join(lines)), 4000 + 300 + 20 * 12)
+
+    def test_index_is_empty_without_copies(self):
+        self.assertEqual(self.run_index(), "")
+
     def test_copy_keeps_only_name_and_description_and_disarms_commands(self):
         self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL, "references/naming.md": "ref"}})
         out, _ = self.run_sync()

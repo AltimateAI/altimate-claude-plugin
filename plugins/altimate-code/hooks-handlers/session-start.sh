@@ -54,8 +54,10 @@ elif command -v python3 >/dev/null 2>&1; then
   fi
 
   # Marked directories are workspace skill copies (made by this plugin or the CLI); user-written skills carry no marker.
-  if [ -n "$(find "$PROJECT_DIR/.claude/skills" -mindepth 2 -maxdepth 2 -name .altimate-workspace-skill 2>/dev/null | head -n 1)" ]; then
-    SKILLS_NOTE=' The linked Altimate workspace'"'"'s team skills are available in this session as project skills (copied into `.claude/skills/`), next to the workspace conventions, knowledge and memory that the workspace tools return.'
+  # Claude Code drops skill descriptions once its skill listing is over its size budget, so the copies' descriptions are repeated here.
+  SKILLS_INDEX="$(python3 -I "$HANDLERS/sync-workspace-skills.py" --index "$PROJECT_DIR" 2>/dev/null)"
+  if [ -n "$SKILLS_INDEX" ]; then
+    SKILLS_NOTE=' The linked Altimate workspace'"'"'s team skills are available in this session as project skills (copied into `.claude/skills/`), next to the workspace conventions, knowledge and memory that the workspace tools return. Claude Code'"'"'s skill listing can show them without descriptions when it is over its size budget, so they are listed here:\n'"$SKILLS_INDEX"
   fi
 fi
 

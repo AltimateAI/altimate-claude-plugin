@@ -32,6 +32,8 @@ for mode in mcp cli; do
   [ -f "$project/.claude/skills/team-style/SKILL.md" ] || fail "$mode: workspace skill was not copied"
   [ "$(cat "$project/.claude/skills/own/SKILL.md")" = "mine" ] || fail "$mode: user skill was changed"
   printf '%s' "$note" | grep -q 'available in this session as project skills' || fail "$mode: context does not mention the project skills"
+  printf '%s' "$note" | grep -qx -- '- team-style: Team style' || fail "$mode: context does not index the workspace skill descriptions"
+  printf '%s' "$note" | grep -q -- '^- own' && fail "$mode: context indexes the user's own skill"
 done
 
 project="$TMP/off"

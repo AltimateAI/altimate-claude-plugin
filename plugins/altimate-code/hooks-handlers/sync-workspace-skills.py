@@ -575,10 +575,48 @@ def reconcile(project, target_root, skills, lock, manifest_text=None, check_mani
     return changed
 
 
+INDEX_DESCRIPTION_CHARS = 250
+INDEX_TOTAL_CHARS = 4000
+
+
+def index(project):
+    """One `- name: description` line per workspace skill copy, descriptions cut to
+    INDEX_DESCRIPTION_CHARS and the whole index to INDEX_TOTAL_CHARS (later skills
+    keep only their names). Claude Code shows a skill's description only while its
+    skill listing fits a size budget; past it, project skills appear as bare names
+    that Claude cannot match to a request, so session start repeats them."""
+    target_root = os.path.join(project, SKILLS_DIR)
+    if is_link(os.path.join(project, ".claude")) or is_link(target_root) or not os.path.isdir(target_root):
+        return ""
+    lines, used = [], 0
+    for entry in sorted(os.listdir(target_root)):
+        path = os.path.join(target_root, entry)
+        if not NAME_PATTERN.fullmatch(entry) or not is_ours(path):
+            continue
+        try:
+            fields, _ = parse_frontmatter(read_text_no_follow(os.path.join(path, "SKILL.md"), "utf-8-sig"))
+        except (OSError, UnicodeDecodeError):
+            continue
+        description = " ".join(((fields or {}).get("description") or "").split())
+        if len(description) > INDEX_DESCRIPTION_CHARS:
+            description = description[: INDEX_DESCRIPTION_CHARS - 1].rsplit(" ", 1)[0] + "…"
+        line = f"- {entry}: {description}" if description and used < INDEX_TOTAL_CHARS else f"- {entry}"
+        used += len(line) + 1
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def main():
     flags = {arg for arg in sys.argv[1:] if arg.startswith("--")}
     paths = [arg for arg in sys.argv[1:] if not arg.startswith("--")]
     project = paths[0] if paths else os.getcwd()
+    if "--index" in flags:
+        # JSON-string-escaped, without the quotes, for embedding in the hook's JSON output.
+        try:
+            print(json.dumps(index(project))[1:-1])
+        except Exception as err:  # never break session start
+            print(f"altimate-code plugin: workspace skill index failed: {err}", file=sys.stderr)
+        return
     if "--account" in flags:
         try:
             identity = signed_in_as()
