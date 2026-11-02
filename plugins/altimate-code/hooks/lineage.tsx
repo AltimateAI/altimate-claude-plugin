@@ -573,7 +573,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   const unchecked: string[] = everyTouched.slice(MAX_EDIT_COLUMNS)
   if (touched.length > 0) {
     const began = await $.clock.now()
-    // Each column has the whole hold: a slow one does not discard the others.
+    // The columns run side by side, each within the time left before the deadline (below): a slow one does not discard the others.
     const results = await Promise.all(
       // Each column gets what is left before the deadline (at most HOLD_MS), so a slow graph lookup
       // leaves the columns unchecked instead of losing the whole note.
