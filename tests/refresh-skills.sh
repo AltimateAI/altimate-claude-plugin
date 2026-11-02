@@ -30,7 +30,8 @@ FAKE
 chmod +x "$TMP/bin/altimate"
 export HOME="$TMP/home" XDG_CACHE_HOME="$TMP/cache" PATH="$TMP/bin:$PATH"
 
-wait_for() { for _ in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
+# Up to 20 s: the background refresh is slow on a loaded machine.
+wait_for() { for _ in $(seq 1 200); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 
 # Never synced: SessionStart returns at once, the slow refresh copies the skill later.
 p="$TMP/first"; mkdir -p "$p/.altimate-code"

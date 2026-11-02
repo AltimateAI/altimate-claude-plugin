@@ -581,14 +581,15 @@ INDEX_TOTAL_CHARS = 4000
 
 def index(project):
     """One `- name: description` line per workspace skill copy, descriptions cut to
-    INDEX_DESCRIPTION_CHARS and the whole index to INDEX_TOTAL_CHARS (later skills
-    keep only their names). Claude Code shows a skill's description only while its
+    INDEX_DESCRIPTION_CHARS and the whole index, as JSON-escaped text, to INDEX_TOTAL_CHARS;
+    skills past it are counted in a last `- … and N more` line, so SessionStart stays well
+    inside Claude Code's hook output limit. Claude Code shows a skill's description only while its
     skill listing fits a size budget; past it, project skills appear as bare names
     that Claude cannot match to a request, so session start repeats them."""
     target_root = os.path.join(project, SKILLS_DIR)
     if is_link(os.path.join(project, ".claude")) or is_link(target_root) or not os.path.isdir(target_root):
         return ""
-    lines, used = [], 0
+    lines, used, omitted = [], 0, 0
     for entry in sorted(os.listdir(target_root)):
         path = os.path.join(target_root, entry)
         if not NAME_PATTERN.fullmatch(entry) or not is_ours(path):
@@ -600,9 +601,15 @@ def index(project):
         description = " ".join(((fields or {}).get("description") or "").split())
         if len(description) > INDEX_DESCRIPTION_CHARS:
             description = description[: INDEX_DESCRIPTION_CHARS - 1].rsplit(" ", 1)[0] + "…"
-        line = f"- {entry}: {description}" if description and used < INDEX_TOTAL_CHARS else f"- {entry}"
-        used += len(line) + 1
+        line = f"- {entry}: {description}" if description else f"- {entry}"
+        size = len(json.dumps(line)[1:-1]) + 2
+        if omitted or used + size > INDEX_TOTAL_CHARS - 80:  # room for the closing line
+            omitted += 1
+            continue
+        used += size
         lines.append(line)
+    if omitted:
+        lines.append(f"- … and {omitted} more in .claude/skills/")
     return "\n".join(lines)
 
 

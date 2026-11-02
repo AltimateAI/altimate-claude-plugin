@@ -1,6 +1,6 @@
 # Privacy Policy — Altimate Code plugin for Claude Code
 
-**Effective date:** October 17, 2026
+**Effective date:** November 2, 2026
 **Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) MCP server and CLI.
 
 This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai/privacy) and [Terms](https://www.altimate.ai/terms), which govern Altimate services generally. Where this document is silent, the master policy applies. Questions: **info@altimate.ai**.
@@ -9,8 +9,8 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 
 ## The short version
 
-- When the plugin is enabled, Claude Code launches a local `altimate-code mcp serve` process for direct data tools. This requires a build containing `mcp serve`; if the server cannot start or is disallowed, the same tools run through the model-free `altimate tool run` CLI, which makes no LLM calls either.
-- MCP tool results, including sampled column values and query results, enter the Claude Code conversation and therefore reach your configured model provider. The local MCP server makes no separate LLM calls.
+- When the plugin is enabled, Claude Code launches a local `altimate-code mcp serve` process for direct data tools. This requires a build containing `mcp serve`; if the server cannot start or is disallowed, the same tools run through `altimate tool run`. These direct execution paths do not run a local planning model, but workspace services may use backend models as described below.
+- MCP tool results, including sampled column values and query results, enter the Claude Code conversation and therefore reach your configured model provider. Workspace tools can send requests to Altimate services, including backend models used by `ask_knowledge_base`.
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
 - In a project linked to an Altimate workspace, the plugin copies the workspace's team skills into the project's `.claude/skills/` and refreshes them from Altimate in the background at session start and at most hourly. Their text loads into the Claude Code conversation like any project skill. `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns this off and removes the copies at the next session start.
@@ -28,7 +28,19 @@ The plugin registers a local stdio MCP server through `.mcp.json`, provides rout
 | Schema metadata, sampled column values, and query results returned by tools | Local MCP server → Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
 | Scratch tables and spilled query results | Local session storage or spill files; any content Claude reads enters the conversation and reaches your model provider | Local artifacts; conversation copies follow Claude Code and provider policies |
 
-The MCP server makes no separate LLM calls. Delegation uses the separate provider path below.
+Direct local data tools do not invoke a planning model. Workspace tools have the additional service flows below; delegation uses the separate provider path described later.
+
+## Data flows for workspace tools
+
+When workspace tools are enabled in a linked project, requests use your Altimate sign-in and workspace identity. Tool results enter the Claude Code conversation and reach its configured model provider.
+
+| Data | Where it goes | Retention |
+|---|---|---|
+| Questions, SQL and other arguments sent through `workspace_context`, `workspace_skill` and `workspace_execute` (MCP, or `tool run --workspace-tools`) | Your Altimate tenant; knowledge questions (`ask_knowledge_base`) are answered by Altimate's backend models | Governed by the Altimate privacy policy and applicable service terms |
+| Workspace SQL, connection identifiers, and metadata requests | Workspace engine and configured database services; results return through the tool to Claude Code | Governed by the workspace, database, Altimate service, and model-provider policies |
+| Workspace metadata, knowledge, and returned results | Local tool process → Claude Code conversation → configured model provider | Governed by Claude Code and provider policies |
+
+These service calls are separate from local CLI delegation. Configuring BYOK for delegation does not redirect workspace backend model calls. To keep these requests from being sent, do not link the project to an Altimate workspace; without a link the workspace tools send no questions or SQL; they only list your workspaces so one can be chosen.
 
 ## Data flows for workspace skills
 
@@ -50,7 +62,7 @@ The delegation path below runs only when the delegation skill or the `/altimate-
 | Warehouse query results, dbt output, file edits | Produced locally; data supplied to the CLI agent reaches its configured LLM provider. Output read back into Claude Code reaches Claude Code's model provider. | Local output files; provider copies follow the applicable provider policies |
 | Schema metadata indexed by the CLI | Local index on your machine | Local only |
 
-**Bring Your Own Key (BYOK):** if you configure your own provider (Anthropic, OpenAI, Bedrock, Azure OpenAI, Ollama, and others), your prompts go directly from your machine to that provider. Altimate is not in the path.
+**Bring Your Own Key (BYOK):** if you configure your own provider (Anthropic, OpenAI, Bedrock, Azure OpenAI, Ollama, and others), your prompts go directly from your machine to that provider. Altimate is not in that delegation path; workspace service requests still go to Altimate.
 
 ## Usage telemetry
 

@@ -26,7 +26,8 @@ HINT = (
     "Direct warehouse query detected. The altimate-code CLI runs this read-only with no extra setup: "
     "altimate tool run sql_execute --workspace-tools --args with a JSON body holding the warehouse and "
     "query fields --json (schema_inspect for structure, warehouse_list for connections). "
-    "Use altimate-code if altimate is not on PATH."
+    "Use altimate-code if altimate is not on PATH. For a write (a migration or a load), ask the user before "
+    "adding --allow-write, or delegate the job with altimate run."
 )
 SEPARATORS = set(";&|()")
 # Separators inside quotes or escaped are words, not operators: masked before splitting.

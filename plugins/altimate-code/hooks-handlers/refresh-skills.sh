@@ -46,11 +46,14 @@ done
 find "$LOCK" -maxdepth 0 -mmin +10 -exec rmdir {} \; 2>/dev/null
 if [ "$MODE" = "--wait" ]; then
   # A refresh already in flight finishes first; this one then picks up anything newer.
+  # The wait stays well under the Bash tool's default two-minute limit.
   LOCKED=
   i=0
-  while [ "$i" -lt 120 ]; do mkdir "$LOCK" 2>/dev/null && LOCKED=1 && break; sleep 1; i=$((i + 1)); done
+  while [ "$i" -lt 60 ]; do mkdir "$LOCK" 2>/dev/null && LOCKED=1 && break; sleep 1; i=$((i + 1)); done
   [ -n "$LOCKED" ] || { say "Another workspace skill refresh is still running; try again when it finishes."; exit 1; }
-  "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR" </dev/null
+  trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+  trap 'exit 1' HUP INT TERM
+  ALTIMATE_CLAUDE_SKILL_SYNC=1 "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR" </dev/null
   STATUS=$?
   python3 -I "$SYNC_SCRIPT" "$PROJECT_DIR" >/dev/null
   rmdir "$LOCK" 2>/dev/null
@@ -62,9 +65,11 @@ fi
 if mkdir "$LOCK" 2>/dev/null; then
   mkdir -p "$(dirname "$ATTEMPTED")" 2>/dev/null && touch "$ATTEMPTED" 2>/dev/null
   (
-    "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR"
+    # The lock goes with this subshell even when it is stopped mid-refresh.
+    trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+    trap 'exit 1' HUP INT TERM
+    ALTIMATE_CLAUDE_SKILL_SYNC=1 "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR"
     python3 -I "$SYNC_SCRIPT" "$PROJECT_DIR"
-    rmdir "$LOCK"
   ) </dev/null >/dev/null 2>&1 &
 fi
 exit 0

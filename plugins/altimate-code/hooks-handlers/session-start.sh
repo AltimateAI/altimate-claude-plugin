@@ -15,9 +15,9 @@ MODE="$(altimate_data_mode)"
 
 # Both modes: copy the linked Altimate workspace's skills into the project's
 # `.claude/skills/` (see sync-workspace-skills.py) so they load as Claude Code
-# skills. altimate-code writes these copies itself when a project is linked or
-# refreshed; this copy of the snapshot on disk is the safety net for older CLIs
-# and runs before Claude's first reply. A snapshot that was never synced, or not
+# skills. altimate-code also writes these copies when refresh-skills.sh asks it to
+# (ALTIMATE_CLAUDE_SKILL_SYNC=1); this copy of the snapshot on disk covers older
+# CLIs and runs before Claude's first reply. A snapshot that was never synced, or not
 # for an hour, is refreshed in the background by refresh-skills.sh without
 # delaying the session; Claude Code's skill watcher loads the copies when it
 # finishes. Set ALTIMATE_CLAUDE_SKILL_SYNC=0 to turn all of this off; the copies
