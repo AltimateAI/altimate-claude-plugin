@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> } }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown> }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -102,6 +102,8 @@ async function start($: any, on: any, options: Options = {}) {
     calls.push(`mcp:${e.tool}${e.args?.column ? `:${e.args.column}` : ''}`)
     // Claude Code passes structured content on as a JSON text block in place of the text.
     if (e.tool === 'dbt_lineage') {
+      // With the dbt integration, the structured result is its model lineage, plus the report.
+      if (options.modelLineage) return { value: { content: [{ type: 'text', text: JSON.stringify({ ...options.modelLineage, report: 'Model: fct_orders' }) }], isError: false } }
       const text = options.lineageText ?? (structured ? JSON.stringify({ ...LINEAGE, report: LINEAGE_TEXT }) : LINEAGE_TEXT)
       return { value: { content: [{ type: 'text', text }], isError: false } }
     }
@@ -550,4 +552,58 @@ test('a .sql file outside any dbt project gets no timeout toast', async ($, on) 
   await call
   await clock.settle()
   expect(toasts).toEqual([])
+})
+
+test("the pane reads the dbt integration's model lineage from altimate-code", async ($, on) => {
+  const modelLineage = {
+    version: 1,
+    focus: { uniqueId: 'model.shop.fct_orders', name: 'fct_orders' },
+    nodes: [
+      { uniqueId: 'model.shop.int_orders', name: 'int_orders', type: 'model', direction: 'upstream', depth: 1, parents: [], columns: [] },
+      { uniqueId: 'model.shop.fct_orders', name: 'fct_orders', type: 'model', direction: 'focus', depth: 0, parents: ['model.shop.int_orders'], columns: [{ name: 'revenue' }] },
+    ],
+    columnLineage: [{ source: ['model.shop.int_orders', 'net'], target: ['model.shop.fct_orders', 'revenue'], type: 'direct', viewsType: 'Alias', viewsCode: [] }],
+    confidence: 'high',
+    errors: [],
+  }
+  const { clock } = await start($, on, { modelLineage })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /← int_orders\.net\s+Alias/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("Claude's dbt_lineage trace from the dbt integration counts the edges on other models, and a column trace is not kept as the model's columns", async ($, on) => {
+  const trace = {
+    version: 1,
+    focus: { uniqueId: 'model.shop.fct_orders', name: 'fct_orders', column: 'revenue' },
+    nodes: [
+      { uniqueId: 'model.shop.int_orders', name: 'int_orders', type: 'model', direction: 'upstream', depth: 1, parents: [], columns: [] },
+      { uniqueId: 'model.shop.fct_orders', name: 'fct_orders', type: 'model', direction: 'focus', depth: 0, parents: ['model.shop.int_orders'], columns: [] },
+      { uniqueId: 'model.shop.rpt', name: 'rpt', type: 'model', direction: 'downstream', depth: 1, parents: ['model.shop.fct_orders'], columns: [] },
+    ],
+    columnLineage: [
+      { source: ['model.shop.int_orders', 'net'], target: ['model.shop.fct_orders', 'revenue'], type: 'direct', viewsType: 'Transformation', viewsCode: ['sum(net)'] },
+      { source: ['model.shop.fct_orders', 'revenue'], target: ['model.shop.rpt', 'revenue'], type: 'direct', viewsType: 'Original', viewsCode: [] },
+    ],
+    confidence: 'high',
+    errors: [],
+  }
+  const tool = 'mcp__plugin_altimate-code_altimate-code__dbt_lineage'
+  const { clock, calls } = await start($, on, { toolResult: e => (e.tool === tool ? [{ type: 'text', text: JSON.stringify({ ...trace, report: 'x' }) }] : undefined) })
+  await $.tool.call({ tool, model: 'fct_orders', column: 'revenue' } as any)
+  await clock.settle()
+  // Not preloaded from the one-column trace: the pane asks for the whole model.
+  expect(calls).toContain('mcp:dbt_lineage')
+  const row = await $.ui.mount({
+    plugin: 'altimate-code',
+    component: 'ToolResult',
+    requestId: 'tu-2',
+    props: { tool_use_id: 'tu-2', tool, output: [{ type: 'text', text: JSON.stringify({ ...trace, report: 'x' }) }], isErrored: false },
+    surface: 'terminal',
+  } as any)
+  expect(await row.find({ type: 'Text', text: /\+ 1 edges on other models of the trace/ })).toBeDefined()
+  expect(await row.find({ type: 'Text', text: / \(sum\(net\)\)/ })).toBeDefined()
+  await row.unmount()
 })

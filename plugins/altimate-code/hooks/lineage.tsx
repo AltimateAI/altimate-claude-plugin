@@ -18,6 +18,7 @@ import {
   downstreamArt,
   findModel,
   impactOf,
+  modelLineageOf,
   parseDbtLineage,
   reachFromMetadata,
   type Segment,
@@ -775,7 +776,8 @@ export function registerLineage(on: On) {
     if (result.deny || result.isError) return result
 
     if (DBT_LINEAGE.test(e.tool) && 'model' in e) {
-      const columns = lineageFromOutput((result as any).result ?? result.text)
+      // A trace of one column holds only that column's edges: not the model's columns to keep.
+      const columns = (e as any).column ? null : lineageFromOutput((result as any).result ?? result.text)
       const manifest = typeof (e as any).manifest_path === 'string' ? String((e as any).manifest_path) : undefined
       later($, async () => void (await follow($, { model: String((e as any).model), columns, auto: true, manifest })))
     }
@@ -801,6 +803,9 @@ export function registerLineage(on: On) {
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     if (!DBT_LINEAGE.test(e.props.tool) || e.props.isErrored) return next(e)
     const parsed = lineageFromOutput(e.props.output)
+    // The integration's trace runs across hops; this row lists the model's own edges and counts the rest.
+    const trace = modelLineageOf(e.props.output) ?? modelLineageOf(parseJson(textOf(e.props.output)))
+    const otherEdges = trace && parsed ? Math.max(0, trace.columnLineage.length - parsed.edges.length) : 0
     if (!parsed || parsed.edges.length === 0) return next(e)
     const { Box, Text } = $.ui.resolve(e)
     const direct = parsed.edges.filter(edge => edge.lineageType === 'direct')
@@ -812,6 +817,11 @@ export function registerLineage(on: On) {
         <Text dimColor>
           {parsed.model} · confidence {parsed.confidence} · {parsed.columns.length} columns · {parsed.edges.length} edges
         </Text>
+        {otherEdges > 0 && !e.props.isExpanded ? (
+          <Text dimColor>
+            + {otherEdges} edges on other models of the trace · ctrl+o for all
+          </Text>
+        ) : null}
         {(e.props.isExpanded ? direct : direct.slice(0, 12)).map((edge, i) => (
           <Text key={`edge-${i}`}>
             {edge.target.padEnd(w1)} <Text dimColor>←</Text> {edge.source.padEnd(w2)}{'  '}

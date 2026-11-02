@@ -157,8 +157,53 @@ export function sourceName(source: unknown): string {
   return text.replace(/[`"\[\]]/g, '')
 }
 
+/**
+ * The dbt integration's model lineage (dbt_lineage when altimate-code runs it through the project's
+ * dbt adapter): the focus model's column edges become the pane's columns, its parents the upstream.
+ */
+export function columnsFromModelLineage(lineage: any): ColumnLineage | null {
+  const focus = lineage?.focus
+  if (!focus || typeof focus.uniqueId !== 'string' || !Array.isArray(lineage.columnLineage) || !Array.isArray(lineage.nodes)) return null
+  const names = new Map<string, string>(lineage.nodes.map((node: any) => [String(node?.uniqueId), String(node?.name ?? node?.uniqueId)]))
+  const ref = (pair: unknown) => (Array.isArray(pair) && pair.length === 2 ? { node: String(pair[0]), column: String(pair[1]) } : null)
+  const edges: ColumnEdge[] = []
+  const columns = new Map<string, string[]>()
+  for (const edge of lineage.columnLineage) {
+    const source = ref(edge?.source)
+    const target = ref(edge?.target)
+    if (!source || !target || target.node !== focus.uniqueId) continue
+    const from = `${names.get(source.node) ?? source.node}.${source.column}`
+    const code = Array.isArray(edge?.viewsCode) ? edge.viewsCode : []
+    edges.push({
+      source: from,
+      target: target.column,
+      lineageType: edge?.type === 'indirect' ? 'indirect' : 'direct',
+      lens: String(edge?.viewsType ?? 'Not sure'),
+      // The last step is the expression that produces the column, as altimate-code's text shows it.
+      expression: code.length > 0 ? String(code[code.length - 1]) : null,
+    })
+    if (edge?.type !== 'indirect') columns.set(target.column, [...(columns.get(target.column) ?? []), from])
+  }
+  const focusNode = lineage.nodes.find((node: any) => node?.uniqueId === focus.uniqueId)
+  // Columns the integration knows but no edge reaches still belong in the list.
+  for (const column of Array.isArray(focusNode?.columns) ? focusNode.columns : []) {
+    if (typeof column?.name === 'string' && !columns.has(column.name)) columns.set(column.name, [])
+  }
+  return {
+    model: String(focus.name ?? focus.uniqueId),
+    confidence: lineage.confidence === 'high' ? 'high' : 'low',
+    note: Array.isArray(lineage.errors) && lineage.errors[0] ? String(lineage.errors[0]) : null,
+    upstream: Array.isArray(focusNode?.parents) ? focusNode.parents.map(String) : [],
+    columns: [...columns].map(([name, sources]) => ({ name, sources })),
+    edges,
+  }
+}
+
 /** dbt_lineage's structured metadata (altimate-code builds that send it) → the pane's columns. */
 export function columnsFromMetadata(metadata: any): ColumnLineage | null {
+  // The dbt integration's model lineage, sent as the result itself or inside the tool's metadata.
+  const modelLineage = columnsFromModelLineage(metadata) ?? columnsFromModelLineage(metadata?.structuredContent)
+  if (modelLineage) return modelLineage
   if (!metadata || typeof metadata !== 'object' || !metadata.columns || typeof metadata.columns !== 'object') return null
   const edges: ColumnEdge[] = (Array.isArray(metadata.edges) ? metadata.edges : []).map((edge: any) => ({
     source: sourceName(edge?.source),
@@ -618,4 +663,10 @@ export function downstreamArt(graph: LineageGraph, id: string, expanded = false)
     ])
   }
   return rows
+}
+
+/** The dbt integration's model lineage in a dbt_lineage answer, as sent or inside its metadata. */
+export function modelLineageOf(value: unknown): any | null {
+  const candidates = [value, (value as any)?.structuredContent]
+  return candidates.find(one => (one as any)?.focus && Array.isArray((one as any)?.columnLineage)) ?? null
 }

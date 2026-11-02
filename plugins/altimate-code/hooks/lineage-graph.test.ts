@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import {
   buildGraph,
+  columnsFromModelLineage,
   selectItems,
   columnsFromMetadata,
   downstreamArt,
@@ -283,4 +284,42 @@ test('select items map each output name to its expression', () => {
 test('an explicit null relation_name (an ephemeral model) has no warehouse relation', () => {
   const graph = buildGraph({ nodes: { 'model.s.eph': { ...model('eph', []), relation_name: null, database: 'db', schema: 'main' } }, sources: {}, exposures: {} })
   expect(graph.nodes['model.s.eph']!.relation).toBeNull()
+})
+
+const ML = {
+  version: 1,
+  focus: { uniqueId: 'model.shop.customers', name: 'customers' },
+  nodes: [
+    { uniqueId: 'model.shop.stg_payments', name: 'stg_payments', type: 'model', direction: 'upstream', depth: 1, parents: [], columns: [] },
+    { uniqueId: 'model.shop.customers', name: 'customers', type: 'model', direction: 'focus', depth: 0, parents: ['model.shop.stg_payments'], columns: [{ name: 'customer_id' }, { name: 'ltv' }] },
+    { uniqueId: 'model.shop.segments', name: 'segments', type: 'model', direction: 'downstream', depth: 1, parents: ['model.shop.customers'], columns: [] },
+  ],
+  columnLineage: [
+    { source: ['model.shop.stg_payments', 'amount'], target: ['model.shop.customers', 'ltv'], type: 'direct', viewsType: 'Transformation', viewsCode: ['stg_payments.amount', 'sum(amount)'] },
+    { source: ['model.shop.stg_payments', 'status'], target: ['model.shop.customers', 'ltv'], type: 'indirect', viewsType: 'Non select', viewsCode: [] },
+    { source: ['model.shop.customers', 'ltv'], target: ['model.shop.segments', 'ltv'], type: 'direct', viewsType: 'Original', viewsCode: [] },
+  ],
+  confidence: 'high',
+  errors: [],
+}
+
+test("the dbt integration's model lineage reads as the focus model's columns, directly or inside metadata", () => {
+  const expected = {
+    model: 'customers',
+    confidence: 'high',
+    note: null,
+    upstream: ['model.shop.stg_payments'],
+    columns: [
+      { name: 'ltv', sources: ['stg_payments.amount'] },
+      { name: 'customer_id', sources: [] },
+    ],
+    edges: [
+      { source: 'stg_payments.amount', target: 'ltv', lineageType: 'direct', lens: 'Transformation', expression: 'sum(amount)' },
+      { source: 'stg_payments.status', target: 'ltv', lineageType: 'indirect', lens: 'Non select', expression: null },
+    ],
+  }
+  expect(columnsFromModelLineage(ML)).toEqual(expected)
+  expect(columnsFromMetadata({ model_name: 'customers', confidence: 'high', structuredContent: ML })).toEqual(expected)
+  expect(columnsFromMetadata({ ...ML, report: 'Model: customers' })).toEqual(expected)
+  expect(columnsFromModelLineage({ focus: {} })).toBeNull()
 })
