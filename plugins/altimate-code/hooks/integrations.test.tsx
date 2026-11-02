@@ -51,7 +51,7 @@ const field = (name: string, label: string, secret: boolean, extra: Record<strin
 /** The timeout the plugin gave each command, by the command's arguments. */
 const timeouts: Record<string, unknown> = {}
 /** Answers each `altimate integrations …` call the way the CLI does, and remembers the calls. */
-function fakeCli(on: any, answers: { connect: { exitCode: number; body: Record<string, unknown> }; sync?: Record<string, unknown>; status?: unknown }) {
+function fakeCli(on: any, answers: { connect: { exitCode: number; body: Record<string, unknown> }; sync?: Record<string, unknown>; status?: unknown; discardFails?: boolean }) {
   const calls: string[][] = []
   let secretSet = false
   on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
@@ -83,6 +83,7 @@ function fakeCli(on: any, answers: { connect: { exitCode: number; body: Record<s
       case 'open-token-page':
         return reply({ provider: 'jira', variant: 'cloud', tokenUrl: 'https://id.atlassian.com/manage-profile/security/api-tokens' })
       case 'discard':
+        if (answers.discardFails) return reply({ message: 'store locked' }, 1)
         secretSet = false
         return reply({ provider: 'jira', status: 'discarded' })
       case 'connect':
@@ -168,6 +169,7 @@ function cliWith(on: any, providers: unknown[], reply: (args: string[]) => { exi
   on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
     const args = e.argv.slice(2)
     calls.push(args)
+    timeouts[args.join(' ')] = (e as any).init?.timeoutMs
     const custom = reply(args)
     if (custom) return { value: { stderr: '', ...custom } }
     return { value: { exitCode: 0, stdout: JSON.stringify({ workspace: { name: 'Acme', tenant: 'acme', linked: true, id: 1, signedIn: true }, providers }), stderr: '' } }
@@ -286,19 +288,96 @@ test('a sync with a failed provider shows its reason, and a timeout is not repor
   await ui.unmount()
 })
 
-test('Sync all waits longer than a sync of one provider', async ($, on) => {
+test('Sync all makes one call per provider with the per-provider timeout, and a failing provider does not stop the rest', async ($, on) => {
   const clock = mock.clock(on)
   on('command.register', () => ({ value: { command: 'integrations' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  fakeCli(on, { connect: { exitCode: 0, body: {} }, sync: { results: [] } })
+  const calls = cliWith(on, [provider('github', 'GitHub', 'detected')], args => {
+    if (args[0] !== 'sync') return undefined
+    if (args[1] === 'jira') return { exitCode: 1, stdout: JSON.stringify({ results: [{ id: 'jira', result: 'failed', reason: 'connection test failed', steps: [] }] }) }
+    return { exitCode: 0, stdout: JSON.stringify({ results: [{ id: args[1], result: 'synced', steps: [] }] }) }
+  })
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'sync-everything' })
   await clock.settle()
+  expect(calls.filter(args => args[0] === 'sync')).toEqual([
+    ['sync', 'github', '--keep-synced', '--json'],
+    ['sync', 'jira', '--keep-synced', '--json'],
+    ['sync', 'linear', '--keep-synced', '--json'],
+  ])
+  expect(calls.some(args => args.includes('--all'))).toBe(false)
+  for (const id of ['github', 'jira', 'linear']) expect(timeouts[`sync ${id} --keep-synced --json`]).toBe(300_000)
+  expect(await ui.find({ type: 'Text', text: /GitHub synced · Jira: connection test failed · Linear synced/ })).toBeDefined()
   await ui.unmount()
-  expect(timeouts['sync --all --json']).toBe(600_000)
-  expect(Number(timeouts['status --json'])).toBeLessThan(600_000)
+})
+
+test('the band connects what was found, after dropping what an earlier form left behind', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const found = { ...STATUS, providers: [provider('github', 'GitHub', 'detected', { source: { kind: 'cli', label: 'gh CLI' } }), STATUS.providers[1], STATUS.providers[2]] }
+  const cli = fakeCli(on, { status: found, connect: { exitCode: 0, body: { status: 'connected', sync: 'local' } } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const band = await $.ui.mount({ plugin: 'altimate-code', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } } as any)
+  await band.press({ key: 'keep-local' })
+  await clock.settle()
+  const order = cli.map(args => args[0]).filter(verb => verb === 'discard' || verb === 'connect')
+  expect(order).toEqual(['discard', 'connect'])
+  expect(cli).toContainEqual(['discard', 'github', '--json'])
+  await band.unmount()
+})
+
+test('the band does not connect when dropping earlier input fails', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const found = { ...STATUS, providers: [provider('github', 'GitHub', 'detected', { source: { kind: 'cli', label: 'gh CLI' } }), STATUS.providers[1], STATUS.providers[2]] }
+  const cli = fakeCli(on, { status: found, discardFails: true, connect: { exitCode: 0, body: { status: 'connected', sync: 'local' } } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const band = await $.ui.mount({ plugin: 'altimate-code', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } } as any)
+  await band.press({ key: 'keep-local' })
+  await clock.settle()
+  expect(cli.some(args => args[0] === 'connect')).toBe(false)
+  await band.unmount()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /GitHub: could not clear earlier input: store locked/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('a credential found here is offered next to a hand-made connection', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  cliWith(
+    on,
+    [
+      provider('github', 'GitHub', 'connected', { sync: 'synced', managed: false, found: { source: { kind: 'cli', label: 'gh CLI' }, account: 'octo' } }),
+      provider('jira', 'Jira', 'not_found'),
+      provider('linear', 'Linear', 'not_found'),
+    ],
+    () => undefined,
+  )
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'github-use' })).toBeDefined()
+  expect(await ui.find({ key: 'github-local' })).toBeDefined()
+  expect(await ui.find({ key: 'github-off' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a session without a person at the prompt does not scan the machine', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const cli = fakeCli(on, { connect: { exitCode: 0, body: {} } })
+  await $.session.start({ cwd: '/', surface: null, isInteractive: false })
+  await clock.settle()
+  expect(cli).toEqual([])
 })
 
 test('a status refresh that times out does not tell the user to install the CLI', async ($, on) => {
@@ -405,7 +484,9 @@ test('an unlinked folder offers Link workspace; choosing one links, then syncs',
   const run = calls.filter(argv => argv[0] === 'link' || argv[1] === 'sync')
   expect(run).toEqual([
     ['link', '--workspace', '7', '-y'],
-    ['integrations', 'sync', '--all', '--json'],
+    ['integrations', 'sync', 'github', '--keep-synced', '--json'],
+    ['integrations', 'sync', 'jira', '--keep-synced', '--json'],
+    ['integrations', 'sync', 'linear', '--keep-synced', '--json'],
   ])
   expect(await ui.find({ type: 'Text', text: /Linked to Analytics · GitHub synced/ })).toBeDefined()
   expect(await ui.find({ key: 'link-workspace' })).toBeUndefined()

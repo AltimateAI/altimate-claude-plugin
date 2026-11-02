@@ -16,9 +16,8 @@ const DEFAULT_TIMEOUT_MS = 90_000
 // Connect and update add a catalog fetch and a second lock wait before the lock, and
 // two binding lookups inside it, so they sit at the top of this budget; a run that
 // outlasts it is reported as failed and is never started again.
+// Sync all makes one such call per provider, in turn, so no single call can outlast this budget.
 const WORKSPACE_TIMEOUT_MS = 300_000
-// Sync all runs the three providers one after the other.
-const SYNC_ALL_TIMEOUT_MS = 600_000
 // The browser sign-in waits for the person to finish in the browser.
 const SIGN_IN_TIMEOUT_MS = 300_000
 
@@ -123,9 +122,14 @@ function failureText(result: { stdout: string; stderr: string }, command?: strin
   return (command === 'sync' ? syncText(result.stdout) : null) ?? data?.message ?? data?.error ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
 }
 
+// A status read that finishes after a newer one started is dropped, so an older answer never overwrites a newer one.
+let latestRefresh = 0
+
 async function refresh($: EngineInterface, subcommand: 'status' | 'detect' = 'status') {
+  const mine = ++latestRefresh
   try {
     const result = await runCli($, [subcommand, '--json'])
+    if (mine !== latestRefresh) return
     const next = parseStatus(result.stdout)
     if (next) {
       await update($, status, () => next)
@@ -135,6 +139,7 @@ async function refresh($: EngineInterface, subcommand: 'status' | 'detect' = 'st
       await update($, message, () => failure ?? 'altimate returned no integrations status.')
     }
   } catch (error) {
+    if (mine !== latestRefresh) return
     await update($, message, () =>
       MISSING_BINARY.test(String(error)) ? 'altimate CLI not found: install it to use one-click integrations.' : `Could not run altimate: ${String(error)}`,
     )
@@ -144,7 +149,7 @@ async function refresh($: EngineInterface, subcommand: 'status' | 'detect' = 'st
 function showStatusLine($: EngineInterface, current: IntegrationsStatus) {
   const linked = current.providers.filter(one => one.state === 'connected')
   const synced = linked.filter(one => one.sync === 'synced').length
-  const waiting = current.providers.filter(one => one.state === 'detected' || one.state === 'available').length
+  const waiting = current.providers.filter(one => one.state === 'detected' || one.found || one.state === 'available').length
   const attention = current.providers.filter(one => one.state === 'expired' || one.state === 'rejected').length
   const parts = [`⚡ Altimate ${linked.length}/${current.providers.length} integrations`]
   if (attention > 0) parts.push(`${attention} needs attention`)
@@ -161,10 +166,44 @@ function later($: EngineInterface, work: () => Promise<unknown>) {
   })
 }
 
-/** The timeout that fits what the command runs: one provider, or every provider in turn. */
+/** The timeout that fits what the command runs: one provider's sync or disconnect. */
 function timeoutFor(args: string[]) {
-  if (args[0] === 'sync') return args.includes('--all') ? SYNC_ALL_TIMEOUT_MS : WORKSPACE_TIMEOUT_MS
-  return args[0] === 'disconnect' ? WORKSPACE_TIMEOUT_MS : undefined
+  return args[0] === 'sync' || args[0] === 'disconnect' ? WORKSPACE_TIMEOUT_MS : undefined
+}
+
+const SYNC_PROVIDERS: ProviderId[] = ['github', 'jira', 'linear']
+
+/**
+ * Syncs every provider with its own call, one after the other, attaching what the workspace already
+ * holds and never overwriting it. One provider failing or timing out does not stop the others.
+ */
+async function syncEveryProvider($: EngineInterface): Promise<string | null> {
+  const lines: string[] = []
+  for (const id of SYNC_PROVIDERS) {
+    try {
+      const result = await runCli($, ['sync', id, '--keep-synced', '--json'], WORKSPACE_TIMEOUT_MS)
+      const line = syncText(result.stdout) ?? (result.exitCode === 0 ? null : `${nameOf(id)}: ${failureText(result)}`)
+      if (line) lines.push(line)
+    } catch (error) {
+      lines.push(`${nameOf(id)}: Could not run altimate: ${String(error)}`)
+    }
+  }
+  return lines.length > 0 ? lines.join(' · ') : null
+}
+
+/** Sync all: every provider in turn, with the pane's progress line and the status kept current. */
+async function syncAll($: EngineInterface) {
+  if (await read($, busy)) return
+  await update($, busy, () => ({ provider: 'all', label: 'Syncing…' }))
+  await update($, message, () => null)
+  try {
+    const text = (await syncEveryProvider($)) ?? summarize('sync', 'all')
+    await update($, message, () => text)
+    $.ui.toast(text)
+  } finally {
+    await update($, busy, () => null)
+    await refresh($)
+  }
 }
 
 /** Runs one CLI action, keeping the pane's progress line and the status current. */
@@ -254,8 +293,7 @@ async function linkWorkspace($: EngineInterface, choice: WorkspaceChoice) {
     }
     await update($, workspaces, () => null)
     await update($, busy, () => ({ provider: 'all', label: 'Syncing…' }))
-    const sync = await runCli($, ['sync', '--all', '--json'], SYNC_ALL_TIMEOUT_MS)
-    const detail = syncText(sync.stdout) ?? (sync.exitCode === 0 ? null : failureText(sync))
+    const detail = await syncEveryProvider($)
     const text = `Linked to ${choice.name}${detail ? ` · ${detail}` : ''}`
     await update($, message, () => text)
     $.ui.toast(text)
@@ -287,6 +325,19 @@ async function discardEntries($: EngineInterface, provider: ProviderId) {
   try {
     await runJson($, ['discard', provider, '--json'])
   } catch {}
+}
+
+/** Discards what was entered for a provider ahead of an action that ignores the form; an open form for it is closed with it. Returns why it failed, or null. */
+async function discardForAction($: EngineInterface, provider: ProviderId): Promise<string | null> {
+  let failure: string | null
+  try {
+    failure = (await runJson($, ['discard', provider, '--json'])).failure
+  } catch (error) {
+    failure = String(error)
+  }
+  if (failure) return failure
+  if ((await read($, expanded))?.provider === provider) await closeForm($)
+  return null
 }
 
 async function openForm($: EngineInterface, provider: ProviderId, mode: Expanded['mode'], note: string | null = null) {
@@ -442,6 +493,12 @@ function connectFound($: EngineInterface, providers: Provider[], localOnly: bool
     try {
       for (const one of providers) {
         await update($, busy, () => ({ provider: one.id, label: `Testing ${one.name}…` }))
+        // The band acts on what was found, not on values left in an earlier form.
+        const discardFailure = await discardForAction($, one.id)
+        if (discardFailure) {
+          lines.push(`${one.name}: could not clear earlier input: ${discardFailure}`)
+          continue
+        }
         const { data, failure } = await runJson<Outcome>($, ['connect', one.id, ...(localOnly ? ['--local-only'] : []), '--json'], WORKSPACE_TIMEOUT_MS)
         if (data?.status === 'connected') lines.push(connectedText(one.name, data))
         else {
@@ -540,7 +597,10 @@ export const register: Register = on => {
       name: COMMAND,
       description: 'One-click GitHub, Jira and Linear integrations for your Altimate workspace',
     })
-    void refresh($, 'detect')
+    // A press that was running when an earlier session ended can never finish, so it must not block this one.
+    await update($, busy, () => null)
+    // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
+    if (e.isInteractive) void refresh($, 'detect')
 
     return started
   })
@@ -561,7 +621,7 @@ export const register: Register = on => {
     if (e.props.hasSurvey || !current || (await read($, isBandHidden))) return next(e)
 
     const stopped = current.providers.filter(one => one.state === 'rejected' || one.state === 'expired')
-    const found = current.providers.filter(one => one.state === 'detected')
+    const found = current.providers.filter(one => one.state === 'detected' || one.found)
     const remote = current.providers.filter(one => one.state === 'available')
     if (stopped.length + found.length + remote.length === 0) return next(e)
 
@@ -569,7 +629,7 @@ export const register: Register = on => {
     const running = await read($, busy)
     const ready = found
     const signedOut = current.workspace.signedIn === false
-    const foundText = ready.map(one => `${one.name} (${one.source?.label ?? 'local'})`).join(', ')
+    const foundText = ready.map(one => `${one.name} (${(one.found?.source ?? one.source)?.label ?? 'local'})`).join(', ')
 
     return (
       <Box flexDirection="column">
@@ -761,7 +821,7 @@ export const register: Register = on => {
         {note && <Text color="suggestion">{note}</Text>}
         <Box>
           <Button key="refresh" label="Rescan" onPress={() => later($, () => act($, 'all', 'Rescanning…', ['detect', '--json']))} />
-          {!signedOut && <Button key="sync-everything" label="Sync all" onPress={() => later($, () => act($, 'all', 'Syncing…', ['sync', '--all', '--json']))} />}
+          {!signedOut && <Button key="sync-everything" label="Sync all" onPress={() => later($, () => syncAll($))} />}
         </Box>
       </Box>
     )
@@ -775,7 +835,7 @@ function actionsFor($: EngineInterface, one: Provider, Button: any, signedOut: b
   const addCredentials = () => (
     <Button key={`${one.id}-add`} label="Add credentials" onPress={() => later($, () => openForm($, one.id, 'connect'))} />
   )
-  if (one.state === 'detected') {
+  if (one.state === 'detected' || one.found) {
     buttons.push(
       ...(signedOut ? [] : [<Button key={`${one.id}-use`} label="Connect" onPress={() => connectFound($, [one], false)} />]),
       <Button key={`${one.id}-local`} label="Keep local" onPress={() => connectFound($, [one], true)} />,
@@ -784,7 +844,7 @@ function actionsFor($: EngineInterface, one: Provider, Button: any, signedOut: b
   }
   if (one.state === 'available' || one.state === 'not_found') buttons.push(addCredentials())
   // A connection made by hand in the web app is managed there: from here it can only be replaced by adding credentials.
-  if (one.managed === false && one.state !== 'detected') return [addCredentials()]
+  if (one.managed === false && one.state !== 'detected') return one.found ? buttons : [addCredentials()]
   // The connection this tool made can be replaced even when the row shows a newer one made by hand and still valid.
   if (one.state === 'expired' || one.state === 'rejected' || (one.state === 'connected' && one.sync === 'synced')) {
     buttons.push(<Button key={`${one.id}-update`} label="Update" onPress={() => later($, () => openForm($, one.id, 'update'))} />)

@@ -20,6 +20,8 @@ export type Provider = {
   note: string | null
   /** False for a connection made by hand in the web app, which this tool does not manage. */
   managed?: boolean
+  /** A credential found on this machine while the row shows a connection made by hand: it can still be connected here. */
+  found?: { source: { kind: SourceKind; label: string }; account: string | null }
 }
 
 export type IntegrationsStatus = {
