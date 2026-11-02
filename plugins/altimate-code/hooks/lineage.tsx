@@ -353,8 +353,10 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const superseded = () => claimedSeq !== seq
   // Compared with the focus as it is now: another follow may have landed while this one resolved.
   const latest = await read($, focusAtom)
+  if (superseded()) return false
   // The same unique_id in another project, or after a recompile, is a different focus.
-  const isNew = latest?.model !== id || latest.manifest !== manifest || latest.mtimeMs !== stat.mtimeMs || !!input.refresh
+  const differs = (one: LineageFocus | null) => one?.model !== id || one.manifest !== manifest || one.mtimeMs !== stat.mtimeMs
+  const isNew = differs(latest) || differs(current) || !!input.refresh
   const node = graph.nodes[id]!
   await update($, focusAtom, () => ({ model: id!, root, manifest, via, readMs, mtimeMs: stat.mtimeMs }))
   if (superseded()) return false

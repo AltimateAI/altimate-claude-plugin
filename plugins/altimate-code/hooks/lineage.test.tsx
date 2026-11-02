@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void> }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -85,7 +85,15 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` || e.path === MANIFEST_PATH }))
   on('fs.stat', () => ({ value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }))
-  on('fs.read', (_: unknown, e: { path: string }) => ({ value: e.path === MANIFEST_PATH ? JSON.stringify(MANIFEST) : 'select 1' }))
+  let held = false
+  on('fs.read', async (_: unknown, e: { path: string }) => {
+    // A test can pause the first manifest read to make one follow resolve after a newer one.
+    if (e.path === MANIFEST_PATH && options.holdFirstManifestRead && !held) {
+      held = true
+      await options.holdFirstManifestRead
+    }
+    return { value: e.path === MANIFEST_PATH ? JSON.stringify(MANIFEST) : 'select 1' }
+  })
   on('tool.list', () => ({
     value: warehouse ? [{ name: 'mcp__altimate_saas__table_lineage', description: 'Snowflake table lineage', mcp: true }] : [],
   }))
@@ -477,11 +485,15 @@ test('a failing follow started after a good one does not cancel it', async ($, o
 })
 
 test('an older follow that resolves after a newer one does not overwrite it', async ($, on) => {
-  const { clock } = await start($, on)
+  let release!: () => void
+  const { clock } = await start($, on, { holdFirstManifestRead: new Promise<void>(resolve => (release = resolve)) })
   // fct_orders by name first, then int_orders: the second claims the pane; the first, landing later, yields.
   const run = (args: string) => $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
   await run('fct_orders')
+  await clock.settle()
   await run('int_orders')
+  await clock.settle()
+  release()
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
