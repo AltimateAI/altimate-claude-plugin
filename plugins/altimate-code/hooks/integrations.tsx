@@ -131,14 +131,16 @@ async function act($: EngineInterface, target: ProviderId | 'all', label: string
   await update($, message, () => null)
   try {
     let failure: string | null = null
+    let detail: string | null = null
     for (const args of commands) {
       const result = await runCli($, args)
       if (result.exitCode !== 0) {
         failure = firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
         break
       }
+      if (args[0] === 'sync') detail = syncText(result.stdout)
     }
-    const text = failure ?? summarize(verb, target)
+    const text = failure ?? detail ?? summarize(verb, target)
     await update($, message, () => text)
     $.ui.toast(text)
   } catch (error) {
@@ -283,7 +285,8 @@ function submitForm($: EngineInterface, localOnly: boolean) {
     const result = outcome as Outcome | null
     if (!result) return
     if (result.status === 'connected') {
-      const text = `${name} ${result.sync === 'synced' ? 'synced to your Altimate workspace' : 'connected · kept local'}${result.account ? ` as ${result.account}` : ''}`
+      const base = result.sync === 'synced' ? (result.message ? `${name} saved · ${result.message}` : `${name} synced to your Altimate workspace`) : `${name} connected · kept local`
+      const text = `${base}${result.account ? ` as ${result.account}` : ''}`
       await closeForm($)
       await update($, message, () => text)
       $.ui.toast(text)
@@ -306,7 +309,7 @@ function connectFound($: EngineInterface, providers: Provider[], localOnly: bool
       for (const one of providers) {
         await update($, busy, () => ({ provider: one.id, label: `Testing ${one.name}…` }))
         const { data, failure } = await runJson<Outcome>($, ['connect', one.id, ...(localOnly ? ['--local-only'] : []), '--json'], CONNECT_TIMEOUT_MS)
-        if (data?.status === 'connected') lines.push(`${one.name} ${data.sync === 'synced' ? 'synced to your workspace' : 'kept local'}`)
+        if (data?.status === 'connected') lines.push(data.sync === 'synced' ? (data.message ? `${one.name} saved · ${data.message}` : `${one.name} synced to your workspace`) : `${one.name} kept local`)
         else {
           if (data?.status === 'missing_fields') needsInput = needsInput ?? one.id
           lines.push(`${one.name}: ${data?.message ?? failure ?? 'not connected'}`)
@@ -347,6 +350,26 @@ function expiryText(one: Provider, now: number): string | null {
 
 function firstLine(text: string): string | null {
   return text.trim().split('\n')[0] || null
+}
+
+type SyncReport = { results?: { id: string; result?: string; reason?: string; steps?: (string | { label: string; ok: boolean })[] }[] }
+
+/** One line per synced, skipped or failed provider from `sync --json`; null when the output is not that JSON. */
+function syncText(stdout: string): string | null {
+  const results = parseJson<SyncReport>(stdout)?.results
+  if (!Array.isArray(results) || results.length === 0) return null
+  return results
+    .map(one => {
+      const who = ['github', 'jira', 'linear'].includes(one.id) ? nameOf(one.id as ProviderId) : one.id
+      if (one.result !== 'synced') return `${who}: ${one.reason ?? one.result ?? 'not synced'}`
+      // The CLI's --json prints each step as its label; the object form is accepted too.
+      const steps = (one.steps ?? []).map(step => (typeof step === 'string' ? { label: step, ok: !step.startsWith('Not linked') } : step))
+      const bad = steps.filter(step => !step.ok).map(step => step.label)
+      const last = steps.filter(step => step.ok).pop()?.label
+      const detail = bad.length > 0 ? `${bad.join(', ')} failed` : last
+      return detail ? `${who} synced · ${detail}` : `${who} synced`
+    })
+    .join(' · ')
 }
 
 function summarize(verb: string | undefined, target: ProviderId | 'all'): string {

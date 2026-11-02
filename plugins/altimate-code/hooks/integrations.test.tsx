@@ -49,7 +49,7 @@ const field = (name: string, label: string, secret: boolean, extra: Record<strin
 })
 
 /** Answers each `altimate integrations …` call the way the CLI does, and remembers the calls. */
-function fakeCli(on: any, answers: { connect: { exitCode: number; body: Record<string, unknown> } }) {
+function fakeCli(on: any, answers: { connect: { exitCode: number; body: Record<string, unknown> }; sync?: Record<string, unknown> }) {
   const calls: string[][] = []
   let secretSet = false
   on('process.run', (_: unknown, e: { argv: string[] }) => {
@@ -82,6 +82,8 @@ function fakeCli(on: any, answers: { connect: { exitCode: number; body: Record<s
       case 'connect':
       case 'update':
         return reply(answers.connect.body, answers.connect.exitCode)
+      case 'sync':
+        return reply(answers.sync ?? {})
       default:
         return reply({})
     }
@@ -142,5 +144,44 @@ test('the form shows a secret as a masked tail and keeps the form open on a refu
   await ui.press({ key: 'jira-keep-local' })
   await clock.settle()
   expect(calls.some(args => args[0] === 'connect' && args.includes('--local-only'))).toBe(true)
+  await ui.unmount()
+})
+
+test('a connect that is not linked to a workspace says so', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  fakeCli(on, { connect: { exitCode: 0, body: { status: 'connected', sync: 'synced', account: null, message: 'Not linked to a workspace: run altimate link' } } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'jira-add' })
+  await clock.settle()
+  await ui.press({ key: 'jira-submit' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Jira saved · Not linked to a workspace: run altimate link/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /synced to your Altimate workspace/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a sync the CLI skipped shows its reason, not synced', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  fakeCli(on, {
+    connect: { exitCode: 0, body: {} },
+    sync: { workspace: { name: 'Acme', tenant: 'acme' }, results: [{ id: 'github', result: 'skipped', reason: 'Not linked to a workspace', steps: [] }] },
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'sync-everything' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /GitHub: Not linked to a workspace/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /synced to your Altimate workspace/ })).toBeUndefined()
   await ui.unmount()
 })
