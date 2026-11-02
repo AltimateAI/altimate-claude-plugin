@@ -41,7 +41,8 @@ altimate-claude-plugin/
 │       │   ├── data-mode.sh     # MCP or CLI mode, from PATH and MCP settings
 │       │   ├── sync-workspace-skills.py # copies workspace skills into .claude/skills
 │       │   ├── refresh-skills.sh # background / on-demand workspace skill refresh
-│       │   └── warehouse-guard.sh # opt-in PreToolUse warehouse-client guard
+│       │   ├── warehouse-guard.sh # opt-in PreToolUse warehouse-client guard
+│       │   └── warehouse-guard.py # its command parser
 │       ├── commands/
 │       │   ├── altimate.md      # /altimate-code:altimate slash command
 │       │   └── refresh-skills.md # /altimate-code:refresh-skills

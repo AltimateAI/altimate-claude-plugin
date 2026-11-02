@@ -110,7 +110,7 @@ Arguments for the most used tools (`?` marks optional):
 
 ## Read-only by default
 
-`tool run` is read-only unless `--allow-write` is passed; `DROP` and `TRUNCATE` are always blocked. Do not add `--allow-write` on your own: tell the user which statement needs it and why, and wait for a yes. After a yes, add it to that call only.
+`tool run` is read-only unless `--allow-write` is passed; `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are always blocked. Do not add `--allow-write` on your own: tell the user which statement needs it and why, and wait for a yes. After a yes, add it to that call only.
 
 ## Fallback for older CLIs
 
@@ -225,7 +225,7 @@ Local connections (`warehouse_list`, `sql_execute`) and workspace integrations a
 | `disabled` | Workspace access is turned off in Altimate settings. Tell the user; local data tools still work. |
 | `unavailable` | Show the reply's `message`. Local data tools still work. |
 
-When `engineStatus` is `needs_engine`, tell the user that workspace knowledge and warehouse operations need the workspace engine (Node.js 20+ and npm). Install it only after they say yes, with `"$ALTIMATE_BIN" workspace-client engine-install < /dev/null`, then read `workspace_context` with `refresh: true, include_tools: true`.
+When `engineStatus` is `needs_engine`, tell the user that workspace knowledge and warehouse operations need the workspace engine (Node.js 20+ and npm). Install it only after they say yes, with `"$ALTIMATE_BIN" workspace-client engine-install < /dev/null`, then read `workspace_context` with `refresh: true, include_tools: true`. When `engineStatus` is `unavailable`, show its `engineError`; local data tools still work.
 
 When the workspace tools are missing from the session and `tool run` rejects `--workspace-tools`, the CLI is too old: the commands below still work, and workspace questions go through delegation (`run`), which uses the workspace automatically.
 
@@ -233,7 +233,7 @@ When the workspace tools are missing from the session and `tool run` rejects `--
 
 Run each command through the same resolver as above, in the same Bash call. Commands the user types after `!` use `altimate`; on npm installs older than v0.7.1 the user types `altimate-code` instead.
 
-- **Check the link:** `"$ALTIMATE_BIN" workspace status < /dev/null`. Exit code 0 means linked and 3 means not linked. Exit code 2 with `Not signed in to Altimate` means the user must sign in. It also prints the workspace page's URL. For anything else, show the user the CLI's message.
+- **Check the link:** `"$ALTIMATE_BIN" workspace status < /dev/null`. Exit code 0 means linked and 3 means not linked. Exit code 2 with `Not signed in to Altimate` means the user must sign in. For anything else, show the user the CLI's message.
 - **Link:** do not suggest `! altimate link`: its picker needs a terminal, and this session does not give it one. Once the user chooses a workspace (from `workspace_context`, or `"$ALTIMATE_BIN" workspace list < /dev/null`), run `ALTIMATE_DISABLE_MEMORY=1 "$ALTIMATE_BIN" link --workspace "<id or name>" < /dev/null`. `ALTIMATE_DISABLE_MEMORY=1` stops linking from uploading this machine's existing memory to the workspace, which the user has not agreed to here. For a new workspace, run `ALTIMATE_DISABLE_MEMORY=1 "$ALTIMATE_BIN" link --create < /dev/null`, which names it after the repository. If a workspace with that name already exists, `--create` refuses and names it: offer to link to that one with `--workspace`, or, if the user confirms they want a second one, re-run with `--allow-duplicate`. If the project is already linked to a different workspace, `link` refuses; confirm the move with the user, then re-run it with `--yes`. Never pass `--claude-md` unless the user asks for it.
 - **Skills:** `"$ALTIMATE_BIN" skill list < /dev/null` lists them; `"$ALTIMATE_BIN" workspace refresh < /dev/null` pulls the latest workspace skills (exit 3 means not linked: offer to link). To share a project skill with the team, run `"$ALTIMATE_BIN" skill publish "<name>" < /dev/null` only for a skill the user named; add `--replace` only after they confirm overwriting the workspace copy. Personal skills in `~/.claude/skills` are refused; copy one into the project only if the user asks.
 - **Save a memory:** only when the user explicitly asks to save something to the workspace. First read `workspace_context`, show the user the workspace name, the memory id (for example `metrics/arr`) and the exact text (1 to 2,048 characters), and wait for a yes. Then pass the text on stdin:

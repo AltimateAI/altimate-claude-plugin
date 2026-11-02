@@ -526,7 +526,7 @@ def remove_abandoned_staging(target_root):
                     continue
             if time.time() - os.lstat(path).st_mtime > SWAP_SECONDS:
                 shutil.rmtree(path, ignore_errors=True)
-        except OSError:
+        except (OSError, UnicodeDecodeError):  # not a .gitignore we wrote: not ours to sweep
             pass
 
 

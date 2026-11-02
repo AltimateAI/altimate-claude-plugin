@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Checks that the plugin exposes the linked-workspace tools in both modes: the MCP
 # server starts with --workspace-tools, and every documented `tool run|list|schema`
-# call passes it (never `tool context`, which rejects it).
+# call passes it (never `tool context`, which does not need it).
 #
 # With ALTIMATE_TEST_BIN pointing at an altimate-code build that has the `tool`
 # CLI, it also runs the real CLI in a scratch project: the workspace tools are
@@ -18,7 +18,7 @@ args = json.load(open(sys.argv[1]))["mcpServers"]["altimate-code"]["args"]
 sys.exit(0 if args[:2] == ["mcp", "serve"] and "--workspace-tools" in args else 1)
 PY
 
-for file in skills/altimate-code/SKILL.md agents/analyst.md hooks-handlers/session-start.sh hooks-handlers/warehouse-guard.sh commands/altimate.md; do
+for file in skills/altimate-code/SKILL.md agents/analyst.md hooks-handlers/session-start.sh hooks-handlers/warehouse-guard.py commands/altimate.md; do
   bad="$(grep -noE 'tool (run|list|schema) [^`|]*' "$PLUGIN/$file" | grep -v -- '--workspace-tools' | grep -vE 'tool run <name>`|tool run`|tool (run|list|schema)( \(|\.|,|$| subcommand| path| above| that| tool| with)')"
   [ -z "$bad" ] || fail "$file: tool call without --workspace-tools: $bad"
   grep -nE 'tool context[^`]*--workspace-tools' "$PLUGIN/$file" >/dev/null && fail "$file: tool context must not get --workspace-tools"

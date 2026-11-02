@@ -44,7 +44,7 @@ All notable changes to this plugin will be documented in this file.
 - The skill description and SessionStart context describe the tools directly and no longer claim work Claude does well alone.
 
 ### Added
-- Opt-in PreToolUse hook `warehouse-guard.sh`, active only when `ALTIMATE_ROUTE_GUARD=1`. It denies Bash commands that query a warehouse directly and suggests the matching `tool run`. `altimate` commands, dbt and file operations pass.
+- Opt-in PreToolUse hook `warehouse-guard.sh`, active only when `ALTIMATE_ROUTE_GUARD=1`. It denies Bash commands that query a warehouse directly and suggests the matching `tool run`. `altimate` commands, dbt and file operations pass. Needs `python3`.
 - `analyst` agent: a read-only data analyst that works through `tool run`.
 - Tests: `tests/warehouse-guard.sh`.
 

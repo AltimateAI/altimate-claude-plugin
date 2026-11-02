@@ -34,13 +34,13 @@ The altimate-code CLI must be installed and configured on your PATH. Either inst
 
 ```bash
 npm install -g altimate-code                       # requires Node 20+; exposes `altimate` and `altimate-code`
-curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes `altimate`
+curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes `altimate` and `altimate-code`
 altimate                                           # launch the TUI, then run /connect to configure your LLM provider
 ```
 
 The CLI mode invokes `altimate`, the CLI's canonical name, and falls back to `altimate-code` for npm installs older than v0.7.1, so standalone installs work without an alias.
 
-**MCP mode and the CLI name.** The MCP registration launches `altimate-code mcp serve`. npm and Homebrew installs expose both names, but curl and PowerShell installs expose only `altimate`: there the server cannot start until `altimate-code` is on PATH (for example `ln -s "$(command -v altimate)" ~/.local/bin/altimate-code`), and Claude uses the CLI mode meanwhile. MCP mode also needs a build that contains `mcp serve`; check with `altimate-code mcp serve --help`. Direct MCP and `tool run` need no LLM provider; only delegation (`altimate run`) does.
+**MCP mode and the CLI name.** The MCP registration launches `altimate-code mcp serve`. npm, Homebrew and current curl and PowerShell installs expose both names, but curl and PowerShell installs older than v0.12.8 expose only `altimate`: there the server cannot start until `altimate-code` is on PATH (for example `ln -s "$(command -v altimate)" ~/.local/bin/altimate-code`), and Claude uses the CLI mode meanwhile. MCP mode also needs a build that contains `mcp serve`; check with `altimate-code mcp serve --help`. Direct MCP and `tool run` need no LLM provider; only delegation (`altimate run`) does.
 
 
 Or configure a provider via environment variable (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and 20+ others — see the [altimate-code docs](https://docs.altimate.sh)).
@@ -52,7 +52,7 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 1. A **SessionStart hook** adds a description of the available tools and both modes to the session, and copies the linked workspace's skills (see below). It does not start the MCP server.
 2. **MCP mode.** Claude calls `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns columns and value profiles; large results spill to a local file), `sql_materialize` (session-local `scratch` DuckDB for cross-database joins), `answer_commit`, and `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence`, `sql_translate`.
 3. **CLI mode.** The **skill** has Claude run `altimate tool context` once (connections, schema listing, analyst method), then `altimate tool run <name> --args '<json>'` through Bash and reason over the structured output. `altimate tool list --json` shows every tool and its input schema. A warm process per project starts automatically.
-4. Calls are read-only unless you approve `--allow-write` (CLI mode); `DROP` and `TRUNCATE` are always blocked. Read-only is enforced by the database on Postgres, SQLite and DuckDB and by SQL classification elsewhere, so use a read-only DB user for the strongest boundary.
+4. Calls are read-only unless you approve `--allow-write` (CLI mode); `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are always blocked. Read-only is enforced by the database on Postgres, SQLite and DuckDB and by SQL classification elsewhere, so use a read-only DB user for the strongest boundary.
 5. For long multi-step jobs, or when you invoke **`/altimate-code:altimate <task>`** for work that needs the agent, Claude Code runs `altimate run "<your task>"` locally with the `builder` agent (or `analyst` for a data question when MCP is unavailable), which uses your configured LLM provider.
 6. Warehouse queries and dbt commands run **locally under your credentials**. If the installed CLI predates the `tool` subcommand, the skill falls back to delegation.
 
@@ -60,7 +60,7 @@ Connections come from project and global `.altimate-code/connections.json` files
 
 ### Optional: route warehouse queries to the tools
 
-Set `ALTIMATE_ROUTE_GUARD=1` to enable a PreToolUse hook that denies Bash commands querying a warehouse directly (`psql -c`, `trino --execute`, `docker exec ... clickhouse-client`, `snowsql`, `bq query`) and suggests the matching `tool run`. It is off by default and a best-effort nudge, not a security control: it never blocks a lone `altimate` command, dbt, or file operations, while `altimate` chained with other commands is checked like any command, and a client named after `(`, `;`, `|`, `&` or a backtick inside quoted text (a commit message, say) can still be taken as a command.
+Set `ALTIMATE_ROUTE_GUARD=1` to enable a PreToolUse hook that denies Bash commands querying a warehouse directly (`psql -c`, `trino --execute`, `docker exec ... clickhouse-client`, `snowsql`, `bq query`) and suggests the matching `tool run`. It is off by default and a best-effort nudge, not a security control: it never blocks a lone `altimate` command, dbt, or file operations, while `altimate` chained with other commands is checked like any command. Quoted text (a commit message, say) is never taken as a command, but a `$(...)` or backtick substitution inside it is. It needs `python3`; without it every command is allowed.
 
 ### Optional: analyst agent
 
@@ -78,7 +78,7 @@ Claude does the reasoning; no altimate-code agent runs. Knowledge questions are 
 
 1. **Sign in to Altimate** — `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). It opens your browser. This also sets up the model provider altimate-code uses. You can run it from Claude Code by typing it after `!`.
 2. **Link the project** — ask Claude to link the project to your workspace. It shows the workspaces `workspace_context` (or `altimate workspace list`) returns and links the one you choose with `altimate link --workspace "<id or name>"`, or creates one with `altimate link --create`. Claude links with `ALTIMATE_DISABLE_MEMORY=1`, so existing memory on this machine is not uploaded. Moving a linked project to a different workspace also needs `--yes`. `workspace list` is in newer altimate-code releases; with an older one, tell Claude the workspace's name. In a terminal, `altimate link` does the same with a picker; the picker does not work after `!` in Claude Code.
-3. **Check it** — `altimate workspace status` shows the linked workspace and its page in the Altimate web app.
+3. **Check it** — `altimate workspace status` shows the linked workspace, how much memory has reached it and when its skills last synced.
 4. **Ask Claude** — questions about your team's conventions, definitions or knowledge, and queries on the workspace's warehouses, use the workspace tools: *"How do we define recurring revenue?"*, *"Which Snowflake connections does our workspace have?"* Start a request with `/altimate-code:altimate` to be sure it does.
 5. **Workspace engine** — knowledge and warehouse operations need the workspace engine. If it is missing, Claude asks before installing it with `altimate workspace-client engine-install` (Node.js 20+ and npm).
 
@@ -108,7 +108,7 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | Symptom | Fix |
 |---|---|
 | Neither `altimate-code` nor `altimate` on PATH | `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider. |
-| MCP tools missing from the session | Managed settings may disallow MCP servers, `altimate-code` may not be on PATH (curl installs expose only `altimate`), or the build lacks `mcp serve`. Claude falls back to `altimate tool run`, so no action is required. |
+| MCP tools missing from the session | Managed settings may disallow MCP servers, `altimate-code` may not be on PATH (curl and PowerShell installs older than v0.12.8 expose only `altimate`), or the build lacks `mcp serve`. Claude falls back to `altimate tool run`, so no action is required. |
 | `Unauthorized` / `No provider configured` | Run `altimate` (`altimate-code` on npm installs older than v0.7.1) to open the TUI and reconfigure your provider via `/connect`, or set the provider API key env var. |
 | Task hangs for several minutes | Open `altimate` (`altimate-code` on npm installs older than v0.7.1) to check for a pending prompt in the TUI, or re-run specifying a known-good model. |
 | Empty result | The task may be too ambiguous — restate with the target table, expected columns, or time window. |

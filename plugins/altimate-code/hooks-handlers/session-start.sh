@@ -27,7 +27,7 @@ HANDLERS="$(dirname "$0")"
 RELOAD=""
 SKILLS_NOTE=""
 
-# The CLI-mode guidance names the executable that is on PATH: curl installs expose only `altimate`.
+# The CLI-mode guidance names the executable that is on PATH: older curl and PowerShell installs expose only `altimate`.
 CLI_NAME=altimate
 command -v altimate-code >/dev/null 2>&1 && CLI_NAME=altimate-code
 

@@ -259,6 +259,19 @@ class SyncWorkspaceSkillsTest(unittest.TestCase):
         self.run_sync()
         self.assertFalse(os.path.exists(abandoned))
 
+    def test_staging_directory_with_an_unreadable_gitignore_does_not_stop_the_sync(self):
+        skills = os.path.join(self.project, ".claude", "skills")
+        odd = os.path.join(skills, ".alpha.altimate-staging-Ab12Cd")
+        os.makedirs(odd)
+        with open(os.path.join(odd, ".gitignore"), "wb") as f:
+            f.write(b"\xff\xfe*\n")
+        old = time.time() - 3600
+        os.utime(odd, (old, old))
+        self.write_snapshot({"sk_1": {"SKILL.md": RISKY_SKILL}})
+        self.assertEqual(self.run_sync()[0], "changed")
+        self.assertTrue(os.path.isdir(odd))
+        self.assertTrue(os.path.exists(self.skill_path("staging-conventions")))
+
     def test_another_sessions_staging_directory_is_left_alone(self):
         staging = os.path.join(self.project, ".claude", "skills", ".a.altimate-staging-x1y2z3w4")
         os.makedirs(staging)

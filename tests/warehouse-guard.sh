@@ -39,6 +39,65 @@ deny 'bash -c "docker exec -i pg psql -c 1"'
 deny 'bash -lc "docker exec -i pg psql -c 1"'
 deny "sh -ec 'docker exec pg psql -c 1'"
 deny 'zsh -lc "psql -c 1"'
+deny 'bash -cl "psql -c 1"'
+deny "sh -ce 'psql -c 1'"
+deny 'zsh -cl "psql -c 1"'
+deny "bash -l -c 'psql -c 1'"
+deny "bash --login -c 'psql -c 1'"
+deny "bash -o pipefail -c 'psql -c 1'"
+deny "/bin/bash -e -c 'psql -c 1'"
+deny "dash -c 'psql -c 1'"
+allow "git commit -m \"make refresh -c 'psql -c x' work\""
+allow "bash -l script.sh"
+deny '/usr/local/bin/docker exec pg psql -c "select 1"'
+deny 'docker --context prod exec pg psql -c "select 1"'
+deny 'kubectl -n prod exec -it pod -- psql -c "select 1"'
+deny 'kubectl exec pod -c app -- psql -c "select 1"'
+deny 'docker compose -f x.yml exec db psql -c "select 1"'
+deny 'docker-compose exec db mysql -e "select 1"'
+deny 'docker exec -u root -it db mysql -uroot -e "select 1" mysql'
+allow 'docker exec -it db psql'
+allow 'docker exec db ls psql'
+allow 'docker logs db psql -c 1'
+allow 'docker exec -it db ls psql -c 1'
+allow 'kubectl -n prod exec pod -- ls psql -c 1'
+deny 'docker exec -e PGPASSWORD=x -w /tmp db psql -c 1'
+deny 'docker exec -ePGPASSWORD=x --user=root db psql -c 1'
+deny 'podman --connection prod exec db psql -c 1'
+allow 'watch -n1 echo psql -c 1'
+allow 'xargs -r echo psql -c 1'
+allow "git commit -m \"document bash -cl 'psql -c 1'\""
+allow "echo \"run bash -c 'psql -c 1'\""
+deny "sudo bash -c 'psql -c 1'"
+deny "docker exec db bash -lc 'psql -c 1'"
+deny "cd x && bash -O extglob -c 'psql -c 1'"
+deny "bash -c \"bash -c 'psql -c 1'\""
+deny "docker exec db bash -c \"sh -c 'psql -c 1'\""
+deny 'docker exec -- db psql -c 1'
+deny 'docker exec -i -- db mysql -e 1'
+allow "sudo -n echo bash -cl 'psql -c 1'"
+allow "env -i echo bash -cl 'psql -c 1'"
+allow '/usr/bin/docker exec --user root psql echo -c 1'
+deny 'cat q.sql | sudo psql'
+deny 'docker exec -i db psql < q.sql'
+deny 'echo "$(psql -c 1)"'
+allow 'echo "it'"'"'s'
+deny 'timeout -s KILL 5 psql -c 1'
+deny 'exec -a x psql -c 1'
+deny 'nice -n 5 psql -c 1'
+deny 'nice -5 psql -c 1'
+allow "echo ';' psql -c 1"
+allow "printf '%s' '|' psql"
+allow 'echo \; psql -c 1'
+allow 'duckdb -init init.sql db'
+allow 'bq show query'
+deny 'bq --format json query "select 1"'
+deny 'bq --headless query "select 1"'
+deny "env -S 'psql -c 1'"
+deny "env --split-string='psql -c 1'"
+deny "echo \"\$(printf '%s' ')'; psql -c 1)\""
+deny 'echo "$(echo "a;b"; psql -c 1)"'
+deny 'x=`psql -c 1`'
 deny 'kubectl exec -it pod -- psql -c "select 1"'
 deny 'cd x && podman exec pg psql -c "select 1"'
 deny 'true; docker compose exec db mysql -e "select 1"'
