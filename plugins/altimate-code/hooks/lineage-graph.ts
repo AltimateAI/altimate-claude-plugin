@@ -18,6 +18,8 @@ type Manifest = {
   exposures?: Record<string, any>
   metrics?: Record<string, any>
   semantic_models?: Record<string, any>
+  saved_queries?: Record<string, any>
+  unit_tests?: Record<string, any>
   parent_map?: Record<string, string[]>
   child_map?: Record<string, string[]>
 }
@@ -51,7 +53,7 @@ function relationOf(node: any): string | null {
 /** The manifest's graph: dbt's own parent_map / child_map, rebuilt from depends_on when absent. */
 export function buildGraph(manifest: Manifest): LineageGraph {
   const nodes: Record<string, GraphNode> = {}
-  const groups = [manifest.nodes, manifest.sources, manifest.exposures, manifest.metrics, manifest.semantic_models]
+  const groups = [manifest.nodes, manifest.sources, manifest.exposures, manifest.metrics, manifest.semantic_models, manifest.saved_queries, manifest.unit_tests]
   for (const group of groups) for (const [id, node] of Object.entries<any>(group ?? {})) nodes[id] = nodeOf(id, node)
 
   let parents: Record<string, string[]>
@@ -238,13 +240,15 @@ export function reachFromMetadata(metadata: any, model: string, column: string):
     model,
     column,
     models: reach.models.map((one: any) => ({ name: String(one?.name ?? ''), columns: Array.isArray(one?.columns) ? one.columns.map(String) : [] })),
-    exposures: (Array.isArray(reach.exposures) ? reach.exposures : []).map((one: any) => String(one?.label ?? one?.name ?? '')),
+    exposures: labels(reach.exposures),
+    uncertainExposures: labels(reach.uncertain_exposures),
     uncertain: unsure(reach.uncertain),
     untraced: unsure(reach.untraced),
     truncated: reach.truncated === true,
   }
 }
 
+const labels = (list: unknown) => (Array.isArray(list) ? list : []).map((one: any) => String(one?.label ?? one?.name ?? ''))
 const unsure = (list: unknown) =>
   (Array.isArray(list) ? list : []).map((one: any) => ({ name: String(one?.name ?? ''), reason: String(one?.reason ?? '') }))
 

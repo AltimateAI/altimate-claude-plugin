@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; toolResult?: (e: { tool: string }) => unknown }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -130,7 +130,7 @@ async function start($: any, on: any, options: Options = {}) {
   // The tool itself, beneath the plugin.
   on('tool.call', (_: unknown, e: { tool: string }) => {
     calls.push(`tool:${e.tool}`)
-    return { result: { ok: true } }
+    return { result: options.toolResult?.(e) ?? { ok: true } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
@@ -342,4 +342,26 @@ test("following Claude's own dbt_lineage call uses the manifest it named", async
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
+})
+
+test("a dbt_lineage result Claude's call got cut for size leaves the pane to fetch the columns itself", async ($, on) => {
+  const row = { tool: 'mcp__plugin_altimate-code_altimate-code__dbt_lineage', manifest_path: 'target/manifest.json', model: 'fct_orders' }
+  // The report alone, with no mappings in it: nothing known about the columns.
+  const cut = [{ type: 'text', text: JSON.stringify({ report: 'Model: fct_orders\nID: model.shop.fct_orders', truncated: true }) }]
+  const { clock, calls } = await start($, on, { toolResult: e => (e.tool === row.tool ? cut : undefined) })
+  await $.tool.call(row as any)
+  await clock.settle()
+  expect(calls).toContain('mcp:dbt_lineage')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('dashboards on models that may read the column are counted and named', async ($, on) => {
+  const reach = { ...REACH, column_reach: { ...REACH.column_reach, uncertain: [{ name: 'rpt_ops', reason: 'names it only outside its select list' }], uncertain_exposures: [{ name: 'ops', label: 'Ops Board' }] } }
+  const { clock, toasts } = await start($, on, { reach })
+  const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by at least 2 models and 2 dashboards · Exec Revenue · Ops Board')
+  expect(edit.context?.[0]).toContain('dashboards on models that may read it: Ops Board')
 })

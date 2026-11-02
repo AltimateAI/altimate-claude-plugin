@@ -90,6 +90,21 @@ function within<T>($: EngineInterface, ms: number, work: Promise<T>): Promise<T 
   })
 }
 
+/** One focus: the model in one manifest revision. Async answers for another are dropped. */
+const sameFocus = (a: LineageFocus | null, b: LineageFocus | null) =>
+  !!a && !!b && a.model === b.model && a.manifest === b.manifest && a.mtimeMs === b.mtimeMs
+
+/** `a/./b/../c` → `a/c`, so two spellings of one manifest are one focus and one cache entry. */
+function normalize(path: string): string {
+  const out: string[] = []
+  for (const part of path.replace(/\\/g, '/').split('/')) {
+    if (part === '.' || (part === '' && out.length > 0)) continue
+    if (part === '..' && out.length > 0 && out[out.length - 1] !== '..') out.pop()
+    else out.push(part)
+  }
+  return out.join('/') || '/'
+}
+
 const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
 
@@ -193,6 +208,8 @@ async function readGraph($: EngineInterface, manifest: string): Promise<LineageG
  * server leaves big structured results out). Cached per manifest revision and model.
  */
 async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string) {
+  // A file is looked up by its path: snapshots and versioned models do not go by the file's name.
+  model = path ?? model
   const key = `${manifest}\u0000${mtimeMs}\u0000${model}`
   if (toolsCache.has(key)) return checkPath(toolsCache.get(key)!, path)
   const result = await runTool($, 'dbt_lineage', { manifest_path: manifest, model, include_graph: true }, true)
@@ -236,7 +253,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   }
   const current = await read($, focusAtom)
   const sessionRoot = await $.session.root().catch(() => '.')
-  const given = input.manifest ? (/^([\\/]|[A-Za-z]:)/.test(input.manifest) ? input.manifest : `${sessionRoot}/${input.manifest}`) : null
+  const given = input.manifest ? normalize(/^([\\/]|[A-Za-z]:)/.test(input.manifest) ? input.manifest : `${sessionRoot}/${input.manifest}`) : null
   // A tool call's manifest names the project; a model named without a file belongs to the project
   // (and manifest) already followed, else to the session's.
   const named = given ?? (!input.file && current ? current.manifest : null)
@@ -255,7 +272,10 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     await say('No dbt manifest: run `dbt parse` or `dbt compile` to see lineage.', true)
     return false
   }
-  if (input.refresh) manifestCache = null
+  if (input.refresh) {
+    manifestCache = null
+    for (const key of toolsCache.keys()) if (key.startsWith(`${manifest}\u0000`)) toolsCache.delete(key)
+  }
   const wanted = input.file ? relative(root, input.file) : input.model!
   const began = await $.clock.now()
   let graph: LineageGraph | null
@@ -325,14 +345,14 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
     else if (isNew || !(await read($, columnsAtom))) {
       const began = await $.clock.now()
       const result = await runTool($, 'dbt_lineage', { manifest_path: focus.manifest, model: focus.model }).catch(() => null)
-      if ((await read($, focusAtom))?.model !== focus.model) return
+      if (!sameFocus(await read($, focusAtom), focus)) return
       const columns = result?.ok ? (columnsFromMetadata(result.metadata) ?? (result.text ? parseDbtLineage(result.text) : null)) : null
       await update($, columnsAtom, () => columns)
       if (!result?.ok) await update($, messageAtom, () => `dbt_lineage failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}`)
       const ms = Math.round((await $.clock.now()) - began)
       if (columns) $.ui.log(`lineage-pane · dbt_lineage(${node.name}) · ${columns.columns.length} columns · ${elapsed(ms)}`)
     }
-    if (await read($, columnAtom)) await loadReach($)
+    if ((await read($, columnAtom)) && (isNew || !(await read($, reachAtom)))) await loadReach($)
     if (isNew) await loadWarehouse($)
   } finally {
     await update($, loadingAtom, () => false)
@@ -353,16 +373,17 @@ async function loadReach($: EngineInterface) {
   }
   const result = await runTool($, 'impact_analysis', {
     manifest_path: focus.manifest,
-    model: node.name,
+    model: focus.model,
     column,
     change_type: 'modify',
   }).catch(() => null)
-  if ((await read($, focusAtom))?.model !== focus.model || (await read($, columnAtom)) !== column) return
+  if (!sameFocus(await read($, focusAtom), focus) || (await read($, columnAtom)) !== column) return
   const reach = result?.ok ? reachFromMetadata(result.metadata, node.name, column) : null
   await update($, reachAtom, () => reach)
   if (!result?.ok) await update($, messageAtom, () => `impact_analysis failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}`)
   else if (reach) $.ui.log(`lineage-pane · column ${column} · impact_analysis(${node.name}, column: ${column}) · read by ${reach.models.length} models`)
   else if (result.metadata?.column_reach_error) await update($, messageAtom, () => `Column reach failed: ${firstLine(String(result.metadata.column_reach_error))}`)
+  else if (result.metadata && result.metadata.severity === undefined) await update($, messageAtom, () => `impact_analysis: ${firstLine(result.text) ?? 'no answer'}`)
   else await update($, messageAtom, () => 'Column reach needs an altimate-code build whose impact_analysis reports column_reach.')
 }
 
@@ -384,9 +405,10 @@ async function loadWarehouse($: EngineInterface) {
     15_000,
     $.mcp.call(server, tool, { filters: { table: [node.relation], direction: ['downstream'], depth: ['2'] }, limit: 50 }),
   )
-  if (!result || result.isError || (await read($, focusAtom))?.model !== focus!.model) return
+  if (!result || result.isError || !sameFocus(await read($, focusAtom), focus)) return
   const body = result.structuredContent ?? parseJson(textOf(result.content))
-  const view: WarehouseView = { server, tool, table: node.relation, edges: warehouseEdges(body) }
+  const records = (body as any)?.data ?? body
+  const view: WarehouseView = { server, tool, table: node.relation, edges: warehouseEdges(body), complete: records?.truncated !== true && !records?.next_cursor }
   await update($, warehouseAtom, () => view)
   const ms = Math.round((await $.clock.now()) - began)
   $.ui.log(`lineage-pane · ${server} · ${tool}(${node.relation}) · ${elapsed(ms)}`)
@@ -407,7 +429,7 @@ async function editTexts($: EngineInterface, e: any): Promise<{ before: string[]
   return { before: [await $.fs.read(String(e.file_path)).catch(() => '')], after: [String(e.content ?? '')] }
 }
 
-type ImpactNote = { key: string; context: string; view: ImpactView }
+type ImpactNote = { key: string; toast: string; context: string; view: ImpactView }
 
 /**
  * Before an edit to a model's SQL: what reads the model, and, when the edit changes one of its
@@ -439,7 +461,7 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
   let reach: ColumnReachView | null = null
   if (column) {
     const began = await $.clock.now()
-    const result = await within($, HOLD_MS, runTool($, 'impact_analysis', { manifest_path: manifest, model: node.name, column, change_type: 'modify' }))
+    const result = await within($, HOLD_MS, runTool($, 'impact_analysis', { manifest_path: manifest, model: id, column, change_type: 'modify' }))
     reach = result?.ok ? reachFromMetadata(result.metadata, node.name, column) : null
     const ms = Math.round((await $.clock.now()) - began)
     if (reach) $.ui.log(`impact-first · impact_analysis(${node.name}.${column}) · ${elapsed(ms)}`)
@@ -448,19 +470,22 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
   const target = column && reach ? `${node.name}.${column}` : node.name
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
   // What the engine could not settle keeps the count a lower bound, never a confident zero.
-  const unsettled = reach ? reach.uncertain.length + reach.untraced.length : 0
+  const unsettled = reach ? reach.uncertain.length + reach.untraced.length + (reach.truncated ? 1 : 0) : 0
   const atLeast = unsettled > 0 ? 'at least ' : ''
-  const dashboards = reach ? reach.exposures : counts.exposures
+  // Dashboards on models that may read the column count too: a rename breaks a filter for certain.
+  const dashboards = reach ? [...reach.exposures, ...reach.uncertainExposures] : counts.exposures
   const toast = reach
     ? `${target} is read by ${atLeast}${plural(reach.models.length, 'model')} and ${plural(dashboards.length, 'dashboard')}`
     : `${target} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'model')} and ${plural(dashboards.length, 'dashboard')}`
-  $.ui.toast(`◆ impact-first · ${toast}${dashboards.length ? ` · ${dashboards.slice(0, 3).join(' · ')}` : ''}`, { timeoutMs: 8000 })
+  const toastText = `◆ impact-first · ${toast}${dashboards.length ? ` · ${dashboards.slice(0, 3).join(' · ')}` : ''}`
 
   const lines = [`Altimate lineage for ${target}, read from the dbt manifest before this edit:`]
   if (reach) {
     const named = reach.models.slice(0, 15).map(one => (one.columns.length ? `${one.name} (${one.columns.join(', ')})` : one.name))
     lines.push(`- read by ${atLeast}${plural(reach.models.length, 'downstream model')}${named.length ? `: ${named.join(', ')}${reach.models.length > 15 ? ', …' : ''}` : ''}`)
     if (reach.exposures.length) lines.push(`- dashboards on them: ${reach.exposures.join(', ')}`)
+    if (reach.uncertainExposures.length) lines.push(`- dashboards on models that may read it: ${reach.uncertainExposures.join(', ')}`)
+    if (reach.truncated) lines.push('- the trace stopped at its model limit; more models may read it')
     if (reach.uncertain.length) lines.push(`- may also read it: ${reach.uncertain.slice(0, 10).map(one => `${one.name} (${one.reason})`).join(', ')}`)
     if (reach.untraced.length) lines.push(`- could not be traced: ${reach.untraced.slice(0, 10).map(one => `${one.name} (${one.reason})`).join(', ')}`)
   }
@@ -469,7 +494,8 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
   )
   lines.push('Keep these consumers working, or tell the user which of them this edit changes.')
   return {
-    key: `${e.agentId ?? 'main'}:${id}:${column ?? ''}`,
+    key: `${e.agentId ?? 'main'}\u0000${manifest}\u0000${id}\u0000${column ?? ''}`,
+    toast: toastText,
     context: lines.join('\n'),
     view: {
       model: node.name,
@@ -481,6 +507,7 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
       exposures: dashboards,
       readers: reach ? reach.models.length : null,
       unsettled,
+      truncated: !!graph.truncated,
     },
   }
 }
@@ -489,10 +516,17 @@ async function impactFirst($: EngineInterface, e: any, file: string): Promise<Im
 function lineageFromOutput(output: unknown): ColumnLineage | null {
   const structured = columnsFromMetadata((output as any)?.structuredContent ?? output)
   if (structured) return structured
-  const text = textOf(output)
-  const asJson = text.trim().startsWith('{') ? columnsFromMetadata(parseJson(text)) : null
-  if (asJson) return asJson
-  return text.includes('Column Mappings:') ? parseDbtLineage(text) : null
+  let text = textOf(output)
+  if (text.trim().startsWith('{')) {
+    const json = parseJson<any>(text)
+    const fromJson = columnsFromMetadata(json)
+    if (fromJson) return fromJson
+    // A result the server cut for size carries only its report.
+    text = typeof json?.report === 'string' ? json.report : ''
+  }
+  const parsed = text.includes('Column Mappings:') ? parseDbtLineage(text) : null
+  // Nothing parsed means nothing known: let the pane fetch the lineage itself.
+  return parsed && (parsed.columns.length > 0 || parsed.edges.length > 0) ? parsed : null
 }
 
 /** Registers /lineage; called from the plugin's one session.start hook. */
@@ -526,7 +560,7 @@ export async function lineageBand($: EngineInterface, ui: Ui): Promise<RenderEle
           {impact.severity}
         </Text>
         <Text dimColor>
-          {'  '}direct {impact.direct} · transitive {impact.transitive} · tests {impact.tests}
+          {'  '}direct {impact.direct} · transitive {impact.transitive}{impact.truncated ? '+' : ''} · tests {impact.tests}
           {impact.readers !== null ? ` · read by ${impact.unsettled ? 'at least ' : ''}${impact.readers} models` : ''}
           {impact.exposures.length ? ` · ${impact.exposures.length} dashboards` : ''}
         </Text>
@@ -607,6 +641,8 @@ export function registerLineage(on: On) {
       if (files.length) later($, async () => void (await follow($, { file: files[files.length - 1]!, auto: true })))
     }
     if (note) {
+      // Shown only when the lookup finished inside the hold, so the toast never trails a released edit.
+      $.ui.toast(note.toast, { timeoutMs: 8000 })
       await update($, impactAtom, () => note.view)
       await update($, bandHiddenAtom, () => false)
       if (!contextGiven.has(note.key)) {
@@ -743,7 +779,7 @@ export function registerLineage(on: On) {
                 )
               })
             )}
-            {(graph.children[focus.model] ?? [])
+            {warehouse.complete && (graph.children[focus.model] ?? [])
               .map(child => graph.nodes[child])
               .filter(child => FOLLOWABLE.has(child?.type ?? '') && child!.relation && !warehouse.edges.some(edge => edge.target?.toLowerCase() === child!.relation))
               .slice(0, 3)
@@ -787,6 +823,11 @@ export function registerLineage(on: On) {
                   {reach.truncated ? <Text dimColor> (stopped early)</Text> : null}
                 </Text>
                 {reach.exposures.length > 0 ? <Text dimColor>{reach.exposures.join(' · ')}</Text> : null}
+                {reach.uncertainExposures.length > 0 ? (
+                  <Text color="warning">
+                    + {reach.uncertainExposures.length} dashboards on models that may read it: {reach.uncertainExposures.slice(0, 3).join(' · ')}
+                  </Text>
+                ) : null}
                 {reach.uncertain.length > 0 ? (
                   <Text color="warning">
                     + {reach.uncertain.length} may read it: {reach.uncertain.slice(0, 4).map(one => one.name).join(', ')}

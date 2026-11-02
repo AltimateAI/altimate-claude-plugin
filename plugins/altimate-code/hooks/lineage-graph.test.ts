@@ -186,6 +186,7 @@ test('column reach, warehouse records and edited columns read as the pane needs 
     column: 'revenue',
     models: [{ name: 'fct_revenue_daily', columns: ['revenue'] }],
     exposures: ['Exec Revenue'],
+    uncertainExposures: [],
     uncertain: [],
     untraced: [],
     truncated: false,

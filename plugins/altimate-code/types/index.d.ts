@@ -107,6 +107,8 @@ export type ColumnReachView = {
   column: string
   models: { name: string; columns: string[] }[]
   exposures: string[]
+  /** Dashboards on models that may read it or could not be traced. */
+  uncertainExposures: string[]
   /** Models that may read it: only outside their select list, or through an ambiguous table name. */
   uncertain: { name: string; reason: string }[]
   /** Models the lineage engine could not trace (no compiled SQL, unparseable SQL). */
@@ -130,7 +132,8 @@ export type LineageFocus = {
   mtimeMs: number
 }
 
-export type WarehouseView = { server: string; tool: string; table: string; edges: WarehouseEdge[] }
+/** `complete` is false when the warehouse answer was paged or cut, so a missing edge proves nothing. */
+export type WarehouseView = { server: string; tool: string; table: string; edges: WarehouseEdge[]; complete: boolean }
 
 /** What the band reports after Claude edits a model. */
 export type ImpactView = {
@@ -145,6 +148,8 @@ export type ImpactView = {
   readers: number | null
   /** Models that may read it or could not be traced: `readers` is then a lower bound. */
   unsettled: number
+  /** altimate-code stopped the graph at its node limit: `transitive` is a lower bound. */
+  truncated: boolean
 }
 
 declare module 'claude-code' {
