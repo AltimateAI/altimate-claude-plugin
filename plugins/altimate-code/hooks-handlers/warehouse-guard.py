@@ -33,7 +33,7 @@ SEPARATORS = set(";&|()")
 MASK = {ord(c): 0xE000 + n for n, c in enumerate(";&|()")}
 UNMASK = {v: k for k, v in MASK.items()}
 PLACEHOLDER = "\ue005"  # stands in for a substitution, which is judged on its own
-HEREDOC = re.compile(r"<<(-?)[ \t]*((?:[^\s;&|()<>'\"\\]|'[^']*'|\"[^\"]*\"|\\.)+)")
+HEREDOC = re.compile(r"<<(-?)[ \t]*((?:[^\s;&|()<>'\"\\]|'[^'\n]*'|\"(?:[^\"\\\n]|\\.)*\"|\\.)+)")
 KEYWORDS = {"then", "do", "else", "elif", "if", "while", "until", "{", "!"}
 ASSIGN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 # Options that take a separate value: (short letters, long names). Any other option takes none.
@@ -87,12 +87,15 @@ def skip_options(words, i, spec, dash_dash=True):
 
 def scan(text, i=0, nested=False):
     """(text with quoted and escaped separators masked, substitutions replaced by a placeholder,
-    newlines turned into ; and heredoc bodies dropped; the substitution bodies; the index just
+    newlines turned into ; (or a space after a trailing | or &) and heredoc bodies dropped; the substitution bodies; the index just
     past the closing parenthesis when nested inside $( )). Quotes inside a substitution are its
     own; a heredoc body is data, so only an unquoted delimiter's body has substitutions."""
     out, subs, quote, depth, heredocs = [], [], None, 0, []
+    continuing = False  # the last thing emitted was | or &, so a newline continues the line
     while i < len(text):
         c = text[i]
+        if (c not in " \t\n#" or quote) and not text.startswith("\\\n", i):
+            continuing = not quote and c in "|&"
         if c == "\\" and quote != "'" and i + 1 < len(text):
             if text[i + 1] != "\n":  # a backslash-newline joins the lines
                 out.append(c + text[i + 1].translate(MASK))
@@ -115,15 +118,17 @@ def scan(text, i=0, nested=False):
             i += 3
         elif heredoc := HEREDOC.match(text, i):
             word = heredoc.group(2)
-            delimiter = "".join(shlex.split(word))  # quote removal, as the shell does
+            try:
+                delimiter = "".join(shlex.split(word))  # quote removal, as the shell does
+            except ValueError:
+                delimiter = word
             heredocs.append((delimiter, delimiter != word, heredoc.group(1) == "-"))
             out.append("<<" + PLACEHOLDER)  # the << stays visible to the query-input check
             i = heredoc.end()
         elif c == "\n":
             # Newlines separate commands, as in the shell, except after | or & (a pipeline or
             # list continued on the next line).
-            last = next((piece for piece in reversed(out) if piece.strip(" \t")), "")
-            out.append(" " if last.rstrip(" \t")[-1:] in ("|", "&") else ";")
+            out.append(" " if continuing else ";")
             i += 1
             for delimiter, quoted, strip_tabs in heredocs:
                 lines = []
@@ -146,7 +151,7 @@ def scan(text, i=0, nested=False):
                         k += 1
             heredocs = []
         elif c == "#" and (not out or out[-1] in (" ", "\t", ";", "&", "|", "(", ")")):  # at a word start
-            # A comment runs to the end of the line; the newline still separates.
+            # A comment runs to the end of the line; the newline after it is handled as usual.
             end = text.find("\n", i)
             i = len(text) if end < 0 else end
         else:
@@ -232,6 +237,8 @@ def judge(text, depth=0):
                         if split and judge(split, depth + 1):
                             return True
                 i = skip_options(words, i + 1, WRAPPERS[name])
+                while name == "env" and i < len(words) and words[i] == "-":  # env - is env -i
+                    i = skip_options(words, i + 1, WRAPPERS[name])
                 if name == "timeout" and i < len(words):
                     i += 1  # the duration
             elif name in ("docker", "podman", "docker-compose"):

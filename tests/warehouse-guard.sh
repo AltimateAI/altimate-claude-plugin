@@ -141,6 +141,16 @@ deny "$(printf 'cat <<'"'"'E"O'"'"'\ntext\nE"O\npsql -c 1')"
 deny "$(printf 'cat <<\\EOF\ntext\nEOF\npsql -c 1')"
 deny "$(printf 'cat <<EOF\n$(\npsql -c 1\n)\nEOF')"
 deny "$(printf 'printf sql |&\npsql')"
+deny "$(printf 'echo a |\n\n  psql db')"
+deny "$(printf 'echo a | # c\npsql db')"
+deny "$(printf 'sleep 1 &\npsql -c 1')"
+allow "$(printf 'echo "a |"\npsql db')"
+deny 'env - psql -c 1'
+deny 'env -u FOO - psql -c 1'
+deny "$(printf 'echo sql | \\\n\npsql db')"
+deny "$(printf 'echo sql | \\\n  psql db')"
+deny "$(printf 'cat <<"a\\"b"\nx\na"b\npsql -c 1')"
+deny "$(printf 'psql -c 1; cat <<"a\\"b"\nx\na"b')"
 deny 'kubectl exec -it pod -- psql -c "select 1"'
 deny 'cd x && podman exec pg psql -c "select 1"'
 deny 'true; docker compose exec db mysql -e "select 1"'
