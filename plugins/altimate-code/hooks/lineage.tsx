@@ -392,6 +392,9 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
 
 /** Column lineage, then the selected column's reach, then warehouse lineage: each redraws as it lands. */
 async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, isNew: boolean, expected?: LineageFocus) {
+  // Its answers are written only while the follow it started under still owns the pane (see follow).
+  const owner = claimedSeq
+  const mine = () => claimedSeq === owner
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
   const node = focus && graph ? graph.nodes[focus.model] : null
@@ -399,14 +402,14 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
   if (!focus || !node || (expected && !sameFocus(focus, expected))) return
   await update($, loadingAtom, () => true)
   try {
-    if (preloaded) await update($, columnsAtom, () => preloaded)
+    if (preloaded) await update($, columnsAtom, prev => (mine() ? preloaded : prev))
     else if (isNew || !(await read($, columnsAtom))) {
       const began = await $.clock.now()
       const result = await runTool($, 'dbt_lineage', { manifest_path: focus.manifest, model: focus.model }).catch(() => null)
       if (!sameFocus(await read($, focusAtom), focus)) return
       const columns = result?.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
-      await update($, columnsAtom, () => columns)
-      if (!result?.ok) await update($, messageAtom, () => `dbt_lineage failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}`)
+      await update($, columnsAtom, prev => (mine() ? columns : prev))
+      if (!result?.ok) await update($, messageAtom, prev => (mine() ? `dbt_lineage failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}` : prev))
       const ms = Math.round((await $.clock.now()) - began)
       if (columns) $.ui.log(`lineage-pane · dbt_lineage(${node.name}) · ${columns.columns.length} columns · ${elapsed(ms)}`)
     }
@@ -419,14 +422,17 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
 
 /** The downstream models and dashboards that read the selected column (impact_analysis' column reach). */
 async function loadReach($: EngineInterface) {
+  // Its answers are written only while the follow it started under still owns the pane (see follow).
+  const owner = claimedSeq
+  const mine = () => claimedSeq === owner
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
   const column = await read($, columnAtom)
   const node = focus && graph ? graph.nodes[focus.model] : null
   if (!focus || !node || !column) return
-  await update($, reachAtom, () => null)
+  await update($, reachAtom, prev => (mine() ? null : prev))
   if (node.type !== 'model') {
-    await update($, messageAtom, () => 'Column reach starts from a model; a snapshot is traced when it is downstream of one.')
+    await update($, messageAtom, prev => (mine() ? 'Column reach starts from a model; a snapshot is traced when it is downstream of one.' : prev))
     return
   }
   const result = await runTool($, 'impact_analysis', {
@@ -437,16 +443,19 @@ async function loadReach($: EngineInterface) {
   }).catch(() => null)
   if (!sameFocus(await read($, focusAtom), focus) || (await read($, columnAtom)) !== column) return
   const reach = result?.ok ? reachFromMetadata(result.metadata, node.name, column) : null
-  await update($, reachAtom, () => reach)
-  if (!result?.ok) await update($, messageAtom, () => `impact_analysis failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}`)
+  await update($, reachAtom, prev => (mine() ? reach : prev))
+  if (!result?.ok) await update($, messageAtom, prev => (mine() ? `impact_analysis failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}` : prev))
   else if (reach) $.ui.log(`lineage-pane · column ${column} · impact_analysis(${node.name}, column: ${column}) · read by ${reach.models.length} models`)
-  else if (result.metadata?.column_reach_error) await update($, messageAtom, () => `Column reach failed: ${firstLine(String(result.metadata.column_reach_error))}`)
-  else if (result.metadata && result.metadata.severity === undefined) await update($, messageAtom, () => `impact_analysis: ${firstLine(result.text) ?? 'no answer'}`)
-  else await update($, messageAtom, () => 'Column reach needs an altimate-code build whose impact_analysis reports column_reach.')
+  else if (result.metadata?.column_reach_error) await update($, messageAtom, prev => (mine() ? `Column reach failed: ${firstLine(String(result.metadata.column_reach_error))}` : prev))
+  else if (result.metadata && result.metadata.severity === undefined) await update($, messageAtom, prev => (mine() ? `impact_analysis: ${firstLine(result.text) ?? 'no answer'}` : prev))
+  else await update($, messageAtom, prev => (mine() ? 'Column reach needs an altimate-code build whose impact_analysis reports column_reach.' : prev))
 }
 
 /** Warehouse lineage for the model's relation from a connected SaaS MCP server's table_lineage, when there is one. */
 async function loadWarehouse($: EngineInterface) {
+  // Its answers are written only while the follow it started under still owns the pane (see follow).
+  const owner = claimedSeq
+  const mine = () => claimedSeq === owner
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
   const node = focus && graph ? graph.nodes[focus.model] : null
@@ -467,7 +476,7 @@ async function loadWarehouse($: EngineInterface) {
   const body = result.structuredContent ?? parseJson(textOf(result.content))
   const records = (body as any)?.data ?? body
   const view: WarehouseView = { server, tool, table: node.relation, edges: warehouseEdges(body), complete: records?.truncated !== true && !records?.next_cursor }
-  await update($, warehouseAtom, () => view)
+  await update($, warehouseAtom, prev => (mine() ? view : prev))
   const ms = Math.round((await $.clock.now()) - began)
   $.ui.log(`lineage-pane · ${server} · ${tool}(${node.relation}) · ${elapsed(ms)}`)
 }
