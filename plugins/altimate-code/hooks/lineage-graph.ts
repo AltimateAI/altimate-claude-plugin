@@ -170,7 +170,7 @@ export function graphFromSql(project: string, files: { path: string; text: strin
   const add = (kind: string, name: string, path: string, text: string, python = false) => {
     const id = `${kind}.${project}.${name}`
     idOf.set(name.toLowerCase(), id)
-    nodes[id] = { resource_type: kind, name, original_file_path: path, depends_on: { nodes: [] }, config: { materialized: MATERIALIZED.exec(text)?.[1] ?? null } }
+    nodes[id] = { resource_type: kind, name, original_file_path: path, depends_on: { nodes: [] }, config: { materialized: MATERIALIZED.exec(dropUnrendered(text))?.[1] ?? null } }
     units.push({ id, text, python })
   }
   for (const file of files) {
@@ -220,6 +220,12 @@ export function graphFromSql(project: string, files: { path: string; text: strin
 export const FOLLOWABLE = new Set(['model', 'snapshot'])
 
 /** The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. */
+/** The model a name, path or unique_id names, else the one the text before its last dot (a `.column`) names. */
+export function findModelOrColumn(graph: LineageGraph, wanted: string): string | null {
+  const at = wanted.lastIndexOf('.')
+  return findModel(graph, wanted) ?? (at > 0 ? findModel(graph, wanted.slice(0, at)) : null)
+}
+
 export function findModel(graph: LineageGraph, wanted: string): string | null {
   if (FOLLOWABLE.has(graph.nodes[wanted]?.type ?? '')) return wanted
   const lowered = wanted.toLowerCase()

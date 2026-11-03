@@ -18,6 +18,7 @@ import {
   describeGraph,
   downstreamArt,
   findModel,
+  findModelOrColumn,
   graphFromSql,
   impactOf,
   modelLineageOf,
@@ -177,9 +178,7 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
   for (const root of prefer && roots.includes(prefer) ? [prefer, ...roots.filter(one => one !== prefer)] : roots) {
     // ponytail: a manifest over 4 MiB is looked up through its SQL files; the names are the same.
     const graph = (await readGraph($, `${root}/target/manifest.json`).catch(() => null)) ?? (await sqlGraph($, root))
-    // The whole text (a unique_id), else the part before a `.column`.
-    const at = model.lastIndexOf('.')
-    if (findModel(graph, model) || (at > 0 && findModel(graph, model.slice(0, at)))) return root
+    if (findModelOrColumn(graph, model)) return root
   }
   return null
 }
@@ -212,7 +211,7 @@ function sqlFilesIn(command: string, cwd: string): string[] {
 }
 
 // Where a shell command reads from: the session folder, moved by each `cd` in the command.
-const CD = /(?:^|[;&|(]\s*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g
+const CD = /(?:^|[;&|(\n]\s*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
 function commandDir(command: string, cwd: string): string {
   let dir = cwd
   for (const match of command.matchAll(CD)) {
@@ -250,6 +249,13 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
   const files: { path: string; text: string; kind: 'model' | 'snapshot' | 'seed' }[] = []
   // Set only when files were left out: a project of exactly the cap is whole.
   let partial = false
+  // Past the cap: whether a skipped folder holds any file that would have been read.
+  const holds = async (dir: string, ext: string, py: boolean): Promise<boolean> => {
+    const entries = await $.fs.list(`${root}/${dir}`).catch(() => [])
+    if (entries.some(entry => entry.kind === 'file' && (entry.name.endsWith(ext) || (py && entry.name.endsWith('.py'))))) return true
+    for (const entry of entries) if (entry.kind === 'dir' && !entry.name.startsWith('.') && (await holds(`${dir}/${entry.name}`, ext, py))) return true
+    return false
+  }
   const walk = async (dir: string, kind: 'model' | 'snapshot' | 'seed'): Promise<void> => {
     const entries = await $.fs.list(`${root}/${dir}`).catch(() => [])
     const ext = kind === 'seed' ? '.csv' : '.sql'
@@ -260,14 +266,17 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
     const texts = await Promise.all(here.map(entry => (kind === 'seed' ? '' : $.fs.read(`${root}/${dir}/${entry.name}`).catch(() => ''))))
     here.forEach((entry, i) => files.push({ path: `${dir}/${entry.name}`, text: texts[i]!, kind }))
     for (const entry of entries) {
-      if (entry.kind !== 'dir' || entry.name.startsWith('.')) continue
-      if (files.length >= MAX_SQL_FILES) partial = true
-      else await walk(`${dir}/${entry.name}`, kind)
+      // A symlink is `other`, never `dir`, so a link back up the tree is not walked into.
+      if (entry.kind !== 'dir' || entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue
+      if (files.length < MAX_SQL_FILES) await walk(`${dir}/${entry.name}`, kind)
+      else if (!partial) partial = await holds(`${dir}/${entry.name}`, ext, kind === 'model')
     }
   }
-  for (const dir of layout.models) await walk(dir, 'model')
-  for (const dir of layout.snapshots) await walk(dir, 'snapshot')
-  for (const dir of layout.seeds) await walk(dir, 'seed')
+  // `models/`, `./models` and `models` are one folder: paths must match what a follow looks up.
+  const clean = (dir: string) => normalize(dir).replace(/\/+$/, '').replace(/^\.\//, '')
+  for (const dir of layout.models) await walk(clean(dir), 'model')
+  for (const dir of layout.snapshots) await walk(clean(dir), 'snapshot')
+  for (const dir of layout.seeds) await walk(clean(dir), 'seed')
   const graph = graphFromSql(layout.name, files)
   if (partial) graph.partial = true
   if (generation === sqlGeneration) sqlGraphs.set(root, graph)
@@ -402,8 +411,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   // in the project already shown when its graph has it; otherwise the project is found from the
   // session's folder, or below it in a monorepo, the shown one first.
   const shown = !given && !input.file && !input.root && current && input.model ? await read($, graphAtom) : null
-  const dot = input.model ? input.model.lastIndexOf('.') : -1
-  const inShown = !!shown && !!input.model && !!(findModel(shown, input.model) || (dot > 0 && findModel(shown, input.model.slice(0, dot))))
+  const inShown = !!shown && !!input.model && !!findModelOrColumn(shown, input.model)
   const root = given
     ? dirname(dirname(given))
     : input.file
@@ -411,6 +419,8 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
       : inShown
         ? current!.root
         : ((input.root ? await projectRoot($, input.root, false) : null) ??
+          // The project shown, when it has the model outside the part drawn; then the session's.
+          (current?.root && input.model && !input.root ? await projectWith($, current.root, input.model) : null) ??
           (await projectRoot($, sessionRoot, false)) ??
           (input.model ? await projectWith($, input.root ?? sessionRoot, input.model, current?.root) : null) ??
           current?.root ??
@@ -501,9 +511,10 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const differs = (one: LineageFocus | null) => one?.model !== id || one.manifest !== manifest || one.mtimeMs !== mtimeMs
   const isNew = differs(latest) || differs(current) || !!input.refresh
   const node = graph.nodes[id]!
-  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs, stamp: began })))
-  if (superseded()) return false
+  // The graph lands before the focus, so a redraw between the two never pairs the new focus with the old graph.
   await update($, graphAtom, prev => (superseded() ? prev : (via === 'tools' ? graph! : subgraph(graph!, id!))))
+  if (superseded()) return false
+  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs, stamp: began })))
   if (superseded()) return false
   await update($, messageAtom, prev => (superseded() ? prev : fromSql ? `No target/manifest.json: lineage from the SQL files' ref() and source()${graph!.partial ? ', the first 5000 files only' : ''}. Run \`dbt parse\` for columns and dashboards.` : null))
   if (isNew) {
@@ -950,7 +961,8 @@ export function registerLineage(on: On) {
       const named = fromCommand.length ? fromCommand : fromOutput.length === 1 ? fromOutput : []
       if (named.length) {
         later($, async () => {
-          for (const file of named) if (await $.fs.exists(file).catch(() => false)) return void (await follow($, { file, auto: true }))
+          // A path that exists but is in no project (a redirect target) is skipped for the next one.
+          for (const file of named) if ((await $.fs.exists(file).catch(() => false)) && (await follow($, { file, auto: true }))) return
           // Only a name (find -name x.sql): the model of that name in the command's project.
           await follow($, { model: named[0]!.split('/').pop()!.replace(/\.sql$/i, ''), root: dir, auto: true })
         })
@@ -1058,7 +1070,7 @@ export function registerLineage(on: On) {
     const capDown = expanded.down ? UNFOLDED : BOX_CAP
     // The pane redraws on every state change (loading, messages, columns); the drawing depends only on these.
     // The links themselves, not a count: an edit can swap a parent and keep the size.
-    const drawKey = JSON.stringify([focus, graph.parents, view, upLevels, levels, capUp, capDown, width, column, view === 'graph' && column ? reach : null])
+    const drawKey = JSON.stringify([focus, graph.parents, graph.upTruncated, graph.truncated, graph.partial, view, upLevels, levels, capUp, capDown, width, column, view === 'graph' && column ? reach : null])
     if (drawnCache?.key !== drawKey) {
       const layered =
         view === 'graph'
@@ -1071,7 +1083,11 @@ export function registerLineage(on: On) {
       // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
       // The graph does too when its levels do not fit across: the pane scrolls, so every level shows.
       const across = layered && view !== 'folders' ? drawLayered(layered, width - 1) : null
-      const fitted = layered && view === 'graph' && across!.hidden > 0 ? fitVertical(layered, width - 1) : null
+      // Top to bottom draws every model, no "+N more": the pane scrolls.
+      const fitted =
+        layered && view === 'graph' && across!.hidden > 0
+          ? fitVertical(graphView(graph, focus.model, { up: upLevels, down: levels, capUp: Infinity, capDown: Infinity, reach: column ? reach : null }), width - 1)
+          : null
       const rows: Drawn | null = !layered
         ? null
         : view === 'folders'

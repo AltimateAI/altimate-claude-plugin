@@ -393,3 +393,8 @@ test('projectLayout reads block lists with comments, blank lines and CRLF', () =
   expect(projectLayout("model-paths: [transform] # team's models\n").models).toEqual(['transform'])
   expect(projectLayout("model-paths:\n- a\n- b\nseed-paths: ['s']\n")).toMatchObject({ models: ['a', 'b'], seeds: ['s'] })
 })
+
+test('graphFromSql reads materialized from the config dbt renders, not a commented-out one', () => {
+  const graph = graphFromSql('shop', [{ path: 'models/a.sql', text: "{# {{ config(materialized='view') }} #}\n{{ config(materialized='table') }} select 1", kind: 'model' }])
+  expect(graph.nodes['model.shop.a']!.materialized).toBe('table')
+})

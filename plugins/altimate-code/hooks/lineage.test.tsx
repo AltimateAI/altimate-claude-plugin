@@ -110,7 +110,7 @@ async function start($: any, on: any, options: Options = {}) {
       held = true
       await options.holdFirstManifestRead
     }
-    if (sql) return { value: e.path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : (sql[e.path.slice(ROOT.length + 1)] ?? '') }
+    if (sql) return { value: e.path === `${ROOT}/dbt_project.yml` ? (sql['dbt_project.yml'] ?? "name: 'shop'\n") : (sql[e.path.slice(ROOT.length + 1)] ?? '') }
     return { value: e.path === MANIFEST_PATH ? JSON.stringify(MANIFEST) : 'select 1' }
   })
   on('tool.list', () => ({
@@ -686,7 +686,7 @@ test('[e] shows the model end to end, and a pane too narrow for the levels draws
   await ui.unmount()
 })
 
-test('top to bottom, a "+N more" press lists the models it stands for, each followable', async ($, on) => {
+test('top to bottom draws every model, no "+N more", each followable', async ($, on) => {
   const long = (n: string) => `${n}_with_a_rather_long_model_name`
   const sqlFiles: Record<string, string> = { [`models/${long('grand')}.sql`]: 'select 1', [`models/${long('focus')}.sql`]: '', [`models/${long('down_one')}.sql`]: `select * from {{ ref('${long('focus')}') }}`, [`models/${long('down_two')}.sql`]: `select * from {{ ref('${long('down_one')}') }}` }
   const parents: string[] = []
@@ -700,15 +700,31 @@ test('top to bottom, a "+N more" press lists the models it stands for, each foll
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 60 }, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /top to bottom/ })).toBeDefined()
-  const more = await ui.find({ type: 'Button', text: /\+\d+ more/ })
-  await ui.press({ key: more!.key! })
-  await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /MORE UPSTREAM · \d+ not drawn/ })).toBeDefined()
-  const hidden = await ui.find({ type: 'Button', text: long('parent8') })
+  expect(await ui.find({ type: 'Button', text: /\+\d+ more/ })).toBeUndefined()
+  for (let i = 1; i <= 8; i++) expect(await ui.find({ type: 'Button', text: new RegExp(`parent${i}_with`) })).toBeDefined()
+  const hidden = await ui.find({ type: 'Button', text: /parent8_with/ })
   expect(hidden).toBeDefined()
   await ui.press({ key: hidden!.key! })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: new RegExp(`lineage · ${long('parent8')}`) })).toBeDefined()
+  await ui.unmount()
+})
+
+test("model-paths spelled `models/` still matches a read, and a cd on a later line of a command is followed", async ($, on) => {
+  const { clock } = await start($, on, {
+    sqlFiles: {
+      'dbt_project.yml': "name: 'shop'\nmodel-paths: ['models/']\n",
+      'models/staging/stg_orders.sql': "select * from {{ source('raw', 'orders') }}",
+      'models/marts/fct_orders.sql': "select * from {{ ref('stg_orders') }}",
+    },
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/marts/fct_orders.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await $.tool.call({ tool: 'Bash', command: 'ls\ncd /repo/models/staging\ncat stg_orders.sql' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · stg_orders/ })).toBeDefined()
   await ui.unmount()
 })
 
