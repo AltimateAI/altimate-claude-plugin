@@ -916,7 +916,7 @@ export function registerLineage(on: On) {
       view === 'graph'
         ? graphView(graph, focus.model, { up: upLevels, down: levels, capUp, capDown, reach: column ? reach : null })
         : view === 'ends'
-          ? endsView(graph, focus.model, { cap: Math.max(capUp, capDown) })
+          ? endsView(graph, focus.model, { capUp, capDown })
           : view === 'folders'
             ? foldersView(graph, focus.model)
             : null

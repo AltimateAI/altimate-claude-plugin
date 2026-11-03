@@ -152,26 +152,28 @@ export function graphView(graph: LineageGraph, id: string, opts: { up: number; d
     if (matcher?.(node)) return 0
     return node.type === 'exposure' ? 1 : 2
   }
-  // How many shown nodes lie beyond a node, away from the focus.
-  const beyond = (one: string, index: number) => {
+  // How much of the shown graph hangs beyond a node, away from the focus: paths, not distinct nodes, so
+  // a diamond counts twice. ponytail: an estimate for ranking, linear with the memo; exact counts cost O(N·E) per render.
+  const memo = new Map<string, number>()
+  const beyond = (one: string, index: number): number => {
+    const known = memo.get(one)
+    if (known !== undefined) return known
+    memo.set(one, 0)
     const next = index < focusIndex ? graph.parents : graph.children
-    const seen = new Set<string>()
-    const stack = [one]
-    while (stack.length > 0) {
-      for (const other of next[stack.pop()!] ?? []) {
-        if (seen.has(other) || !layerOf.has(other)) continue
-        seen.add(other)
-        stack.push(other)
-      }
-    }
-    return seen.size
+    let total = 0
+    for (const other of next[one] ?? []) if (layerOf.has(other)) total += 1 + beyond(other, index)
+    memo.set(one, Math.min(total, 1e9))
+    return memo.get(one)!
   }
 
   const folded = new Map<string, string>()
   const layers = layerIds.map((ids, index) => {
     if (index === focusIndex) return [boxOf(graph, id, id)]
-    const ranked = ids.map((one, at) => ({ one, at, p: priority(one), n: beyond(one, index) })).sort((a, b) => a.p - b.p || b.n - a.n || a.at - b.at)
-    const capped = capLayer(graph, ranked.map(entry => boxOf(graph, entry.one, id)), index < focusIndex ? opts.capUp : opts.capDown, index)
+    const cap = index < focusIndex ? opts.capUp : opts.capDown
+    // Ranking only matters when the layer folds.
+    const folds = cap > 0 && Number.isFinite(cap) && ids.length > cap + 1
+    const ranked = ids.map((one, at) => ({ one, at, p: priority(one), n: folds ? beyond(one, index) : 0 })).sort((a, b) => a.p - b.p || b.n - a.n || a.at - b.at)
+    const capped = capLayer(graph, ranked.map(entry => boxOf(graph, entry.one, id)), cap, index)
     for (const [from, to] of capped.folded) folded.set(from, to)
     return capped.boxes
   })
@@ -194,7 +196,7 @@ export function graphView(graph: LineageGraph, id: string, opts: { up: number; d
 }
 
 /** Upstream roots, the focus and downstream leaves, each end labelled with how many models sit between. */
-export function endsView(graph: LineageGraph, id: string, opts: { cap: number }): Layered {
+export function endsView(graph: LineageGraph, id: string, opts: { capUp: number; capDown: number }): Layered {
   const label = (box: LayoutBox, via: number) => (via > 0 ? { ...box, label: `${box.label} · via ${via}` } : box)
   // Shown first: dashboards downstream, and sources, seeds and snapshots upstream (where the data
   // enters), then the farthest ends, so a long chain's true origins stay out of "+N more".
@@ -215,8 +217,8 @@ export function endsView(graph: LineageGraph, id: string, opts: { cap: number })
   }
   const ups = ends('parents')
   const downs = ends('children')
-  const upLayer = ups.length > 0 ? capLayer(graph, ups, opts.cap, 0) : null
-  const downLayer = downs.length > 0 ? capLayer(graph, downs, opts.cap, upLayer ? 2 : 1) : null
+  const upLayer = ups.length > 0 ? capLayer(graph, ups, opts.capUp, 0) : null
+  const downLayer = downs.length > 0 ? capLayer(graph, downs, opts.capDown, upLayer ? 2 : 1) : null
   const focus = boxOf(graph, id, id)
   const layers = [upLayer?.boxes, [focus], downLayer?.boxes].filter((one): one is LayoutBox[] => !!one)
   const edges: [string, string][] = []
@@ -367,7 +369,7 @@ function gapsOf(layers: LayoutBox[][], edges: [string, string][]): Gap[] {
 /** Cuts a label to `room` columns in the middle, keeping a short head and the longer tail; a `◆ `/`⋯ ` prefix and a ` · via N` suffix stay whole. */
 function fit(label: string, room: number): string {
   if (label.length <= room) return label
-  const prefix = /^(◆|⋯) /.exec(label)?.[0] ?? ''
+  const prefix = /^(◆ |⋯ |\+\d+ more)/.exec(label)?.[0] ?? ''
   const suffix = / · via \d+$/.exec(label)?.[0] ?? ''
   const name = label.slice(prefix.length, label.length - suffix.length)
   const left = room - prefix.length - suffix.length
@@ -418,8 +420,50 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
   while (cap > MIN_BOX && place(layers, cap, gapsOf(layers, view.edges)).width > maxWidth) cap--
 
   const gapList = gapsOf(layers, view.edges)
-  const { spots, width, height } = place(layers, cap, gapList)
+  const { spots, width } = place(layers, cap, gapList)
   if (layers.length === 0) return { rows: [], hidden }
+
+  // Channel order per gap. Sources whose lines run down go top first and the rest bottom first, and
+  // the first get the rightmost channels, so one source's line does not cut the next one's run. A line
+  // that arrives on another source's row must also turn in right of that source's own turn, or the two
+  // runs read as one line between models that are not linked. When two sources each need the other's
+  // right, the target layer moves down two rows: its rows then never meet a source's row.
+  const orders = gapList.map((gap, index) => {
+    const rowOf = (from: string) => spots.get(from)!.y + 1
+    const plan = () => {
+      const { byFrom, oneTarget } = gap
+      const goesDown = (from: string) => byFrom.get(from)!.reduce((sum, to) => sum + spots.get(to)!.y + 1 - rowOf(from), 0) >= 0
+      const sources = [...byFrom.keys()]
+      const downs = sources.filter(goesDown).sort((p, q) => rowOf(p) - rowOf(q))
+      const ups = sources.filter(from => !goesDown(from)).sort((p, q) => rowOf(q) - rowOf(p))
+      const preferred = [...downs, ...ups]
+      if (oneTarget) return preferred
+      const onRow = new Map(sources.map(from => [rowOf(from), from]))
+      const after = new Map(sources.map(from => [from, new Set<string>()]))
+      for (const from of sources) {
+        for (const to of byFrom.get(from)!) {
+          const other = onRow.get(spots.get(to)!.y + 1)
+          if (other && other !== from && !byFrom.get(other)!.includes(to)) after.get(from)!.add(other)
+        }
+      }
+      // Kahn's order over "comes before", ties in the preferred order.
+      const waiting = new Map(sources.map(from => [from, 0]))
+      for (const later of after.values()) for (const one of later) waiting.set(one, waiting.get(one)! + 1)
+      const order: string[] = []
+      while (order.length < sources.length) {
+        const next = preferred.find(from => waiting.get(from) === 0 && !order.includes(from))
+        if (!next) return null
+        order.push(next)
+        for (const one of after.get(next)!) waiting.set(one, waiting.get(one)! - 1)
+      }
+      return order
+    }
+    const order = plan()
+    if (order) return order
+    for (const box of layers[index + 1] ?? []) spots.get(box.key)!.y += 2
+    return plan()!
+  })
+  const height = Math.max(0, ...[...spots.values()].map(spot => spot.y + 3))
   const cells: (Cell | null)[][] = Array.from({ length: height }, () => Array<Cell | null>(width).fill(null))
   const mask: number[][] = Array.from({ length: height }, () => Array<number>(width).fill(0))
 
@@ -431,20 +475,14 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
       mask[y]![x + 1]! |= W
     }
   }
-  for (const { byFrom, oneTarget, width: gapWidth } of gapList) {
+  gapList.forEach(({ byFrom, oneTarget, width: gapWidth }, index) => {
     const channels = gapWidth - 2
-    // Each source gets its own channel. Sources whose lines run down are ordered top first and the rest bottom first,
-    // and the first get the rightmost channels, so the lines of one do not cut the horizontal run of the next.
-    const rowOf = (from: string) => spots.get(from)!.y + 1
-    const goesDown = (from: string) => byFrom.get(from)!.reduce((sum, to) => sum + spots.get(to)!.y + 1 - rowOf(from), 0) >= 0
-    const sources = [...byFrom.keys()]
-    const downs = sources.filter(goesDown).sort((p, q) => rowOf(p) - rowOf(q))
-    const ups = sources.filter(from => !goesDown(from)).sort((p, q) => rowOf(q) - rowOf(p))
-    const first = Math.min(channels, sources.length + 2)
+    const order = orders[index]!
+    const first = Math.min(channels, order.length + 2)
     // Lines that all end on one box merge into one channel: a shared line cannot be misread there.
-    ;[...downs, ...ups].forEach((from, index) => {
+    order.forEach((from, at) => {
       const a = spots.get(from)!
-      const channel = oneTarget ? Math.ceil(channels / 2) : first - (index % first)
+      const channel = oneTarget ? Math.ceil(channels / 2) : first - (at % first)
       const ys = a.y + 1
       const targets = byFrom.get(from)!
       linked.add(from)
@@ -470,7 +508,7 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
         mask[y + 1]![column]! |= N
       }
     })
-  }
+  })
 
   for (const boxes of layers) {
     for (const box of boxes) {

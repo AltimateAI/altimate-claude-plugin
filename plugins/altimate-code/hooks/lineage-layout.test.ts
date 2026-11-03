@@ -113,7 +113,7 @@ test('graphView keeps reach hits when capping and sets tones', () => {
 })
 
 test('endsView lists the roots and leaves with the models between', () => {
-  const view = endsView(graph, FCT, { cap: 0 })
+  const view = endsView(graph, FCT, { capUp: 0, capDown: 0 })
   // Sources and dashboards first, then the farthest ends.
   expect(names(view)).toEqual([['orders · via 2', 'stg_b · via 1'], ['fct'], ['◆ Dash · via 1', 'm6 · via 1', 'm3', 'm4', 'm5']])
   expect(view.edges).toHaveLength(2 + 5)
@@ -121,7 +121,7 @@ test('endsView lists the roots and leaves with the models between', () => {
 })
 
 test('endsView folds ends past the cap', () => {
-  const view = endsView(graph, FCT, { cap: 2 })
+  const view = endsView(graph, FCT, { capUp: 2, capDown: 2 })
   expect(view.layers.at(-1)!.map(box => box.label)).toEqual(['◆ Dash · via 1', 'm6 · via 1', '+3 more · marts'])
   expect(view.edges.filter(([, to]) => to === 'more:2')).toEqual([[FCT, 'more:2']])
 })
@@ -188,9 +188,9 @@ test('drawLayered label cells carry the node and styles', () => {
 })
 
 test('endsView marks an upstream end with a prefix only when the ancestry was cut, and never a source', () => {
-  const cut = endsView({ ...graph, upTruncated: true }, FCT, { capUp: 0, capDown: 0 } as any)
+  const cut = endsView({ ...graph, upTruncated: true }, FCT, { capUp: 0, capDown: 0 })
   expect(names(cut)[0]).toEqual(['orders · via 2', '⋯ stg_b · via 1'])
-  expect(names(endsView(graph, FCT, { cap: 0 }))[0]).toEqual(['orders · via 2', 'stg_b · via 1'])
+  expect(names(endsView(graph, FCT, { capUp: 0, capDown: 0 }))[0]).toEqual(['orders · via 2', 'stg_b · via 1'])
 })
 
 test('an exposure takes its tone from the reach, and a more box the strongest of what it folds', () => {
@@ -321,4 +321,56 @@ test('drawStack stacks the folders top to bottom with an arrow between, and wrap
   const wrapped = text(drawStack(wide, 40))
   expect(wrapped).toHaveLength(6)
   expect(Math.max(...wrapped.map(row => row.length))).toBeLessThanOrEqual(40)
+})
+
+// Every unbroken run from a box's right border to an arrow must be a real link.
+function straightRuns(rows: string[]): [string, string][] {
+  const runs: [string, string][] = []
+  for (const row of rows) {
+    const chars = [...row]
+    chars.forEach((ch, at) => {
+      if (ch !== '▶') return
+      // Junctions that carry the line on (┬ ┴ ┼) keep it one line to the eye.
+      let x = at - 1
+      while (x >= 0 && '─┬┴┼'.includes(chars[x]!)) x--
+      if (x < 1 || !['├', '┠'].includes(chars[x]!) || chars[x - 1] !== ' ') return
+      const from = chars.slice(0, x).join('').split(/[│┃]/).at(-1)!.trim()
+      if (!from) return
+      const to = chars.slice(at + 2).join('').split(/[│┃├┠]/)[0]!.trim()
+      runs.push([from, to])
+    })
+  }
+  return runs
+}
+
+const linksOf = (pairs: [string, string][]): LineageGraph => {
+  const g: LineageGraph = { nodes: {}, parents: {}, children: {} }
+  for (const name of new Set(pairs.flat())) {
+    g.nodes[name] = { id: name, name, label: null, type: 'model', path: null, materialized: null, relation: null, columns: [] }
+    g.parents[name] = []
+    g.children[name] = []
+  }
+  for (const [a, b] of pairs) {
+    g.children[a]!.push(b)
+    g.parents[b]!.push(a)
+  }
+  return g
+}
+
+test('drawLayered never draws an unbroken line between two models that are not linked', () => {
+  const cases: [string, [string, string][]][] = [
+    // A folded layer pins "+N more" last, pulling lines across the rows of other sources.
+    ['f', [['f', 'p1'], ['f', 'p2'], ['f', 'p3'], ['p1', 'x1'], ['p1', 'x2'], ['p3', 't1'], ['p3', 't2'], ['p3', 't3'], ['p3', 't4'], ['t1', 'u1'], ['t2', 'u2'], ['t3', 'u3'], ['t4', 'u4']]],
+    // A barycenter tie puts a target on another source's row.
+    ['f', [['f', 'a'], ['f', 'b'], ['f', 'c'], ['f', 'd'], ['a', 't1'], ['d', 't1'], ['b', 't2'], ['c', 't2']]],
+  ]
+  for (const [focus, pairs] of cases) {
+    const graph = linksOf(pairs)
+    const drawn = text(drawLayered(graphView(graph, focus, { up: 0, down: 3, capUp: 4, capDown: 4 }), 300).rows)
+    const real = new Set(pairs.map(([a, b]) => `${a}>${b}`))
+    for (const [from, to] of straightRuns(drawn)) {
+      if (to.startsWith('+')) continue
+      expect(real.has(`${from}>${to}`) || `${from}>${to}`).toBe(true)
+    }
+  }
 })
