@@ -89,8 +89,11 @@ let ownerKey = ''
 // Each column-reach request takes a number; only the newest one's answer is shown.
 let reachSeq = 0
 const contextGiven = new Set<string>()
-// Whether something Claude did this turn (a read, an edit, a dbt_lineage call) already moved the pane.
-let claudeFollowed = false
+// Main-conversation turns: the current one's number, the last one in which something Claude did (a
+// read, an edit, a dbt_lineage call) moved the pane, and Claude-driven follows still resolving.
+let turnCount = 0
+let followedTurn = -1
+let followsInFlight = 0
 
 const VIEWS: (ViewKind | 'list')[] = ['graph', 'ends', 'folders', 'list']
 const VIEW_TITLE: Record<ViewKind | 'list', string> = { graph: 'GRAPH', ends: 'ENDS ONLY', folders: 'FOLDERS', list: 'LIST' }
@@ -410,6 +413,8 @@ type FollowInput = {
   model?: string
   /** A folder the model belongs under, when no file names it: a shell command's working folder. */
   root?: string
+  /** Led by the models Claude's answer names, not by something Claude read: it does not count as a read. */
+  fromAnswer?: boolean
   column?: string | null
   columns?: ColumnLineage | null
   /** Focus the pane: /lineage and presses. */
@@ -425,7 +430,21 @@ type FollowInput = {
 }
 
 /** Points the pane at a model (by file, name or unique_id) and loads its graph, columns, reach and warehouse lineage. */
+/** A follow; one Claude's work started counts for the turn it started in, once it lands. */
 async function follow($: EngineInterface, input: FollowInput): Promise<boolean> {
+  if (!input.auto || input.fromAnswer) return followOnce($, input)
+  const turn = turnCount
+  followsInFlight++
+  try {
+    const followed = await followOnce($, input)
+    if (followed) followedTurn = Math.max(followedTurn, turn)
+    return followed
+  } finally {
+    followsInFlight--
+  }
+}
+
+async function followOnce($: EngineInterface, input: FollowInput): Promise<boolean> {
   // What Claude's own reads run into outside a project (a package's SQL, a stray .sql) is not news.
   const isPackage = !!input.file && /[\\/]dbt_(?:packages|modules)[\\/]/.test(input.file)
   const say = async (text: string, always = false) => {
@@ -568,7 +587,6 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     paneOpened = true
     await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
   }
-  if (input.auto) claudeFollowed = true
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
   // for this model (by unique_id when the answer gives one, else by name).
@@ -929,7 +947,7 @@ export function registerLineage(on: On) {
     // A subagent's turn starting does not clear the main conversation's context.
     if (!(e as { agentId?: string }).agentId) {
       contextGiven.clear()
-      claudeFollowed = false
+      turnCount++
     }
     return next(e)
   })
@@ -940,12 +958,18 @@ export function registerLineage(on: On) {
     const out = await next(e)
     if ((e as { agentId?: string }).agentId || e.reason !== 'answer' || !out.text) return out
     const text = out.text
+    const turn = turnCount
     later($, async () => {
+      // A read Claude made this turn may still be loading: let it land first (5 s at most).
+      for (let i = 0; i < 50 && followsInFlight > 0; i++) await $.clock.sleep(100).catch(() => {})
+      // A newer turn has started: this answer is no longer the one shown.
+      if (turnCount !== turn) return
       const root = (await read($, focusAtom))?.root ?? (await projectRoot($, await $.session.root().catch(() => '.'), false))
       if (!root) return
       const named = await modelsNamed($, text, root).catch(() => [])
+      if (turnCount !== turn) return
       await update($, answerAtom, () => named)
-      if (!claudeFollowed && named[0]) await follow($, { model: named[0].id, auto: true })
+      if (followedTurn !== turn && named[0]) await follow($, { model: named[0].id, auto: true, fromAnswer: true })
     })
     return out
   })

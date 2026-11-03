@@ -803,6 +803,22 @@ test('an answer after Claude read a model leaves the pane on what it read', asyn
   await ui.unmount()
 })
 
+test("a read still loading when the answer ends wins over the models the answer names", async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, { holdFirstManifestRead: new Promise<void>(resolve => (release = resolve)) })
+  await $.turn.start({ text: 'explain fct_orders', turnId: 't3' } as any)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await $.turn.complete({ answer: 'It reads `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't3' } as any)
+  // The answer is handled while the read is still loading; then the read lands.
+  await clock.advance(100)
+  release()
+  await clock.advance(200)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a failing follow started after a good one does not cancel it', async ($, on) => {
   const { clock } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
