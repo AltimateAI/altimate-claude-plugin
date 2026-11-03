@@ -1221,3 +1221,15 @@ test('the impact note stays under 4 KB in bytes with non-ASCII names', async ($,
   expect(new TextEncoder().encode(note).length).toBe(note.length)
   expect(note.length).toBeLessThan(4200)
 })
+
+test('a cut impact note never ends inside an escape', async ($, on) => {
+  // Backslashes escape to two characters each, so the cut lands on either half across these lengths.
+  const models = Array.from({ length: 20 }, (_, i) => ({ name: `m${i}`, columns: Array.from({ length: 8 }, (_, j) => `${'\\'.repeat(30 + i + j)}`) }))
+  const { clock } = await start($, on, { reach: { ...REACH, column_reach: { ...REACH.column_reach, models } } })
+  const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  const note: string = edit.context?.[0] ?? ''
+  const head = note.slice(0, note.indexOf('...\n'))
+  expect(head.length).toBeGreaterThan(3000)
+  expect(head.match(/\\*$/)![0].length % 2).toBe(0)
+})

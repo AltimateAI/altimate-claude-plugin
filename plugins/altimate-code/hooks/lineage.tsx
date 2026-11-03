@@ -845,6 +845,11 @@ const quoted = (text: string) => {
 /** At most `max` entries, then how many more. */
 const capped = (items: string[], max: number) => items.slice(0, max).join(', ') + (items.length > max ? `, ... ${items.length - max} more` : '')
 const listed = (items: string[], max = 10) => capped(items.map(quoted), max)
+/** The first `max` characters of ASCII text (so `max` bytes), never ending inside a `\\uXXXX`, `\\\\` or `\\"` escape. */
+function cut(text: string, max: number): string {
+  const head = text.slice(0, max).replace(/\\u[0-9a-f]{0,3}$/, '')
+  return head.match(/\\*$/)![0].length % 2 ? head.slice(0, -1) : head
+}
 
 /**
  * Before an edit to a model's SQL: what reads the model, and, when the edit changes one of its
@@ -943,8 +948,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
     // manifest's revision: a recompile is told again.
     key: `${e.agentId ?? 'main'}\u0000${manifest}\u0000${stat.mtimeMs}\u0000${id}\u0000${traced.join(',')}\u0000${unchecked.join(',')}`,
     toast: toastText,
-    // Everything in the note is ASCII, so this cut is in bytes; it never ends inside an escape.
-    context: `${body.length > MAX_NOTE ? `${body.slice(0, MAX_NOTE).replace(/\\u[0-9a-f]{0,3}$/, '')}...` : body}\n${close}`,
+    context: `${body.length > MAX_NOTE ? `${cut(body, MAX_NOTE)}...` : body}\n${close}`,
     view: {
       model: node.name,
       column: reach ? column : null,
