@@ -98,5 +98,19 @@ assert any("refresh-skills.sh\" --if-stale" in h["command"] for e in stop for h 
 PY
 grep -q 'refresh-skills.sh" --wait' "$PLUGIN/commands/refresh-skills.md" || fail "manual command does not run --wait"
 
+# A background refresh that is stopped mid-refresh releases its lock; --wait releases it once done.
+p="$TMP/stopped"; mkdir -p "$p/.altimate-code"
+LOCKDIR="$p/.altimate-code/claude-skill-sync.lock"
+FAKE_DELAY=30 CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --if-stale
+wait_for "$LOCKDIR" || fail "background refresh took no lock"
+sub="$(pgrep -f "$REFRESH --if-stale" | head -1)"
+[ -n "$sub" ] || fail "could not find the background refresh to stop"
+[ -n "$sub" ] && kill -TERM "$sub"
+pkill -TERM -f "$TMP/bin/altimate" 2>/dev/null  # the fake CLI, so the subshell's trap can run
+for _ in $(seq 1 100); do [ -e "$LOCKDIR" ] || break; sleep 0.1; done
+[ ! -e "$LOCKDIR" ] || fail "a stopped background refresh left its lock"
+CLAUDE_PROJECT_DIR="$p" bash "$REFRESH" --wait >/dev/null
+[ ! -e "$LOCKDIR" ] || fail "--wait left its lock"
+
 [ "$FAILURES" -eq 0 ] && echo "refresh-skills: all checks passed"
 exit "$FAILURES"

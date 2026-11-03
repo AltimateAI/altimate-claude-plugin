@@ -581,7 +581,7 @@ INDEX_TOTAL_CHARS = 4000
 
 def index(project):
     """One `- name: description` line per workspace skill copy, descriptions cut to
-    INDEX_DESCRIPTION_CHARS and the whole index, as JSON-escaped text, to INDEX_TOTAL_CHARS;
+    INDEX_DESCRIPTION_CHARS and the whole index to INDEX_TOTAL_CHARS characters;
     skills past it are counted in a last `- … and N more` line, so SessionStart stays well
     inside Claude Code's hook output limit. Claude Code shows a skill's description only while its
     skill listing fits a size budget; past it, project skills appear as bare names
@@ -595,14 +595,28 @@ def index(project):
         if not NAME_PATTERN.fullmatch(entry) or not is_ours(path):
             continue
         try:
-            fields, _ = parse_frontmatter(read_text_no_follow(os.path.join(path, "SKILL.md"), "utf-8-sig"))
+            text = read_text_no_follow(os.path.join(path, "SKILL.md"), "utf-8-sig")
         except (OSError, UnicodeDecodeError):
             continue
-        description = " ".join(((fields or {}).get("description") or "").split())
+        fields, _ = parse_frontmatter(text)
+        description = (fields or {}).get("description") or ""
+        # Copies store the description as a JSON string (render_skill, and the CLI the same way);
+        # decode it so non-ASCII text, backslashes and newlines read as written.
+        quoted = re.search(r'^description: ("(?:[^"\\\n]|\\.)*")$', text.split("\n---", 1)[0], re.M)
+        if quoted:
+            try:
+                description = json.loads(quoted.group(1))
+            except ValueError:
+                pass
+        # One line, with no control, zero-width or bidi characters a description could carry into the
+        # session; they are removed before whitespace is collapsed, so no double space is left.
+        description = " ".join(
+            re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]", "", description).split()
+        )
         if len(description) > INDEX_DESCRIPTION_CHARS:
             description = description[: INDEX_DESCRIPTION_CHARS - 1].rsplit(" ", 1)[0] + "…"
         line = f"- {entry}: {description}" if description else f"- {entry}"
-        size = len(json.dumps(line)[1:-1]) + 2
+        size = len(line) + 1  # Claude Code caps the decoded text
         if omitted or used + size > INDEX_TOTAL_CHARS - 80:  # room for the closing line
             omitted += 1
             continue

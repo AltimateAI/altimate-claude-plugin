@@ -56,6 +56,8 @@ if [ "$MODE" = "--wait" ]; then
   ALTIMATE_CLAUDE_SKILL_SYNC=1 "$ALTIMATE_BIN" workspace refresh --directory "$PROJECT_DIR" </dev/null
   STATUS=$?
   python3 -I "$SYNC_SCRIPT" "$PROJECT_DIR" >/dev/null
+  # Release now and drop the trap, so exiting later cannot remove a lock another refresh took meanwhile.
+  trap - EXIT HUP INT TERM
   rmdir "$LOCK" 2>/dev/null
   COUNT="$(find "$PROJECT_DIR/.claude/skills" -mindepth 2 -maxdepth 2 -name .altimate-workspace-skill 2>/dev/null | wc -l | tr -d ' ')"
   say "Workspace skills in .claude/skills: $COUNT."
