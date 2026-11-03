@@ -142,7 +142,8 @@ test('the form shows a secret as a masked tail and keeps the form open on a refu
 
   await ui.press({ key: 'jira-jiraApiToken-create' })
   await clock.settle()
-  expect(calls.some(args => args[0] === 'open-token-page')).toBe(true)
+  // The press is what opens the browser, so the CLI is asked to open it.
+  expect(calls.some(args => args[0] === 'open-token-page' && args.includes('--open'))).toBe(true)
 
   await ui.press({ key: 'jira-submit' })
   await clock.settle()

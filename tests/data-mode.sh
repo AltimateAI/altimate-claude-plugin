@@ -54,6 +54,10 @@ rm "$TMP/programfiles/ClaudeCode/managed-settings.json"
 printf '{}' > "$TMP/programfiles/ClaudeCode/managed-mcp.json"
 expect "Windows managed MCP is exclusive" "$W" "" "" "PROGRAMFILES=$TMP/programfiles" cli
 rm "$TMP/programfiles/ClaudeCode/managed-mcp.json"
+# Elsewhere a relative "C:/Program Files" folder is never read as managed policy.
+mkdir -p "$TMP/cwd/C:/Program Files/ClaudeCode" && printf '{}' > "$TMP/cwd/C:/Program Files/ClaudeCode/managed-mcp.json"
+out="$(cd "$TMP/cwd" && env -i HOME="$TMP" PATH="$W:/usr/bin:/bin" CLAUDE_CONFIG_DIR="$TMP/config" CLAUDE_PROJECT_DIR="$TMP/project" bash "$HOOK")"
+printf '%s' "$out" | grep -q 'tool context` once' && { echo "FAIL: relative C:/Program Files read as managed policy"; FAILURES=$((FAILURES + 1)); }
 
 # With CLAUDE_CONFIG_DIR set, a .claude.json in HOME is not Claude Code's.
 printf '%s' '{"projects":{"'"$TMP/project"'":{"disabledMcpServers":["plugin:altimate-code:altimate-code"]}}}' > "$TMP/.claude.json"
