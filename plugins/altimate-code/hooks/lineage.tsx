@@ -267,7 +267,8 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
     here.forEach((entry, i) => files.push({ path: `${dir}/${entry.name}`, text: texts[i]!, kind }))
     for (const entry of entries) {
       // A symlink is `other`, never `dir`, so a link back up the tree is not walked into.
-      if (entry.kind !== 'dir' || entry.name.startsWith('.') || SKIP_DIRS.has(entry.name)) continue
+      // Inside a configured model folder every subfolder is the project's own, whatever its name.
+      if (entry.kind !== 'dir' || entry.name.startsWith('.')) continue
       if (files.length < MAX_SQL_FILES) await walk(`${dir}/${entry.name}`, kind)
       else if (!partial) partial = await holds(`${dir}/${entry.name}`, ext, kind === 'model')
     }

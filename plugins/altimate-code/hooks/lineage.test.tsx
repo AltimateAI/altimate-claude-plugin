@@ -728,6 +728,16 @@ test("model-paths spelled `models/` still matches a read, and a cd on a later li
   await ui.unmount()
 })
 
+test('a model folder named like a build folder (models/build/) is still read', async ($, on) => {
+  const { clock } = await start($, on, { sqlFiles: { 'models/build/orders_built.sql': 'select 1', 'models/rpt.sql': "select * from {{ ref('orders_built') }}" } })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/build/orders_built.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · orders_built/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /rpt/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a failing follow started after a good one does not cancel it', async ($, on) => {
   const { clock } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
