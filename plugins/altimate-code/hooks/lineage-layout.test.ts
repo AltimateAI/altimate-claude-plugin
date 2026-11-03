@@ -442,36 +442,34 @@ const layered = (levels: string[][], edges: [string, string][]): Layered => ({
   edges,
 })
 
-// For every ▼: the boxes whose lines it can be followed back to. The line is traced up from the arrow to
-// the row it turns on, along that row, and up from each place on it where a line comes down to a box.
+// For every ▼: the source boxes its line leads back to. The line is followed from the arrow's column through every
+// junction except ┼, where it goes straight on (a crossing), up to each ┬/┯ under a box.
+const ARMS: Record<string, string> = { '│': 'NS', '─': 'EW', '┌': 'ES', '┐': 'WS', '└': 'NE', '┘': 'NW', '├': 'NES', '┤': 'NWS', '┬': 'EWS', '┴': 'EWN', '┼': 'NESW', '┯': 'EWS' }
+const STEP: Record<string, [number, number]> = { N: [0, -1], S: [0, 1], E: [1, 0], W: [-1, 0] }
+const BACK: Record<string, string> = { N: 'S', S: 'N', E: 'W', W: 'E' }
 function sourcesOf(grid: Grid): { to: string | undefined; from: string[] }[] {
   const found: { to: string | undefined; from: string[] }[] = []
   grid.forEach((row, y) => {
     row.forEach((cell, x) => {
       if (cell.ch !== '▼') return
-      const to = at(grid, x, y + 2)?.node
       const from = new Set<string>()
-      const departure = (cx: number, from0: number) => {
-        let up = from0
-        while ('│┼┤├'.includes(at(grid, cx, up)?.ch ?? ' ')) up--
-        const cap = at(grid, cx, up)
-        if ((cap?.ch === '┬' || cap?.ch === '┯') && at(grid, cx, up - 1)?.node) from.add(at(grid, cx, up - 1)!.node!)
-      }
-      const scan = (row: number) => {
-        for (const dir of [-1, 1]) {
-          for (let cx = x; '─┬┴┼┌┐└┘├┤'.includes(at(grid, cx, row)?.ch ?? ' '); cx += dir) {
-            if (cx !== x && '└┘┴┤├'.includes(at(grid, cx, row)!.ch)) departure(cx, row - 1)
-          }
+      const seen = new Set<string>()
+      const walk = (cx: number, cy: number, dir: string) => {
+        const key = `${cx},${cy},${dir}`
+        if (seen.has(key)) return
+        seen.add(key)
+        const here = at(grid, cx, cy)
+        const arms = here && ARMS[here.ch]
+        if (!arms || !arms.includes(BACK[dir]!)) return
+        if ((here.ch === '┬' || here.ch === '┯') && at(grid, cx, cy - 1)?.node) {
+          from.add(at(grid, cx, cy - 1)!.node!)
+          return
         }
+        const out = here.ch === '┼' ? [dir] : [...arms].filter(arm => arm !== BACK[dir])
+        for (const arm of out) walk(cx + STEP[arm]![0], cy + STEP[arm]![1], arm)
       }
-      let top = y - 1
-      while ('│┼┤├'.includes(at(grid, x, top)?.ch ?? ' ')) {
-        if ('┤├'.includes(at(grid, x, top)!.ch)) scan(top)
-        top--
-      }
-      if (at(grid, x, top)?.ch === '┬' && at(grid, x, top - 1)?.node) from.add(at(grid, x, top - 1)!.node!)
-      scan(top)
-      found.push({ to, from: [...from] })
+      walk(x, y - 1, 'N')
+      found.push({ to: at(grid, x, y + 2)?.node, from: [...from] })
     })
   })
   return found
@@ -493,30 +491,22 @@ test('drawVertical draws a chain top to bottom with every arrow on a box top', (
   expect(rows.flat().filter(one => one.node === 'model.shop.c').length).toBeGreaterThan(0)
 })
 
-test('drawVertical folds a level wider than the pane into a more box and redirects its edges', () => {
+test('drawVertical draws every box of a wide level on sub-rows and never folds', () => {
   const parents = Array.from({ length: 6 }, (_, i) => `parent_${i}`)
   const wide = buildGraph({
     nodes: { ...Object.fromEntries(parents.map(one => [`model.shop.${one}`, model(one, [])])), 'model.shop.f': model('f', parents) },
     sources: {},
     exposures: {},
   } as any)
-  const view = graphView(wide, 'model.shop.f', { up: 1, down: 0, capUp: 0, capDown: 0 })
+  const view = graphView(wide, 'model.shop.f', { up: 1, down: 0, capUp: Infinity, capDown: Infinity })
   const rows = drawVertical(view, 30)
-  const lines = text(rows)
-  expect(Math.max(...lines.map(row => [...row].length))).toBeLessThanOrEqual(30)
-  const labels = lines.join('\n')
-  expect(labels).toContain('+5 more')
-  expect(rows.flat().some(one => one.node === 'more:up')).toBe(true)
-  const grid = gridOf(rows)
-  const departures = grid.flatMap((row, y) => row.filter((cell, x) => cell.ch === '┬' && at(grid, x, y - 1)?.node))
-  expect(departures).toHaveLength(2)
-  expect(grid.flat().filter(cell => cell.ch === '▼')).toHaveLength(1)
-  const sources = sourcesOf(grid)
-  expect(sources[0]!.to).toBe('model.shop.f')
-  expect(sources[0]!.from.sort()).toEqual(['model.shop.parent_0', 'more:up'].sort())
-  // an existing more box takes the folded count on top of its own
-  const own = graphView(wide, 'model.shop.f', { up: 1, down: 0, capUp: 4, capDown: 0 })
-  expect(text(drawVertical(own, 22)).join('\n')).toMatch(/\+\d+ more/)
+  const out = text(rows).join('\n')
+  for (const one of parents) expect(out).toContain(one)
+  expect(out).not.toContain('more')
+  expect(view.layers.flat().some(box => box.kind === 'more')).toBe(false)
+  const found = sourcesOf(gridOf(rows))
+  expect(found).toHaveLength(6)
+  expect(found.every(one => one.to === 'model.shop.f' && one.from.length === 1)).toBe(true)
 })
 
 test('drawVertical never joins two boxes that are not linked', () => {
@@ -526,21 +516,93 @@ test('drawVertical never joins two boxes that are not linked', () => {
     [[['a1', 'a2'], ['b1', 'b2', 'b3']], [['a1', 'b1'], ['a1', 'b2'], ['a2', 'b2'], ['a2', 'b3']]],
     [[['a1', 'a2', 'a3', 'a4'], ['b1', 'b2']], [['a1', 'b2'], ['a2', 'b1'], ['a3', 'b2'], ['a4', 'b1'], ['a4', 'b2']]],
     [[['x'], ['a1', 'a2', 'a3'], ['b1', 'b2']], [['x', 'a1'], ['x', 'a2'], ['x', 'a3'], ['a1', 'b2'], ['a3', 'b1']]],
+    [[['P', 'Q'], ['T1', 'T2']], [['P', 'T1'], ['Q', 'T1'], ['Q', 'T2']]],
+    [[['P', 'Q'], ['T1', 'T', 'T2']], [['P', 'T'], ['P', 'T2'], ['Q', 'T1'], ['Q', 'T']]],
+    [[['a1', 'a2', 'a3'], ['b1', 'b2', 'b3']], [['a1', 'b2'], ['a2', 'b1']]],
+    [[['a1', 'a2', 'a3'], ['b1', 'b2', 'b3']], [['a1', 'b2'], ['a2', 'b1'], ['a2', 'b2']]],
+    [[['s1', 's2', 's3', 's4'], ['t']], [['s1', 't'], ['s2', 't'], ['s3', 't'], ['s4', 't']]],
   ]
   for (const [levels, edges] of cases) {
-    const view = layered(levels, edges)
-    const real = new Set(edges.map(([from, to]) => `${from}>${to}`))
-    const grid = gridOf(drawVertical(view, 60))
+    const rows = drawVertical(layered(levels, edges), 80)
+    expect(text(rows).join('\n')).not.toContain('more')
+    const grid = gridOf(rows)
     const found = sourcesOf(grid)
-    expect(found.length).toBeGreaterThan(0)
-    for (const { to, from } of found) {
-      expect(from.length).toBeGreaterThan(0)
-      for (const one of from) expect(real.has(`${one}>${to}`) ? true : `${one}>${to}`).toBe(true)
-    }
-    // every real link is drawn: the arrow into each target is reachable from each of its sources, except where
-    // a line passes through another's arrival column as a crossing (┼), which a trace cannot tell from a merge
-    for (const [from, to] of grid.flat().some(cell => cell.ch === '┼') && levels[0]!.length === 4 ? [] : edges) {
-      expect(found.some(one => one.to === to && one.from.includes(from))).toBe(true)
+    expect(found).toHaveLength(edges.length)
+    const pairs = found.map(one => {
+      expect(one.from).toHaveLength(1)
+      return `${one.from[0]}>${one.to}`
+    })
+    expect(pairs.sort()).toEqual(edges.map(([from, to]) => `${from}>${to}`).sort())
+    // a merge would show as a junction a line enters from three sides at an arrival: every ▼ has a plain │ or ┼ above
+    for (const [y, row] of grid.entries()) {
+      row.forEach((cell, x) => cell.ch === '▼' && expect('│┼┌┐┬'.includes(at(grid, x, y - 1)!.ch)).toBe(true))
     }
   }
+})
+
+const checkTraced = (levels: string[][], edges: [string, string][], width: number) => {
+  const rows = drawVertical(layered(levels, edges), width)
+  const grid = gridOf(rows)
+  const found = sourcesOf(grid)
+  expect(found).toHaveLength(edges.length)
+  const pairs = found.map(one => {
+    expect(one.from).toHaveLength(1)
+    return `${one.from[0]}>${one.to}`
+  })
+  expect(pairs.sort()).toEqual(edges.map(([from, to]) => `${from}>${to}`).sort())
+  // every arrow column is odd and used once per row, every departure column even
+  grid.forEach((row, y) => {
+    const arrows = row.flatMap((cell, x) => (cell.ch === '▼' ? [x] : []))
+    expect(arrows.every(x => x % 2 === 1)).toBe(true)
+    expect(new Set(arrows).size).toBe(arrows.length)
+    row.forEach((cell, x) => (cell.ch === '┬' || cell.ch === '┯') && at(grid, x, y - 1)?.node && expect(x % 2).toBe(0))
+  })
+  return { rows, grid }
+}
+
+test('drawVertical wraps a level of nine boxes onto sub-rows and traces every edge', () => {
+  const mid = Array.from({ length: 9 }, (_, i) => `model_name_${i}`)
+  const edges: [string, string][] = [
+    ...mid.map((one): [string, string] => ['top', one]),
+    ['model_name_0', 'bot1'],
+    ['model_name_4', 'bot1'],
+    ['model_name_8', 'bot2'],
+    ['model_name_2', 'bot2'],
+  ]
+  const { rows } = checkTraced([['top'], mid, ['bot1', 'bot2']], edges, 64)
+  const out = text(rows)
+  for (const one of mid) expect(out.join('\n')).toContain(one)
+  const subRows = out.filter(row => /│ model_name_\d/.test(row))
+  expect(subRows.length).toBeGreaterThan(1)
+  expect(subRows.length).toBeLessThan(9)
+})
+
+test('drawVertical reaches a target in a lower sub-row through the source lane', () => {
+  const mid = Array.from({ length: 6 }, (_, i) => `model_name_${i}`)
+  const edges: [string, string][] = [
+    ...mid.map((one): [string, string] => ['top', one]),
+    ...mid.map((one): [string, string] => [one, 'bot']),
+  ]
+  const { rows, grid } = checkTraced([['top'], mid, ['bot']], edges, 45)
+  const boxRight = Math.max(...text(rows).filter(row => row.includes('model_name_')).map(row => row.indexOf('│', row.indexOf('model_name_'))))
+  // a lane is a column of │ right of every box
+  expect(grid.some(row => row.some((cell, x) => x > boxRight && cell.ch === '┐'))).toBe(true)
+  expect(grid.some(row => row.some((cell, x) => x > boxRight && cell.ch === '┤'))).toBe(true)
+})
+
+test('drawVertical draws no more box when caps are Infinity', () => {
+  const view = graphView(graph, FCT, { up: 2, down: 1, capUp: Infinity, capDown: Infinity })
+  expect(view.layers.flat().some(box => box.kind === 'more')).toBe(false)
+  const out = text(drawVertical(view, 40)).join('\n')
+  expect(out).not.toContain('more')
+  for (const name of ['m1', 'm2', 'm3', 'm4', 'm5']) expect(out).toContain(` ${name} `)
+})
+
+test('a name that two lines can hold is split hard rather than cut in the middle', () => {
+  const name = 'fct_internationalization'
+  const view = graphView(chain(name, 'b'), 'model.shop.b', { up: 1, down: 0, capUp: 0, capDown: 0 })
+  const rows = text(drawVertical(view, 20))
+  const inner = (row: string) => row.replace(/^[│┃]\s?/, '').replace(/\s?[│┃]$/, '').trim()
+  expect(rows.join('\n')).not.toContain('…')
+  expect(inner(rows[1]!) + inner(rows[2]!)).toBe(name)
 })

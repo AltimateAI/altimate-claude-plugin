@@ -406,6 +406,8 @@ function wrap(label: string, room: number): string[] {
   }
   if (first.length > room) first = first.slice(0, room)
   const rest = name.slice(first.length).trimStart()
+  // No break fits both lines: a name that two lines can hold is split hard across them before any middle cut.
+  if (rest.length + suffix.length > room && name.length > room && name.length - room + suffix.length <= room) return [name.slice(0, room), `${name.slice(room)}${suffix}`]
   return [first.trimEnd(), rest ? fit(`${rest}${suffix}`, room) : suffix.trimStart()]
 }
 
@@ -667,15 +669,15 @@ export function drawStack(view: Layered, maxWidth: number): Segment[][] {
   return rows
 }
 
-const TONES = ['dim', 'maybe', 'hit'] as const
-
 /**
- * Draws the layers top to bottom: the farthest upstream level first, each level a row of boxes centred
- * in `maxWidth`. A level too wide for the pane folds its trailing boxes into a `+N more` box (merged
- * into the level's own when it has one), with the edges of folded boxes redirected to it. Between two
- * levels a line leaves a box's bottom border at an even column, runs along its own channel row and
- * enters the target at an odd column under a `▼`: the two parities never meet, so a line going down
- * cannot read as the continuation of another. Sources ending on one box share a channel row.
+ * Draws the layers top to bottom: the farthest upstream level first, every box drawn. A level is a grid
+ * of sub-rows, `C` boxes wide (as many as fit beside the lane bus), all boxes one size, left-aligned so grid
+ * columns line up. Between two sub-rows a line leaves a box's bottom border at an even column, runs along
+ * its own channel row and enters the target at an odd column of its own under a `▼`. A target in a later
+ * sub-row than the next is reached through the source's own lane in a bus right of the grid: down the lane,
+ * then left along the source's own channel row in the band above the target. Departures are even, arrivals
+ * odd, lanes unique per source over their height, and no line ends on another's, so a `┼` is always two
+ * lines crossing and every other junction is one line's own.
  */
 export function drawVertical(view: Layered, maxWidth: number): Segment[][] {
   return drawFitted(fitVertical(view, maxWidth), maxWidth)
@@ -683,92 +685,129 @@ export function drawVertical(view: Layered, maxWidth: number): Segment[][] {
 
 const verticalWidth = (box: LayoutBox, maxWidth: number) => Math.min(maxWidth, MAX_BOX, Math.max(5, box.label.length + 4))
 
-/**
- * The layers as drawVertical lays them out: a level too wide for the pane folds its trailing boxes into
- * its `+N more` box (each more box lists the nodes it hides in `folded`), edges redirected to it.
- */
-export function fitVertical(view: Layered, maxWidth: number): Layered {
-  const focusAt = Math.max(0, view.layers.findIndex(boxes => boxes.some(box => box.kind === 'focus')))
-  const widthOf = (box: LayoutBox) => verticalWidth(box, maxWidth)
-  const rowWidth = (boxes: LayoutBox[]) => boxes.reduce((sum, box) => sum + widthOf(box), 0) + 2 * Math.max(0, boxes.length - 1)
-  const folded = new Map<string, string>()
-  const levels = view.layers.map((boxes, index) => {
-    if (index === focusAt || rowWidth(boxes) <= maxWidth) return boxes
-    const side = index < focusAt ? 'up' : 'down'
-    const own = boxes.find(box => box.kind === 'more')
-    const plain = boxes.filter(box => box.kind !== 'more')
-    const owned = Number(/^\+(\d+)/.exec(own?.label ?? '')?.[1] ?? 0)
-    const make = (rest: LayoutBox[]): LayoutBox => {
-      const tones = [...rest, ...(own ? [own] : [])].map(box => TONES.indexOf(box.tone as (typeof TONES)[number]))
-      const tone = TONES[Math.max(...tones)]
-      const hidden = [...rest.flatMap(box => box.folded ?? (box.node ? [box.node] : [])), ...(own?.folded ?? [])]
-      return { key: own?.key ?? `more:v${index}`, label: `+${rest.length + owned} more`, node: `more:${side}`, kind: 'more', folded: hidden, ...(tone && { tone }) }
-    }
-    let keep = plain.length - 1
-    while (keep > 0 && rowWidth([...plain.slice(0, keep), make(plain.slice(keep))]) > maxWidth) keep--
-    const rest = plain.slice(Math.max(0, keep))
-    const more = make(rest)
-    for (const box of rest) folded.set(box.key, more.key)
-    return [...plain.slice(0, Math.max(0, keep)), more]
-  })
-  return { layers: levels, edges: dedupe(view.edges.map(([from, to]) => [folded.get(from) ?? from, folded.get(to) ?? to])) }
+/** The layers as drawVertical lays them out: unchanged, every box is drawn and the pane scrolls. */
+export function fitVertical(view: Layered, _maxWidth: number): Layered {
+  return view
 }
 
 function drawFitted(view: Layered, maxWidth: number): Segment[][] {
   const levels = view.layers
-  const focusAt = Math.max(0, levels.findIndex(boxes => boxes.some(box => box.kind === 'focus')))
-  const widthOf = (box: LayoutBox) => verticalWidth(box, maxWidth)
-  const rowWidth = (boxes: LayoutBox[]) => boxes.reduce((sum, box) => sum + widthOf(box), 0) + 2 * Math.max(0, boxes.length - 1)
   if (levels.length === 0) return []
-  const edges = view.edges
   const levelOf = new Map<string, number>()
   const boxByKey = new Map<string, LayoutBox>()
   levels.forEach((boxes, index) => boxes.forEach(box => (levelOf.set(box.key, index), boxByKey.set(box.key, box))))
-
-  const tall = levels.some(boxes => boxes.some(box => box.label.length > widthOf(box) - 4))
+  const adjacent = view.edges.filter(([from, to]) => levelOf.get(to) === levelOf.get(from)! + 1)
+  // Every edge enters its target at a column of its own, so a target needs an odd inner column per incoming edge.
+  const incoming = new Map<string, number>()
+  for (const [, to] of adjacent) incoming.set(to, (incoming.get(to) ?? 0) + 1)
+  const allBoxes = levels.flat()
+  const boxW = Math.max(
+    5,
+    Math.min(maxWidth, ...[MAX_BOX], Math.max(...allBoxes.map(box => box.label.length + 4))),
+    ...[...incoming.values()].map(n => 2 * n + 3),
+  )
+  const tall = allBoxes.some(box => box.label.length > boxW - 4)
   const boxHeight = tall ? 4 : 3
-  const spots = new Map<string, { x: number; y: number; w: number }>()
-  const width = maxWidth
-  // Column of a box's line leaving (even, right part) and entering (odd, left part).
-  const leave = (key: string) => {
-    const { x, w } = spots.get(key)!
-    for (let c = x + w - 2; c > x; c--) if (c % 2 === 0) return c
-    return x + 1
+  const widest = Math.max(...levels.map(boxes => boxes.length))
+
+  const plan = (C: number) => {
+    const subs: LayoutBox[][] = []
+    const subLevel: number[] = []
+    levels.forEach((boxes, level) => {
+      for (let i = 0; i < boxes.length; i += C) {
+        subs.push(boxes.slice(i, i + C))
+        subLevel.push(level)
+      }
+    })
+    const gOf = new Map<string, number>()
+    const colOf = new Map<string, number>()
+    subs.forEach((sub, g) => sub.forEach((box, c) => (gOf.set(box.key, g), colOf.set(box.key, c))))
+    const bySource = new Map<string, { direct: string[]; lane: string[] }>()
+    for (const [from, to] of adjacent) {
+      const one = bySource.get(from) ?? { direct: [], lane: [] }
+      ;(gOf.get(to) === gOf.get(from)! + 1 ? one.direct : one.lane).push(to)
+      bySource.set(from, one)
+    }
+    // A lane serves its source from the band under the source's sub-row to the band above its last target; the
+    // next source may take it only in a later band, so two lines never meet end to end.
+    const need = [...bySource]
+      .filter(([, one]) => one.lane.length > 0)
+      .map(([from, one]) => ({ from, start: gOf.get(from)!, end: Math.max(...one.lane.map(to => gOf.get(to)! - 1)) }))
+      .sort((p, q) => p.start - q.start || p.end - q.end)
+    const laneOf = new Map<string, number>()
+    const laneEnd: number[] = []
+    for (const one of need) {
+      let lane = laneEnd.findIndex(end => end < one.start)
+      if (lane < 0) {
+        lane = laneEnd.length
+        laneEnd.push(0)
+      }
+      laneEnd[lane] = one.end
+      laneOf.set(one.from, lane)
+    }
+    const cols = Math.max(...subs.map(sub => sub.length))
+    const grid = cols * (boxW + 2) - 2
+    const lanes = laneEnd.length
+    return { subs, subLevel, gOf, colOf, bySource, laneOf, grid, lanes, width: grid + (lanes > 0 ? 2 * lanes + 1 : 0) }
   }
-  const enter = (key: string) => {
-    const { x, w } = spots.get(key)!
-    for (let c = x + 1; c < x + w - 1; c++) if (c % 2 === 1) return c
+  // As many boxes per sub-row as fit beside the lane bus. ponytail: one box per sub-row plus its bus can still
+  // be wider than maxWidth (wide names, many lanes); it is drawn anyway and the pane scrolls or clips it.
+  let chosen = plan(1)
+  for (let C = widest; C > 1; C--) {
+    const one = plan(C)
+    if (one.width <= maxWidth) {
+      chosen = one
+      break
+    }
+  }
+  const { subs, gOf, colOf, bySource, laneOf, grid, width } = chosen
+  const laneCol = (from: string) => grid + 2 + 2 * laneOf.get(from)!
+  const spots = new Map<string, { x: number; sub: number }>()
+  subs.forEach((sub, g) => sub.forEach(box => spots.set(box.key, { x: colOf.get(box.key)! * (boxW + 2), sub: g })))
+  // A box's line leaves at its rightmost even inner column; one source, one departure.
+  const leave = (key: string) => {
+    const { x } = spots.get(key)!
+    for (let c = x + boxW - 2; c > x; c--) if (c % 2 === 0) return c
     return x + 1
   }
 
-  // Bands first need the sources of each pair of levels; their height gives the rows.
-  const bands = levels.slice(1).map((_, index) => {
-    const byFrom = new Map<string, string[]>()
-    for (const [from, to] of edges) {
-      if (levelOf.get(from) === index && levelOf.get(to) === index + 1) byFrom.set(from, [...(byFrom.get(from) ?? []), to])
-    }
-    const oneTarget = new Set([...byFrom.values()].flat()).size === 1
-    const rows = byFrom.size === 0 ? 1 : (oneTarget ? 1 : byFrom.size) + 2
-    return { byFrom, oneTarget, rows }
-  })
+  type User = { from: string; departing: boolean }
+  const bands: User[][] = subs.slice(0, -1).map(() => [])
+  for (const [from, one] of bySource) {
+    bands[gOf.get(from)!]!.push({ from, departing: true })
+    for (const band of new Set(one.lane.map(to => gOf.get(to)! - 1))) bands[band]!.push({ from, departing: false })
+  }
+  const bandRows = bands.map(users => (users.length === 0 ? 1 : users.length + 2))
+  const top: number[] = []
   let y = 0
-  levels.forEach((boxes, index) => {
-    let x = Math.max(0, Math.floor((width - rowWidth(boxes)) / 2))
-    for (const box of boxes) {
-      spots.set(box.key, { x, y, w: widthOf(box) })
-      x += widthOf(box) + 2
-    }
-    y += boxHeight + (bands[index]?.rows ?? 0)
+  subs.forEach((_, g) => {
+    top.push(y)
+    y += boxHeight + (bandRows[g] ?? 0)
   })
   const height = y
   const cells: (Cell | null)[][] = Array.from({ length: height }, () => Array<Cell | null>(width).fill(null))
   const mask: number[][] = Array.from({ length: height }, () => Array<number>(width).fill(0))
-  for (const boxes of levels) {
-    for (const box of boxes) {
-      const { x, y: top, w } = spots.get(box.key)!
-      paintBox(cells, box, x, top, w, boxHeight, false)
+  for (const sub of subs) {
+    for (const box of sub) {
+      const { x, sub: g } = spots.get(box.key)!
+      paintBox(cells, box, x, top[g]!, boxW, boxHeight, false)
     }
   }
+
+  // Arrival columns: the odd inner columns of a target, left to right, in the order its lines come from the left.
+  const arrival = new Map<string, number>()
+  for (const to of new Set(adjacent.map(([, one]) => one))) {
+    const { x } = spots.get(to)!
+    const sources = adjacent.filter(([, one]) => one === to).map(([from]) => from)
+    const key = (from: string) => (bySource.get(from)!.lane.includes(to) ? laneCol(from) : leave(from))
+    sources.sort((p, q) => key(p) - key(q))
+    let column = x + 1 + (x % 2 === 0 ? 0 : 1)
+    for (const from of sources) {
+      arrival.set(`${from}\0${to}`, column)
+      column += 2
+    }
+  }
+  const hit = (from: string, to: string) => arrival.get(`${from}\0${to}`)!
 
   const dim: Style = { dim: true }
   const run = (x: number, y1: number, y2: number) => {
@@ -783,47 +822,61 @@ function drawFitted(view: Layered, maxWidth: number): Segment[][] {
       mask[at]![x + 1]! |= W
     }
   }
-  bands.forEach(({ byFrom, oneTarget, rows }, index) => {
-    if (byFrom.size === 0) return
-    const first = [...byFrom.keys()][0]!
-    const bottom = spots.get(first)!.y + boxHeight
-    const arrowRow = bottom + rows - 1
-    const span = (from: string) => {
-      const cols = [leave(from), ...byFrom.get(from)!.map(enter)]
-      return [Math.min(...cols), Math.max(...cols)] as const
+  const laneRows = new Map<string, { start: number; end: number }>()
+  bands.forEach((users, b) => {
+    if (users.length === 0) return
+    const bandTop = top[b]! + boxHeight
+    const arrowRow = bandTop + bandRows[b]! - 1
+    const targetsOf = (user: User) => {
+      const one = bySource.get(user.from)!
+      return user.departing ? one.direct : one.lane.filter(to => gOf.get(to) === b + 1)
     }
-    // A source whose run covers another's arrival column, or another's departure column, goes above it:
-    // that keeps one line from cutting across the next.
-    const preferred = [...byFrom.keys()].sort((p, q) => leave(p) - leave(q))
-    const before = new Map(preferred.map(from => [from, new Set<string>()]))
-    for (const x of preferred) {
-      for (const y of preferred) {
-        if (x === y) continue
-        const [lo, hi] = span(y)
-        if (byFrom.get(x)!.some(to => enter(to) > lo && enter(to) < hi)) before.get(x)!.add(y)
-        const [xlo, xhi] = span(x)
-        if (leave(y) > xlo && leave(y) < xhi) before.get(x)!.add(y)
+    const colsOf = (user: User) => [
+      user.departing ? leave(user.from) : laneCol(user.from),
+      ...targetsOf(user).map(to => hit(user.from, to)),
+      ...(user.departing && laneOf.has(user.from) ? [laneCol(user.from)] : []),
+    ]
+    // Channel rows only decide how many lines cross: a line whose run covers another's departure or arrival goes
+    // above it when it can; rightward runs are stacked outermost first, leftward ones after them.
+    const lo = (user: User) => Math.min(...colsOf(user))
+    const hi = (user: User) => Math.max(...colsOf(user))
+    const base = (user: User) => colsOf(user)[0]!
+    const rightward = (user: User) => (colsOf(user)[1] ?? base(user)) >= base(user)
+    const preferred = [...users.filter(rightward).sort((p, q) => base(q) - base(p)), ...users.filter(one => !rightward(one)).sort((p, q) => base(p) - base(q))]
+    const before = new Map(preferred.map(one => [one, new Set<User>()]))
+    for (const one of preferred) {
+      for (const other of preferred) {
+        if (one === other) continue
+        if (targetsOf(one).some(to => hit(one.from, to) > lo(other) && hit(one.from, to) < hi(other))) before.get(one)!.add(other)
+        if (base(other) > lo(one) && base(other) < hi(one)) before.get(one)!.add(other)
       }
     }
-    const order: string[] = []
+    const order: User[] = []
     while (order.length < preferred.length) {
-      const next = preferred.find(from => !order.includes(from) && [...before.get(from)!].every(one => order.includes(one)))
+      const next = preferred.find(one => !order.includes(one) && [...before.get(one)!].every(other => order.includes(other)))
       if (!next) break
       order.push(next)
     }
-    const sources = order.length === preferred.length ? order : preferred
-    sources.forEach((from, at) => {
-      const channel = bottom + 1 + (oneTarget ? 0 : at)
-      const d = leave(from)
-      cells[bottom - 1]![d] = { ch: boxByKey.get(from)!.kind === 'focus' ? '┯' : '┬', style: styleOf(boxByKey.get(from)!) }
-      run(d, bottom - 1, channel)
-      for (const to of byFrom.get(from)!) {
-        const a = enter(to)
-        across(d, a, channel)
+    ;(order.length === preferred.length ? order : preferred).forEach((user, at) => {
+      const channel = bandTop + 1 + at
+      const cols = colsOf(user)
+      across(Math.min(...cols), Math.max(...cols), channel)
+      if (user.departing) {
+        const d = leave(user.from)
+        const box = boxByKey.get(user.from)!
+        cells[bandTop - 1]![d] = { ch: box.kind === 'focus' ? '┯' : '┬', style: styleOf(box) }
+        run(d, bandTop - 1, channel)
+        if (laneOf.has(user.from)) laneRows.set(user.from, { start: channel, end: channel })
+      } else {
+        laneRows.get(user.from)!.end = Math.max(laneRows.get(user.from)!.end, channel)
+      }
+      for (const to of targetsOf(user)) {
+        const a = hit(user.from, to)
         run(a, channel, arrowRow)
         cells[arrowRow]![a] = { ch: '▼', style: dim }
       }
     })
   })
+  for (const [from, rows] of laneRows) run(laneCol(from), rows.start, rows.end)
   return toSegments(cells, mask)
 }
