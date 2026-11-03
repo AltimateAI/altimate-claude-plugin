@@ -416,7 +416,7 @@ type FollowInput = {
   root?: string
   /**
    * Led by the models Claude's answer names in this turn, not by something Claude read: it does not count
-   * as a read, and it gives up once a newer turn starts.
+   * as a read, and it does not claim the pane once a newer turn has started.
    */
   fromAnswer?: number
   column?: string | null
@@ -433,16 +433,12 @@ type FollowInput = {
   manifest?: string
 }
 
-/** A follow; one Claude's work started counts for the turn it started in, once it lands. */
+/** A follow; one Claude or the person started counts for the turn it started in, once it lands. */
 async function follow($: EngineInterface, input: FollowInput): Promise<boolean> {
   if (input.fromAnswer !== undefined) return followOnce($, input)
+  // Claude's reads and the person's own presses alike: in flight, the answer waits for them; landed,
+  // the answer leaves the pane where they put it.
   const turn = turnCount
-  // The person's own press or /lineage moves the pane on purpose: the answer leaves it there.
-  if (!input.auto) {
-    const followed = await followOnce($, input)
-    if (followed) followedTurn = Math.max(followedTurn, turn)
-    return followed
-  }
   followsInFlight++
   try {
     const followed = await followOnce($, input)
@@ -555,14 +551,14 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     return false
   }
   const readMs = Math.round((await $.clock.now()) - began)
-  // An answer's follow whose turn is over leaves the pane to the newer turn.
-  const stale = () => input.fromAnswer !== undefined && input.fromAnswer !== turnCount
-  if (claimedSeq > seq || stale()) return false
+  // An answer's follow whose turn is over leaves the pane to the newer turn. Checked here, before any
+  // write: once a follow claims the pane it writes all of its state or a newer follow replaces it.
+  if (claimedSeq > seq || (input.fromAnswer !== undefined && input.fromAnswer !== turnCount)) return false
   claimedSeq = seq
   ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
   // update() may retry its write after a conflict, so each write below re-checks ownership inside
   // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
-  const superseded = () => claimedSeq !== seq || stale()
+  const superseded = () => claimedSeq !== seq
   // Compared with the focus as it is now: another follow may have landed while this one resolved.
   const latest = await read($, focusAtom)
   if (superseded()) return false

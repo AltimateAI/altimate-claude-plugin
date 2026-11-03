@@ -880,6 +880,23 @@ test("a subagent's answer, or one naming the model shown, does not move the pane
   await ui.unmount()
 })
 
+test("the person's press still loading when the answer ends wins over the answer's models", async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, { holdManifestStat: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.turn.start({ text: 'q', turnId: 't10' } as any)
+  // The person's /lineage, still loading...
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  // ...when an answer naming another model ends the turn.
+  await $.turn.complete({ answer: 'See `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't10' } as any)
+  await clock.advance(100)
+  release()
+  await clock.advance(6000)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a failing follow started after a good one does not cancel it', async ($, on) => {
   const { clock } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
