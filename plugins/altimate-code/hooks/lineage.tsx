@@ -10,7 +10,7 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
-import { drawLayered, drawStack, drawVertical, endsView, fitVertical, foldersView, graphView, type Layered, type ViewKind } from './lineage-layout'
+import { columnOf, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
   buildGraph,
@@ -60,9 +60,8 @@ const warehouseAtom = atom({ plugin: 'altimate-code', key: 'lineageWarehouse' } 
 const expandedAtom = atom({ plugin: 'altimate-code', key: 'lineageExpanded' } as const, { up: false, down: false })
 // How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists.
 const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 'graph' as ViewKind | 'list')
-// Levels the boxes view draws on each side.
-const levelsAtom = atom({ plugin: 'altimate-code', key: 'lineageLevels' } as const, 2)
-const upLevelsAtom = atom({ plugin: 'altimate-code', key: 'lineageUpLevels' } as const, 2)
+// Where the graph canvas is panned to: its first visible column; null centres it on the model.
+const panAtom = atom({ plugin: 'altimate-code', key: 'lineagePan' } as const, null as number | null)
 const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
 const messageAtom = atom({ plugin: 'altimate-code', key: 'lineageMessage' } as const, null as string | null)
 const loadingAtom = atom({ plugin: 'altimate-code', key: 'lineageLoading' } as const, false)
@@ -95,10 +94,6 @@ const MIN_GRAPH_COLUMNS = 48
 // the rows a very wide layer draws.
 const BOX_CAP = 4
 const UNFOLDED = 40
-// What k and l step through: a source-to-mart chain can be a dozen levels deep.
-const LEVELS = [1, 2, 3, 4, 6, 8, 12]
-const nextLevel = (current: number) => LEVELS[(LEVELS.indexOf(current) + 1) % LEVELS.length] ?? LEVELS[0]!
-const MAX_LEVEL = LEVELS[LEVELS.length - 1]!
 // Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
 // surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
 const PANE_SIZE = { columns: 110, rows: 34 }
@@ -231,7 +226,8 @@ const clearSqlGraphs = () => {
   sqlGeneration++
 }
 // The last drawing of the graph views and what it was drawn from.
-type Drawn = { rows: Segment[][]; hidden: number; down: boolean; folded: { up: string[]; down: string[] } }
+// `canvas`: the graph's full width when the pane shows a window of it (0 for the views that fit).
+type Drawn = { rows: Segment[][]; hidden: number; canvas: number; folded: { up: string[]; down: string[] } }
 let drawnCache: { key: string; drawn: Drawn | null } | null = null
 /** The nodes the drawing's `+N more` boxes stand for, by side. */
 const foldedOf = (view: Layered) => {
@@ -520,6 +516,8 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   await update($, messageAtom, prev => (superseded() ? prev : fromSql ? `No target/manifest.json: lineage from the SQL files' ref() and source()${graph!.partial ? ', the first 5000 files only' : ''}. Run \`dbt parse\` for columns and dashboards.` : null))
   if (isNew) {
     if (latest?.model !== id) await update($, expandedAtom, prev => (superseded() ? prev : ({ up: false, down: false })))
+    // A new model's canvas opens centred on it.
+    if (latest?.model !== id) await update($, panAtom, prev => (superseded() ? prev : null))
     await update($, columnsAtom, prev => (superseded() ? prev : null))
     await update($, reachAtom, prev => (superseded() ? prev : null))
     await update($, warehouseAtom, prev => (superseded() ? prev : null))
@@ -1037,8 +1035,7 @@ export function registerLineage(on: On) {
     const message = await read($, messageAtom)
     const loading = await read($, loadingAtom)
     const chosenView = await read($, viewAtom)
-    const levels = await read($, levelsAtom)
-    const upLevels = await read($, upLevelsAtom)
+    const pan = await read($, panAtom)
     const node = focus && graph ? graph.nodes[focus.model] : null
 
     if (!focus || !graph || !node) {
@@ -1071,34 +1068,39 @@ export function registerLineage(on: On) {
     const capDown = expanded.down ? UNFOLDED : BOX_CAP
     // The pane redraws on every state change (loading, messages, columns); the drawing depends only on these.
     // The links themselves, not a count: an edit can swap a parent and keep the size.
-    const drawKey = JSON.stringify([focus, graph.parents, graph.upTruncated, graph.truncated, graph.partial, view, upLevels, levels, capUp, capDown, width, column, view === 'graph' && column ? reach : null])
+    const drawKey = JSON.stringify([focus, graph.parents, graph.upTruncated, graph.truncated, graph.partial, view, capUp, capDown, view === 'graph' ? 0 : width, column, view === 'graph' && column ? reach : null])
     if (drawnCache?.key !== drawKey) {
+      // The graph is the whole lineage, every level, model and name in full, as one canvas the pane
+      // pans across (dbt-lineage-viewer's view): nothing folded, dropped or cut.
       const layered =
         view === 'graph'
-          ? graphView(graph, focus.model, { up: upLevels, down: levels, capUp, capDown, reach: column ? reach : null })
+          ? graphView(graph, focus.model, { up: Infinity, down: Infinity, capUp: Infinity, capDown: Infinity, reach: column ? reach : null })
           : view === 'ends'
             ? endsView(graph, focus.model, { capUp, capDown })
             : view === 'folders'
               ? foldersView(graph, focus.model)
               : null
       // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
-      // The graph does too when its levels do not fit across: the pane scrolls, so every level shows.
-      const across = layered && view !== 'folders' ? drawLayered(layered, width - 1) : null
-      // Top to bottom draws every model, no "+N more": the pane scrolls.
-      const fitted =
-        layered && view === 'graph' && across!.hidden > 0
-          ? fitVertical(graphView(graph, focus.model, { up: upLevels, down: levels, capUp: Infinity, capDown: Infinity, reach: column ? reach : null }), width - 1)
-          : null
       const rows: Drawn | null = !layered
         ? null
         : view === 'folders'
-          ? { rows: drawStack(layered, width - 1), hidden: 0, down: true, folded: { up: [], down: [] } }
-          : fitted
-            ? { rows: drawVertical(fitted, width - 1), hidden: 0, down: true, folded: foldedOf(fitted) }
-            : { ...across!, down: false, folded: foldedOf(layered) }
+          ? { rows: drawStack(layered, width - 1), hidden: 0, canvas: 0, folded: { up: [], down: [] } }
+          : view === 'graph'
+            ? (() => {
+                const whole = drawLayered(layered, Infinity).rows
+                return { rows: whole, hidden: 0, canvas: Math.max(0, ...whole.map(row => row.reduce((n, one) => n + one.text.length, 0))), folded: { up: [], down: [] } }
+              })()
+            : { ...drawLayered(layered, width - 1), canvas: 0, folded: foldedOf(layered) }
       drawnCache = { key: drawKey, drawn: rows }
     }
     const drawn = drawnCache.drawn
+    // The window onto the graph canvas: centred on the model until panned.
+    const room = width - 1
+    const maxPan = Math.max(0, (drawn?.canvas ?? 0) - room)
+    const centre = drawn?.canvas ? Math.max(0, columnOf(drawn.rows, focus.model) - Math.floor(room / 3)) : 0
+    const from = Math.min(maxPan, Math.max(0, pan ?? centre))
+    const shownRows = drawn ? (drawn.canvas > room ? sliceRows(drawn.rows, from, room) : drawn.rows) : []
+    const panBy = (step: number) => update($, panAtom, current => Math.min(maxPan, Math.max(0, (current ?? centre) + step)))
     // A "+N more" box opened: what it stands for, by name, each one followable; upstream above the
     // graph and downstream below it, beside the boxes that were pressed.
     const foldedList = (side: 'up' | 'down') =>
@@ -1142,11 +1144,18 @@ export function registerLineage(on: On) {
           <Box flexDirection="column">
             <Text dimColor>
               {VIEW_TITLE[view]} · {source}
-              {view === 'graph' ? ` · ↑${upLevels} ↓${levels}${drawn.down ? ' · top to bottom' : ''}` : ''}
+              {drawn.canvas > room ? ` · columns ${from + 1}–${Math.min(drawn.canvas, from + room)} of ${drawn.canvas}` : ''}
               {drawn.hidden ? ` · ${drawn.hidden} level${drawn.hidden === 1 ? '' : 's'} past the pane's width` : ''}
               {graph.upTruncated || graph.truncated ? ` · ${[graph.upTruncated && 'upstream', graph.truncated && 'downstream'].filter(Boolean).join(' and ')} cut at 500 nodes` : ''}
             </Text>
-            {drawn.rows.map((row, i) => drawRow(ui, $, graph, row.some(one => one.text) ? row : [{ text: ' ' }], `graph-${i}`))}
+            {drawn.canvas > room && (
+              <Box flexDirection="row" gap={2}>
+                <Button key="lineage-pan-left" plain hotkey="h" label="◀ pan" onPress={() => panBy(-Math.max(8, Math.floor(room / 2)))} />
+                <Button key="lineage-pan-right" plain hotkey="l" label="pan ▶" onPress={() => panBy(Math.max(8, Math.floor(room / 2)))} />
+                <Button key="lineage-pan-focus" plain hotkey="f" label="the model" onPress={() => update($, panAtom, () => null)} />
+              </Box>
+            )}
+            {shownRows.map((row, i) => drawRow(ui, $, graph, row.some(one => one.text) ? row : [{ text: ' ' }], `graph-${i}`))}
           </Box>
         )}
         {view !== 'list' && foldedList('down')}
@@ -1278,26 +1287,6 @@ export function registerLineage(on: On) {
               hotkey="v"
               label={VIEW_TITLE[view].toLowerCase()}
               onPress={() => update($, viewAtom, current => VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length]!)}
-            />
-          )}
-          {view === 'graph' && (
-            <Button key="lineage-up-levels" plain hotkey="k" label={`↑${upLevels}`} onPress={() => update($, upLevelsAtom, nextLevel)} />
-          )}
-          {view === 'graph' && (
-            <Button key="lineage-levels" plain hotkey="l" label={`↓${levels}`} onPress={() => update($, levelsAtom, nextLevel)} />
-          )}
-          {view === 'graph' && (
-            <Button
-              key="lineage-end-to-end"
-              plain
-              hotkey="e"
-              label={upLevels === MAX_LEVEL && levels === MAX_LEVEL ? 'nearby' : 'end to end'}
-              onPress={async () => {
-                // Every level both ways, or back to the two nearest.
-                const all = upLevels === MAX_LEVEL && levels === MAX_LEVEL
-                await update($, upLevelsAtom, () => (all ? 2 : MAX_LEVEL))
-                await update($, levelsAtom, () => (all ? 2 : MAX_LEVEL))
-              }}
             />
           )}
           <Button

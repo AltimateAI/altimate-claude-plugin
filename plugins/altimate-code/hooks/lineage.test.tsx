@@ -186,7 +186,7 @@ test('reading a model points the pane at it: the manifest graph, then its column
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest · ↑2 ↓2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
@@ -258,10 +258,6 @@ test('the graph view draws boxes a press follows; [v] cycles the views and [l] t
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /┏━+┓/ })).toBeDefined()
-  await ui.press({ key: 'lineage-levels' })
-  await ui.press({ key: 'lineage-up-levels' })
-  await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest · ↑3 ↓3/ })).toBeDefined()
   for (const title of [/ENDS ONLY · manifest/, /FOLDERS · manifest/, 'UPSTREAM · manifest', /GRAPH · manifest/]) {
     await ui.press({ key: 'lineage-view' })
     await clock.settle()
@@ -651,13 +647,16 @@ test('a shell read that finds the file by name (find -name x.sql; cat $f) follow
   await ui.unmount()
 })
 
-test('pressing a "+N more" box unfolds that side', async ($, on) => {
+test('in the ends view, pressing a "+N more" box unfolds that side', async ($, on) => {
   const sqlFiles: Record<string, string> = { 'models/marts/fct_orders.sql': 'select 1' }
   for (let i = 1; i <= 7; i++) sqlFiles[`models/marts/rpt_${i}.sql`] = "select * from {{ ref('fct_orders') }}"
   const { clock } = await start($, on, { sqlFiles })
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/marts/fct_orders.sql` })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The graph draws everything; the ends view still folds its long lists.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   const more = await ui.find({ type: 'Button', text: /\+3 more/ })
   expect(more).toBeDefined()
   await ui.press({ key: more!.key! })
@@ -667,26 +666,39 @@ test('pressing a "+N more" box unfolds that side', async ($, on) => {
   await ui.unmount()
 })
 
-test('[e] shows the model end to end, and a pane too narrow for the levels draws them top to bottom', async ($, on) => {
-  const sqlFiles: Record<string, string> = { 'models/m0.sql': "select * from {{ source('raw', 'orders') }}" }
-  for (let i = 1; i <= 6; i++) sqlFiles[`models/m${i}.sql`] = `select * from {{ ref('m${i - 1}') }}`
+test('the graph is one canvas with every level and whole names; h and l pan it, f centres the model', async ($, on) => {
+  const name = (n: number) => `model_${n}_with_a_long_name_to_draw_whole`
+  const sqlFiles: Record<string, string> = { [`models/${name(0)}.sql`]: "select * from {{ source('raw', 'orders') }}" }
+  for (let i = 1; i <= 6; i++) sqlFiles[`models/${name(i)}.sql`] = `select * from {{ ref('${name(i - 1)}') }}`
   const { clock } = await start($, on, { sqlFiles })
-  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/m3.sql` })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/${name(3)}.sql` })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 60 }, surface: 'terminal' })
-  await ui.press({ key: 'lineage-end-to-end' })
+  const range = async () => /columns (\d+)–(\d+) of (\d+)/.exec((await ui.find({ type: 'Text', text: /columns \d+–\d+ of \d+/ }))!.text!)!.slice(1).map(Number)
+  const [start1, , total] = await range()
+  // Centred on the model, whose name is drawn whole; never a fold or a cut.
+  expect(await ui.find({ type: 'Button', text: new RegExp(name(3)) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /…|\+\d+ more/ })).toBeUndefined()
+  await ui.press({ key: 'lineage-pan-right' })
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /GRAPH · SQL files · ↑12 ↓12 · top to bottom/ })).toBeDefined()
-  // Every level, from the source to the last model.
+  const [start2] = await range()
+  expect(start2).toBeGreaterThan(start1!)
+  // Panned to the far right, the last model shows; to the far left, the source.
+  for (let i = 0; i < 20; i++) await ui.press({ key: 'lineage-pan-right' })
+  await clock.settle()
+  expect((await range())[1]).toBe(total)
+  expect(await ui.find({ type: 'Button', text: new RegExp(name(6)) })).toBeDefined()
+  for (let i = 0; i < 30; i++) await ui.press({ key: 'lineage-pan-left' })
+  await clock.settle()
+  expect((await range())[0]).toBe(1)
   expect(await ui.find({ type: 'Text', text: /orders/ })).toBeDefined()
-  for (const name of [/m0/, /m6/]) expect(await ui.find({ type: 'Button', text: name })).toBeDefined()
-  await ui.press({ key: 'lineage-end-to-end' })
+  await ui.press({ key: 'lineage-pan-focus' })
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /↑2 ↓2/ })).toBeDefined()
+  expect((await range())[0]).toBe(start1)
   await ui.unmount()
 })
 
-test('top to bottom draws every model, no "+N more", each followable', async ($, on) => {
+test('every parent is drawn, no "+N more", each followable after panning to it', async ($, on) => {
   const long = (n: string) => `${n}_with_a_rather_long_model_name`
   const sqlFiles: Record<string, string> = { [`models/${long('grand')}.sql`]: 'select 1', [`models/${long('focus')}.sql`]: '', [`models/${long('down_one')}.sql`]: `select * from {{ ref('${long('focus')}') }}`, [`models/${long('down_two')}.sql`]: `select * from {{ ref('${long('down_one')}') }}` }
   const parents: string[] = []
@@ -698,9 +710,11 @@ test('top to bottom draws every model, no "+N more", each followable', async ($,
   const { clock } = await start($, on, { sqlFiles })
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/${long('focus')}.sql` })
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 60 }, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /top to bottom/ })).toBeDefined()
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 120 }, surface: 'terminal' })
   expect(await ui.find({ type: 'Button', text: /\+\d+ more/ })).toBeUndefined()
+  // The parents sit left of the model: pan there.
+  for (let i = 0; i < 10; i++) await ui.press({ key: 'lineage-pan-left' })
+  await clock.settle()
   for (let i = 1; i <= 8; i++) expect(await ui.find({ type: 'Button', text: new RegExp(`parent${i}_with`) })).toBeDefined()
   const hidden = await ui.find({ type: 'Button', text: /parent8_with/ })
   expect(hidden).toBeDefined()

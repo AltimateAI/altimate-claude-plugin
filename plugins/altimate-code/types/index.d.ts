@@ -195,10 +195,8 @@ declare module 'claude-code' {
       lineageExpanded: { up: boolean; down: boolean }
       /** How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists. */
       lineageView: 'graph' | 'ends' | 'folders' | 'list'
-      /** Downstream levels the boxes view draws. */
-      lineageLevels: number
-      /** Upstream levels the boxes view draws. */
-      lineageUpLevels: number
+      /** The graph canvas's first visible column; null centres it on the followed model. */
+      lineagePan: number | null
       lineageImpact: Shaped<ImpactView | null>
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
