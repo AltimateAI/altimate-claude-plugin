@@ -2,6 +2,8 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
+import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
+import { lineageBand, registerLineage, startLineage } from './lineage'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -61,41 +63,8 @@ const STATE_COLOR: Record<Provider['state'], string> = {
   not_found: 'inactive',
 }
 
-// `altimate` is the name the standalone installer and npm v0.7.1+ put on PATH;
-// older npm installs only have `altimate-code`.
-const CLI_NAMES = ['altimate', 'altimate-code'] as const
-
-// A command that cannot start rejects; only that moves on to the next name, so a
-// timeout never reruns a command that may have taken effect.
-const MISSING_BINARY = /ENOENT|not found|no such file|(cannot|could not|failed to) (start|spawn|run)/i
-
 async function runCli($: EngineInterface, args: string[], timeoutMs = DEFAULT_TIMEOUT_MS) {
   return runAltimate($, ['integrations', ...args], timeoutMs)
-}
-
-async function runAltimate($: EngineInterface, args: string[], timeoutMs = DEFAULT_TIMEOUT_MS) {
-  let lastError: unknown = null
-  for (const bin of CLI_NAMES) {
-    try {
-      return await $.process.run([bin, ...args], { timeoutMs })
-    } catch (error) {
-      if (!MISSING_BINARY.test(String(error))) throw error
-      lastError = error
-    }
-  }
-  throw lastError ?? new Error('altimate CLI not found')
-}
-
-// The CLI pretty-prints its JSON, so read the whole text first, then fall back
-// to the last line for a CLI that logs before printing one compact line.
-function parseJson<T>(text: string): T | null {
-  const body = text.trim()
-  for (const candidate of [body, body.split('\n').pop() ?? '']) {
-    try {
-      return JSON.parse(candidate) as T
-    } catch {}
-  }
-  return null
 }
 
 function parseStatus(text: string): IntegrationsStatus | null {
@@ -156,14 +125,6 @@ function showStatusLine($: EngineInterface, current: IntegrationsStatus) {
   if (synced > 0) parts.push(`${synced} synced`)
   if (waiting > 0) parts.push(`${waiting} found`)
   $.ui.status(parts.join(' · '))
-}
-
-// A press has a short budget, so a press only schedules its work; the work then
-// runs on the clock, outside the press.
-function later($: EngineInterface, work: () => Promise<unknown>) {
-  $.clock.after(0, () => {
-    void work()
-  })
 }
 
 /** The timeout that fits what the command runs: one provider's sync or disconnect. */
@@ -597,6 +558,8 @@ export const register: Register = on => {
       name: COMMAND,
       description: 'One-click GitHub, Jira and Linear integrations for your Altimate workspace',
     })
+    // The lineage half failing to start must not stop this pane's own setup below.
+    await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
@@ -617,13 +580,17 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // One band per plugin: the lineage impact line rides under the integrations one, or alone.
+    if (e.props.hasSurvey) return next(e)
+    const lineage = await lineageBand($, $.ui.resolve(e))
+    const pass = async () => lineage ?? next(e)
     const current = await read($, status)
-    if (e.props.hasSurvey || !current || (await read($, isBandHidden))) return next(e)
+    if (!current || (await read($, isBandHidden))) return pass()
 
     const stopped = current.providers.filter(one => one.state === 'rejected' || one.state === 'expired')
     const found = current.providers.filter(one => one.state === 'detected' || one.found)
     const remote = current.providers.filter(one => one.state === 'available')
-    if (stopped.length + found.length + remote.length === 0) return next(e)
+    if (stopped.length + found.length + remote.length === 0) return pass()
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const running = await read($, busy)
@@ -672,6 +639,7 @@ export const register: Register = on => {
             <Button key="hide" label="Later" onPress={() => update($, isBandHidden, () => true)} />
           </Box>
         )}
+        {lineage}
       </Box>
     )
   })
@@ -826,6 +794,8 @@ export const register: Register = on => {
       </Box>
     )
   })
+
+  registerLineage(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added
