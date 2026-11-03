@@ -476,3 +476,55 @@ test('columnOf finds where the focus box starts', () => {
   expect(columnOf(rows, 'model.shop.b')).toBe(line.indexOf('┃') + 1)
   expect(columnOf(rows, 'missing')).toBe(-1)
 })
+
+test('drawLayered draws a 500-node lineage with an unbounded width in well under 300 ms', () => {
+  const node = (id: string) => ({ id, name: id, label: null, type: 'model', path: `models/m/${id}.sql`, materialized: null, relation: null, columns: [] })
+  const big: LineageGraph = { nodes: { f: node('f') }, parents: { f: [] }, children: { f: [] } }
+  for (let i = 0; i < 250; i++) {
+    big.nodes[`c${i}`] = node(`c${i}`)
+    big.parents[`c${i}`] = ['f']
+    big.children[`c${i}`] = []
+    big.children.f!.push(`c${i}`)
+  }
+  let prev = 'c0'
+  for (let i = 0; i < 249; i++) {
+    big.nodes[`d${i}`] = node(`d${i}`)
+    big.parents[`d${i}`] = [prev]
+    big.children[`d${i}`] = []
+    big.children[prev]!.push(`d${i}`)
+    prev = `d${i}`
+  }
+  const started = performance.now()
+  const { rows, hidden } = drawLayered(graphView(big, 'f', { up: Infinity, down: Infinity, capUp: Infinity, capDown: Infinity }), Infinity)
+  expect(performance.now() - started).toBeLessThan(300)
+  expect(hidden).toBe(0)
+  expect(rows).toHaveLength(999)
+  expect(text(rows).join('\n')).toContain('│ d248 ')
+})
+
+test('drawLayered rows on a small fork and merge are exactly these', () => {
+  const small = buildGraph({
+    nodes: {
+      'model.shop.a': model('a', [], 'x'),
+      'model.shop.b': model('b', [], 'x'),
+      'model.shop.mid': model('mid', ['a', 'b'], 'x'),
+      'model.shop.f': model('f', ['mid'], 'x'),
+      'model.shop.x': model('x', ['f'], 'x'),
+      'model.shop.y': model('y', ['f'], 'x'),
+      'model.shop.z': model('z', ['x'], 'x'),
+    },
+    sources: {},
+    exposures: {},
+  } as any)
+  const { rows } = drawLayered(graphView(small, 'model.shop.f', { up: 2, down: 2, capUp: 0, capDown: 0 }), Infinity)
+  expect(text(rows)).toEqual([
+    '┌───┐                                 ┌───┐',
+    '│ a ├───┐                         ┌──▶│ x ├───┐',
+    '└───┘   │   ┌─────┐       ┏━━━┓   │   └───┘   │   ┌───┐',
+    '        ├──▶│ mid ├──────▶┃ f ┠───┤           └──▶│ z │',
+    '┌───┐   │   └─────┘       ┗━━━┛   │   ┌───┐       └───┘',
+    '│ b ├───┘                         └──▶│ y │',
+    '└───┘                                 └───┘',
+  ])
+  expect(rows[3]!.some(one => one.dim)).toBe(true)
+})

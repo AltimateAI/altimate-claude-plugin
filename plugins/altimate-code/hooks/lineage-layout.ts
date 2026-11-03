@@ -431,12 +431,12 @@ function place(layers: LayoutBox[][], cap: number, gaps: Gap[]) {
 }
 
 /** Paints a box at (x, y); `exit` puts a junction on the right border of the first label row where a line leaves. */
-function paintBox(cells: (Cell | null)[][], box: LayoutBox, x: number, y: number, w: number, boxHeight: number, exit: boolean) {
+function paintBox(cells: Map<number, Cell>[], box: LayoutBox, x: number, y: number, w: number, boxHeight: number, exit: boolean) {
   const style = styleOf(box)
   const [tl, tr, bl, br, hz, vt] = box.kind === 'focus' ? ['┏', '┓', '┗', '┛', '━', '┃'] : ['┌', '┐', '└', '┘', '─', '│']
   const lines = wrap(box.label, w - 4)
   const put = (cx: number, cy: number, ch: string, node?: string) => {
-    cells[cy]![cx] = node ? { ch, node, style } : { ch, style }
+    cells[cy]!.set(cx, node ? { ch, node, style } : { ch, style })
   }
   const bottom = y + boxHeight - 1
   put(x, y, tl)
@@ -455,19 +455,34 @@ function paintBox(cells: (Cell | null)[][], box: LayoutBox, x: number, y: number
   }
 }
 
-/** The grid as rows of styled runs: line cells come from the direction masks, trailing blanks are dropped. */
-function toSegments(cells: (Cell | null)[][], mask: number[][]): Segment[][] {
+/**
+ * The grid as rows of styled runs. Only drawn cells are stored (`cells`, a map per row) and line cells come
+ * from the direction masks (a byte per column); a row is walked over the columns that hold something, the
+ * blanks between them are runs of spaces, and trailing blanks are dropped.
+ */
+function toSegments(cells: Map<number, Cell>[], mask: Uint8Array[]): Segment[][] {
   const dim: Style = { dim: true }
+  const blank: Cell = { ch: ' ' }
   return cells.map((line, y) => {
-    const row = line.map((cell, x): Cell => cell ?? (mask[y]![x]! ? { ch: JOINT[mask[y]![x]!]!, style: dim } : { ch: ' ' }))
-    while (row.length > 0 && row[row.length - 1]!.ch === ' ' && !row[row.length - 1]!.node) row.pop()
-    if (row.length === 0) return [{ text: '' }]
+    const marks = mask[y]!
+    const columns: number[] = [...line.keys()]
+    for (let x = 0; x < marks.length; x++) if (marks[x]! !== 0 && !line.has(x)) columns.push(x)
+    columns.sort((p, q) => p - q)
+    const runs: { cell: Cell; count: number }[] = []
+    let at = 0
+    for (const x of columns) {
+      if (x > at) runs.push({ cell: blank, count: x - at })
+      runs.push({ cell: line.get(x) ?? { ch: JOINT[marks[x]!]!, style: dim }, count: 1 })
+      at = x + 1
+    }
+    while (runs.length > 0 && runs[runs.length - 1]!.cell.ch === ' ' && !runs[runs.length - 1]!.cell.node) runs.pop()
+    if (runs.length === 0) return [{ text: '' }]
     const out: Segment[] = []
     let last: Cell | null = null
-    for (const cell of row) {
-      if (last && sameStyle(last, cell)) out[out.length - 1]!.text += cell.ch
+    for (const { cell, count } of runs) {
+      if (last && sameStyle(last, cell)) out[out.length - 1]!.text += cell.ch.repeat(count)
       else {
-        const seg: Segment = { text: cell.ch }
+        const seg: Segment = { text: cell.ch.repeat(count) }
         if (cell.node) seg.node = cell.node
         if (cell.style?.color) seg.color = cell.style.color
         if (cell.style?.dim) seg.dim = true
@@ -567,8 +582,8 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
     return plan()!
   })
   const height = Math.max(0, ...[...spots.values()].map(spot => spot.y + boxHeight))
-  const cells: (Cell | null)[][] = Array.from({ length: height }, () => Array<Cell | null>(width).fill(null))
-  const mask: number[][] = Array.from({ length: height }, () => Array<number>(width).fill(0))
+  const cells: Map<number, Cell>[] = Array.from({ length: height }, () => new Map<number, Cell>())
+  const mask: Uint8Array[] = Array.from({ length: height }, () => new Uint8Array(width))
 
   const linked = new Set<string>()
   const dim: Style = { dim: true }
@@ -602,7 +617,7 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
         }
         mask[yt]![x0 + channels]! |= E
         const b = spots.get(to)!
-        cells[yt]![b.x - 1] = { ch: '▶', style: dim }
+        cells[yt]!.set(b.x - 1, { ch: '▶', style: dim })
       }
       const lo = Math.min(ys, ...rows)
       const hi = Math.max(ys, ...rows)

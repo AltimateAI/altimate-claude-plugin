@@ -60,6 +60,8 @@ const warehouseAtom = atom({ plugin: 'altimate-code', key: 'lineageWarehouse' } 
 const expandedAtom = atom({ plugin: 'altimate-code', key: 'lineageExpanded' } as const, { up: false, down: false })
 // How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists.
 const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 'graph' as ViewKind | 'list')
+// A model the pane should scroll down to once its graph is drawn: the canvas can be taller than the pane.
+let revealFor: string | null = null
 // Where the graph canvas is panned to: its first visible column; null centres it on the model.
 const panAtom = atom({ plugin: 'altimate-code', key: 'lineagePan' } as const, null as number | null)
 const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
@@ -518,6 +520,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     if (latest?.model !== id) await update($, expandedAtom, prev => (superseded() ? prev : ({ up: false, down: false })))
     // A new model's canvas opens centred on it.
     if (latest?.model !== id) await update($, panAtom, prev => (superseded() ? prev : null))
+    if (latest?.model !== id) revealFor = id
     await update($, columnsAtom, prev => (superseded() ? prev : null))
     await update($, reachAtom, prev => (superseded() ? prev : null))
     await update($, warehouseAtom, prev => (superseded() ? prev : null))
@@ -960,9 +963,19 @@ export function registerLineage(on: On) {
       const named = fromCommand.length ? fromCommand : fromOutput.length === 1 ? fromOutput : []
       if (named.length) {
         later($, async () => {
-          // A path that exists but is in no project (a redirect target) is skipped for the next one.
-          for (const file of named) if ((await $.fs.exists(file).catch(() => false)) && (await follow($, { file, auto: true }))) return
-          // Only a name (find -name x.sql): the model of that name in the command's project.
+          // A path that exists but is in no project (a redirect target) is skipped for the next one; once
+          // a newer follow (another read) has started, this command's candidates stop.
+          const start = startedSeq
+          let own = 0
+          for (const file of named) {
+            if (!(await $.fs.exists(file).catch(() => false))) continue
+            own++
+            if (await follow($, { file, auto: true })) return
+            if (startedSeq - start > own) return
+          }
+          // Only a name (find -name x.sql): the model of that name in the command's project, unless a
+          // newer follow has started since this command's own ones.
+          if (startedSeq - start > own) return
           await follow($, { model: named[0]!.split('/').pop()!.replace(/\.sql$/i, ''), root: dir, auto: true })
         })
       }
@@ -1100,7 +1113,21 @@ export function registerLineage(on: On) {
     const centre = drawn?.canvas ? Math.max(0, columnOf(drawn.rows, focus.model) - Math.floor(room / 3)) : 0
     const from = Math.min(maxPan, Math.max(0, pan ?? centre))
     const shownRows = drawn ? (drawn.canvas > room ? sliceRows(drawn.rows, from, room) : drawn.rows) : []
-    const panBy = (step: number) => update($, panAtom, current => Math.min(maxPan, Math.max(0, (current ?? centre) + step)))
+    // From what is shown: a stored pan past the edge (a narrower pane, a right-clamped start) is not the start.
+    const panBy = (step: number) => update($, panAtom, () => Math.min(maxPan, Math.max(0, from + step)))
+    // Once a new model's graph is drawn, scroll the pane to it: the canvas can be taller than the pane.
+    const focusRow = view === 'graph' ? shownRows.findIndex(row => row.some(one => one.node === focus.model)) : -1
+    if (revealFor === focus.model && focusRow >= 0) {
+      revealFor = null
+      later($, async () => {
+        // The new drawing may not be on screen yet: retry briefly until the model's box is there.
+        for (let tries = 0; tries < 10; tries++) {
+          const moved = await $.ui.scroll({ to: { key: `graph-${focusRow}-${focus.model}` }, in: PANE, block: 'center' }).catch(() => ({ deny: 'failed' }))
+          if (!moved.deny || !/no element/.test(moved.deny)) return
+          await $.clock.sleep(100).catch(() => {})
+        }
+      })
+    }
     // A "+N more" box opened: what it stands for, by name, each one followable; upstream above the
     // graph and downstream below it, beside the boxes that were pressed.
     const foldedList = (side: 'up' | 'down') =>
@@ -1152,7 +1179,16 @@ export function registerLineage(on: On) {
               <Box flexDirection="row" gap={2}>
                 <Button key="lineage-pan-left" plain hotkey="h" label="◀ pan" onPress={() => panBy(-Math.max(8, Math.floor(room / 2)))} />
                 <Button key="lineage-pan-right" plain hotkey="l" label="pan ▶" onPress={() => panBy(Math.max(8, Math.floor(room / 2)))} />
-                <Button key="lineage-pan-focus" plain hotkey="f" label="the model" onPress={() => update($, panAtom, () => null)} />
+                <Button
+                  key="lineage-pan-focus"
+                  plain
+                  hotkey="f"
+                  label="the model"
+                  onPress={async () => {
+                    revealFor = focus.model
+                    await update($, panAtom, () => null)
+                  }}
+                />
               </Box>
             )}
             {shownRows.map((row, i) => drawRow(ui, $, graph, row.some(one => one.text) ? row : [{ text: ' ' }], `graph-${i}`))}

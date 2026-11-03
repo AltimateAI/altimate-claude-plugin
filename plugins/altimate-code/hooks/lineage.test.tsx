@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string> }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void> }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -104,11 +104,16 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
   })
   let held = false
+  let heldSql = false
   on('fs.read', async (_: unknown, e: { path: string }) => {
     // A test can pause the first manifest read to make one follow resolve after a newer one.
     if (e.path === MANIFEST_PATH && options.holdFirstManifestRead && !held) {
       held = true
       await options.holdFirstManifestRead
+    }
+    if (sql && options.holdFirstSqlRead && !heldSql && e.path.endsWith('.sql')) {
+      heldSql = true
+      await options.holdFirstSqlRead
     }
     if (sql) return { value: e.path === `${ROOT}/dbt_project.yml` ? (sql['dbt_project.yml'] ?? "name: 'shop'\n") : (sql[e.path.slice(ROOT.length + 1)] ?? '') }
     return { value: e.path === MANIFEST_PATH ? JSON.stringify(MANIFEST) : 'select 1' }
@@ -749,6 +754,24 @@ test('a model folder named like a build folder (models/build/) is still read', a
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · orders_built/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /rpt/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a shell read whose first candidate loses to a newer read does not take the pane back', async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, {
+    sqlFiles: { 'models/a_model.sql': 'select 1', 'models/b_model.sql': 'select 1', 'models/c_model.sql': 'select 1' },
+    holdFirstSqlRead: new Promise<void>(resolve => (release = resolve)),
+  })
+  // b is tried first (the last named) and waits on its scan while Claude reads c.
+  await $.tool.call({ tool: 'Bash', command: 'cat /repo/models/a_model.sql /repo/models/b_model.sql' } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/c_model.sql` })
+  await clock.settle()
+  release()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · c_model/ })).toBeDefined()
   await ui.unmount()
 })
 
