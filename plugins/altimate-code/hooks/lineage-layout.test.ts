@@ -55,7 +55,7 @@ test('graphView folds past the cap into one more box with the shared folder', ()
   const last = view.layers.at(-1)!
   expect(last.map(box => box.label)).toEqual(['m1', 'm2', '+3 more · marts'])
   const more = last.at(-1)!
-  expect(more).toEqual({ key: 'more:2', label: '+3 more · marts', node: 'more:down', kind: 'more' })
+  expect(more).toEqual({ key: 'more:2', label: '+3 more · marts', node: 'more:down', kind: 'more', folded: ['model.shop.m3', 'model.shop.m4', 'model.shop.m5'] })
   expect(view.edges.filter(([, to]) => to === 'more:2')).toEqual([[FCT, 'more:2']])
 })
 

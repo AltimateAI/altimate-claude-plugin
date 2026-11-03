@@ -8,6 +8,8 @@ export type LayoutBox = {
   node?: string
   kind: 'focus' | 'model' | 'exposure' | 'more' | 'group'
   tone?: 'hit' | 'maybe' | 'dim'
+  /** A `+N more` box: the nodes it stands for. */
+  folded?: string[]
 }
 /** Boxes in columns, farthest upstream first, and the edges between box keys, parent to child. */
 export type Layered = { layers: LayoutBox[][]; edges: [string, string][] }
@@ -63,7 +65,8 @@ function capLayer(graph: LineageGraph, ranked: LayoutBox[], cap: number, index: 
   const common = folders.size === 1 ? [...folders][0] : null
   const key = `more:${index}`
   for (const box of rest) folded.set(box.key, key)
-  return { boxes: [...kept, { key, label: `+${rest.length} more${common ? ` · ${common}` : ''}`, node: `more:${side}`, kind: 'more' }], folded }
+  const hidden = rest.flatMap(box => box.folded ?? (box.node ? [box.node] : []))
+  return { boxes: [...kept, { key, label: `+${rest.length} more${common ? ` · ${common}` : ''}`, node: `more:${side}`, kind: 'more', folded: hidden }], folded }
 }
 
 const dedupe = (edges: [string, string][]) => {
@@ -675,8 +678,18 @@ const TONES = ['dim', 'maybe', 'hit'] as const
  * cannot read as the continuation of another. Sources ending on one box share a channel row.
  */
 export function drawVertical(view: Layered, maxWidth: number): Segment[][] {
+  return drawFitted(fitVertical(view, maxWidth), maxWidth)
+}
+
+const verticalWidth = (box: LayoutBox, maxWidth: number) => Math.min(maxWidth, MAX_BOX, Math.max(5, box.label.length + 4))
+
+/**
+ * The layers as drawVertical lays them out: a level too wide for the pane folds its trailing boxes into
+ * its `+N more` box (each more box lists the nodes it hides in `folded`), edges redirected to it.
+ */
+export function fitVertical(view: Layered, maxWidth: number): Layered {
   const focusAt = Math.max(0, view.layers.findIndex(boxes => boxes.some(box => box.kind === 'focus')))
-  const widthOf = (box: LayoutBox) => Math.min(maxWidth, MAX_BOX, Math.max(5, box.label.length + 4))
+  const widthOf = (box: LayoutBox) => verticalWidth(box, maxWidth)
   const rowWidth = (boxes: LayoutBox[]) => boxes.reduce((sum, box) => sum + widthOf(box), 0) + 2 * Math.max(0, boxes.length - 1)
   const folded = new Map<string, string>()
   const levels = view.layers.map((boxes, index) => {
@@ -688,7 +701,8 @@ export function drawVertical(view: Layered, maxWidth: number): Segment[][] {
     const make = (rest: LayoutBox[]): LayoutBox => {
       const tones = [...rest, ...(own ? [own] : [])].map(box => TONES.indexOf(box.tone as (typeof TONES)[number]))
       const tone = TONES[Math.max(...tones)]
-      return { key: own?.key ?? `more:v${index}`, label: `+${rest.length + owned} more`, node: `more:${side}`, kind: 'more', ...(tone && { tone }) }
+      const hidden = [...rest.flatMap(box => box.folded ?? (box.node ? [box.node] : [])), ...(own?.folded ?? [])]
+      return { key: own?.key ?? `more:v${index}`, label: `+${rest.length + owned} more`, node: `more:${side}`, kind: 'more', folded: hidden, ...(tone && { tone }) }
     }
     let keep = plain.length - 1
     while (keep > 0 && rowWidth([...plain.slice(0, keep), make(plain.slice(keep))]) > maxWidth) keep--
@@ -697,8 +711,16 @@ export function drawVertical(view: Layered, maxWidth: number): Segment[][] {
     for (const box of rest) folded.set(box.key, more.key)
     return [...plain.slice(0, Math.max(0, keep)), more]
   })
+  return { layers: levels, edges: dedupe(view.edges.map(([from, to]) => [folded.get(from) ?? from, folded.get(to) ?? to])) }
+}
+
+function drawFitted(view: Layered, maxWidth: number): Segment[][] {
+  const levels = view.layers
+  const focusAt = Math.max(0, levels.findIndex(boxes => boxes.some(box => box.kind === 'focus')))
+  const widthOf = (box: LayoutBox) => verticalWidth(box, maxWidth)
+  const rowWidth = (boxes: LayoutBox[]) => boxes.reduce((sum, box) => sum + widthOf(box), 0) + 2 * Math.max(0, boxes.length - 1)
   if (levels.length === 0) return []
-  const edges = dedupe(view.edges.map(([from, to]) => [folded.get(from) ?? from, folded.get(to) ?? to]))
+  const edges = view.edges
   const levelOf = new Map<string, number>()
   const boxByKey = new Map<string, LayoutBox>()
   levels.forEach((boxes, index) => boxes.forEach(box => (levelOf.set(box.key, index), boxByKey.set(box.key, box))))

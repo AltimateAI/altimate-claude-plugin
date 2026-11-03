@@ -686,6 +686,32 @@ test('[e] shows the model end to end, and a pane too narrow for the levels draws
   await ui.unmount()
 })
 
+test('top to bottom, a "+N more" press lists the models it stands for, each followable', async ($, on) => {
+  const long = (n: string) => `${n}_with_a_rather_long_model_name`
+  const sqlFiles: Record<string, string> = { [`models/${long('grand')}.sql`]: 'select 1', [`models/${long('focus')}.sql`]: '', [`models/${long('down_one')}.sql`]: `select * from {{ ref('${long('focus')}') }}`, [`models/${long('down_two')}.sql`]: `select * from {{ ref('${long('down_one')}') }}` }
+  const parents: string[] = []
+  for (let i = 1; i <= 8; i++) {
+    parents.push(long(`parent${i}`))
+    sqlFiles[`models/${long(`parent${i}`)}.sql`] = `select * from {{ ref('${long('grand')}') }}`
+  }
+  sqlFiles[`models/${long('focus')}.sql`] = parents.map(name => `{{ ref('${name}') }}`).join(' ')
+  const { clock } = await start($, on, { sqlFiles })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/${long('focus')}.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 60 }, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /top to bottom/ })).toBeDefined()
+  const more = await ui.find({ type: 'Button', text: /\+\d+ more/ })
+  await ui.press({ key: more!.key! })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /MORE UPSTREAM · \d+ not drawn/ })).toBeDefined()
+  const hidden = await ui.find({ type: 'Button', text: long('parent8') })
+  expect(hidden).toBeDefined()
+  await ui.press({ key: hidden!.key! })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`lineage · ${long('parent8')}`) })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a failing follow started after a good one does not cancel it', async ($, on) => {
   const { clock } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })

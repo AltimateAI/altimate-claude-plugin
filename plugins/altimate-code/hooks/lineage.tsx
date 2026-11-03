@@ -10,7 +10,7 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
-import { drawLayered, drawStack, drawVertical, endsView, foldersView, graphView, type ViewKind } from './lineage-layout'
+import { drawLayered, drawStack, drawVertical, endsView, fitVertical, foldersView, graphView, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
   buildGraph,
@@ -232,7 +232,14 @@ const clearSqlGraphs = () => {
   sqlGeneration++
 }
 // The last drawing of the graph views and what it was drawn from.
-let drawnCache: { key: string; drawn: { rows: Segment[][]; hidden: number; down: boolean } | null } | null = null
+type Drawn = { rows: Segment[][]; hidden: number; down: boolean; folded: { up: string[]; down: string[] } }
+let drawnCache: { key: string; drawn: Drawn | null } | null = null
+/** The nodes the drawing's `+N more` boxes stand for, by side. */
+const foldedOf = (view: Layered) => {
+  const out = { up: [] as string[], down: [] as string[] }
+  for (const box of view.layers.flat()) if (box.kind === 'more' && box.folded) out[box.node === 'more:up' ? 'up' : 'down'].push(...box.folded)
+  return out
+}
 // ponytail: a cap on files read per project; past it the graph is partial. A walk that streams would lift it.
 const MAX_SQL_FILES = 5000
 async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph> {
@@ -1064,16 +1071,38 @@ export function registerLineage(on: On) {
       // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
       // The graph does too when its levels do not fit across: the pane scrolls, so every level shows.
       const across = layered && view !== 'folders' ? drawLayered(layered, width - 1) : null
-      const rows = !layered
+      const fitted = layered && view === 'graph' && across!.hidden > 0 ? fitVertical(layered, width - 1) : null
+      const rows: Drawn | null = !layered
         ? null
         : view === 'folders'
-          ? { rows: drawStack(layered, width - 1), hidden: 0, down: true }
-          : view === 'graph' && across!.hidden > 0
-            ? { rows: drawVertical(layered, width - 1), hidden: 0, down: true }
-            : { ...across!, down: false }
+          ? { rows: drawStack(layered, width - 1), hidden: 0, down: true, folded: { up: [], down: [] } }
+          : fitted
+            ? { rows: drawVertical(fitted, width - 1), hidden: 0, down: true, folded: foldedOf(fitted) }
+            : { ...across!, down: false, folded: foldedOf(layered) }
       drawnCache = { key: drawKey, drawn: rows }
     }
     const drawn = drawnCache.drawn
+    // A "+N more" box opened: what it stands for, by name, each one followable; upstream above the
+    // graph and downstream below it, beside the boxes that were pressed.
+    const foldedList = (side: 'up' | 'down') =>
+      drawn && expanded[side] && drawn.folded[side].length > 0 ? (
+        <Box key={`folded-${side}`} flexDirection="column">
+          <Text dimColor>
+            {side === 'up' ? 'MORE UPSTREAM' : 'MORE DOWNSTREAM'} · {drawn.folded[side].length} not drawn
+          </Text>
+          <Box flexDirection="row" flexWrap="wrap" columnGap={2}>
+            {drawn.folded[side].map(id =>
+              FOLLOWABLE.has(graph.nodes[id]?.type ?? '') ? (
+                <Button key={`folded-${id}`} plain label={graph.nodes[id]!.name} onPress={() => later($, async () => void (await follow($, { model: id })))} />
+              ) : (
+                <Text key={`folded-${id}`} dimColor>
+                  {graph.nodes[id]?.label ?? graph.nodes[id]?.name ?? id}
+                </Text>
+              ),
+            )}
+          </Box>
+        </Box>
+      ) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
     return (
@@ -1091,6 +1120,7 @@ export function registerLineage(on: On) {
           {columns?.note && <Text color="warning">⚠ {columns.note}</Text>}
         </Box>
 
+        {view !== 'list' && foldedList('up')}
         {view !== 'list' && drawn && (
           <Box flexDirection="column">
             <Text dimColor>
@@ -1102,6 +1132,7 @@ export function registerLineage(on: On) {
             {drawn.rows.map((row, i) => drawRow(ui, $, graph, row.some(one => one.text) ? row : [{ text: ' ' }], `graph-${i}`))}
           </Box>
         )}
+        {view !== 'list' && foldedList('down')}
 
         {view === 'list' && (
           <Box flexDirection="column" gap={1}>
