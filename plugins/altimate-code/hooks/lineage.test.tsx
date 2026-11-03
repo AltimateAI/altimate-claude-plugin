@@ -667,6 +667,25 @@ test('pressing a "+N more" box unfolds that side', async ($, on) => {
   await ui.unmount()
 })
 
+test('[e] shows the model end to end, and a pane too narrow for the levels draws them top to bottom', async ($, on) => {
+  const sqlFiles: Record<string, string> = { 'models/m0.sql': "select * from {{ source('raw', 'orders') }}" }
+  for (let i = 1; i <= 6; i++) sqlFiles[`models/m${i}.sql`] = `select * from {{ ref('m${i - 1}') }}`
+  const { clock } = await start($, on, { sqlFiles })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/m3.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 60 }, surface: 'terminal' })
+  await ui.press({ key: 'lineage-end-to-end' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /GRAPH · SQL files · ↑12 ↓12 · top to bottom/ })).toBeDefined()
+  // Every level, from the source to the last model.
+  expect(await ui.find({ type: 'Text', text: /orders/ })).toBeDefined()
+  for (const name of [/m0/, /m6/]) expect(await ui.find({ type: 'Button', text: name })).toBeDefined()
+  await ui.press({ key: 'lineage-end-to-end' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /↑2 ↓2/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a failing follow started after a good one does not cancel it', async ($, on) => {
   const { clock } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })

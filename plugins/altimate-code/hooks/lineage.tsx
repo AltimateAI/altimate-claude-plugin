@@ -10,7 +10,7 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
-import { drawLayered, drawStack, endsView, foldersView, graphView, type ViewKind } from './lineage-layout'
+import { drawLayered, drawStack, drawVertical, endsView, foldersView, graphView, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
   buildGraph,
@@ -97,6 +97,7 @@ const UNFOLDED = 40
 // What k and l step through: a source-to-mart chain can be a dozen levels deep.
 const LEVELS = [1, 2, 3, 4, 6, 8, 12]
 const nextLevel = (current: number) => LEVELS[(LEVELS.indexOf(current) + 1) % LEVELS.length] ?? LEVELS[0]!
+const MAX_LEVEL = LEVELS[LEVELS.length - 1]!
 // Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
 // surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
 const PANE_SIZE = { columns: 110, rows: 34 }
@@ -231,7 +232,7 @@ const clearSqlGraphs = () => {
   sqlGeneration++
 }
 // The last drawing of the graph views and what it was drawn from.
-let drawnCache: { key: string; drawn: { rows: Segment[][]; hidden: number } | null } | null = null
+let drawnCache: { key: string; drawn: { rows: Segment[][]; hidden: number; down: boolean } | null } | null = null
 // ponytail: a cap on files read per project; past it the graph is partial. A walk that streams would lift it.
 const MAX_SQL_FILES = 5000
 async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph> {
@@ -1061,7 +1062,15 @@ export function registerLineage(on: On) {
               ? foldersView(graph, focus.model)
               : null
       // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
-      const rows = layered ? (view === 'folders' ? { rows: drawStack(layered, width - 1), hidden: 0 } : drawLayered(layered, width - 1)) : null
+      // The graph does too when its levels do not fit across: the pane scrolls, so every level shows.
+      const across = layered && view !== 'folders' ? drawLayered(layered, width - 1) : null
+      const rows = !layered
+        ? null
+        : view === 'folders'
+          ? { rows: drawStack(layered, width - 1), hidden: 0, down: true }
+          : view === 'graph' && across!.hidden > 0
+            ? { rows: drawVertical(layered, width - 1), hidden: 0, down: true }
+            : { ...across!, down: false }
       drawnCache = { key: drawKey, drawn: rows }
     }
     const drawn = drawnCache.drawn
@@ -1086,7 +1095,7 @@ export function registerLineage(on: On) {
           <Box flexDirection="column">
             <Text dimColor>
               {VIEW_TITLE[view]} · {source}
-              {view === 'graph' ? ` · ↑${upLevels} ↓${levels}` : ''}
+              {view === 'graph' ? ` · ↑${upLevels} ↓${levels}${drawn.down ? ' · top to bottom' : ''}` : ''}
               {drawn.hidden ? ` · ${drawn.hidden} level${drawn.hidden === 1 ? '' : 's'} past the pane's width` : ''}
               {graph.upTruncated || graph.truncated ? ` · ${[graph.upTruncated && 'upstream', graph.truncated && 'downstream'].filter(Boolean).join(' and ')} cut at 500 nodes` : ''}
             </Text>
@@ -1228,6 +1237,20 @@ export function registerLineage(on: On) {
           )}
           {view === 'graph' && (
             <Button key="lineage-levels" plain hotkey="l" label={`↓${levels}`} onPress={() => update($, levelsAtom, nextLevel)} />
+          )}
+          {view === 'graph' && (
+            <Button
+              key="lineage-end-to-end"
+              plain
+              hotkey="e"
+              label={upLevels === MAX_LEVEL && levels === MAX_LEVEL ? 'nearby' : 'end to end'}
+              onPress={async () => {
+                // Every level both ways, or back to the two nearest.
+                const all = upLevels === MAX_LEVEL && levels === MAX_LEVEL
+                await update($, upLevelsAtom, () => (all ? 2 : MAX_LEVEL))
+                await update($, levelsAtom, () => (all ? 2 : MAX_LEVEL))
+              }}
+            />
           )}
           <Button
             key="lineage-refresh"

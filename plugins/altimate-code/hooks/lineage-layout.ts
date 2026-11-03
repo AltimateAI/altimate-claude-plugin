@@ -425,6 +425,56 @@ function place(layers: LayoutBox[][], cap: number, gaps: Gap[]) {
   return { spots, width, height: total, boxHeight }
 }
 
+/** Paints a box at (x, y); `exit` puts a junction on the right border of the first label row where a line leaves. */
+function paintBox(cells: (Cell | null)[][], box: LayoutBox, x: number, y: number, w: number, boxHeight: number, exit: boolean) {
+  const style = styleOf(box)
+  const [tl, tr, bl, br, hz, vt] = box.kind === 'focus' ? ['┏', '┓', '┗', '┛', '━', '┃'] : ['┌', '┐', '└', '┘', '─', '│']
+  const lines = wrap(box.label, w - 4)
+  const put = (cx: number, cy: number, ch: string, node?: string) => {
+    cells[cy]![cx] = node ? { ch, node, style } : { ch, style }
+  }
+  const bottom = y + boxHeight - 1
+  put(x, y, tl)
+  put(x + w - 1, y, tr)
+  put(x, bottom, bl)
+  put(x + w - 1, bottom, br)
+  for (let i = 1; i < w - 1; i++) {
+    put(x + i, y, hz)
+    put(x + i, bottom, hz)
+  }
+  for (let row = 1; row < boxHeight - 1; row++) {
+    const text = lines[row - 1] ?? ''
+    put(x, y + row, vt)
+    put(x + w - 1, y + row, row === 1 && exit ? (vt === '┃' ? '┠' : '├') : vt)
+    for (let i = 1; i < w - 1; i++) put(x + i, y + row, i >= 2 && i - 2 < text.length ? text[i - 2]! : ' ', box.node)
+  }
+}
+
+/** The grid as rows of styled runs: line cells come from the direction masks, trailing blanks are dropped. */
+function toSegments(cells: (Cell | null)[][], mask: number[][]): Segment[][] {
+  const dim: Style = { dim: true }
+  return cells.map((line, y) => {
+    const row = line.map((cell, x): Cell => cell ?? (mask[y]![x]! ? { ch: JOINT[mask[y]![x]!]!, style: dim } : { ch: ' ' }))
+    while (row.length > 0 && row[row.length - 1]!.ch === ' ' && !row[row.length - 1]!.node) row.pop()
+    if (row.length === 0) return [{ text: '' }]
+    const out: Segment[] = []
+    let last: Cell | null = null
+    for (const cell of row) {
+      if (last && sameStyle(last, cell)) out[out.length - 1]!.text += cell.ch
+      else {
+        const seg: Segment = { text: cell.ch }
+        if (cell.node) seg.node = cell.node
+        if (cell.style?.color) seg.color = cell.style.color
+        if (cell.style?.dim) seg.dim = true
+        if (cell.style?.bold) seg.bold = true
+        out.push(seg)
+      }
+      last = cell
+    }
+    return out
+  })
+}
+
 /**
  * Draws the layers as boxes joined by right-angled lines. Boxes narrow first; layers that still do
  * not fit `maxWidth` are dropped, counted in `hidden`: upstream past the first level, then the farthest
@@ -559,51 +609,11 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
   for (const boxes of layers) {
     for (const box of boxes) {
       const { x, y, w } = spots.get(box.key)!
-      const style = styleOf(box)
-      const heavy = box.kind === 'focus'
-      const [tl, tr, bl, br, hz, vt] = heavy ? ['┏', '┓', '┗', '┛', '━', '┃'] : ['┌', '┐', '└', '┘', '─', '│']
-      const lines = wrap(box.label, w - 4)
-      const put = (cx: number, cy: number, ch: string, node?: string) => {
-        cells[cy]![cx] = node ? { ch, node, style } : { ch, style }
-      }
-      const bottom = y + boxHeight - 1
-      put(x, y, tl)
-      put(x + w - 1, y, tr)
-      put(x, bottom, bl)
-      put(x + w - 1, bottom, br)
-      for (let i = 1; i < w - 1; i++) {
-        put(x + i, y, hz)
-        put(x + i, bottom, hz)
-      }
-      for (let row = 1; row < boxHeight - 1; row++) {
-        const text = lines[row - 1] ?? ''
-        put(x, y + row, vt)
-        put(x + w - 1, y + row, row === 1 && linked.has(box.key) ? (vt === '┃' ? '┠' : '├') : vt)
-        for (let i = 1; i < w - 1; i++) put(x + i, y + row, i >= 2 && i - 2 < text.length ? text[i - 2]! : ' ', box.node)
-      }
+      paintBox(cells, box, x, y, w, boxHeight, linked.has(box.key))
     }
   }
 
-  const rows = cells.map((line, y) => {
-    const row = line.map((cell, x): Cell => cell ?? (mask[y]![x]! ? { ch: JOINT[mask[y]![x]!]!, style: dim } : { ch: ' ' }))
-    while (row.length > 0 && row[row.length - 1]!.ch === ' ' && !row[row.length - 1]!.node) row.pop()
-    if (row.length === 0) return [{ text: '' }]
-    const out: Segment[] = []
-    let last: Cell | null = null
-    for (const cell of row) {
-      if (last && sameStyle(last, cell)) out[out.length - 1]!.text += cell.ch
-      else {
-        const seg: Segment = { text: cell.ch }
-        if (cell.node) seg.node = cell.node
-        if (cell.style?.color) seg.color = cell.style.color
-        if (cell.style?.dim) seg.dim = true
-        if (cell.style?.bold) seg.bold = true
-        out.push(seg)
-      }
-      last = cell
-    }
-    return out
-  })
+  const rows = toSegments(cells, mask)
   return { rows, hidden }
 }
 
@@ -652,4 +662,146 @@ export function drawStack(view: Layered, maxWidth: number): Segment[][] {
     }
   })
   return rows
+}
+
+const TONES = ['dim', 'maybe', 'hit'] as const
+
+/**
+ * Draws the layers top to bottom: the farthest upstream level first, each level a row of boxes centred
+ * in `maxWidth`. A level too wide for the pane folds its trailing boxes into a `+N more` box (merged
+ * into the level's own when it has one), with the edges of folded boxes redirected to it. Between two
+ * levels a line leaves a box's bottom border at an even column, runs along its own channel row and
+ * enters the target at an odd column under a `▼`: the two parities never meet, so a line going down
+ * cannot read as the continuation of another. Sources ending on one box share a channel row.
+ */
+export function drawVertical(view: Layered, maxWidth: number): Segment[][] {
+  const focusAt = Math.max(0, view.layers.findIndex(boxes => boxes.some(box => box.kind === 'focus')))
+  const widthOf = (box: LayoutBox) => Math.min(maxWidth, MAX_BOX, Math.max(5, box.label.length + 4))
+  const rowWidth = (boxes: LayoutBox[]) => boxes.reduce((sum, box) => sum + widthOf(box), 0) + 2 * Math.max(0, boxes.length - 1)
+  const folded = new Map<string, string>()
+  const levels = view.layers.map((boxes, index) => {
+    if (index === focusAt || rowWidth(boxes) <= maxWidth) return boxes
+    const side = index < focusAt ? 'up' : 'down'
+    const own = boxes.find(box => box.kind === 'more')
+    const plain = boxes.filter(box => box.kind !== 'more')
+    const owned = Number(/^\+(\d+)/.exec(own?.label ?? '')?.[1] ?? 0)
+    const make = (rest: LayoutBox[]): LayoutBox => {
+      const tones = [...rest, ...(own ? [own] : [])].map(box => TONES.indexOf(box.tone as (typeof TONES)[number]))
+      const tone = TONES[Math.max(...tones)]
+      return { key: own?.key ?? `more:v${index}`, label: `+${rest.length + owned} more`, node: `more:${side}`, kind: 'more', ...(tone && { tone }) }
+    }
+    let keep = plain.length - 1
+    while (keep > 0 && rowWidth([...plain.slice(0, keep), make(plain.slice(keep))]) > maxWidth) keep--
+    const rest = plain.slice(Math.max(0, keep))
+    const more = make(rest)
+    for (const box of rest) folded.set(box.key, more.key)
+    return [...plain.slice(0, Math.max(0, keep)), more]
+  })
+  if (levels.length === 0) return []
+  const edges = dedupe(view.edges.map(([from, to]) => [folded.get(from) ?? from, folded.get(to) ?? to]))
+  const levelOf = new Map<string, number>()
+  const boxByKey = new Map<string, LayoutBox>()
+  levels.forEach((boxes, index) => boxes.forEach(box => (levelOf.set(box.key, index), boxByKey.set(box.key, box))))
+
+  const tall = levels.some(boxes => boxes.some(box => box.label.length > widthOf(box) - 4))
+  const boxHeight = tall ? 4 : 3
+  const spots = new Map<string, { x: number; y: number; w: number }>()
+  const width = maxWidth
+  // Column of a box's line leaving (even, right part) and entering (odd, left part).
+  const leave = (key: string) => {
+    const { x, w } = spots.get(key)!
+    for (let c = x + w - 2; c > x; c--) if (c % 2 === 0) return c
+    return x + 1
+  }
+  const enter = (key: string) => {
+    const { x, w } = spots.get(key)!
+    for (let c = x + 1; c < x + w - 1; c++) if (c % 2 === 1) return c
+    return x + 1
+  }
+
+  // Bands first need the sources of each pair of levels; their height gives the rows.
+  const bands = levels.slice(1).map((_, index) => {
+    const byFrom = new Map<string, string[]>()
+    for (const [from, to] of edges) {
+      if (levelOf.get(from) === index && levelOf.get(to) === index + 1) byFrom.set(from, [...(byFrom.get(from) ?? []), to])
+    }
+    const oneTarget = new Set([...byFrom.values()].flat()).size === 1
+    const rows = byFrom.size === 0 ? 1 : (oneTarget ? 1 : byFrom.size) + 2
+    return { byFrom, oneTarget, rows }
+  })
+  let y = 0
+  levels.forEach((boxes, index) => {
+    let x = Math.max(0, Math.floor((width - rowWidth(boxes)) / 2))
+    for (const box of boxes) {
+      spots.set(box.key, { x, y, w: widthOf(box) })
+      x += widthOf(box) + 2
+    }
+    y += boxHeight + (bands[index]?.rows ?? 0)
+  })
+  const height = y
+  const cells: (Cell | null)[][] = Array.from({ length: height }, () => Array<Cell | null>(width).fill(null))
+  const mask: number[][] = Array.from({ length: height }, () => Array<number>(width).fill(0))
+  for (const boxes of levels) {
+    for (const box of boxes) {
+      const { x, y: top, w } = spots.get(box.key)!
+      paintBox(cells, box, x, top, w, boxHeight, false)
+    }
+  }
+
+  const dim: Style = { dim: true }
+  const run = (x: number, y1: number, y2: number) => {
+    for (let at = y1; at < y2; at++) {
+      mask[at]![x]! |= S
+      mask[at + 1]![x]! |= N
+    }
+  }
+  const across = (x1: number, x2: number, at: number) => {
+    for (let x = Math.min(x1, x2); x < Math.max(x1, x2); x++) {
+      mask[at]![x]! |= E
+      mask[at]![x + 1]! |= W
+    }
+  }
+  bands.forEach(({ byFrom, oneTarget, rows }, index) => {
+    if (byFrom.size === 0) return
+    const first = [...byFrom.keys()][0]!
+    const bottom = spots.get(first)!.y + boxHeight
+    const arrowRow = bottom + rows - 1
+    const span = (from: string) => {
+      const cols = [leave(from), ...byFrom.get(from)!.map(enter)]
+      return [Math.min(...cols), Math.max(...cols)] as const
+    }
+    // A source whose run covers another's arrival column, or another's departure column, goes above it:
+    // that keeps one line from cutting across the next.
+    const preferred = [...byFrom.keys()].sort((p, q) => leave(p) - leave(q))
+    const before = new Map(preferred.map(from => [from, new Set<string>()]))
+    for (const x of preferred) {
+      for (const y of preferred) {
+        if (x === y) continue
+        const [lo, hi] = span(y)
+        if (byFrom.get(x)!.some(to => enter(to) > lo && enter(to) < hi)) before.get(x)!.add(y)
+        const [xlo, xhi] = span(x)
+        if (leave(y) > xlo && leave(y) < xhi) before.get(x)!.add(y)
+      }
+    }
+    const order: string[] = []
+    while (order.length < preferred.length) {
+      const next = preferred.find(from => !order.includes(from) && [...before.get(from)!].every(one => order.includes(one)))
+      if (!next) break
+      order.push(next)
+    }
+    const sources = order.length === preferred.length ? order : preferred
+    sources.forEach((from, at) => {
+      const channel = bottom + 1 + (oneTarget ? 0 : at)
+      const d = leave(from)
+      cells[bottom - 1]![d] = { ch: boxByKey.get(from)!.kind === 'focus' ? '┯' : '┬', style: styleOf(boxByKey.get(from)!) }
+      run(d, bottom - 1, channel)
+      for (const to of byFrom.get(from)!) {
+        const a = enter(to)
+        across(d, a, channel)
+        run(a, channel, arrowRow)
+        cells[arrowRow]![a] = { ch: '▼', style: dim }
+      }
+    })
+  })
+  return toSegments(cells, mask)
 }

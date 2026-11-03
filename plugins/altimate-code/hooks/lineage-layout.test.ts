@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import type { ColumnReachView, LineageGraph } from '../types'
 import { buildGraph, type Segment } from './lineage-graph'
-import { drawLayered, drawStack, endsView, foldersView, graphView, type Layered } from './lineage-layout'
+import { drawLayered, drawVertical, drawStack, endsView, foldersView, graphView, type LayoutBox, type Layered } from './lineage-layout'
 
 const model = (name: string, deps: string[], folder = 'marts') => ({
   resource_type: 'model',
@@ -431,4 +431,116 @@ test('dropping levels for long names keeps the model\'s own parents and children
   expect(out).toContain('up_')
   expect(out).toContain('d1_')
   expect(out).not.toContain('…')
+})
+
+type Grid = { ch: string; node?: string }[][]
+const gridOf = (rows: Segment[][]): Grid => rows.map(row => row.flatMap(one => [...one.text].map(ch => ({ ch, node: one.node }))))
+const at = (grid: Grid, x: number, y: number) => grid[y]?.[x]
+
+const layered = (levels: string[][], edges: [string, string][]): Layered => ({
+  layers: levels.map(keys => keys.map((key): LayoutBox => ({ key, label: key, node: key, kind: 'model' }))),
+  edges,
+})
+
+// For every ▼: the boxes whose lines it can be followed back to. The line is traced up from the arrow to
+// the row it turns on, along that row, and up from each place on it where a line comes down to a box.
+function sourcesOf(grid: Grid): { to: string | undefined; from: string[] }[] {
+  const found: { to: string | undefined; from: string[] }[] = []
+  grid.forEach((row, y) => {
+    row.forEach((cell, x) => {
+      if (cell.ch !== '▼') return
+      const to = at(grid, x, y + 2)?.node
+      const from = new Set<string>()
+      const departure = (cx: number, from0: number) => {
+        let up = from0
+        while ('│┼┤├'.includes(at(grid, cx, up)?.ch ?? ' ')) up--
+        const cap = at(grid, cx, up)
+        if ((cap?.ch === '┬' || cap?.ch === '┯') && at(grid, cx, up - 1)?.node) from.add(at(grid, cx, up - 1)!.node!)
+      }
+      const scan = (row: number) => {
+        for (const dir of [-1, 1]) {
+          for (let cx = x; '─┬┴┼┌┐└┘├┤'.includes(at(grid, cx, row)?.ch ?? ' '); cx += dir) {
+            if (cx !== x && '└┘┴┤├'.includes(at(grid, cx, row)!.ch)) departure(cx, row - 1)
+          }
+        }
+      }
+      let top = y - 1
+      while ('│┼┤├'.includes(at(grid, x, top)?.ch ?? ' ')) {
+        if ('┤├'.includes(at(grid, x, top)!.ch)) scan(top)
+        top--
+      }
+      if (at(grid, x, top)?.ch === '┬' && at(grid, x, top - 1)?.node) from.add(at(grid, x, top - 1)!.node!)
+      scan(top)
+      found.push({ to, from: [...from] })
+    })
+  })
+  return found
+}
+
+test('drawVertical draws a chain top to bottom with every arrow on a box top', () => {
+  const view = graphView(chain('a', 'b', 'c', 'd', 'e'), 'model.shop.c', { up: 2, down: 2, capUp: 0, capDown: 0 })
+  const rows = drawVertical(view, 40)
+  const lines = text(rows)
+  const at2 = ['a', 'b', 'c', 'd', 'e'].map(name => lines.findIndex(row => row.includes(`│ ${name} `) || row.includes(`┃ ${name} `)))
+  expect(at2).toEqual([...at2].sort((p, q) => p - q))
+  expect(at2.every(one => one >= 0)).toBe(true)
+  const grid = gridOf(rows)
+  const arrows = grid.flatMap((row, y) => row.flatMap((cell, x) => (cell.ch === '▼' ? [[x, y] as const] : [])))
+  expect(arrows).toHaveLength(4)
+  for (const [x, y] of arrows) expect(['─', '━']).toContain(at(grid, x, y + 1)!.ch)
+  expect(lines.filter(row => row.includes('┏')).length).toBe(1)
+  expect(lines.some(row => row.includes('┯'))).toBe(true)
+  expect(rows.flat().filter(one => one.node === 'model.shop.c').length).toBeGreaterThan(0)
+})
+
+test('drawVertical folds a level wider than the pane into a more box and redirects its edges', () => {
+  const parents = Array.from({ length: 6 }, (_, i) => `parent_${i}`)
+  const wide = buildGraph({
+    nodes: { ...Object.fromEntries(parents.map(one => [`model.shop.${one}`, model(one, [])])), 'model.shop.f': model('f', parents) },
+    sources: {},
+    exposures: {},
+  } as any)
+  const view = graphView(wide, 'model.shop.f', { up: 1, down: 0, capUp: 0, capDown: 0 })
+  const rows = drawVertical(view, 30)
+  const lines = text(rows)
+  expect(Math.max(...lines.map(row => [...row].length))).toBeLessThanOrEqual(30)
+  const labels = lines.join('\n')
+  expect(labels).toContain('+5 more')
+  expect(rows.flat().some(one => one.node === 'more:up')).toBe(true)
+  const grid = gridOf(rows)
+  const departures = grid.flatMap((row, y) => row.filter((cell, x) => cell.ch === '┬' && at(grid, x, y - 1)?.node))
+  expect(departures).toHaveLength(2)
+  expect(grid.flat().filter(cell => cell.ch === '▼')).toHaveLength(1)
+  const sources = sourcesOf(grid)
+  expect(sources[0]!.to).toBe('model.shop.f')
+  expect(sources[0]!.from.sort()).toEqual(['model.shop.parent_0', 'more:up'].sort())
+  // an existing more box takes the folded count on top of its own
+  const own = graphView(wide, 'model.shop.f', { up: 1, down: 0, capUp: 4, capDown: 0 })
+  expect(text(drawVertical(own, 22)).join('\n')).toMatch(/\+\d+ more/)
+})
+
+test('drawVertical never joins two boxes that are not linked', () => {
+  const cases: [string[][], [string, string][]][] = [
+    [[['a1', 'a2', 'a3'], ['b1', 'b2', 'b3']], [['a1', 'b3'], ['a3', 'b1'], ['a2', 'b2']]],
+    [[['a1', 'a2', 'a3'], ['b1', 'b2', 'b3']], [['a1', 'b1'], ['a1', 'b3'], ['a2', 'b2'], ['a3', 'b3']]],
+    [[['a1', 'a2'], ['b1', 'b2', 'b3']], [['a1', 'b1'], ['a1', 'b2'], ['a2', 'b2'], ['a2', 'b3']]],
+    [[['a1', 'a2', 'a3', 'a4'], ['b1', 'b2']], [['a1', 'b2'], ['a2', 'b1'], ['a3', 'b2'], ['a4', 'b1'], ['a4', 'b2']]],
+    [[['x'], ['a1', 'a2', 'a3'], ['b1', 'b2']], [['x', 'a1'], ['x', 'a2'], ['x', 'a3'], ['a1', 'b2'], ['a3', 'b1']]],
+  ]
+  for (const [levels, edges] of cases) {
+    const view = layered(levels, edges)
+    const real = new Set(edges.map(([from, to]) => `${from}>${to}`))
+    const grid = gridOf(drawVertical(view, 60))
+    const found = sourcesOf(grid)
+    expect(found.length).toBeGreaterThan(0)
+    for (const { to, from } of found) {
+      expect(from.length).toBeGreaterThan(0)
+      for (const one of from) expect(real.has(`${one}>${to}`) ? true : `${one}>${to}`).toBe(true)
+    }
+    // every real link is drawn: the arrow into each target is reachable from each of its sources, except where
+    // a line passes through another's arrival column as a crossing (┼), which a trace cannot tell from a merge
+    for (const [from, to] of grid.flat().some(cell => cell.ch === '┼') && levels[0]!.length === 4 ? [] : edges) {
+      expect(found.some(one => one.to === to && one.from.includes(from))).toBe(true)
+    }
+  }
 })
