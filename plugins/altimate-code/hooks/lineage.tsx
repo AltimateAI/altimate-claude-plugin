@@ -219,6 +219,8 @@ function commandDir(command: string, cwd: string): string {
 // Per project folder: the graph read from its SQL files when it has no manifest, kept until a refresh
 // or an edit of a .sql file.
 const sqlGraphs = new Map<string, LineageGraph>()
+// The last drawing of the graph views and what it was drawn from.
+let drawnCache: { key: string; drawn: { rows: Segment[][]; hidden: number } | null } | null = null
 // ponytail: a cap on files read per project; past it the graph is partial. A walk that streams would lift it.
 const MAX_SQL_FILES = 5000
 async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph> {
@@ -879,8 +881,11 @@ export function registerLineage(on: On) {
     if (result.deny || result.isError) return result
 
     if (DBT_LINEAGE.test(e.tool) && 'model' in e) {
-      // A trace of one column holds only that column's edges: not the model's columns to keep.
-      const columns = (e as any).column ? null : lineageFromOutput((result as any).result ?? result.text)
+      // A trace of one column holds only that column's edges: not the model's columns to keep. The
+      // answer says so itself (its focus names the column) as well as the call's argument.
+      const output = (result as any).result ?? result.text
+      const trace = modelLineageOf(output) ?? modelLineageOf(parseJson(textOf(output)))
+      const columns = (e as any).column || trace?.focus?.column ? null : lineageFromOutput(output)
       const manifest = typeof (e as any).manifest_path === 'string' ? String((e as any).manifest_path) : undefined
       later($, async () => void (await follow($, { model: String((e as any).model), columns, auto: true, manifest })))
     }
@@ -1000,16 +1005,22 @@ export function registerLineage(on: On) {
     const view = chosenView !== 'list' && width < MIN_GRAPH_COLUMNS ? 'list' : chosenView
     const capUp = expanded.up ? UNFOLDED : BOX_CAP
     const capDown = expanded.down ? UNFOLDED : BOX_CAP
-    const layered =
-      view === 'graph'
-        ? graphView(graph, focus.model, { up: upLevels, down: levels, capUp, capDown, reach: column ? reach : null })
-        : view === 'ends'
-          ? endsView(graph, focus.model, { capUp, capDown })
-          : view === 'folders'
-            ? foldersView(graph, focus.model)
-            : null
-    // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
-    const drawn = layered ? (view === 'folders' ? { rows: drawStack(layered, width - 1), hidden: 0 } : drawLayered(layered, width - 1)) : null
+    // The pane redraws on every state change (loading, messages, columns); the drawing depends only on these.
+    const drawKey = JSON.stringify([focus, Object.keys(graph.nodes).length, view, upLevels, levels, capUp, capDown, width, column, view === 'graph' && column ? reach : null])
+    if (drawnCache?.key !== drawKey) {
+      const layered =
+        view === 'graph'
+          ? graphView(graph, focus.model, { up: upLevels, down: levels, capUp, capDown, reach: column ? reach : null })
+          : view === 'ends'
+            ? endsView(graph, focus.model, { capUp, capDown })
+            : view === 'folders'
+              ? foldersView(graph, focus.model)
+              : null
+      // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
+      const rows = layered ? (view === 'folders' ? { rows: drawStack(layered, width - 1), hidden: 0 } : drawLayered(layered, width - 1)) : null
+      drawnCache = { key: drawKey, drawn: rows }
+    }
+    const drawn = drawnCache.drawn
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
     return (

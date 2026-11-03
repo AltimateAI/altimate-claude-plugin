@@ -120,7 +120,7 @@ test('dbt parent_map and child_map are used when present, and a model is found b
   expect(graph.nodes['model.shop.fct_orders']!.relation).toBe('shop.main.fct_orders')
 })
 
-test('the subgraph keeps two levels up, everything downstream and the tests', () => {
+test('the subgraph keeps the whole upstream, everything downstream and the tests', () => {
   const sub = subgraph(buildGraph(MANIFEST), 'model.shop.int_orders')
   expect(Object.keys(sub.nodes)).toContain('model.shop.rpt_finance_weekly')
   expect(Object.keys(sub.nodes)).toContain('exposure.shop.exec_revenue')
@@ -349,4 +349,17 @@ test('graphFromSql reads ref() and source() the way dbt resolves them, leaving c
 test('projectLayout reads the name and folder lists of dbt_project.yml, with dbt defaults', () => {
   expect(projectLayout("name: 'dbt_integration'\nmodel-paths: [\"models\", 'more']\n")).toEqual({ name: 'dbt_integration', models: ['models', 'more'], snapshots: ['snapshots'], seeds: ['seeds'] })
   expect(projectLayout('')).toEqual({ name: 'project', models: ['models'], snapshots: ['snapshots'], seeds: ['seeds'] })
+})
+
+test('the subgraph keeps 500 ancestors, nearest first, and marks the cut', () => {
+  const nodes: Record<string, any> = {}
+  for (let i = 0; i <= 502; i++) nodes[`model.shop.m${i}`] = { resource_type: 'model', name: `m${i}`, depends_on: { nodes: i < 502 ? [`model.shop.m${i + 1}`] : [] } }
+  const sub = subgraph(buildGraph({ nodes } as any), 'model.shop.m0')
+  expect(sub.upTruncated).toBe(true)
+  expect(Object.keys(sub.nodes)).toHaveLength(501)
+  expect(sub.nodes['model.shop.m500']).toBeDefined()
+  expect(sub.nodes['model.shop.m501']).toBeUndefined()
+  const whole = subgraph(buildGraph({ nodes } as any), 'model.shop.m3')
+  expect(whole.upTruncated).toBeUndefined()
+  expect(whole.nodes['model.shop.m502']).toBeDefined()
 })

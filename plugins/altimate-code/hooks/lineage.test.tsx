@@ -705,7 +705,8 @@ test("Claude's dbt_lineage trace from the dbt integration counts the edges on ot
   }
   const tool = 'mcp__plugin_altimate-code_altimate-code__dbt_lineage'
   const { clock, calls } = await start($, on, { toolResult: e => (e.tool === tool ? [{ type: 'text', text: JSON.stringify({ ...trace, report: 'x' }) }] : undefined) })
-  await $.tool.call({ tool, model: 'fct_orders', column: 'revenue' } as any)
+  // No column argument: the answer's own focus says it is a one-column trace.
+  await $.tool.call({ tool, model: 'fct_orders' } as any)
   await clock.settle()
   // Not preloaded from the one-column trace: the pane asks for the whole model.
   expect(calls).toContain('mcp:dbt_lineage')

@@ -24,7 +24,7 @@ type Manifest = {
   child_map?: Record<string, string[]>
 }
 
-function nodeOf(id: string, node: any): GraphNode {
+export function nodeOf(id: string, node: any): GraphNode {
   const type: string = node?.resource_type ?? id.split('.')[0] ?? 'unknown'
   const columns = Object.entries<any>(node?.columns ?? {}).map(([key, col]) => String(col?.name ?? key))
   return {
@@ -147,7 +147,8 @@ export function findModel(graph: LineageGraph, wanted: string): string | null {
   return null
 }
 
-const isTest = (node: GraphNode | undefined, id: string) => ['test', 'unit_test'].includes(node?.type ?? id.split('.')[0] ?? '')
+/** dbt's data tests and unit tests: counted downstream, never drawn. */
+export const isTest = (node: GraphNode | undefined, id: string) => ['test', 'unit_test'].includes(node?.type ?? id.split('.')[0] ?? '')
 
 /** Direct parents, each with its own parents: the two levels the pane draws upstream. */
 export function upstreamOf(graph: LineageGraph, id: string): { node: GraphNode; parents: GraphNode[] }[] {

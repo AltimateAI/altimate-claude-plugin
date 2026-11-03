@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import type { ColumnReachView } from '../types'
+import type { ColumnReachView, LineageGraph } from '../types'
 import { buildGraph, type Segment } from './lineage-graph'
 import { drawLayered, drawStack, endsView, foldersView, graphView, type Layered } from './lineage-layout'
 

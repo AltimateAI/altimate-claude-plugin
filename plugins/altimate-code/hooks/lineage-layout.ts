@@ -1,5 +1,5 @@
 import type { ColumnReachView, GraphNode, LineageGraph } from '../types'
-import type { Segment } from './lineage-graph'
+import { isTest, nodeOf as manifestNode, type Segment } from './lineage-graph'
 
 export type ViewKind = 'graph' | 'ends' | 'folders'
 export type LayoutBox = {
@@ -12,10 +12,9 @@ export type LayoutBox = {
 /** Boxes in columns, farthest upstream first, and the edges between box keys, parent to child. */
 export type Layered = { layers: LayoutBox[][]; edges: [string, string][] }
 
-const isTestId = (graph: LineageGraph, id: string) => ['test', 'unit_test'].includes(graph.nodes[id]?.type ?? id.split('.')[0] ?? '')
+const isTestId = (graph: LineageGraph, id: string) => isTest(graph.nodes[id], id)
 
-const nodeOf = (graph: LineageGraph, id: string): GraphNode =>
-  graph.nodes[id] ?? { id, name: id.split('.').pop() ?? id, label: null, type: id.split('.')[0] ?? '', path: null, materialized: null, relation: null, columns: [] }
+const nodeOf = (graph: LineageGraph, id: string): GraphNode => graph.nodes[id] ?? manifestNode(id, null)
 
 /** Breadth-first distance from `id` along parents or children; tests are skipped, `limit` levels at most. */
 function walk(graph: LineageGraph, id: string, side: 'parents' | 'children', limit: number): Map<string, number> {
@@ -581,7 +580,9 @@ export function drawStack(view: Layered, maxWidth: number): Segment[][] {
       lines.at(-1)!.push(box)
     }
     for (const boxes of lines) {
-      const [top, mid, bottom]: Segment[][] = [[], [], []]
+      const top: Segment[] = []
+      const mid: Segment[] = []
+      const bottom: Segment[] = []
       boxes.forEach((box, i) => {
         const w = widthOf(box)
         const style = styleOf(box)
