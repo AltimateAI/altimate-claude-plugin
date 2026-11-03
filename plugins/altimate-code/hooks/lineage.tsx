@@ -192,8 +192,8 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
  * backticks (a bare `orders` in prose is too often just a word). Read from the project shown, else the
  * session's.
  */
-async function modelsNamed($: EngineInterface, text: string, root: string): Promise<{ id: string; name: string }[]> {
-  const graph = (await readGraph($, `${root}/target/manifest.json`).catch(() => null)) ?? (await sqlGraph($, root))
+async function modelsNamed($: EngineInterface, text: string, root: string, manifest = `${root}/target/manifest.json`): Promise<{ id: string; name: string }[]> {
+  const graph = (await readGraph($, manifest).catch(() => null)) ?? (await sqlGraph($, root))
   const byName = new Map<string, string>()
   for (const node of Object.values(graph.nodes)) if (FOLLOWABLE.has(node.type) && node.path) byName.set(node.name.toLowerCase(), node.id)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
@@ -414,8 +414,11 @@ type FollowInput = {
   model?: string
   /** A folder the model belongs under, when no file names it: a shell command's working folder. */
   root?: string
-  /** Led by the models Claude's answer names, not by something Claude read: it does not count as a read. */
-  fromAnswer?: boolean
+  /**
+   * Led by the models Claude's answer names in this turn, not by something Claude read: it does not count
+   * as a read, and it gives up once a newer turn starts.
+   */
+  fromAnswer?: number
   column?: string | null
   columns?: ColumnLineage | null
   /** Focus the pane: /lineage and presses. */
@@ -432,8 +435,14 @@ type FollowInput = {
 
 /** A follow; one Claude's work started counts for the turn it started in, once it lands. */
 async function follow($: EngineInterface, input: FollowInput): Promise<boolean> {
-  if (!input.auto || input.fromAnswer) return followOnce($, input)
+  if (input.fromAnswer !== undefined) return followOnce($, input)
   const turn = turnCount
+  // The person's own press or /lineage moves the pane on purpose: the answer leaves it there.
+  if (!input.auto) {
+    const followed = await followOnce($, input)
+    if (followed) followedTurn = Math.max(followedTurn, turn)
+    return followed
+  }
   followsInFlight++
   try {
     const followed = await followOnce($, input)
@@ -546,12 +555,14 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     return false
   }
   const readMs = Math.round((await $.clock.now()) - began)
-  if (claimedSeq > seq) return false
+  // An answer's follow whose turn is over leaves the pane to the newer turn.
+  const stale = () => input.fromAnswer !== undefined && input.fromAnswer !== turnCount
+  if (claimedSeq > seq || stale()) return false
   claimedSeq = seq
   ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
   // update() may retry its write after a conflict, so each write below re-checks ownership inside
   // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
-  const superseded = () => claimedSeq !== seq
+  const superseded = () => claimedSeq !== seq || stale()
   // Compared with the focus as it is now: another follow may have landed while this one resolved.
   const latest = await read($, focusAtom)
   if (superseded()) return false
@@ -870,6 +881,8 @@ export async function startLineage($: EngineInterface) {
   paneOpened = false
   drawnCache = null
   contextGiven.clear()
+  // A new conversation's answers start empty.
+  await update($, answerAtom, () => [])
   await $.command.register({
     name: COMMAND,
     description: 'Show dbt lineage for a model beside the chat: upstream, downstream, columns and column reach',
@@ -941,6 +954,7 @@ export function registerLineage(on: On) {
     paneOpened = false
     drawnCache = null
     contextGiven.clear()
+    await update($, answerAtom, () => [])
     return next(e)
   })
 
@@ -965,13 +979,26 @@ export function registerLineage(on: On) {
       for (let i = 0; i < 50 && followsInFlight > 0; i++) await $.clock.sleep(100).catch(() => {})
       // A newer turn has started: this answer is no longer the one shown.
       if (turnCount !== turn) return
-      const root = (await read($, focusAtom))?.root ?? (await projectRoot($, await $.session.root().catch(() => '.'), false))
-      if (!root) return
-      const named = await modelsNamed($, text, root).catch(() => [])
+      // The project shown (with the manifest it was read from), else the session's, else the projects
+      // below a monorepo root: the first whose models the answer names.
+      const focus = await read($, focusAtom)
+      const sessionRoot = await $.session.root().catch(() => '.')
+      const shown = focus ? [{ root: focus.root, manifest: focus.via === 'manifest' ? focus.manifest : undefined }] : []
+      const own = await projectRoot($, sessionRoot, false)
+      const roots = shown.length ? shown : own ? [{ root: own, manifest: undefined }] : (await projectsBelow($, sessionRoot)).map(root => ({ root, manifest: undefined }))
+      let named: { id: string; name: string }[] = []
+      for (const one of roots) {
+        named = await modelsNamed($, text, one.root, one.manifest).catch(() => [])
+        if (named.length) break
+      }
       if (turnCount !== turn) return
       await update($, answerAtom, prev => (turnCount === turn ? named : prev))
-      // Checked again after every wait: a newer turn may have started meanwhile.
-      if (turnCount === turn && followedTurn !== turn && named[0]) await follow($, { model: named[0].id, auto: true, fromAnswer: true })
+      // Not when the pane already shows a model the answer names, when this turn moved it (a read, a
+      // press), or when a read is still loading; and checked again after every wait.
+      const shownNamed = !!focus && named.some(one => one.id === focus.model)
+      if (turnCount === turn && followedTurn !== turn && followsInFlight === 0 && !shownNamed && named[0]) {
+        await follow($, { model: named[0].id, auto: true, fromAnswer: turn })
+      }
     })
     return out
   })

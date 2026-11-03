@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void> }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> } }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -92,7 +92,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('fs.exists', (_: unknown, e: { path: string }) => ({
     value: e.path === `${ROOT}/dbt_project.yml` || (hasManifest && e.path === MANIFEST_PATH) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
   }))
-  on('fs.stat', (_: unknown, e: { path: string }) => {
+  on('fs.stat', async (_: unknown, e: { path: string }) => {
+    if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
     if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
     return { value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }
   })
@@ -108,6 +109,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   let held = false
   let heldSql = false
+  let manifestStats = 0
   on('fs.read', async (_: unknown, e: { path: string }) => {
     // A test can pause the first manifest read to make one follow resolve after a newer one.
     if (e.path === MANIFEST_PATH && options.holdFirstManifestRead && !held) {
@@ -845,6 +847,36 @@ test('a backticked path in the answer names its model, underscore or not', async
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("an answer's follow still loading when the next turn starts leaves the pane alone", async ($, on) => {
+  let release!: () => void
+  // Stat 1 is finding the answer's models; stat 2 is the answer's own follow, held until the next turn starts.
+  const { clock } = await start($, on, { holdManifestStat: { at: 2, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.turn.start({ text: 'q', turnId: 't7' } as any)
+  await $.turn.complete({ answer: 'See `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't7' } as any)
+  await clock.advance(100)
+  await $.turn.start({ text: 'next', turnId: 't8' } as any)
+  release()
+  await clock.advance(200)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a subagent's answer, or one naming the model shown, does not move the pane", async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  await $.turn.start({ text: 'q', turnId: 't9' } as any)
+  await $.turn.complete({ answer: 'See `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't9', agentId: 'sub-1' } as any)
+  await clock.settle()
+  await $.turn.complete({ answer: 'It starts in `int_orders`, which fct_orders reads.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't9' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()
 })
 
