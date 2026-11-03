@@ -219,13 +219,13 @@ export function graphFromSql(project: string, files: { path: string; text: strin
 /** Nodes the pane can follow: they have SQL that dbt_lineage traces. */
 export const FOLLOWABLE = new Set(['model', 'snapshot'])
 
-/** The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. */
 /** The model a name, path or unique_id names, else the one the text before its last dot (a `.column`) names. */
 export function findModelOrColumn(graph: LineageGraph, wanted: string): string | null {
   const at = wanted.lastIndexOf('.')
   return findModel(graph, wanted) ?? (at > 0 ? findModel(graph, wanted.slice(0, at)) : null)
 }
 
+/** The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. */
 export function findModel(graph: LineageGraph, wanted: string): string | null {
   if (FOLLOWABLE.has(graph.nodes[wanted]?.type ?? '')) return wanted
   const lowered = wanted.toLowerCase()

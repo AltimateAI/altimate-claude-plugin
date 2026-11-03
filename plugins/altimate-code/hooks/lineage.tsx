@@ -231,6 +231,9 @@ const clearSqlGraphs = () => {
 // `canvas`: the graph's full width when the pane shows a window of it (0 for the views that fit).
 type Drawn = { rows: Segment[][]; hidden: number; canvas: number; folded: { up: string[]; down: string[] } }
 let drawnCache: { key: string; drawn: Drawn | null } | null = null
+// ponytail: the whole canvas is mounted so the pane's own scrolling reaches every row; windowing rows would
+// mean scrolling by hand. The slice is cached, so only a pan or a new drawing re-slices.
+let sliceCache: { key: string; rows: Segment[][] } | null = null
 /** The nodes the drawing's `+N more` boxes stand for, by side. */
 const foldedOf = (view: Layered) => {
   const out = { up: [] as string[], down: [] as string[] }
@@ -247,17 +250,20 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
   const files: { path: string; text: string; kind: 'model' | 'snapshot' | 'seed' }[] = []
   // Set only when files were left out: a project of exactly the cap is whole.
   let partial = false
+  type Kind = 'model' | 'snapshot' | 'seed'
+  // The files a walk reads: seeds' CSVs, SQL, and Python models.
+  const reads = (entry: { kind: string; name: string }, kind: Kind) =>
+    entry.kind === 'file' && (entry.name.endsWith(kind === 'seed' ? '.csv' : '.sql') || (kind === 'model' && entry.name.endsWith('.py')))
   // Past the cap: whether a skipped folder holds any file that would have been read.
-  const holds = async (dir: string, ext: string, py: boolean): Promise<boolean> => {
+  const holds = async (dir: string, kind: Kind): Promise<boolean> => {
     const entries = await $.fs.list(`${root}/${dir}`).catch(() => [])
-    if (entries.some(entry => entry.kind === 'file' && (entry.name.endsWith(ext) || (py && entry.name.endsWith('.py'))))) return true
-    for (const entry of entries) if (entry.kind === 'dir' && !entry.name.startsWith('.') && (await holds(`${dir}/${entry.name}`, ext, py))) return true
+    if (entries.some(entry => reads(entry, kind))) return true
+    for (const entry of entries) if (entry.kind === 'dir' && !entry.name.startsWith('.') && (await holds(`${dir}/${entry.name}`, kind))) return true
     return false
   }
-  const walk = async (dir: string, kind: 'model' | 'snapshot' | 'seed'): Promise<void> => {
+  const walk = async (dir: string, kind: Kind): Promise<void> => {
     const entries = await $.fs.list(`${root}/${dir}`).catch(() => [])
-    const ext = kind === 'seed' ? '.csv' : '.sql'
-    const matching = entries.filter(entry => entry.kind === 'file' && (entry.name.endsWith(ext) || (kind === 'model' && entry.name.endsWith('.py'))))
+    const matching = entries.filter(entry => reads(entry, kind))
     const here = matching.slice(0, Math.max(0, MAX_SQL_FILES - files.length))
     if (here.length < matching.length) partial = true
     // A seed is only its name; its rows are not read.
@@ -268,7 +274,7 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
       // Inside a configured model folder every subfolder is the project's own, whatever its name.
       if (entry.kind !== 'dir' || entry.name.startsWith('.')) continue
       if (files.length < MAX_SQL_FILES) await walk(`${dir}/${entry.name}`, kind)
-      else if (!partial) partial = await holds(`${dir}/${entry.name}`, ext, kind === 'model')
+      else if (!partial) partial = await holds(`${dir}/${entry.name}`, kind)
     }
   }
   // `models/`, `./models` and `models` are one folder: paths must match what a follow looks up.
@@ -1083,7 +1089,7 @@ export function registerLineage(on: On) {
     const capDown = expanded.down ? UNFOLDED : BOX_CAP
     // The pane redraws on every state change (loading, messages, columns); the drawing depends only on these.
     // The links themselves, not a count: an edit can swap a parent and keep the size.
-    const drawKey = JSON.stringify([focus, graph.parents, graph.upTruncated, graph.truncated, graph.partial, view, capUp, capDown, view === 'graph' ? 0 : width, column, view === 'graph' && column ? reach : null])
+    const drawKey = JSON.stringify([focus, graph.parents, graph.upTruncated, graph.truncated, graph.partial, view, view === 'graph' || view === 'folders' ? 0 : capUp, view === 'graph' || view === 'folders' ? 0 : capDown, view === 'graph' ? 0 : width, column, view === 'graph' && column ? reach : null])
     if (drawnCache?.key !== drawKey) {
       // The graph is the whole lineage, every level, model and name in full, as one canvas the pane
       // pans across (dbt-lineage-viewer's view): nothing folded, dropped or cut.
@@ -1114,7 +1120,10 @@ export function registerLineage(on: On) {
     const maxPan = Math.max(0, (drawn?.canvas ?? 0) - room)
     const centre = drawn?.canvas ? Math.max(0, columnOf(drawn.rows, focus.model) - Math.floor(room / 3)) : 0
     const from = Math.min(maxPan, Math.max(0, pan ?? centre))
-    const shownRows = drawn ? (drawn.canvas > room ? sliceRows(drawn.rows, from, room) : drawn.rows) : []
+    // The window's rows, kept while the drawing and the pan stand: a redraw for a message or a column pick reuses them.
+    const sliceKey = `${drawnCache.key}\u0000${from}\u0000${room}`
+    if (sliceCache?.key !== sliceKey) sliceCache = { key: sliceKey, rows: drawn ? (drawn.canvas > room ? sliceRows(drawn.rows, from, room) : drawn.rows) : [] }
+    const shownRows = sliceCache.rows
     // From what is shown: a stored pan past the edge (a narrower pane, a right-clamped start) is not the start.
     const panBy = (step: number) => update($, panAtom, () => Math.min(maxPan, Math.max(0, from + step)))
     // Once a new model's graph is drawn, scroll the pane to it: the canvas can be taller than the pane.
@@ -1320,8 +1329,9 @@ export function registerLineage(on: On) {
         )}
 
         <Box flexDirection="row" gap={2}>
-          <Button key="lineage-up" plain hotkey="u" label="upstream" onPress={() => update($, expandedAtom, current => ({ ...current, up: !current.up }))} />
-          <Button key="lineage-down" plain hotkey="d" label="downstream" onPress={() => update($, expandedAtom, current => ({ ...current, down: !current.down }))} />
+          {/* The graph draws everything; unfolding is for the views that fold. */}
+          {view !== 'graph' && <Button key="lineage-up" plain hotkey="u" label="upstream" onPress={() => update($, expandedAtom, current => ({ ...current, up: !current.up }))} />}
+          {view !== 'graph' && <Button key="lineage-down" plain hotkey="d" label="downstream" onPress={() => update($, expandedAtom, current => ({ ...current, down: !current.down }))} />}
           <Button key="lineage-column" plain hotkey="c" label="column" onPress={nextColumn} />
           {width >= MIN_GRAPH_COLUMNS && (
             <Button
