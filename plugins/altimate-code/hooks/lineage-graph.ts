@@ -76,13 +76,26 @@ export function buildGraph(manifest: Manifest): LineageGraph {
   return { nodes, parents, children }
 }
 
+/** A YAML line without its comment: a `#` at the start or after a space, outside quotes. ponytail: escaped quotes inside a quoted path are not handled; a YAML parser would. */
+function withoutComment(line: string): string {
+  let quote = ''
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]!
+    if (quote) {
+      if (ch === quote) quote = ''
+    } else if (ch === "'" || ch === '"') quote = ch
+    else if (ch === '#' && (i === 0 || /\s/.test(line[i - 1]!))) return line.slice(0, i)
+  }
+  return line
+}
+
 /** A dbt_project.yml's name and folders: the few keys the SQL-file graph needs, inline or block lists. */
 export function projectLayout(yml: string): { name: string; models: string[]; snapshots: string[]; seeds: string[] } {
   // Comments and blank lines out first; a `#` inside quotes stays.
   const lines = yml
     .replace(/\r\n?/g, '\n')
     .split('\n')
-    .map(line => line.replace(/(^|\s)#(?=(?:[^'"]|'[^']*'|"[^"]*")*$).*$/, '').trimEnd())
+    .map(line => withoutComment(line).trimEnd())
     .filter(line => line.trim() !== '')
   const unquote = (item: string) => item.trim().replace(/^['"]|['"]$/g, '')
   const list = (keys: string[], fallback: string) => {
@@ -93,7 +106,8 @@ export function projectLayout(yml: string): { name: string; models: string[]; sn
       if (rest.startsWith('[')) return rest.replace(/^\[|\]$/g, '').split(',').map(unquote).filter(Boolean)
       const items: string[] = []
       for (const line of lines.slice(at + 1)) {
-        const item = /^\s+-\s*(.+)$/.exec(line)
+        // YAML allows the items at the key's own indent.
+        const item = /^\s*-\s*(.+)$/.exec(line)
         if (!item) break
         items.push(unquote(item[1]!))
       }
@@ -117,7 +131,13 @@ const blankStrings = (code: string) => code.replace(/(['"])(?:\\.|(?!\1)[^\\\n])
 
 /** The ref() and source() calls in code: only where the call itself is code, not text inside quotes. */
 function callsIn(code: string, python: boolean): { refs: RegExpExecArray[]; sources: RegExpExecArray[] } {
-  const masked = blankStrings(python ? code.replace(/(['"])(?:\\.|(?!\1)[^\\\n])*\1|#[^\n]*/g, text => (text.startsWith('#') ? ' '.repeat(text.length) : text)) : code)
+  // Python: triple-quoted strings (they span lines) and comments go first, then one-line strings.
+  // ponytail: a pattern, not a tokenizer: an escaped delimiter inside a docstring or a ref inside an
+  // f-string's braces is misread. Without a manifest this graph is an approximation; `dbt parse` settles it.
+  const blank = (text: string) => text.replace(/[^\n]/g, ' ')
+  const masked = blankStrings(
+    python ? code.replace(/'''[\s\S]*?'''|"""[\s\S]*?"""|(['"])(?:\\.|(?!\1)[^\\\n])*\1|#[^\n]*/g, text => (text.startsWith('#') || text.length >= 6 && /^('''|""")/.test(text) ? blank(text) : text)) : code,
+  )
   const refs: RegExpExecArray[] = []
   const sources: RegExpExecArray[] = []
   // A Python model calls dbt.ref(); Jinja calls ref() bare.
