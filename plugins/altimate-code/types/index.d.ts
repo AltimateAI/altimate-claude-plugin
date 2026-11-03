@@ -166,6 +166,8 @@ export type ImpactView = {
   readers: number | null
   /** Models that may read it or could not be traced: `readers` is then a lower bound. */
   unsettled: number
+  /** The dashboards could not be read: the count is a lower bound. */
+  dashboardsUnsettled?: boolean
   /** altimate-code stopped the graph at its node limit: `transitive` is a lower bound. */
   truncated: boolean
 }
