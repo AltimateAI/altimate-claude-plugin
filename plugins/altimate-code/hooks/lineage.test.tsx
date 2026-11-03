@@ -90,7 +90,7 @@ async function start($: any, on: any, options: Options = {}) {
     value: e.path === `${ROOT}/dbt_project.yml` || (hasManifest && e.path === MANIFEST_PATH) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
   }))
   on('fs.stat', (_: unknown, e: { path: string }) => {
-    if (!hasManifest && e.path === MANIFEST_PATH) throw new Error('ENOENT')
+    if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
     return { value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }
   })
   on('fs.list', (_: unknown, e: { path: string }) => {
@@ -619,6 +619,26 @@ test('a listing of many SQL files does not move the pane; a command that names a
   await $.tool.call({ tool: 'Bash', command: 'cat /repo/models/fct_orders.sql' } as any)
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a press in a project other than the session\'s stays in the project shown', async ($, on) => {
+  const { clock } = await start($, on, {
+    sqlFiles: {
+      'models/a.sql': 'select 1',
+      'sub/dbt_project.yml': "name: 'b'\n",
+      'sub/models/x_model.sql': 'select 1',
+      'sub/models/y_model.sql': "select * from {{ ref('x_model') }}",
+    },
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/sub/models/y_model.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · y_model/ })).toBeDefined()
+  const box = await ui.find({ type: 'Button', text: /x_model/ })
+  await ui.press({ key: box!.key! })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · x_model/ })).toBeDefined()
   await ui.unmount()
 })
 

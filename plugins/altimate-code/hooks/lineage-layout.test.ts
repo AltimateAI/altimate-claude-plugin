@@ -416,3 +416,19 @@ test('more boxes carry the side they fold so a press can open them', () => {
   const drawn = drawLayered(endsView(graph, FCT, { capUp: 1, capDown: 1 }), 100).rows.flat()
   expect(drawn.some(one => one.node === 'more:down')).toBe(true)
 })
+
+test('dropping levels for long names keeps the model\'s own parents and children', () => {
+  const name = (n: string) => `${n}_${'x'.repeat(14)}_${'y'.repeat(10)}`
+  const graph = linksOf([
+    [name('up'), 'f'],
+    ['f', name('d1')],
+    [name('d1'), name('d2')],
+    [name('d2'), name('d3')],
+  ])
+  const drawn = drawLayered(graphView(graph, 'f', { up: 1, down: 3, capUp: 4, capDown: 4 }), 80)
+  const out = text(drawn.rows).join('\n')
+  expect(drawn.hidden).toBeGreaterThan(0)
+  expect(out).toContain('up_')
+  expect(out).toContain('d1_')
+  expect(out).not.toContain('…')
+})

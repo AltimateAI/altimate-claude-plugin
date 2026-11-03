@@ -240,22 +240,28 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
   const generation = sqlGeneration
   const layout = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
   const files: { path: string; text: string; kind: 'model' | 'snapshot' | 'seed' }[] = []
+  // Set only when files were left out: a project of exactly the cap is whole.
+  let partial = false
   const walk = async (dir: string, kind: 'model' | 'snapshot' | 'seed'): Promise<void> => {
     const entries = await $.fs.list(`${root}/${dir}`).catch(() => [])
     const ext = kind === 'seed' ? '.csv' : '.sql'
-    const here = entries
-      .filter(entry => entry.kind === 'file' && (entry.name.endsWith(ext) || (kind === 'model' && entry.name.endsWith('.py'))))
-      .slice(0, Math.max(0, MAX_SQL_FILES - files.length))
+    const matching = entries.filter(entry => entry.kind === 'file' && (entry.name.endsWith(ext) || (kind === 'model' && entry.name.endsWith('.py'))))
+    const here = matching.slice(0, Math.max(0, MAX_SQL_FILES - files.length))
+    if (here.length < matching.length) partial = true
     // A seed is only its name; its rows are not read.
     const texts = await Promise.all(here.map(entry => (kind === 'seed' ? '' : $.fs.read(`${root}/${dir}/${entry.name}`).catch(() => ''))))
     here.forEach((entry, i) => files.push({ path: `${dir}/${entry.name}`, text: texts[i]!, kind }))
-    for (const entry of entries) if (entry.kind === 'dir' && !entry.name.startsWith('.') && files.length < MAX_SQL_FILES) await walk(`${dir}/${entry.name}`, kind)
+    for (const entry of entries) {
+      if (entry.kind !== 'dir' || entry.name.startsWith('.')) continue
+      if (files.length >= MAX_SQL_FILES) partial = true
+      else await walk(`${dir}/${entry.name}`, kind)
+    }
   }
   for (const dir of layout.models) await walk(dir, 'model')
   for (const dir of layout.snapshots) await walk(dir, 'snapshot')
   for (const dir of layout.seeds) await walk(dir, 'seed')
   const graph = graphFromSql(layout.name, files)
-  if (files.length >= MAX_SQL_FILES) graph.partial = true
+  if (partial) graph.partial = true
   if (generation === sqlGeneration) sqlGraphs.set(root, graph)
   return graph
 }
@@ -384,20 +390,25 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const current = await read($, focusAtom)
   const sessionRoot = await $.session.root().catch(() => '.')
   const given = input.manifest ? normalize(/^([\\/]|[A-Za-z]:)/.test(input.manifest) ? input.manifest : `${sessionRoot}/${input.manifest}`) : null
-  // A tool call's manifest names the project; a model named without a file belongs to the project
-  // (and manifest) already followed, else to the session's.
-  // A focus read from SQL files has no manifest to name.
-  const named = given ?? (!input.file && !input.root && current && current.via !== 'sql' ? current.manifest : null)
+  // A tool call's manifest names the project. A model named without a file (a press, r, /lineage) stays
+  // in the project already shown when its graph has it; otherwise the project is found from the
+  // session's folder, or below it in a monorepo, the shown one first.
+  const shown = !given && !input.file && !input.root && current && input.model ? await read($, graphAtom) : null
+  const dot = input.model ? input.model.lastIndexOf('.') : -1
+  const inShown = !!shown && !!input.model && !!(findModel(shown, input.model) || (dot > 0 && findModel(shown, input.model.slice(0, dot))))
   const root = given
     ? dirname(dirname(given))
     : input.file
       ? await projectRoot($, input.file, true)
-      : ((input.root ? await projectRoot($, input.root, false) : null) ??
-        (await projectRoot($, sessionRoot, false)) ??
-        // A monorepo's root: the project below it that has the model, the followed one first.
-        (input.model ? await projectWith($, input.root ?? sessionRoot, input.model, current?.root) : null) ??
-        current?.root ??
-        null)
+      : inShown
+        ? current!.root
+        : ((input.root ? await projectRoot($, input.root, false) : null) ??
+          (await projectRoot($, sessionRoot, false)) ??
+          (input.model ? await projectWith($, input.root ?? sessionRoot, input.model, current?.root) : null) ??
+          current?.root ??
+          null)
+  // The manifest already read is reused only for the same project; a focus read from SQL files has none.
+  const named = given ?? (!input.file && current && root === current.root && current.via !== 'sql' ? current.manifest : null)
   if (!root) {
     await say('Not inside a dbt project: no dbt_project.yml above this folder.')
     return false
@@ -839,7 +850,7 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
             key={`${key}-${one.node}-${i}`}
             plain
             label={one.text}
-            onPress={() => update($, expandedAtom, current => (one.node === 'more:up' ? { ...current, up: !current.up } : { ...current, down: !current.down }))}
+            onPress={() => update($, expandedAtom, current => (one.node === 'more:up' ? { ...current, up: true } : { ...current, down: true }))}
           />
         ) : one.node && FOLLOWABLE.has(graph.nodes[one.node]?.type ?? '') ? (
           <Button key={`${key}-${one.node}`} plain label={one.text} onPress={() => later($, async () => void (await follow($, { model: one.node! })))} />

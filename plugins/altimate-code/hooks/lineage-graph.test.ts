@@ -372,3 +372,22 @@ test('the subgraph keeps 500 ancestors, nearest first, and marks the cut', () =>
   expect(whole.upTruncated).toBeUndefined()
   expect(whole.nodes['model.shop.m502']).toBeDefined()
 })
+
+test('graphFromSql counts only real calls: not quoted text, Python comments, raw blocks or commented-out snapshots', () => {
+  const graph = graphFromSql('shop', [
+    { path: 'models/a.sql', text: 'select 1', kind: 'model' },
+    { path: 'models/j.sql', text: "{{ \"ref('not_executed')\" }} {% raw %}{{ ref('raw_one') }}{% endraw %} select * from {{ ref('a') }}", kind: 'model' },
+    { path: 'models/p.py', text: "def model(dbt, s):\n    # old = dbt.ref('removed')\n    note = \"ref('text_only')\"\n    return dbt.ref('a')", kind: 'model' },
+    { path: 'snapshots/s.sql', text: "{# {% snapshot retired %} select * from {{ ref('a') }} {% endsnapshot %} #}\n{% snapshot live %} select * from {{ ref('a') }} {% endsnapshot %}", kind: 'snapshot' },
+  ])
+  expect(graph.parents['model.shop.j']).toEqual(['model.shop.a'])
+  expect(graph.parents['model.shop.p']).toEqual(['model.shop.a'])
+  expect(graph.nodes['snapshot.shop.live']).toBeDefined()
+  expect(graph.nodes['snapshot.shop.retired']).toBeUndefined()
+  expect(Object.keys(graph.nodes).some(id => /(not_executed|raw_one|removed|text_only)$/.test(id))).toBe(false)
+})
+
+test('projectLayout reads block lists with comments, blank lines and CRLF', () => {
+  const yml = "name: 'x'\r\nmodel-paths: # where models live\r\n  - transform # main\r\n\r\n  # legacy below\r\n  - 'legacy'\r\nsnapshot-paths: ['snaps'] # inline\r\n"
+  expect(projectLayout(yml)).toEqual({ name: 'x', models: ['transform', 'legacy'], snapshots: ['snaps'], seeds: ['seeds'] })
+})

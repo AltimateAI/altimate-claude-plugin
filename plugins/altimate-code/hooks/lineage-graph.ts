@@ -78,27 +78,61 @@ export function buildGraph(manifest: Manifest): LineageGraph {
 
 /** A dbt_project.yml's name and folders: the few keys the SQL-file graph needs, inline or block lists. */
 export function projectLayout(yml: string): { name: string; models: string[]; snapshots: string[]; seeds: string[] } {
+  // Comments and blank lines out first; a `#` inside quotes stays.
+  const lines = yml
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map(line => line.replace(/(^|\s)#(?=(?:[^'"]|'[^']*'|"[^"]*")*$).*$/, '').trimEnd())
+    .filter(line => line.trim() !== '')
   const unquote = (item: string) => item.trim().replace(/^['"]|['"]$/g, '')
   const list = (keys: string[], fallback: string) => {
     for (const key of keys) {
-      const inline = new RegExp(`^${key}:[ \\t]*\\[([^\\]]*)\\]`, 'm').exec(yml)
-      if (inline) return inline[1]!.split(',').map(unquote).filter(Boolean)
-      const block = new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]+-[^\\n]*\\n?)+)`, 'm').exec(yml)
-      if (block) return block[1]!.split('\n').map(line => unquote(line.replace(/^\s*-\s*/, ''))).filter(Boolean)
+      const at = lines.findIndex(line => line.startsWith(`${key}:`))
+      if (at < 0) continue
+      const rest = lines[at]!.slice(key.length + 1).trim()
+      if (rest.startsWith('[')) return rest.replace(/^\[|\]$/g, '').split(',').map(unquote).filter(Boolean)
+      const items: string[] = []
+      for (const line of lines.slice(at + 1)) {
+        const item = /^\s+-\s*(.+)$/.exec(line)
+        if (!item) break
+        items.push(unquote(item[1]!))
+      }
+      return items
     }
     return [fallback]
   }
-  const name = /^name:\s*['"]?([\w-]+)/m.exec(yml)?.[1] ?? 'project'
+  const name = /^name:\s*['"]?([\w-]+)/m.exec(lines.join('\n'))?.[1] ?? 'project'
   // source-paths is model-paths' name before dbt 1.0.
   return { name, models: list(['model-paths', 'source-paths'], 'models'), snapshots: list(['snapshot-paths'], 'snapshots'), seeds: list(['seed-paths', 'data-paths'], 'seeds') }
 }
 
-const REF = /\bref\s*\(\s*(['"])([^'"]+)\1(?:\s*,\s*(['"])([^'"]+)\3)?([^)]*)\)/g
-const SOURCE = /\bsource\s*\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]+)\3\s*\)/g
+const REF = /ref\s*\(\s*(['"])([^'"]+)\1(?:\s*,\s*(['"])([^'"]+)\3)?([^)]*)\)/y
+const SOURCE = /source\s*\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]+)\3\s*\)/y
 const VERSION = /\b(?:v|version)\s*=\s*['"]?(\d+)/
 const JINJA = /\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g
 const SNAPSHOT_BLOCK = /\{%-?\s*snapshot\s+(\w+)\s*-?%\}([\s\S]*?)\{%-?\s*endsnapshot\s*-?%\}/g
 const MATERIALIZED = /materialized\s*=\s*['"](\w+)['"]/
+// Quoted text, kept the same length so positions still line up with the original.
+const blankStrings = (code: string) => code.replace(/(['"])(?:\\.|(?!\1)[^\\\n])*\1/g, text => ' '.repeat(text.length))
+
+/** The ref() and source() calls in code: only where the call itself is code, not text inside quotes. */
+function callsIn(code: string, python: boolean): { refs: RegExpExecArray[]; sources: RegExpExecArray[] } {
+  const masked = blankStrings(python ? code.replace(/(['"])(?:\\.|(?!\1)[^\\\n])*\1|#[^\n]*/g, text => (text.startsWith('#') ? ' '.repeat(text.length) : text)) : code)
+  const refs: RegExpExecArray[] = []
+  const sources: RegExpExecArray[] = []
+  // A Python model calls dbt.ref(); Jinja calls ref() bare.
+  for (const call of masked.matchAll(python ? /\bdbt\.(ref|source)\s*\(/g : /(?<![\w.])(ref|source)\s*\(/g)) {
+    const at = call.index! + (python ? 4 : 0)
+    const pattern = call[1] === 'ref' ? REF : SOURCE
+    pattern.lastIndex = at
+    const match = pattern.exec(code)
+    if (match) (call[1] === 'ref' ? refs : sources).push(match)
+  }
+  return { refs, sources }
+}
+
+// What dbt never renders: Jinja comments and raw blocks.
+const dropUnrendered = (text: string) => text.replace(/\{#[\s\S]*?#\}/g, '').replace(/\{%-?\s*raw\s*-?%\}[\s\S]*?\{%-?\s*endraw\s*-?%\}/g, '')
 
 /**
  * The project's graph from its files when there is no manifest: each model's and snapshot's ref() and
@@ -125,29 +159,34 @@ export function graphFromSql(project: string, files: { path: string; text: strin
       nodes[`seed.${project}.${base}`] = { resource_type: 'seed', name: base, original_file_path: file.path, depends_on: { nodes: [] } }
       idOf.set(base.toLowerCase(), `seed.${project}.${base}`)
     } else if (file.kind === 'snapshot') {
-      // A file may hold several snapshot blocks, each its own node with its own refs.
-      for (const block of file.text.matchAll(SNAPSHOT_BLOCK)) add('snapshot', block[1]!, file.path, block[2]!)
+      // A file may hold several snapshot blocks, each its own node with its own refs; a commented-out
+      // block is none.
+      for (const block of dropUnrendered(file.text).matchAll(SNAPSHOT_BLOCK)) add('snapshot', block[1]!, file.path, block[2]!)
     } else add('model', base, file.path, file.text, file.path.endsWith('.py'))
+  }
+  // name → its highest version's id, for a ref with no version.
+  const latest = new Map<string, { version: number; id: string }>()
+  for (const [key, id] of idOf) {
+    const versioned = /^(.+)_v(\d+)$/.exec(key)
+    if (versioned && (latest.get(versioned[1]!)?.version ?? -1) < Number(versioned[2])) latest.set(versioned[1]!, { version: Number(versioned[2]), id })
   }
   const resolve = (name: string, rest: string) => {
     const lowered = name.toLowerCase()
     const version = VERSION.exec(rest)?.[1]
     if (version) return idOf.get(`${lowered}_v${version}`) ?? idOf.get(lowered)
-    if (idOf.has(lowered)) return idOf.get(lowered)
-    const versions = [...idOf.keys()].filter(key => new RegExp(`^${lowered.replace(/[^\w]/g, '')}_v\\d+$`).test(key))
-    return versions.length ? idOf.get(versions.sort((a, b) => Number(b.split('_v').pop()) - Number(a.split('_v').pop()))[0]!) : undefined
+    return idOf.get(lowered) ?? latest.get(lowered)?.id
   }
   for (const unit of units) {
-    const without = unit.text.replace(/\{#[\s\S]*?#\}/g, '')
-    const code = unit.python ? without : (without.match(JINJA) ?? []).join('\n')
+    const code = unit.python ? unit.text : (dropUnrendered(unit.text).match(JINJA) ?? []).join('\n')
+    const { refs, sources: sourceCalls } = callsIn(code, unit.python)
     const parents = new Set<string>()
-    for (const match of code.matchAll(REF)) {
+    for (const match of refs) {
       const [pkg, model] = match[4] ? [match[2]!, match[4]] : [null, match[2]!]
       const id = (!pkg || pkg === project ? resolve(model, match[5] ?? '') : undefined) ?? `model.${pkg ?? project}.${model}`
       nodes[id] ??= { resource_type: 'model', name: model, original_file_path: null, depends_on: { nodes: [] } }
       parents.add(id)
     }
-    for (const match of code.matchAll(SOURCE)) {
+    for (const match of sourceCalls) {
       const id = `source.${project}.${match[2]}.${match[4]}`
       sources[id] ??= { resource_type: 'source', name: match[4], source_name: match[2] }
       parents.add(id)

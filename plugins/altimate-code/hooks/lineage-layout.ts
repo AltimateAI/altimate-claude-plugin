@@ -451,8 +451,10 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
     layers.length > 1 && (((before > 1 || layers.length - before - 1 > 1) && readableWidth(layers) > maxWidth) || narrowWidth(layers) > maxWidth)
   while (tooWide()) {
     const after = layers.length - before - 1
-    const alternate = before <= 1
-    const upstream = before > 1 || after === 0 || (!dropDown && before > 0)
+    // Only the names do not fit: drop a level past the model's own parents and children, never those.
+    const forNames = narrowWidth(layers) <= maxWidth
+    const alternate = before <= 1 && !forNames
+    const upstream = forNames ? before > 1 && (after <= 1 || !dropDown) : before > 1 || after === 0 || (!dropDown && before > 0)
     if (upstream) {
       layers = layers.slice(1)
       before--
