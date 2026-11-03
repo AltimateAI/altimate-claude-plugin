@@ -240,8 +240,9 @@ test('the graph view draws boxes a press follows; [v] cycles the views and [l] t
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /┏━+┓/ })).toBeDefined()
   await ui.press({ key: 'lineage-levels' })
+  await ui.press({ key: 'lineage-up-levels' })
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest · ↑2 ↓3/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest · ↑3 ↓3/ })).toBeDefined()
   for (const title of [/ENDS ONLY · manifest/, /FOLDERS · manifest/, 'UPSTREAM · manifest', /GRAPH · manifest/]) {
     await ui.press({ key: 'lineage-view' })
     await clock.settle()

@@ -10,7 +10,7 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
-import { drawLayered, endsView, foldersView, graphView, type ViewKind } from './lineage-layout'
+import { drawLayered, drawStack, endsView, foldersView, graphView, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
   buildGraph,
@@ -57,8 +57,9 @@ const warehouseAtom = atom({ plugin: 'altimate-code', key: 'lineageWarehouse' } 
 const expandedAtom = atom({ plugin: 'altimate-code', key: 'lineageExpanded' } as const, { up: false, down: false })
 // How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists.
 const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 'graph' as ViewKind | 'list')
-// Downstream levels the boxes view draws; upstream is the two levels the graph keeps.
+// Levels the boxes view draws on each side.
 const levelsAtom = atom({ plugin: 'altimate-code', key: 'lineageLevels' } as const, 2)
+const upLevelsAtom = atom({ plugin: 'altimate-code', key: 'lineageUpLevels' } as const, 2)
 const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
 const messageAtom = atom({ plugin: 'altimate-code', key: 'lineageMessage' } as const, null as string | null)
 const loadingAtom = atom({ plugin: 'altimate-code', key: 'lineageLoading' } as const, false)
@@ -87,9 +88,13 @@ const VIEWS: (ViewKind | 'list')[] = ['graph', 'ends', 'folders', 'list']
 const VIEW_TITLE: Record<ViewKind | 'list', string> = { graph: 'GRAPH', ends: 'ENDS ONLY', folders: 'FOLDERS', list: 'LIST' }
 // Narrower than this, boxes do not fit and the text lists stand in.
 const MIN_GRAPH_COLUMNS = 48
-// Boxes per layer before the rest fold into "+N more" (u/d unfold them).
+// Boxes per layer before the rest fold into "+N more"; u/d raise it to UNFOLDED, which still bounds
+// the rows a very wide layer draws.
 const BOX_CAP = 4
-const MAX_LEVELS = 4
+const UNFOLDED = 40
+// What k and l step through: a source-to-mart chain can be a dozen levels deep.
+const LEVELS = [1, 2, 3, 4, 6, 8, 12]
+const nextLevel = (current: number) => LEVELS[(LEVELS.indexOf(current) + 1) % LEVELS.length] ?? LEVELS[0]!
 // Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
 // surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
 const PANE_SIZE = { columns: 110, rows: 34 }
@@ -876,6 +881,7 @@ export function registerLineage(on: On) {
     const loading = await read($, loadingAtom)
     const chosenView = await read($, viewAtom)
     const levels = await read($, levelsAtom)
+    const upLevels = await read($, upLevelsAtom)
     const node = focus && graph ? graph.nodes[focus.model] : null
 
     if (!focus || !graph || !node) {
@@ -902,18 +908,20 @@ export function registerLineage(on: On) {
       selectColumn(columnNames[(at + 1) % columnNames.length]!)
     }
     const source = focus.via === 'tools' ? 'altimate-code' : 'manifest'
-    const width = Number((e as any).props?.bodyColumns) || 80
+    const width = e.props.bodyColumns || 80
     const view = chosenView !== 'list' && width < MIN_GRAPH_COLUMNS ? 'list' : chosenView
-    const cap = expanded.up || expanded.down ? Infinity : BOX_CAP
+    const capUp = expanded.up ? UNFOLDED : BOX_CAP
+    const capDown = expanded.down ? UNFOLDED : BOX_CAP
     const layered =
       view === 'graph'
-        ? graphView(graph, focus.model, { up: 2, down: levels, cap, reach: column ? reach : null })
+        ? graphView(graph, focus.model, { up: upLevels, down: levels, capUp, capDown, reach: column ? reach : null })
         : view === 'ends'
-          ? endsView(graph, focus.model, { cap })
+          ? endsView(graph, focus.model, { cap: Math.max(capUp, capDown) })
           : view === 'folders'
             ? foldersView(graph, focus.model)
             : null
-    const drawn = layered ? drawLayered(layered, width - 1) : null
+    // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
+    const drawn = layered ? (view === 'folders' ? { rows: drawStack(layered, width - 1), hidden: 0 } : drawLayered(layered, width - 1)) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
     return (
@@ -935,8 +943,9 @@ export function registerLineage(on: On) {
           <Box flexDirection="column">
             <Text dimColor>
               {VIEW_TITLE[view]} · {source}
-              {view === 'graph' ? ` · ↑2 ↓${levels}` : ''}
+              {view === 'graph' ? ` · ↑${upLevels} ↓${levels}` : ''}
               {drawn.hidden ? ` · ${drawn.hidden} level${drawn.hidden === 1 ? '' : 's'} past the pane's width` : ''}
+              {graph.upTruncated || graph.truncated ? ` · ${[graph.upTruncated && 'upstream', graph.truncated && 'downstream'].filter(Boolean).join(' and ')} cut at 500 nodes` : ''}
             </Text>
             {drawn.rows.map((row, i) => drawRow(ui, $, graph, row.some(one => one.text) ? row : [{ text: ' ' }], `graph-${i}`))}
           </Box>
@@ -1062,15 +1071,20 @@ export function registerLineage(on: On) {
           <Button key="lineage-up" plain hotkey="u" label="upstream" onPress={() => update($, expandedAtom, current => ({ ...current, up: !current.up }))} />
           <Button key="lineage-down" plain hotkey="d" label="downstream" onPress={() => update($, expandedAtom, current => ({ ...current, down: !current.down }))} />
           <Button key="lineage-column" plain hotkey="c" label="column" onPress={nextColumn} />
-          <Button
-            key="lineage-view"
-            plain
-            hotkey="v"
-            label={VIEW_TITLE[chosenView].toLowerCase()}
-            onPress={() => update($, viewAtom, current => VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length]!)}
-          />
+          {width >= MIN_GRAPH_COLUMNS && (
+            <Button
+              key="lineage-view"
+              plain
+              hotkey="v"
+              label={VIEW_TITLE[view].toLowerCase()}
+              onPress={() => update($, viewAtom, current => VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length]!)}
+            />
+          )}
           {view === 'graph' && (
-            <Button key="lineage-levels" plain hotkey="l" label={`${levels} levels`} onPress={() => update($, levelsAtom, current => (current % MAX_LEVELS) + 1)} />
+            <Button key="lineage-up-levels" plain hotkey="k" label={`↑${upLevels}`} onPress={() => update($, upLevelsAtom, nextLevel)} />
+          )}
+          {view === 'graph' && (
+            <Button key="lineage-levels" plain hotkey="l" label={`↓${levels}`} onPress={() => update($, levelsAtom, nextLevel)} />
           )}
           <Button
             key="lineage-refresh"

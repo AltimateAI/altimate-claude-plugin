@@ -509,15 +509,28 @@ export function describeGraph(graph: LineageGraph, id: string): string {
   return `${name} is built from ${up.join(', ') || 'nothing upstream'}; ${direct.length} node${direct.length === 1 ? '' : 's'} read it directly${direct.length ? `: ${direct.slice(0, 8).join(', ')}` : ''}.`
 }
 
+// Ancestors the pane keeps, nearest first: a source-to-mart chain of a few hundred models fits.
+const MAX_UPSTREAM = 500
+
 /**
- * The part of the graph the pane draws for one model: two levels up, everything downstream, and the
- * links between them. Kept in state in place of the whole manifest graph.
+ * The part of the graph the pane draws for one model: everything upstream (up to MAX_UPSTREAM, then
+ * `upTruncated`), everything downstream, and the links between them. Kept in state in place of the
+ * whole manifest graph.
  */
 export function subgraph(graph: LineageGraph, id: string): LineageGraph {
   const keep = new Set([id])
-  for (const parent of graph.parents[id] ?? []) {
-    keep.add(parent)
-    for (const grand of graph.parents[parent] ?? []) keep.add(grand)
+  let upTruncated = false
+  const queue = [id]
+  while (queue.length && !upTruncated) {
+    for (const parent of graph.parents[queue.shift()!] ?? []) {
+      if (keep.has(parent) || isTest(graph.nodes[parent], parent)) continue
+      if (keep.size > MAX_UPSTREAM) {
+        upTruncated = true
+        break
+      }
+      keep.add(parent)
+      queue.push(parent)
+    }
   }
   for (const row of downstreamOf(graph, id).rows) keep.add(row.node.id)
   const nodes: Record<string, GraphNode> = {}
@@ -534,7 +547,7 @@ export function subgraph(graph: LineageGraph, id: string): LineageGraph {
       return true
     })
   }
-  return { nodes, parents, children }
+  return { nodes, parents, children, ...(upTruncated && { upTruncated: true }) }
 }
 
 /** One run of text in a drawn row; `node` makes it a control that follows that node. */

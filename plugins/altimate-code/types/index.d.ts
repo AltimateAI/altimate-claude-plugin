@@ -81,8 +81,10 @@ export type LineageGraph = {
   nodes: Record<string, GraphNode>
   parents: Record<string, string[]>
   children: Record<string, string[]>
-  /** Set by altimate-code when downstream stopped at its node limit. */
+  /** Set when downstream stopped at the node limit. */
   truncated?: boolean
+  /** Set when upstream stopped at the node limit. */
+  upTruncated?: boolean
 }
 
 /** One column edge from dbt_lineage: an upstream column feeding an output column. */
@@ -191,6 +193,8 @@ declare module 'claude-code' {
       lineageView: 'graph' | 'ends' | 'folders' | 'list'
       /** Downstream levels the boxes view draws. */
       lineageLevels: number
+      /** Upstream levels the boxes view draws. */
+      lineageUpLevels: number
       lineageImpact: Shaped<ImpactView | null>
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
