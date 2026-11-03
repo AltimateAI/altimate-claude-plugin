@@ -558,7 +558,8 @@ export const register: Register = on => {
       name: COMMAND,
       description: 'One-click GitHub, Jira and Linear integrations for your Altimate workspace',
     })
-    await startLineage($)
+    // The lineage half failing to start must not stop this pane's own setup below.
+    await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.

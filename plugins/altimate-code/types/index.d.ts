@@ -128,6 +128,8 @@ export type ColumnReachView = {
   /** Models the lineage engine could not trace (no compiled SQL, unparseable SQL). */
   untraced: { name: string; id?: string; reason: string }[]
   truncated: boolean
+  /** The dashboards could not be read: their count is a lower bound. */
+  exposuresError?: string
 }
 
 /** A table_lineage edge from a SaaS MCP server: what the warehouse's query history shows. */

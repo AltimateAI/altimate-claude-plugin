@@ -9,8 +9,8 @@ const CLI_NAMES = ['altimate', 'altimate-code'] as const
 // reruns a command that may have taken effect.
 export const MISSING_BINARY = /ENOENT|not found|no such file|(cannot|could not|failed to) (start|spawn|run)/i
 
-/** Runs the altimate CLI under the first name that is installed. */
-export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 30_000) {
+/** Runs the altimate CLI under the first name that is installed; 90 s unless the caller says otherwise. */
+export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 90_000) {
   let lastError: unknown = null
   for (const bin of CLI_NAMES) {
     try {

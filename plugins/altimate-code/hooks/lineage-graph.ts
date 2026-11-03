@@ -445,6 +445,7 @@ export function reachFromMetadata(metadata: any, model: string, column: string):
     uncertain: unsure(reach.uncertain),
     untraced: unsure(reach.untraced),
     truncated: reach.truncated === true,
+    ...(metadata.exposures_error && { exposuresError: String(metadata.exposures_error) }),
   }
 }
 
