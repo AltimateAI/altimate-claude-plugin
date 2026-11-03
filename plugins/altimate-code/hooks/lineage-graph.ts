@@ -76,6 +76,63 @@ export function buildGraph(manifest: Manifest): LineageGraph {
   return { nodes, parents, children }
 }
 
+/** A dbt_project.yml's name and folders, read line by line: the few keys the SQL-file graph needs. */
+export function projectLayout(yml: string): { name: string; models: string[]; snapshots: string[]; seeds: string[] } {
+  const list = (key: string, fallback: string) => {
+    const match = new RegExp(`^${key}:\\s*\\[([^\\]]*)\\]`, 'm').exec(yml)
+    const items = match ? match[1]!.split(',').map(item => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean) : []
+    return items.length ? items : [fallback]
+  }
+  const name = /^name:\s*['"]?([\w-]+)/m.exec(yml)?.[1] ?? 'project'
+  return { name, models: list('model-paths', 'models'), snapshots: list('snapshot-paths', 'snapshots'), seeds: list('seed-paths', 'seeds') }
+}
+
+const REF = /\bref\(\s*(['"])([^'"]+)\1(?:\s*,\s*(['"])([^'"]+)\3)?[^)]*\)/g
+const SOURCE = /\bsource\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]+)\3\s*\)/g
+const SNAPSHOT_BLOCK = /\{%-?\s*snapshot\s+(\w+)\s*-?%\}/
+const MATERIALIZED = /materialized\s*=\s*['"](\w+)['"]/
+
+/**
+ * The project's graph from its files when there is no manifest: each model's and snapshot's ref() and
+ * source() calls, the way dbt resolves them, with Jinja and SQL comments left out. A ref to a
+ * package's model, which has no file here, becomes a node without a path. ponytail: no columns, no
+ * exposures and no macros that build refs; `dbt parse` gives the manifest that has them.
+ */
+export function graphFromSql(project: string, files: { path: string; text: string; kind: 'model' | 'snapshot' | 'seed' }[]): LineageGraph {
+  const nodes: Record<string, any> = {}
+  const sources: Record<string, any> = {}
+  const idOf = new Map<string, string>()
+  const byPath = new Map<string, string>()
+  for (const file of files) {
+    const base = file.path.split('/').pop()!.replace(/\.(sql|csv)$/, '')
+    const name = file.kind === 'snapshot' ? (SNAPSHOT_BLOCK.exec(file.text)?.[1] ?? base) : base
+    const id = `${file.kind}.${project}.${name}`
+    idOf.set(name.toLowerCase(), id)
+    byPath.set(file.path, id)
+    nodes[id] = { resource_type: file.kind, name, original_file_path: file.path, depends_on: { nodes: [] }, config: { materialized: MATERIALIZED.exec(file.text)?.[1] ?? null } }
+  }
+  for (const file of files) {
+    if (file.kind === 'seed') continue
+    const node = nodes[byPath.get(file.path)!]
+    const sql = file.text.replace(/\{#[\s\S]*?#\}/g, '').replace(/--[^\n]*/g, '')
+    const parents = new Set<string>()
+    for (const match of sql.matchAll(REF)) {
+      const [pkg, model] = match[4] ? [match[2]!, match[4]] : [null, match[2]!]
+      const known = !pkg || pkg === project ? idOf.get(model.toLowerCase()) : undefined
+      const id = known ?? `model.${pkg ?? project}.${model}`
+      nodes[id] ??= { resource_type: 'model', name: model, original_file_path: null, depends_on: { nodes: [] } }
+      parents.add(id)
+    }
+    for (const match of sql.matchAll(SOURCE)) {
+      const id = `source.${project}.${match[2]}.${match[4]}`
+      sources[id] ??= { resource_type: 'source', name: match[4], source_name: match[2] }
+      parents.add(id)
+    }
+    node.depends_on.nodes = [...parents]
+  }
+  return buildGraph({ nodes, sources })
+}
+
 /** Nodes the pane can follow: they have SQL that dbt_lineage traces. */
 export const FOLLOWABLE = new Set(['model', 'snapshot'])
 

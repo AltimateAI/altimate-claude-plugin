@@ -7,6 +7,8 @@ import {
   columnsFromMetadata,
   downstreamArt,
   findModel,
+  graphFromSql,
+  projectLayout,
   impactOf,
   parseDbtLineage,
   reachFromMetadata,
@@ -323,4 +325,28 @@ test("the dbt integration's model lineage reads as the focus model's columns, di
   expect(columnsFromMetadata({ model_name: 'customers', confidence: 'high', structuredContent: ML })).toEqual(expected)
   expect(columnsFromMetadata({ ...ML, report: 'Model: customers' })).toEqual(expected)
   expect(columnsFromModelLineage({ focus: {} })).toBeNull()
+})
+
+test('graphFromSql reads ref() and source() the way dbt resolves them, leaving comments out', () => {
+  const graph = graphFromSql('shop', [
+    { path: 'models/stg/stg_orders.sql', text: "select * from {{ source('raw', 'orders') }}", kind: 'model' },
+    { path: 'models/fct.sql', text: "{{ config(materialized='table') }} select * from {{ ref('stg_orders') }} join {{ ref(\"util\", 'calendar') }} -- {{ ref('gone') }}", kind: 'model' },
+    { path: 'models/v.sql', text: "{# {{ ref('gone') }} #} select * from {{ ref('fct', v=2) }}", kind: 'model' },
+    { path: 'snapshots/s.sql', text: "{% snapshot orders_snap %} select * from {{ ref('stg_orders') }} {% endsnapshot %}", kind: 'snapshot' },
+    { path: 'seeds/countries.csv', text: '', kind: 'seed' },
+  ])
+  expect(graph.parents['model.shop.fct']).toEqual(['model.shop.stg_orders', 'model.util.calendar'])
+  expect(graph.parents['model.shop.stg_orders']).toEqual(['source.shop.raw.orders'])
+  expect(graph.parents['model.shop.v']).toEqual(['model.shop.fct'])
+  expect(graph.nodes['model.shop.fct']!.materialized).toBe('table')
+  expect(graph.nodes['model.util.calendar']!.path).toBeNull()
+  expect(graph.nodes['snapshot.shop.orders_snap']!.type).toBe('snapshot')
+  expect(graph.nodes['seed.shop.countries']).toBeDefined()
+  expect(Object.keys(graph.nodes).some(id => id.endsWith('.gone'))).toBe(false)
+  expect(findModel(graph, 'models/fct.sql')).toBe('model.shop.fct')
+})
+
+test('projectLayout reads the name and folder lists of dbt_project.yml, with dbt defaults', () => {
+  expect(projectLayout("name: 'dbt_integration'\nmodel-paths: [\"models\", 'more']\n")).toEqual({ name: 'dbt_integration', models: ['models', 'more'], snapshots: ['snapshots'], seeds: ['seeds'] })
+  expect(projectLayout('')).toEqual({ name: 'project', models: ['models'], snapshots: ['snapshots'], seeds: ['seeds'] })
 })

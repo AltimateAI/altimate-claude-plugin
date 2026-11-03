@@ -134,7 +134,7 @@ export type LineageFocus = {
   root: string
   manifest: string
   /** How the graph was read: the manifest file, or altimate-code's tools for a manifest over 4 MiB. */
-  via: 'manifest' | 'tools'
+  via: 'manifest' | 'tools' | 'sql'
   /** Milliseconds the graph took to read. */
   readMs: number
   /** The manifest's modification time when it was read: a recompile is a new focus. */

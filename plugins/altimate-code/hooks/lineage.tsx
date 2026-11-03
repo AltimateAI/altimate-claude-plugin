@@ -18,9 +18,11 @@ import {
   describeGraph,
   downstreamArt,
   findModel,
+  graphFromSql,
   impactOf,
   modelLineageOf,
   parseDbtLineage,
+  projectLayout,
   reachFromMetadata,
   type Segment,
   subgraph,
@@ -156,6 +158,26 @@ async function projectRoot($: EngineInterface, start: string, isFile: boolean): 
   return null
 }
 
+// Folders never holding a project of the session's own: installed packages, builds, environments.
+const SKIP_DIRS = new Set(['node_modules', 'dbt_packages', 'dbt_modules', 'target', 'venv', 'site-packages', 'dist', 'build'])
+/** dbt projects under a folder (a monorepo's root), a few levels down. */
+async function projectsBelow($: EngineInterface, start: string, depth = 4): Promise<string[]> {
+  if (await $.fs.exists(`${start}/dbt_project.yml`).catch(() => false)) return [start]
+  if (depth === 0) return []
+  const entries = await $.fs.list(start).catch(() => [])
+  const dirs = entries.filter(entry => entry.kind === 'dir' && !entry.name.startsWith('.') && !SKIP_DIRS.has(entry.name))
+  return (await Promise.all(dirs.map(entry => projectsBelow($, `${start}/${entry.name}`, depth - 1)))).flat()
+}
+
+/** The project under a folder whose models include `model`: its manifest's when it can be read, else its SQL files'. */
+async function projectWith($: EngineInterface, start: string, model: string): Promise<string | null> {
+  for (const root of await projectsBelow($, start)) {
+    const manifest = await readGraph($, `${root}/target/manifest.json`).catch(() => null)
+    if (findModel(manifest ?? (await sqlGraph($, root)), model.split('.')[0]!)) return root
+  }
+  return null
+}
+
 let serverName: string | null = null
 let connectFailedAt = -Infinity
 const CONNECT_RETRY_MS = 60_000
@@ -181,6 +203,44 @@ function sqlFilesIn(command: string, cwd: string): string[] {
     const file = match[1]!
     return file.startsWith('/') ? file : `${cwd.replace(/[\\/]+$/, '')}/${file.replace(/^\.\//, '')}`
   })
+}
+
+// Where a shell command reads from: the session folder, moved by each `cd` in the command.
+const CD = /(?:^|[;&|(]\s*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/g
+function commandDir(command: string, cwd: string): string {
+  let dir = cwd
+  for (const match of command.matchAll(CD)) {
+    const target = match[1]!.replace(/^['"]|['"]$/g, '')
+    dir = target.startsWith('/') ? target : `${dir}/${target}`
+  }
+  return normalize(dir)
+}
+
+// Per project folder: the graph read from its SQL files when it has no manifest, kept until a refresh
+// or an edit of a .sql file.
+const sqlGraphs = new Map<string, LineageGraph>()
+// ponytail: a cap on files read per project; past it the graph is partial. A walk that streams would lift it.
+const MAX_SQL_FILES = 5000
+async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph> {
+  const cached = sqlGraphs.get(root)
+  if (cached) return cached
+  const layout = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
+  const files: { path: string; text: string; kind: 'model' | 'snapshot' | 'seed' }[] = []
+  const walk = async (dir: string, kind: 'model' | 'snapshot' | 'seed'): Promise<void> => {
+    const entries = await $.fs.list(`${root}/${dir}`).catch(() => [])
+    const ext = kind === 'seed' ? '.csv' : '.sql'
+    const here = entries.filter(entry => entry.kind === 'file' && entry.name.endsWith(ext)).slice(0, Math.max(0, MAX_SQL_FILES - files.length))
+    // A seed is only its name; its rows are not read.
+    const texts = await Promise.all(here.map(entry => (kind === 'seed' ? '' : $.fs.read(`${root}/${dir}/${entry.name}`).catch(() => ''))))
+    here.forEach((entry, i) => files.push({ path: `${dir}/${entry.name}`, text: texts[i]!, kind }))
+    for (const entry of entries) if (entry.kind === 'dir' && !entry.name.startsWith('.') && files.length < MAX_SQL_FILES) await walk(`${dir}/${entry.name}`, kind)
+  }
+  for (const dir of layout.models) await walk(dir, 'model')
+  for (const dir of layout.snapshots) await walk(dir, 'snapshot')
+  for (const dir of layout.seeds) await walk(dir, 'seed')
+  const graph = graphFromSql(layout.name, files)
+  sqlGraphs.set(root, graph)
+  return graph
 }
 
 function textOf(content: unknown): string {
@@ -280,6 +340,8 @@ function checkPath<T extends { graph: LineageGraph; id: string } | null>(built: 
 type FollowInput = {
   file?: string
   model?: string
+  /** A folder the model belongs under, when no file names it: a shell command's working folder. */
+  root?: string
   column?: string | null
   columns?: ColumnLineage | null
   /** Focus the pane: /lineage and presses. */
@@ -307,23 +369,32 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const given = input.manifest ? normalize(/^([\\/]|[A-Za-z]:)/.test(input.manifest) ? input.manifest : `${sessionRoot}/${input.manifest}`) : null
   // A tool call's manifest names the project; a model named without a file belongs to the project
   // (and manifest) already followed, else to the session's.
-  const named = given ?? (!input.file && current ? current.manifest : null)
+  // A focus read from SQL files has no manifest to name.
+  const named = given ?? (!input.file && !input.root && current && current.via !== 'sql' ? current.manifest : null)
   const root = given
     ? dirname(dirname(given))
     : input.file
       ? await projectRoot($, input.file, true)
-      : (current?.root ?? (await projectRoot($, sessionRoot, false)))
+      : ((input.root ? await projectRoot($, input.root, false) : null) ??
+        current?.root ??
+        (await projectRoot($, sessionRoot, false)) ??
+        // A monorepo's root: the project below it that has the model.
+        (input.model ? await projectWith($, input.root ?? sessionRoot, input.model) : null))
   if (!root) {
     await say('Not inside a dbt project: no dbt_project.yml above this folder.')
     return false
   }
   const manifest = named ?? `${root}/target/manifest.json`
   const stat = await $.fs.stat(manifest).catch(() => null)
-  if (!stat) {
-    await say('No dbt manifest: run `dbt parse` or `dbt compile` to see lineage.', true)
+  // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
+  const fromSql = !stat && !named
+  if (!stat && !fromSql) {
+    await say('No dbt manifest at that path: run `dbt parse` or `dbt compile` to see lineage.', true)
     return false
   }
+  const mtimeMs = stat?.mtimeMs ?? 0
   if (input.refresh) {
+    sqlGraphs.delete(root)
     manifestCache = null
     for (const key of toolsCache.keys()) if (key.startsWith(`${manifest}\u0000`)) toolsCache.delete(key)
   }
@@ -338,7 +409,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const began = await $.clock.now()
   let graph: LineageGraph | null
   try {
-    graph = await readGraph($, manifest)
+    graph = fromSql ? await sqlGraph($, root) : await readGraph($, manifest)
   } catch {
     await say(`Could not read ${relative(root, manifest) || manifest}: is dbt still writing it? Press r to retry.`, true)
     return false
@@ -349,13 +420,13 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     const model = split ? findModel(graph, split.model) : null
     if (split && model) [id, wanted, column] = [model, split.model, split.column]
   }
-  let via: LineageFocus['via'] = 'manifest'
+  let via: LineageFocus['via'] = fromSql ? 'sql' : 'manifest'
   let columns = input.columns ?? null
   if (!graph) {
     const name = input.file ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
     let failure: string | null = null
     const lookUp = (model: string) =>
-      graphFromTools($, manifest, stat.mtimeMs, model, input.file ? wanted : undefined).catch(error => {
+      graphFromTools($, manifest, mtimeMs, model, input.file ? wanted : undefined).catch(error => {
         failure = String(error?.message ?? error)
         return null
       })
@@ -375,13 +446,13 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     via = 'tools'
   }
   if (!graph || !id) {
-    await say(`No dbt model matches "${wanted}" in the manifest.`)
+    await say(`No dbt model matches "${wanted}" in the ${fromSql ? "project's SQL files" : 'manifest'}.`)
     return false
   }
   const readMs = Math.round((await $.clock.now()) - began)
   if (claimedSeq > seq) return false
   claimedSeq = seq
-  ownerKey = `${id}\u0000${manifest}\u0000${stat.mtimeMs}`
+  ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
   // update() may retry its write after a conflict, so each write below re-checks ownership inside
   // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
   const superseded = () => claimedSeq !== seq
@@ -389,14 +460,14 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const latest = await read($, focusAtom)
   if (superseded()) return false
   // The same unique_id in another project, or after a recompile, is a different focus.
-  const differs = (one: LineageFocus | null) => one?.model !== id || one.manifest !== manifest || one.mtimeMs !== stat.mtimeMs
+  const differs = (one: LineageFocus | null) => one?.model !== id || one.manifest !== manifest || one.mtimeMs !== mtimeMs
   const isNew = differs(latest) || differs(current) || !!input.refresh
   const node = graph.nodes[id]!
-  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs: stat.mtimeMs })))
+  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs })))
   if (superseded()) return false
-  await update($, graphAtom, prev => (superseded() ? prev : (via === 'manifest' ? subgraph(graph!, id!) : graph!)))
+  await update($, graphAtom, prev => (superseded() ? prev : (via === 'tools' ? graph! : subgraph(graph!, id!))))
   if (superseded()) return false
-  await update($, messageAtom, prev => (superseded() ? prev : null))
+  await update($, messageAtom, prev => (superseded() ? prev : fromSql ? 'No target/manifest.json: lineage from the SQL files\' ref() and source(). Run `dbt parse` for columns and dashboards.' : null))
   if (isNew) {
     if (latest?.model !== id) await update($, expandedAtom, prev => (superseded() ? prev : ({ up: false, down: false })))
     await update($, columnsAtom, prev => (superseded() ? prev : null))
@@ -404,7 +475,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     await update($, warehouseAtom, prev => (superseded() ? prev : null))
     if (latest?.model !== id) await update($, columnAtom, prev => (superseded() ? prev : null))
     if (latest?.model !== id) $.ui.log(`lineage-pane · following ${node.name} →`)
-    $.ui.log(`lineage-pane · ${relative(root, manifest)} · ${elapsed(readMs)}${via === 'tools' ? ' · via altimate-code' : ' · offline'}`)
+    $.ui.log(`lineage-pane · ${relative(root, manifest)} · ${elapsed(readMs)}${via === 'tools' ? ' · via altimate-code' : via === 'sql' ? ' · from the SQL files' : ' · offline'}`)
   }
   if (superseded()) return false
   if (column !== undefined && column !== (await read($, columnAtom))) {
@@ -417,7 +488,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     paneOpened = true
     await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
   }
-  const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs: stat.mtimeMs }
+  const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
   // for this model (by unique_id when the answer gives one, else by name).
   const preload = columns && (columns.id ? columns.id === id : columns.model === node.name) ? columns : null
@@ -442,9 +513,12 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
       const began = await $.clock.now()
       const result = await runTool($, 'dbt_lineage', { manifest_path: focus.manifest, model: focus.model }).catch(() => null)
       if (!sameFocus(await read($, focusAtom), focus)) return
-      const columns = result?.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
+      const answer = result?.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
+      // Without a manifest only the dbt integration's answer has columns; the fallback's note repeats the pane's.
+      const columns = focus.via === 'sql' && !answer?.columns.length ? null : answer
       await update($, columnsAtom, prev => (mine() ? columns : prev))
-      if (!result?.ok) await update($, messageAtom, prev => (mine() ? `dbt_lineage failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}` : prev))
+      // Without a manifest only the dbt integration can answer; its absence is what the note above says.
+      if (!result?.ok && focus.via !== 'sql') await update($, messageAtom, prev => (mine() ? `dbt_lineage failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}` : prev))
       const ms = Math.round((await $.clock.now()) - began)
       if (columns) $.ui.log(`lineage-pane · dbt_lineage(${node.name}) · ${columns.columns.length} columns · ${elapsed(ms)}`)
     }
@@ -471,6 +545,8 @@ async function loadReach($: EngineInterface) {
     await update($, messageAtom, prev => (mine() ? 'Column reach starts from a model; a snapshot is traced when it is downstream of one.' : prev))
     return
   }
+  // Column reach traces compiled SQL, which only a manifest holds; the column box says so.
+  if (focus.via === 'sql') return
   const result = await runTool($, 'impact_analysis', {
     manifest_path: focus.manifest,
     model: focus.model,
@@ -785,6 +861,7 @@ export function registerLineage(on: On) {
     const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? String(e.file_path) : null
     const isSql = !!file && /\.sql$/i.test(file)
     const isEdit = isSql && EDIT_TOOLS.has(e.tool)
+    if (isEdit) sqlGraphs.clear()
     let lookup: Promise<ImpactNote | null> | null = null
     let finished = false
     const progress = { project: false }
@@ -809,8 +886,19 @@ export function registerLineage(on: On) {
     }
     if (isSql) later($, async () => void (await follow($, { file: file!, auto: true })))
     else if (e.tool === 'Bash' && 'command' in e) {
-      const files = sqlFilesIn(String(e.command), await $.session.root().catch(() => '.'))
-      if (files.length) later($, async () => void (await follow($, { file: files[files.length - 1]!, auto: true })))
+      // The file may be named in the command, or only in its output (`f=$(find … -name x.sql); cat $f`).
+      const command = String(e.command)
+      const dir = commandDir(command, await $.session.root().catch(() => '.'))
+      const raw = (result as any).result ?? result.text
+      const output = (typeof raw === 'string' ? raw : typeof raw?.stdout === 'string' ? raw.stdout : textOf(raw)).slice(0, 65536)
+      const named = [...sqlFilesIn(command, dir), ...sqlFilesIn(output, dir)].reverse()
+      if (named.length) {
+        later($, async () => {
+          for (const file of named) if (await $.fs.exists(file).catch(() => false)) return void (await follow($, { file, auto: true }))
+          // Only a name (find -name x.sql): the model of that name in the command's project.
+          await follow($, { model: named[0]!.split('/').pop()!.replace(/\.sql$/i, ''), root: dir, auto: true })
+        })
+      }
     }
     if (note) {
       await update($, impactAtom, () => note.view)
@@ -907,7 +995,7 @@ export function registerLineage(on: On) {
       const at = column ? columnNames.indexOf(column) : -1
       selectColumn(columnNames[(at + 1) % columnNames.length]!)
     }
-    const source = focus.via === 'tools' ? 'altimate-code' : 'manifest'
+    const source = focus.via === 'tools' ? 'altimate-code' : focus.via === 'sql' ? 'SQL files' : 'manifest'
     const width = e.props.bodyColumns || 80
     const view = chosenView !== 'list' && width < MIN_GRAPH_COLUMNS ? 'list' : chosenView
     const capUp = expanded.up ? UNFOLDED : BOX_CAP
@@ -1062,7 +1150,7 @@ export function registerLineage(on: On) {
                 ) : null}
               </Box>
             ) : (
-              <Text dimColor>tracing {column} through downstream SQL…</Text>
+              <Text dimColor>{focus.via === 'sql' ? 'column reach needs a compiled manifest: run `dbt compile`' : `tracing ${column} through downstream SQL…`}</Text>
             )}
           </Box>
         )}

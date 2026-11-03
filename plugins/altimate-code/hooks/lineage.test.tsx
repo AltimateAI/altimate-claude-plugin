@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string> }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -83,8 +83,26 @@ async function start($: any, on: any, options: Options = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` || e.path === MANIFEST_PATH }))
-  on('fs.stat', () => ({ value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }))
+  // sqlFiles: a project with no manifest, its files by project-relative path.
+  const sql = options.sqlFiles
+  const hasManifest = !sql
+  on('fs.exists', (_: unknown, e: { path: string }) => ({
+    value: e.path === `${ROOT}/dbt_project.yml` || (hasManifest && e.path === MANIFEST_PATH) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
+  }))
+  on('fs.stat', (_: unknown, e: { path: string }) => {
+    if (!hasManifest && e.path === MANIFEST_PATH) throw new Error('ENOENT')
+    return { value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }
+  })
+  on('fs.list', (_: unknown, e: { path: string }) => {
+    const dir = e.path.slice(ROOT.length + 1)
+    const names = new Map<string, 'file' | 'dir'>()
+    for (const path of Object.keys(sql ?? {})) {
+      if (!path.startsWith(`${dir}/`)) continue
+      const [head, ...rest] = path.slice(dir.length + 1).split('/')
+      names.set(head!, rest.length ? 'dir' : 'file')
+    }
+    return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
+  })
   let held = false
   on('fs.read', async (_: unknown, e: { path: string }) => {
     // A test can pause the first manifest read to make one follow resolve after a newer one.
@@ -92,6 +110,7 @@ async function start($: any, on: any, options: Options = {}) {
       held = true
       await options.holdFirstManifestRead
     }
+    if (sql) return { value: e.path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : (sql[e.path.slice(ROOT.length + 1)] ?? '') }
     return { value: e.path === MANIFEST_PATH ? JSON.stringify(MANIFEST) : 'select 1' }
   })
   on('tool.list', () => ({
@@ -541,6 +560,38 @@ test("altimate-code's own failure on a large manifest is shown as a failure, not
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /altimate-code failed: the dbt project could not start/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("with no manifest, the graph comes from the SQL files' ref() and source() calls", async ($, on) => {
+  const { clock } = await start($, on, {
+    sqlFiles: {
+      'models/staging/stg_orders.sql': "select * from {{ source('raw', 'orders') }}",
+      'models/marts/fct_orders.sql': "select * from {{ ref('stg_orders') }} -- {{ ref('old_orders') }}",
+      'models/marts/rpt_daily.sql': "{# {{ ref('nope') }} #} select * from {{ ref('fct_orders') }}",
+    },
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/marts/fct_orders.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /GRAPH · SQL files/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No target\/manifest.json/ })).toBeDefined()
+  for (const name of [/stg_orders/, /rpt_daily/, /orders/]) expect(await ui.find({ type: 'Button', text: name })).toBeDefined()
+  // Commented-out refs are not links.
+  expect(await ui.find({ type: 'Button', text: /old_orders|nope/ })).toBeUndefined()
+  // A model named next, with no file: still the same project's SQL files.
+  await $.command.run({ command: 'lineage', args: 'rpt_daily', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · rpt_daily/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a shell read that finds the file by name (find -name x.sql; cat $f) follows that model', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Bash', command: "cd /repo && f=$(find models -name 'int_orders.sql'); cat $f" } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
 })
 
