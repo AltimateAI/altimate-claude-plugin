@@ -819,6 +819,35 @@ test("a read still loading when the answer ends wins over the models the answer 
   await ui.unmount()
 })
 
+test("an answer still being handled when a newer turn starts never writes its models or moves the pane", async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, { holdFirstManifestRead: new Promise<void>(resolve => (release = resolve)) })
+  await $.turn.start({ text: 'first', turnId: 't4' } as any)
+  // A read still loading keeps the first answer waiting...
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await $.turn.complete({ answer: 'It reads `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't4' } as any)
+  await clock.advance(100)
+  // ...while the next turn starts.
+  await $.turn.start({ text: 'second', turnId: 't5' } as any)
+  release()
+  await clock.advance(6000)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /IN THE ANSWER/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a backticked path in the answer names its model, underscore or not', async ($, on) => {
+  const { clock } = await start($, on, { sqlFiles: { 'models/orders.sql': 'select 1', 'models/rpt.sql': "select * from {{ ref('orders') }}" } })
+  await $.turn.start({ text: 'q', turnId: 't6' } as any)
+  await $.turn.complete({ answer: 'See `models/orders.sql`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't6' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('a failing follow started after a good one does not cancel it', async ($, on) => {
   const { clock } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })

@@ -196,7 +196,8 @@ async function modelsNamed($: EngineInterface, text: string, root: string): Prom
   const graph = (await readGraph($, `${root}/target/manifest.json`).catch(() => null)) ?? (await sqlGraph($, root))
   const byName = new Map<string, string>()
   for (const node of Object.values(graph.nodes)) if (FOLLOWABLE.has(node.type) && node.path) byName.set(node.name.toLowerCase(), node.id)
-  const ticked = new Set([...text.matchAll(/`([\w.]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
+  // A backticked name or path (`models/marts/orders.sql`): its file name counts.
+  const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
   const found = new Map<string, { id: string; name: string }>()
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
     const word = match[0].toLowerCase()
@@ -429,7 +430,6 @@ type FollowInput = {
   manifest?: string
 }
 
-/** Points the pane at a model (by file, name or unique_id) and loads its graph, columns, reach and warehouse lineage. */
 /** A follow; one Claude's work started counts for the turn it started in, once it lands. */
 async function follow($: EngineInterface, input: FollowInput): Promise<boolean> {
   if (!input.auto || input.fromAnswer) return followOnce($, input)
@@ -444,6 +444,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   }
 }
 
+/** Points the pane at a model (by file, name or unique_id) and loads its graph, columns, reach and warehouse lineage. */
 async function followOnce($: EngineInterface, input: FollowInput): Promise<boolean> {
   // What Claude's own reads run into outside a project (a package's SQL, a stray .sql) is not news.
   const isPackage = !!input.file && /[\\/]dbt_(?:packages|modules)[\\/]/.test(input.file)
@@ -1407,9 +1408,9 @@ export function registerLineage(on: On) {
         )}
 
         <Box flexDirection="row" gap={2}>
-          {/* The graph draws everything; unfolding is for the views that fold. */}
-          {view !== 'graph' && <Button key="lineage-up" plain hotkey="u" label="upstream" onPress={() => update($, expandedAtom, current => ({ ...current, up: !current.up }))} />}
-          {view !== 'graph' && <Button key="lineage-down" plain hotkey="d" label="downstream" onPress={() => update($, expandedAtom, current => ({ ...current, down: !current.down }))} />}
+          {/* Only the ends and list views fold; the graph and folders draw everything. */}
+          {(view === 'ends' || view === 'list') && <Button key="lineage-up" plain hotkey="u" label="upstream" onPress={() => update($, expandedAtom, current => ({ ...current, up: !current.up }))} />}
+          {(view === 'ends' || view === 'list') && <Button key="lineage-down" plain hotkey="d" label="downstream" onPress={() => update($, expandedAtom, current => ({ ...current, down: !current.down }))} />}
           <Button key="lineage-column" plain hotkey="c" label="column" onPress={nextColumn} />
           {width >= MIN_GRAPH_COLUMNS && (
             <Button
