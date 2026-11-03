@@ -719,7 +719,7 @@ export const register: Register = on => {
           {choices && !running && (
             <Box flexDirection="column">
               <Text dimColor>Link this folder to:</Text>
-              <Box>
+              <Box flexDirection="column">
                 {choices.map(one => (
                   <Button key={`link-${one.id}`} label={one.name} onPress={() => later($, () => linkWorkspace($, one))} />
                 ))}
