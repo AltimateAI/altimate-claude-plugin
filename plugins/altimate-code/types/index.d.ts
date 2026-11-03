@@ -199,7 +199,7 @@ declare module 'claude-code' {
       lineagePan: number | null
       lineageImpact: Shaped<ImpactView | null>
       /** The dbt models Claude's last answer names, first named first. */
-      lineageAnswer: { id: string; name: string }[]
+      lineageAnswer: { id: string; name: string; root: string; manifest?: string }[]
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
       lineageLoading: boolean

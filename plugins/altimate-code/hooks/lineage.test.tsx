@@ -70,6 +70,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('command.register', () => ({ value: { command: 'lineage' } }))
   // A turn's start and end beneath the plugin: the engine's answer is the model's text.
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  on('session.end', () => ({ sessionId: 'test' }))
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
@@ -894,6 +895,42 @@ test("the person's press still loading when the answer ends wins over the answer
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a newer turn arriving while the answer's own model lookup runs keeps the answer out", async ($, on) => {
+  let release!: () => void
+  // Stats 1-2 are the read's own follow; stat 3 is the answer's model lookup, held until the next turn has started.
+  const { clock } = await start($, on, { holdManifestStat: { at: 3, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  await $.turn.start({ text: 'q', turnId: 't11' } as any)
+  await $.turn.complete({ answer: 'See `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't11' } as any)
+  await clock.advance(100)
+  await $.turn.start({ text: 'next', turnId: 't12' } as any)
+  release()
+  await clock.advance(200)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /IN THE ANSWER/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a follow left running by the last conversation does not hold up the next one's answers", async ($, on) => {
+  // A read whose manifest check never returns, then the conversation ends and a new one starts.
+  const { clock } = await start($, on, { holdManifestStat: { at: 1, until: new Promise<void>(() => {}) } })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  await $.turn.start({ text: 'q', turnId: 't13' } as any)
+  await $.turn.complete({ answer: 'See `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't13' } as any)
+  await clock.advance(6000)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
 })
 

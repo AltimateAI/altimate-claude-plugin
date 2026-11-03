@@ -63,7 +63,7 @@ const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 
 // A model the pane should scroll down to once its graph is drawn: the canvas can be taller than the pane.
 let revealFor: string | null = null
 // The dbt models Claude's last answer names, in the order it names them.
-const answerAtom = atom({ plugin: 'altimate-code', key: 'lineageAnswer' } as const, [] as { id: string; name: string }[])
+const answerAtom = atom({ plugin: 'altimate-code', key: 'lineageAnswer' } as const, [] as { id: string; name: string; root: string; manifest?: string }[])
 // Where the graph canvas is panned to: its first visible column; null centres it on the model.
 const panAtom = atom({ plugin: 'altimate-code', key: 'lineagePan' } as const, null as number | null)
 const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
@@ -94,6 +94,14 @@ const contextGiven = new Set<string>()
 let turnCount = 0
 let followedTurn = -1
 let followsInFlight = 0
+// Bumped when a conversation starts or ends: a follow left from the last one cannot touch the count.
+let followSession = 0
+const newConversation = () => {
+  turnCount++
+  followedTurn = -1
+  followsInFlight = 0
+  followSession++
+}
 
 const VIEWS: (ViewKind | 'list')[] = ['graph', 'ends', 'folders', 'list']
 const VIEW_TITLE: Record<ViewKind | 'list', string> = { graph: 'GRAPH', ends: 'ENDS ONLY', folders: 'FOLDERS', list: 'LIST' }
@@ -192,17 +200,19 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
  * backticks (a bare `orders` in prose is too often just a word). Read from the project shown, else the
  * session's.
  */
-async function modelsNamed($: EngineInterface, text: string, root: string, manifest = `${root}/target/manifest.json`): Promise<{ id: string; name: string }[]> {
-  const graph = (await readGraph($, manifest).catch(() => null)) ?? (await sqlGraph($, root))
+async function modelsNamed($: EngineInterface, text: string, root: string, manifest = `${root}/target/manifest.json`): Promise<{ id: string; name: string; root: string; manifest?: string }[]> {
+  const fromManifest = await readGraph($, manifest).catch(() => null)
+  const graphFromManifest = !!fromManifest
+  const graph = fromManifest ?? (await sqlGraph($, root))
   const byName = new Map<string, string>()
   for (const node of Object.values(graph.nodes)) if (FOLLOWABLE.has(node.type) && node.path) byName.set(node.name.toLowerCase(), node.id)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
   const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
-  const found = new Map<string, { id: string; name: string }>()
+  const found = new Map<string, { id: string; name: string; root: string; manifest?: string }>()
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
     const word = match[0].toLowerCase()
     const id = byName.get(word)
-    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0] })
+    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root, ...(graphFromManifest && { manifest }) })
   }
   return [...found.values()].slice(0, 12)
 }
@@ -439,13 +449,14 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   // Claude's reads and the person's own presses alike: in flight, the answer waits for them; landed,
   // the answer leaves the pane where they put it.
   const turn = turnCount
+  const session = followSession
   followsInFlight++
   try {
     const followed = await followOnce($, input)
-    if (followed) followedTurn = Math.max(followedTurn, turn)
+    if (followed && session === followSession) followedTurn = Math.max(followedTurn, turn)
     return followed
   } finally {
-    followsInFlight--
+    if (session === followSession) followsInFlight--
   }
 }
 
@@ -877,6 +888,7 @@ export async function startLineage($: EngineInterface) {
   paneOpened = false
   drawnCache = null
   contextGiven.clear()
+  newConversation()
   // A new conversation's answers start empty.
   await update($, answerAtom, () => [])
   await $.command.register({
@@ -950,6 +962,7 @@ export function registerLineage(on: On) {
     paneOpened = false
     drawnCache = null
     contextGiven.clear()
+    newConversation()
     await update($, answerAtom, () => [])
     return next(e)
   })
@@ -981,8 +994,10 @@ export function registerLineage(on: On) {
       const sessionRoot = await $.session.root().catch(() => '.')
       const shown = focus ? [{ root: focus.root, manifest: focus.via === 'manifest' ? focus.manifest : undefined }] : []
       const own = await projectRoot($, sessionRoot, false)
-      const roots = shown.length ? shown : own ? [{ root: own, manifest: undefined }] : (await projectsBelow($, sessionRoot)).map(root => ({ root, manifest: undefined }))
-      let named: { id: string; name: string }[] = []
+      // The shown project first, then the session's, then those below a monorepo root, each once.
+      const candidates = [...shown, ...(own ? [{ root: own, manifest: undefined }] : (await projectsBelow($, sessionRoot)).map(root => ({ root, manifest: undefined })))]
+      const roots = candidates.filter((one, i) => candidates.findIndex(other => other.root === one.root) === i)
+      let named: { id: string; name: string; root: string; manifest?: string }[] = []
       for (const one of roots) {
         named = await modelsNamed($, text, one.root, one.manifest).catch(() => [])
         if (named.length) break
@@ -993,7 +1008,7 @@ export function registerLineage(on: On) {
       // press), or when a read is still loading; and checked again after every wait.
       const shownNamed = !!focus && named.some(one => one.id === focus.model)
       if (turnCount === turn && followedTurn !== turn && followsInFlight === 0 && !shownNamed && named[0]) {
-        await follow($, { model: named[0].id, auto: true, fromAnswer: turn })
+        await follow($, { model: named[0].id, root: named[0].root, manifest: named[0].manifest, auto: true, fromAnswer: turn })
       }
     })
     return out
@@ -1276,7 +1291,7 @@ export function registerLineage(on: On) {
             <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
               <Text dimColor>IN THE ANSWER ·</Text>
               {answer.map(one => (
-                <Button key={`answer-${one.id}`} plain label={one.id === focus.model ? `▸${one.name}` : one.name} onPress={() => later($, async () => void (await follow($, { model: one.id, open: true })))} />
+                <Button key={`answer-${one.id}`} plain label={one.id === focus.model ? `▸${one.name}` : one.name} onPress={() => later($, async () => void (await follow($, { model: one.id, root: one.root, manifest: one.manifest, open: true })))} />
               ))}
             </Box>
           )}
