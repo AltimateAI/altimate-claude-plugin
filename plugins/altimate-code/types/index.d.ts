@@ -98,6 +98,8 @@ export type ColumnEdge = {
 /** dbt_lineage for one model. */
 export type ColumnLineage = {
   model: string
+  /** The model's unique_id, when the answer gives it: a name can match models of two projects. */
+  id?: string
   confidence: 'high' | 'low'
   note: string | null
   upstream: string[]

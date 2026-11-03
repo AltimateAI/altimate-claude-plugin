@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown> }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -136,6 +136,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}`)
+    if (options.cliTooLarge) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '', isStdoutTruncated: true } }
     // altimate-code's dbt_lineage with include_graph returns the subgraph the pane would build itself.
     const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
     const body =
@@ -480,6 +481,26 @@ test("Claude's truncated dbt_lineage result is not preloaded as the whole lineag
   await $.tool.call({ tool: 'mcp__altimate_code__dbt_lineage', model: 'fct_orders' } as any)
   await clock.settle()
   expect(calls).toContain('mcp:dbt_lineage')
+})
+
+for (const [id, preloaded] of [['model.shop.fct_orders', true], ['model.other.fct_orders', false]] as const) {
+  test(`Claude's whole dbt_lineage result for ${id} ${preloaded ? 'preloads the pane' : "is another project's model: not preloaded"}`, async ($, on) => {
+    const { clock, calls } = await start($, on, {
+      toolResult: e => (e.tool === 'mcp__altimate_code__dbt_lineage' ? { structuredContent: { ...LINEAGE, model_unique_id: id } } : undefined),
+    })
+    await $.tool.call({ tool: 'mcp__altimate_code__dbt_lineage', model: 'fct_orders' } as any)
+    await clock.settle()
+    expect(calls.includes('mcp:dbt_lineage')).toBe(!preloaded)
+  })
+}
+
+test("an answer from altimate-code too large to read says so, rather than that the model isn't there", async ($, on) => {
+  const { clock } = await start($, on, { size: 6 * 1024 * 1024, cliTooLarge: true })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /larger than the 4 MiB a plugin can read/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('a failing follow started after a good one does not cancel it', async ($, on) => {

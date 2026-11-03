@@ -306,6 +306,7 @@ const ML = {
 test("the dbt integration's model lineage reads as the focus model's columns, directly or inside metadata", () => {
   const expected = {
     model: 'customers',
+    id: 'model.shop.customers',
     confidence: 'high',
     note: null,
     upstream: ['model.shop.stg_payments'],

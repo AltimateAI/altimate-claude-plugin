@@ -191,6 +191,7 @@ export function columnsFromModelLineage(lineage: any): ColumnLineage | null {
   }
   return {
     model: String(focus.name ?? focus.uniqueId),
+    id: focus.uniqueId,
     confidence: lineage.confidence === 'high' ? 'high' : 'low',
     note: Array.isArray(lineage.errors) && lineage.errors[0] ? String(lineage.errors[0]) : null,
     upstream: Array.isArray(focusNode?.parents) ? focusNode.parents.map(String) : [],
@@ -214,6 +215,7 @@ export function columnsFromMetadata(metadata: any): ColumnLineage | null {
   }))
   return {
     model: String(metadata.model_name ?? ''),
+    ...(typeof metadata.model_unique_id === 'string' && { id: metadata.model_unique_id }),
     confidence: metadata.confidence === 'high' ? 'high' : 'low',
     note: Array.isArray(metadata.confidence_factors) && metadata.confidence_factors[0] ? String(metadata.confidence_factors[0]) : null,
     upstream: Array.isArray(metadata.upstream) ? metadata.upstream.map(String) : [],

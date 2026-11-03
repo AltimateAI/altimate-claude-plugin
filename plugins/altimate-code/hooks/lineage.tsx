@@ -240,6 +240,8 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
   const result = await runTool($, 'dbt_lineage', { manifest_path: manifest, model, include_graph: true }, true)
   const graph = result.metadata?.graph as LineageGraph | undefined
   const id: string | undefined = result.metadata?.model_unique_id ?? undefined
+  // An answer the plugin could not read (too large, no output) is a failure to report, not "no model".
+  if (!result.ok && !result.metadata) throw new Error(result.text || 'altimate-code did not answer')
   if (!result.ok && !id) return null
   if (id && !graph?.nodes?.[id]) throw new Error('needs an altimate-code build whose dbt_lineage supports include_graph')
   const built = id && graph ? { graph, id, columns: columnsFromMetadata(result.metadata) } : null
@@ -395,7 +397,10 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     await $.ui.open({ id: PANE, title: PANE_TITLE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
   }
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs: stat.mtimeMs }
-  later($, () => loadDetails($, columns, isNew, focus))
+  // Columns handed in by a tool call may be another project's model of the same name: keep them only
+  // for this model (by unique_id when the answer gives one, else by name).
+  const preload = columns && (columns.id ? columns.id === id : columns.model === node.name) ? columns : null
+  later($, () => loadDetails($, preload, isNew, focus))
   return true
 }
 
