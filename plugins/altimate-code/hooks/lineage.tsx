@@ -968,8 +968,9 @@ export function registerLineage(on: On) {
       if (!root) return
       const named = await modelsNamed($, text, root).catch(() => [])
       if (turnCount !== turn) return
-      await update($, answerAtom, () => named)
-      if (followedTurn !== turn && named[0]) await follow($, { model: named[0].id, auto: true, fromAnswer: true })
+      await update($, answerAtom, prev => (turnCount === turn ? named : prev))
+      // Checked again after every wait: a newer turn may have started meanwhile.
+      if (turnCount === turn && followedTurn !== turn && named[0]) await follow($, { model: named[0].id, auto: true, fromAnswer: true })
     })
     return out
   })
