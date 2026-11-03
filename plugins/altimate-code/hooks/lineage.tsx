@@ -104,8 +104,9 @@ const newConversation = () => {
   followSession++
   projectSeen = false
   projectsCache.clear()
+  askedFor = null
   // A follow started in the last conversation refuses at its claim: the new one owns the pane.
-  claimedSeq = ++startedSeq
+  conversationSeq = claimedSeq = ++startedSeq
 }
 
 const VIEWS: (ViewKind | 'list')[] = ['graph', 'ends', 'folders', 'list']
@@ -179,6 +180,10 @@ async function projectRoot($: EngineInterface, start: string, isFile: boolean): 
 
 // Folders never holding a project of the session's own: installed packages, builds, environments.
 const SKIP_DIRS = new Set(['node_modules', 'dbt_packages', 'dbt_modules', 'target', 'venv', 'site-packages', 'dist', 'build'])
+// The model the person last asked for (/lineage, a press, r): the only one warehouse lineage is asked about.
+let askedFor: string | null = null
+// The follow sequence when this conversation began: a follow from before it sets nothing of this one's.
+let conversationSeq = 0
 // Set once a dbt project is seen this session: until then an answer never walks the session's folder.
 let projectSeen = false
 // Per folder, until a refresh or an edit of a .sql file or dbt_project.yml.
@@ -299,7 +304,6 @@ let sqlGeneration = 0
 const clearSqlGraphs = () => {
   sqlGraphs.clear()
   sqlGeneration++
-  projectsCache.clear()
 }
 
 // Work asked for again while the same work still runs (a burst of edits, a re-read) shares its answer.
@@ -339,10 +343,15 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
   const reads = (entry: { kind: string; name: string }, kind: Kind) =>
     entry.kind === 'file' && (entry.name.endsWith(kind === 'seed' ? '.csv' : '.sql') || (kind === 'model' && entry.name.endsWith('.py')))
   // Past the cap: whether a skipped folder holds any file that would have been read.
+  // `dir` is project-relative; '' is the project's own folder (`model-paths: ['.']`).
+  const under = (dir: string, name: string) => (dir ? `${dir}/${name}` : name)
+  // In the project's own folder, its builds and installed packages are not its models.
+  const subfolders = (dir: string, entries: { kind: string; name: string }[]) =>
+    entries.filter(entry => entry.kind === 'dir' && !entry.name.startsWith('.') && (dir || !SKIP_DIRS.has(entry.name)))
   const holds = async (dir: string, kind: Kind): Promise<boolean> => {
     const entries = await $.fs.list(`${root}/${dir}`).catch(() => [])
     if (entries.some(entry => reads(entry, kind))) return true
-    for (const entry of entries) if (entry.kind === 'dir' && !entry.name.startsWith('.') && (await holds(`${dir}/${entry.name}`, kind))) return true
+    for (const entry of subfolders(dir, entries)) if (await holds(under(dir, entry.name), kind)) return true
     return false
   }
   const walk = async (dir: string, kind: Kind): Promise<void> => {
@@ -353,21 +362,20 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
     // A seed is only its name; its rows are not read. Files are read 32 at a time.
     for (let i = 0; i < here.length; i += 32) {
       const batch = here.slice(i, i + 32)
-      const texts = await Promise.all(batch.map(entry => (kind === 'seed' ? '' : $.fs.read(`${root}/${dir}/${entry.name}`).catch(() => ''))))
-      batch.forEach((entry, j) => files.push({ path: `${dir}/${entry.name}`, text: texts[j]!, kind }))
+      const texts = await Promise.all(batch.map(entry => (kind === 'seed' ? '' : $.fs.read(`${root}/${under(dir, entry.name)}`).catch(() => ''))))
+      batch.forEach((entry, j) => files.push({ path: under(dir, entry.name), text: texts[j]!, kind }))
     }
-    for (const entry of entries) {
-      // A symlink is `other`, never `dir`, so a link back up the tree is not walked into.
-      // Inside a configured model folder every subfolder is the project's own, whatever its name.
-      if (entry.kind !== 'dir' || entry.name.startsWith('.')) continue
-      if (files.length < MAX_SQL_FILES) await walk(`${dir}/${entry.name}`, kind)
-      else if (!partial) partial = await holds(`${dir}/${entry.name}`, kind)
+    // A symlink is `other`, never `dir`, so a link back up the tree is not walked into. Inside a
+    // configured model folder every subfolder is the project's own, whatever its name.
+    for (const entry of subfolders(dir, entries)) {
+      if (files.length < MAX_SQL_FILES) await walk(under(dir, entry.name), kind)
+      else if (!partial) partial = await holds(under(dir, entry.name), kind)
     }
   }
   // `models/`, `./models` and `models` are one folder: paths must match what a follow looks up.
   const clean = (dir: string) => normalize(dir).replace(/\/+$/, '').replace(/^\.\//, '')
   // Only folders inside the project: an absolute path or one that climbs out (`../..`) is not walked.
-  const inside = (list: string[]) => list.map(clean).filter(dir => dir && !/^(?:[\\/]|[A-Za-z]:|\.\.(?:[\\/]|$))/.test(dir))
+  const inside = (list: string[]) => list.map(clean).filter(dir => !/^(?:[\\/]|[A-Za-z]:|\.\.(?:[\\/]|$))/.test(dir))
   for (const dir of inside(layout.models)) await walk(dir, 'model')
   for (const dir of inside(layout.snapshots)) await walk(dir, 'snapshot')
   for (const dir of inside(layout.seeds)) await walk(dir, 'seed')
@@ -398,9 +406,16 @@ function fileUriPath(uri: string): string {
  * `cliOnly` goes straight to the CLI, whose --json carries the whole metadata; a structured result
  * the server left out for size is fetched that way too.
  */
-async function runTool($: EngineInterface, name: string, args: Record<string, unknown>, cliOnly = false, timeoutMs = TOOL_TIMEOUT_MS) {
+async function runTool($: EngineInterface, name: string, args: Record<string, unknown>, cliOnly = false, until?: number) {
+  // With a deadline, nothing starts once it has passed, and the CLI is stopped at it.
+  const left = async () => {
+    const ms = until === undefined ? TOOL_TIMEOUT_MS : until - (await $.clock.now())
+    if (ms <= 0) throw new Error('out of time')
+    return ms
+  }
   const server = cliOnly ? null : await mcpServer($)
   if (server) {
+    await left()
     try {
       const result = await $.mcp.call(server, name, args)
       let text = textOf(result.content)
@@ -423,7 +438,7 @@ async function runTool($: EngineInterface, name: string, args: Record<string, un
       serverName = null
     }
   }
-  const result = await runAltimate($, ['tool', 'run', name, '--args', JSON.stringify(args), '--json'], timeoutMs)
+  const result = await runAltimate($, ['tool', 'run', name, '--args', JSON.stringify(args), '--json'], await left())
   if ((result as { isStdoutTruncated?: boolean }).isStdoutTruncated) {
     return { metadata: null as any, text: `${name}'s answer was larger than the 4 MiB a plugin can read`, ok: false }
   }
@@ -548,7 +563,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     await say('Not inside a dbt project: no dbt_project.yml above this folder.')
     return false
   }
-  projectSeen = true
+  if (seq > conversationSeq) projectSeen = true
   const manifest = named ?? `${root}/target/manifest.json`
   const stat = await $.fs.stat(manifest).catch(() => null)
   // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
@@ -561,6 +576,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   const mtimeMs = stat?.mtimeMs ?? 0
   if (input.refresh) {
     clearSqlGraphs()
+    projectsCache.clear()
     manifestCache = null
     for (const key of toolsCache.keys()) if (key.startsWith(`${manifest}\u0000`)) toolsCache.delete(key)
   }
@@ -621,6 +637,8 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   if (claimedSeq > seq || (input.fromAnswer !== undefined && input.fromAnswer !== turnCount)) return false
   claimedSeq = seq
   ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
+  // The person's own follows; Claude's reads and the answer's follow are not asks.
+  if (!input.auto && input.fromAnswer === undefined) askedFor = `${id}\u0000${manifest}`
   // update() may retry its write after a conflict, so each write below re-checks ownership inside
   // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
   const superseded = () => claimedSeq !== seq
@@ -664,12 +682,12 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
   // for this model (by unique_id when the answer gives one, else by name).
   const preload = columns && (columns.id ? columns.id === id : columns.model === node.name) ? columns : null
-  later($, () => loadDetails($, preload, isNew, focus, !!input.open))
+  later($, () => loadDetails($, preload, isNew, focus))
   return true
 }
 
 /** Column lineage, then the selected column's reach, then warehouse lineage: each redraws as it lands. */
-async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, isNew: boolean, expected?: LineageFocus, asked = false) {
+async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, isNew: boolean, expected?: LineageFocus) {
   // Its answers are written only while the focus they were asked for still owns the pane.
   const owner = ownerKey
   const mine = () => ownerKey === owner
@@ -695,9 +713,7 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
       if (columns) $.ui.log(`lineage-pane · dbt_lineage(${node.name}) · ${columns.columns.length} columns · ${elapsed(ms)}`)
     }
     if ((await read($, columnAtom)) && (isNew || !(await read($, reachAtom)))) await loadReach($)
-    // The table's name goes to another MCP server only when the person asked for this model (/lineage, a
-    // press), never on a follow of Claude's own read.
-    if (asked && (isNew || !(await read($, warehouseAtom)))) await loadWarehouse($)
+    if (isNew || !(await read($, warehouseAtom))) await loadWarehouse($)
   } finally {
     await update($, loadingAtom, () => false)
   }
@@ -752,6 +768,11 @@ async function loadWarehouse($: EngineInterface) {
     .find((match): match is RegExpExecArray => !!match && !match[1]!.startsWith('plugin_altimate-code'))
   if (!found) return
   const [, server, tool] = found as unknown as [string, string, string]
+  // The table's name goes to another MCP server only for the model the person asked for (/lineage, a
+  // press, r), never one the pane followed from Claude's reads: checked against the focus now, just
+  // before the call, so a follow that landed meanwhile is not sent.
+  const now = await read($, focusAtom)
+  if (!sameFocus(now, focus) || askedFor !== `${now!.model}\u0000${now!.manifest}`) return
   const began = await $.clock.now()
   const result = await within(
     $,
@@ -815,10 +836,11 @@ type ImpactNote = { key: string; toast: string; context: string; view: ImpactVie
 // Claude's context is not the place for a repo's free text at any length.
 const MAX_NOTE = 4000
 const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g
-/** Project text as one line of at most 80 characters, JSON-quoted unless it is a plain name. */
+/** Project text as one line of at most 80 characters, JSON-quoted (ASCII only) unless it is a plain name. */
 const quoted = (text: string) => {
   const one = String(text).replace(CONTROL, ' ').trim().slice(0, 80)
-  return /^[\w.$-]+$/.test(one) ? one : JSON.stringify(one)
+  // Non-ASCII is escaped, so the note's length in characters is its size in bytes.
+  return /^[\w.$-]+$/.test(one) ? one : JSON.stringify(one).replace(/[\u0080-\uffff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`)
 }
 /** At most `max` entries, then how many more. */
 const capped = (items: string[], max: number) => items.slice(0, max).join(', ') + (items.length > max ? `, … ${items.length - max} more` : '')
@@ -874,7 +896,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
         const left = Math.min(HOLD_MS, deadline - (await $.clock.now()))
         if (left <= 0) return null
         const args = { manifest_path: manifest, model: id, column: col, change_type: 'modify' }
-        return within($, left, shared(`impact\u0000${manifest}\u0000${stat.mtimeMs}\u0000${id}\u0000${col}`, () => runTool($, 'impact_analysis', args, false, left)))
+        return within($, left, shared(`impact\u0000${manifest}\u0000${stat.mtimeMs}\u0000${id}\u0000${col}`, () => runTool($, 'impact_analysis', args, false, deadline)))
       }),
     )
     const reaches = results.map((result, i) => (result?.ok ? reachFromMetadata(result.metadata, node.name, touched[i]!) : null))
@@ -888,7 +910,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   const target = column && reach ? `${node.name}.${column}` : node.name
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
   // What the engine could not settle keeps the count a lower bound, never a confident zero.
-  const unsettled = reach ? reach.uncertain.length + reach.untraced.length + (reach.truncated ? 1 : 0) + (reach.exposuresError ? 1 : 0) + unchecked.length : 0
+  const unsettled = reach ? reach.uncertain.length + reach.untraced.length + (reach.truncated ? 1 : 0) + unchecked.length : 0
   const atLeast = unsettled > 0 ? 'at least ' : ''
   // Dashboards on models that may read the column count too: a rename breaks a filter for certain.
   const dashboards = reach ? [...reach.exposures, ...reach.uncertainExposures] : counts.exposures
@@ -1136,6 +1158,8 @@ export function registerLineage(on: On) {
     if (result.deny || result.isError) return result
     // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
     if (file && EDIT_TOOLS.has(e.tool) && /(\.sql|\.py|dbt_project\.yml)$/i.test(file)) clearSqlGraphs()
+    // Projects are found by their dbt_project.yml alone.
+    if (file && EDIT_TOOLS.has(e.tool) && /dbt_project\.yml$/i.test(file)) projectsCache.clear()
 
     if (DBT_LINEAGE.test(e.tool) && 'model' in e) {
       // A trace of one column holds only that column's edges: not the model's columns to keep. The

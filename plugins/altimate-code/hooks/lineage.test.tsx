@@ -1141,7 +1141,7 @@ test('an unreadable dashboards section keeps the dashboard count a lower bound',
   const { clock, toasts } = await start($, on, { reach: { ...REACH, exposures_error: 'exposures: bad yaml' } })
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
-  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by at least 2 models and at least 1 dashboard · Exec Revenue')
+  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and at least 1 dashboard · Exec Revenue')
   expect(edit.context?.[0]).toContain('the dashboards could not be read ("exposures: bad yaml")')
 })
 
@@ -1176,4 +1176,44 @@ test('a model folder outside the project (`../..`) is never walked', async ($, o
   await clock.settle()
   expect(lists).toContain(`${ROOT}/models`)
   expect(lists.filter(path => path.includes('..') || path.includes('etc'))).toEqual([])
+})
+
+test("a press on a graph box asks for warehouse lineage; the pane following Claude's read does not", async ($, on) => {
+  const { clock, calls } = await start($, on, { warehouse: true })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls).not.toContain('mcp:table_lineage')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const box = await ui.find({ type: 'Button', text: /int_orders/ })
+  await ui.press({ key: box!.key! })
+  await clock.settle()
+  expect(calls.filter(one => one === 'mcp:table_lineage')).toEqual(['mcp:table_lineage'])
+  // Claude reading another model afterwards does not send that one's table.
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls.filter(one => one === 'mcp:table_lineage')).toEqual(['mcp:table_lineage'])
+  await ui.unmount()
+})
+
+test("model-paths ['.'] reads the project's own folder, not its builds or packages", async ($, on) => {
+  const { clock, lists } = await start($, on, {
+    sqlFiles: { 'dbt_project.yml': "name: 'shop'\nmodel-paths: ['.']\n", 'a_model.sql': 'select 1', 'b_model.sql': "select * from {{ ref('a_model') }}", 'target/run/a_model.sql': 'select 1' },
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/b_model.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · b_model/ })).toBeDefined()
+  expect(lists.filter(path => path.includes('target'))).toEqual([])
+  await ui.unmount()
+})
+
+test('the impact note stays under 4 KB in bytes with non-ASCII names', async ($, on) => {
+  const exposures = Array.from({ length: 30 }, (_, i) => ({ name: `d${i}`, label: `${'売上'.repeat(40)}${i}` }))
+  const models = Array.from({ length: 20 }, (_, i) => ({ name: `m${i}`, columns: Array.from({ length: 8 }, (_, j) => `${'列'.repeat(40)}${j}`) }))
+  const { clock } = await start($, on, { reach: { ...REACH, column_reach: { ...REACH.column_reach, models, exposures } } })
+  const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  const note: string = edit.context?.[0] ?? ''
+  expect(note).toContain('\\u5217')
+  expect(new TextEncoder().encode(note).length).toBeLessThan(4200)
 })
