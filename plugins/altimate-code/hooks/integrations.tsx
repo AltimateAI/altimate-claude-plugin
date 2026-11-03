@@ -429,7 +429,7 @@ function createToken($: EngineInterface) {
   later($, async () => {
     const open = await read($, expanded)
     if (!open) return
-    const { data, failure } = await runJson<{ tokenUrl?: string; message?: string }>($, ['open-token-page', open.provider, ...(open.variant ? ['--variant', open.variant] : []), '--json'])
+    const { data, failure } = await runJson<{ tokenUrl?: string; message?: string }>($, ['open-token-page', open.provider, ...(open.variant ? ['--variant', open.variant] : []), '--open', '--json'])
     if (failure) await update($, formMessage, () => failure)
     else $.ui.toast(`Opened ${data?.tokenUrl ?? 'the token page'} in your browser`)
   })
