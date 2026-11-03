@@ -54,7 +54,7 @@ const subfolder = (node: GraphNode) => {
  * Keeps the first `cap` boxes of a priority-ordered layer and folds the rest into one `more` box.
  * One folded box would take the room of its own box, so a single leftover is kept as it is.
  */
-function capLayer(graph: LineageGraph, ranked: LayoutBox[], cap: number, index: number): { boxes: LayoutBox[]; folded: Map<string, string> } {
+function capLayer(graph: LineageGraph, ranked: LayoutBox[], cap: number, index: number, side: 'up' | 'down'): { boxes: LayoutBox[]; folded: Map<string, string> } {
   const folded = new Map<string, string>()
   if (!(cap > 0) || !Number.isFinite(cap) || ranked.length <= cap + 1) return { boxes: ranked, folded }
   const kept = ranked.slice(0, cap)
@@ -63,7 +63,7 @@ function capLayer(graph: LineageGraph, ranked: LayoutBox[], cap: number, index: 
   const common = folders.size === 1 ? [...folders][0] : null
   const key = `more:${index}`
   for (const box of rest) folded.set(box.key, key)
-  return { boxes: [...kept, { key, label: `+${rest.length} more${common ? ` · ${common}` : ''}`, kind: 'more' }], folded }
+  return { boxes: [...kept, { key, label: `+${rest.length} more${common ? ` · ${common}` : ''}`, node: `more:${side}`, kind: 'more' }], folded }
 }
 
 const dedupe = (edges: [string, string][]) => {
@@ -172,7 +172,7 @@ export function graphView(graph: LineageGraph, id: string, opts: { up: number; d
     // Ranking only matters when the layer folds.
     const folds = cap > 0 && Number.isFinite(cap) && ids.length > cap + 1
     const ranked = ids.map((one, at) => ({ one, at, p: priority(one), n: folds ? beyond(one, index) : 0 })).sort((a, b) => a.p - b.p || b.n - a.n || a.at - b.at)
-    const capped = capLayer(graph, ranked.map(entry => boxOf(graph, entry.one, id)), cap, index)
+    const capped = capLayer(graph, ranked.map(entry => boxOf(graph, entry.one, id)), cap, index, index < focusIndex ? 'up' : 'down')
     for (const [from, to] of capped.folded) folded.set(from, to)
     return capped.boxes
   })
@@ -216,8 +216,8 @@ export function endsView(graph: LineageGraph, id: string, opts: { capUp: number;
   }
   const ups = ends('parents')
   const downs = ends('children')
-  const upLayer = ups.length > 0 ? capLayer(graph, ups, opts.capUp, 0) : null
-  const downLayer = downs.length > 0 ? capLayer(graph, downs, opts.capDown, upLayer ? 2 : 1) : null
+  const upLayer = ups.length > 0 ? capLayer(graph, ups, opts.capUp, 0, 'up') : null
+  const downLayer = downs.length > 0 ? capLayer(graph, downs, opts.capDown, upLayer ? 2 : 1, 'down') : null
   const focus = boxOf(graph, id, id)
   const layers = [upLayer?.boxes, [focus], downLayer?.boxes].filter((one): one is LayoutBox[] => !!one)
   const edges: [string, string][] = []
@@ -377,19 +377,52 @@ function fit(label: string, room: number): string {
   return `${prefix}${name.slice(0, head)}…${name.slice(name.length - (left - 1 - head))}${suffix}`
 }
 
+/**
+ * A label as the lines of a box `room` columns wide: one when it fits, else two split after `_` or a space
+ * (greedy; a first part longer than the line is split hard). A `◆ ` prefix stays on the first line and a
+ * ` · via N` suffix on the last. Only when two lines cannot hold it is the second cut in the middle.
+ */
+function wrap(label: string, room: number): string[] {
+  if (label.length <= room) return [label]
+  const suffix = / · via \d+$/.exec(label)?.[0] ?? ''
+  const name = label.slice(0, label.length - suffix.length)
+  const parts = name.split(/(?<=[_ ])/)
+  const split = (at: number) => [parts.slice(0, at).join('').trimEnd(), `${parts.slice(at).join('').trimStart()}${suffix}`] as const
+  // The split after `_` that leaves the two lines closest in length; none that fits both: fill the first.
+  let best: readonly [string, string] | null = null
+  for (let at = 1; at < parts.length; at++) {
+    const [one, two] = split(at)
+    if (one.length > room || two.length > room) continue
+    if (!best || Math.max(one.length, two.length) < Math.max(best[0].length, best[1].length)) best = [one, two]
+  }
+  if (best) return [...best]
+  let first = ''
+  for (const part of parts) {
+    if (first.length + part.length > room && first.length > 0) break
+    first += part
+  }
+  if (first.length > room) first = first.slice(0, room)
+  const rest = name.slice(first.length).trimStart()
+  return [first.trimEnd(), rest ? fit(`${rest}${suffix}`, room) : suffix.trimStart()]
+}
+
 function place(layers: LayoutBox[][], cap: number, gaps: Gap[]) {
   const widths = layers.map(boxes => Math.min(cap, Math.max(0, ...boxes.map(box => box.label.length)) + 4))
-  const heights = layers.map(boxes => boxes.length * 4 - 1)
+  // Boxes share one height: three rows, or four when any label needs a second line.
+  const tall = layers.some((boxes, layer) => boxes.some(box => box.label.length > widths[layer]! - 4))
+  const boxHeight = tall ? 4 : 3
+  const pitch = boxHeight + 1
+  const heights = layers.map(boxes => boxes.length * pitch - 1)
   const total = Math.max(0, ...heights)
   const width = widths.reduce((sum, w) => sum + w, 0) + gaps.reduce((sum, gap) => sum + gap.width, 0)
   const spots = new Map<string, Placed>()
   let x = 0
   layers.forEach((boxes, layer) => {
     const top = Math.floor((total - heights[layer]!) / 2)
-    boxes.forEach((box, i) => spots.set(box.key, { x, y: top + i * 4, w: widths[layer]!, layer }))
+    boxes.forEach((box, i) => spots.set(box.key, { x, y: top + i * pitch, w: widths[layer]!, layer }))
     x += widths[layer]! + (gaps[layer]?.width ?? 0)
   })
-  return { spots, width, height: total }
+  return { spots, width, height: total, boxHeight }
 }
 
 /**
@@ -403,8 +436,20 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
   const focusAt = Math.max(0, layers.findIndex(boxes => boxes.some(box => box.kind === 'focus')))
   let before = focusAt
   let dropDown = true
-  const widthOf = (list: LayoutBox[][]) => place(list, DROP_BOX, gapsOf(list, view.edges)).width
-  while (layers.length > 1 && widthOf(layers) > maxWidth) {
+  // The narrowest box that still shows every name whole on its two lines: a level drops before a name is cut.
+  const readable = (list: LayoutBox[][]) => {
+    const labels = list.flat().map(box => box.label)
+    let w = Math.min(DROP_BOX, MAX_BOX)
+    while (w < MAX_BOX && labels.some(label => wrap(label, w - 4).some(line => line.includes('…')))) w++
+    return w
+  }
+  // Levels past the model's own parents and children drop before a name is cut; those two levels drop
+  // only when even narrowed boxes do not fit.
+  const readableWidth = (list: LayoutBox[][]) => place(list, readable(list), gapsOf(list, view.edges)).width
+  const narrowWidth = (list: LayoutBox[][]) => place(list, DROP_BOX, gapsOf(list, view.edges)).width
+  const tooWide = () =>
+    layers.length > 1 && (((before > 1 || layers.length - before - 1 > 1) && readableWidth(layers) > maxWidth) || narrowWidth(layers) > maxWidth)
+  while (tooWide()) {
     const after = layers.length - before - 1
     const alternate = before <= 1
     const upstream = before > 1 || after === 0 || (!dropDown && before > 0)
@@ -419,7 +464,7 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
   while (cap > MIN_BOX && place(layers, cap, gapsOf(layers, view.edges)).width > maxWidth) cap--
 
   const gapList = gapsOf(layers, view.edges)
-  const { spots, width } = place(layers, cap, gapList)
+  const { spots, width, boxHeight } = place(layers, cap, gapList)
   if (layers.length === 0) return { rows: [], hidden }
 
   // Channel order per gap. Sources whose lines run down go top first and the rest bottom first, and
@@ -462,7 +507,7 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
     for (const box of layers[index + 1] ?? []) spots.get(box.key)!.y += 2
     return plan()!
   })
-  const height = Math.max(0, ...[...spots.values()].map(spot => spot.y + 3))
+  const height = Math.max(0, ...[...spots.values()].map(spot => spot.y + boxHeight))
   const cells: (Cell | null)[][] = Array.from({ length: height }, () => Array<Cell | null>(width).fill(null))
   const mask: number[][] = Array.from({ length: height }, () => Array<number>(width).fill(0))
 
@@ -515,22 +560,25 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
       const style = styleOf(box)
       const heavy = box.kind === 'focus'
       const [tl, tr, bl, br, hz, vt] = heavy ? ['┏', '┓', '┗', '┛', '━', '┃'] : ['┌', '┐', '└', '┘', '─', '│']
-      const inner = w - 4
-      const text = fit(box.label, inner)
+      const lines = wrap(box.label, w - 4)
       const put = (cx: number, cy: number, ch: string, node?: string) => {
         cells[cy]![cx] = node ? { ch, node, style } : { ch, style }
       }
+      const bottom = y + boxHeight - 1
       put(x, y, tl)
       put(x + w - 1, y, tr)
-      put(x, y + 2, bl)
-      put(x + w - 1, y + 2, br)
+      put(x, bottom, bl)
+      put(x + w - 1, bottom, br)
       for (let i = 1; i < w - 1; i++) {
         put(x + i, y, hz)
-        put(x + i, y + 2, hz)
+        put(x + i, bottom, hz)
       }
-      put(x, y + 1, vt)
-      put(x + w - 1, y + 1, linked.has(box.key) ? (vt === '┃' ? '┠' : '├') : vt)
-      for (let i = 1; i < w - 1; i++) put(x + i, y + 1, i >= 2 && i - 2 < text.length ? text[i - 2]! : ' ', box.node)
+      for (let row = 1; row < boxHeight - 1; row++) {
+        const text = lines[row - 1] ?? ''
+        put(x, y + row, vt)
+        put(x + w - 1, y + row, row === 1 && linked.has(box.key) ? (vt === '┃' ? '┠' : '├') : vt)
+        for (let i = 1; i < w - 1; i++) put(x + i, y + row, i >= 2 && i - 2 < text.length ? text[i - 2]! : ' ', box.node)
+      }
     }
   }
 
@@ -564,7 +612,7 @@ export function drawLayered(view: Layered, maxWidth: number): { rows: Segment[][
  */
 export function drawStack(view: Layered, maxWidth: number): Segment[][] {
   const rows: Segment[][] = []
-  const widthOf = (box: LayoutBox) => Math.max(MIN_BOX, Math.min(maxWidth, box.label.length + 4))
+  const widthOf = (box: LayoutBox) => Math.max(MIN_BOX, Math.min(maxWidth, MAX_BOX, box.label.length + 4))
   const segment = (text: string, style: Style, node?: string): Segment => ({ text, ...style, ...(node && { node }) })
   view.layers.forEach((layer, index) => {
     if (index > 0) rows.push([{ text: '   │', dim: true }], [{ text: '   ▼', dim: true }])
@@ -580,9 +628,12 @@ export function drawStack(view: Layered, maxWidth: number): Segment[][] {
       lines.at(-1)!.push(box)
     }
     for (const boxes of lines) {
+      // The boxes of one line share a height: a second label row when any name needs it.
+      const wrapped = boxes.map(box => wrap(box.label, widthOf(box) - 4))
+      const labelRows = Math.max(...wrapped.map(one => one.length))
       const top: Segment[] = []
-      const mid: Segment[] = []
       const bottom: Segment[] = []
+      const mids: Segment[][] = Array.from({ length: labelRows }, () => [])
       boxes.forEach((box, i) => {
         const w = widthOf(box)
         const style = styleOf(box)
@@ -590,10 +641,12 @@ export function drawStack(view: Layered, maxWidth: number): Segment[][] {
         const [tl, tr, bl, br, hz, vt] = box.kind === 'focus' ? ['┏', '┓', '┗', '┛', '━', '┃'] : ['┌', '┐', '└', '┘', '─', '│']
         const gap = i > 0 ? '  ' : ''
         top.push(segment(`${gap}${tl}${hz.repeat(w - 2)}${tr}`, border))
-        mid.push(segment(`${gap}${vt} `, border), segment(fit(box.label, w - 4).padEnd(w - 4), box.kind === 'group' ? {} : style, box.node), segment(` ${vt}`, border))
+        mids.forEach((mid, row) => {
+          mid.push(segment(`${gap}${vt} `, border), segment((wrapped[i]![row] ?? '').padEnd(w - 4), box.kind === 'group' ? {} : style, box.node), segment(` ${vt}`, border))
+        })
         bottom.push(segment(`${gap}${bl}${hz.repeat(w - 2)}${br}`, border))
       })
-      rows.push(top, mid, bottom)
+      rows.push(top, ...mids, bottom)
     }
   })
   return rows

@@ -85,6 +85,8 @@ export type LineageGraph = {
   truncated?: boolean
   /** Set when upstream stopped at the node limit. */
   upTruncated?: boolean
+  /** Built from a project's SQL files that stopped at the file limit. */
+  partial?: boolean
 }
 
 /** One column edge from dbt_lineage: an upstream column feeding an output column. */
@@ -139,6 +141,8 @@ export type LineageFocus = {
   readMs: number
   /** The manifest's modification time when it was read: a recompile is a new focus. */
   mtimeMs: number
+  /** When this follow ran: what the pane draws from changes with it. */
+  stamp?: number
 }
 
 /** `complete` is false when the warehouse answer was paged or cut, so a missing edge proves nothing. */

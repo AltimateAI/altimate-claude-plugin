@@ -577,12 +577,48 @@ test("with no manifest, the graph comes from the SQL files' ref() and source() c
   expect(await ui.find({ type: 'Text', text: /GRAPH · SQL files/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /No target\/manifest.json/ })).toBeDefined()
   for (const name of [/stg_orders/, /rpt_daily/, /orders/]) expect(await ui.find({ type: 'Button', text: name })).toBeDefined()
-  // Commented-out refs are not links.
-  expect(await ui.find({ type: 'Button', text: /old_orders|nope/ })).toBeUndefined()
+  // dbt renders a ref in an SQL comment (it is a dependency); one in a Jinja comment is not.
+  expect(await ui.find({ type: 'Button', text: /old_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /nope/ })).toBeUndefined()
   // A model named next, with no file: still the same project's SQL files.
   await $.command.run({ command: 'lineage', args: 'rpt_daily', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /lineage · rpt_daily/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an edit that changes a ref redraws the graph read from the SQL files', async ($, on) => {
+  const files: Record<string, string> = {
+    'models/staging/stg_orders.sql': "select * from {{ source('raw', 'orders') }}",
+    'models/staging/stg_payments.sql': "select * from {{ source('raw', 'orders') }}",
+    'models/marts/fct_orders.sql': "select * from {{ ref('stg_orders') }}",
+  }
+  const { clock } = await start($, on, { sqlFiles: files })
+  const fct = `${ROOT}/models/marts/fct_orders.sql`
+  await $.tool.call({ tool: 'Read', file_path: fct })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', text: /stg_orders/ })).toBeDefined()
+  // Same number of models, another parent: the drawing must not be the cached one.
+  files['models/marts/fct_orders.sql'] = "select * from {{ ref('stg_payments') }}"
+  await $.tool.call({ tool: 'Edit', file_path: fct, old_string: 'stg_orders', new_string: 'stg_payments' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Button', text: /stg_payments/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /stg_orders/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a listing of many SQL files does not move the pane; a command that names a file wins over its output', async ($, on) => {
+  const { clock } = await start($, on, {
+    toolResult: e => (e.tool === 'Bash' ? { ok: true, text: 'models/fct_orders.sql\nmodels/int_orders.sql\n' } : undefined),
+  })
+  await $.tool.call({ tool: 'Bash', command: 'cd /repo && ls models' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · / })).toBeUndefined()
+  await $.tool.call({ tool: 'Bash', command: 'cat /repo/models/fct_orders.sql' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -592,6 +628,22 @@ test('a shell read that finds the file by name (find -name x.sql; cat $f) follow
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('pressing a "+N more" box unfolds that side', async ($, on) => {
+  const sqlFiles: Record<string, string> = { 'models/marts/fct_orders.sql': 'select 1' }
+  for (let i = 1; i <= 7; i++) sqlFiles[`models/marts/rpt_${i}.sql`] = "select * from {{ ref('fct_orders') }}"
+  const { clock } = await start($, on, { sqlFiles })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/marts/fct_orders.sql` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const more = await ui.find({ type: 'Button', text: /\+3 more/ })
+  expect(more).toBeDefined()
+  await ui.press({ key: more!.key! })
+  await clock.settle()
+  expect(await ui.find({ type: 'Button', text: /\+\d+ more/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: /rpt_7/ })).toBeDefined()
   await ui.unmount()
 })
 

@@ -327,28 +327,37 @@ test("the dbt integration's model lineage reads as the focus model's columns, di
   expect(columnsFromModelLineage({ focus: {} })).toBeNull()
 })
 
-test('graphFromSql reads ref() and source() the way dbt resolves them, leaving comments out', () => {
+test('graphFromSql reads ref() and source() the way dbt renders them', () => {
   const graph = graphFromSql('shop', [
-    { path: 'models/stg/stg_orders.sql', text: "select * from {{ source('raw', 'orders') }}", kind: 'model' },
-    { path: 'models/fct.sql', text: "{{ config(materialized='table') }} select * from {{ ref('stg_orders') }} join {{ ref(\"util\", 'calendar') }} -- {{ ref('gone') }}", kind: 'model' },
-    { path: 'models/v.sql', text: "{# {{ ref('gone') }} #} select * from {{ ref('fct', v=2) }}", kind: 'model' },
-    { path: 'snapshots/s.sql', text: "{% snapshot orders_snap %} select * from {{ ref('stg_orders') }} {% endsnapshot %}", kind: 'snapshot' },
+    { path: 'models/stg/stg_orders.sql', text: "select * from {{ source ('raw', 'orders') }}", kind: 'model' },
+    // A ref in an SQL comment is rendered by dbt (depends_on); one in a Jinja comment or outside Jinja is not.
+    { path: 'models/fct.sql', text: "-- depends_on: {{ ref('dep') }}\n{{ config(materialized='table') }} select * from {{ ref ('stg_orders') }} join {{ ref(\"util\", 'calendar') }} {# {{ ref('gone') }} #} where note = 'ref(\"fake\")'", kind: 'model' },
+    { path: 'models/dep.sql', text: 'select 1', kind: 'model' },
+    { path: 'models/orders_v1.sql', text: 'select 1', kind: 'model' },
+    { path: 'models/orders_v2.sql', text: 'select 2', kind: 'model' },
+    { path: 'models/v.sql', text: "select * from {{ ref('orders', v=1) }} join {{ ref('orders') }}", kind: 'model' },
+    { path: 'models/py_model.py', text: "def model(dbt, session):\n    return dbt.ref('fct')", kind: 'model' },
+    { path: 'snapshots/s.sql', text: "{% snapshot orders_snap %} select * from {{ ref('stg_orders') }} {% endsnapshot %}\n{% snapshot fct_snap %} select * from {{ ref('fct') }} {% endsnapshot %}", kind: 'snapshot' },
     { path: 'seeds/countries.csv', text: '', kind: 'seed' },
   ])
-  expect(graph.parents['model.shop.fct']).toEqual(['model.shop.stg_orders', 'model.util.calendar'])
+  expect(graph.parents['model.shop.fct']).toEqual(['model.shop.dep', 'model.shop.stg_orders', 'model.util.calendar'])
   expect(graph.parents['model.shop.stg_orders']).toEqual(['source.shop.raw.orders'])
-  expect(graph.parents['model.shop.v']).toEqual(['model.shop.fct'])
+  // v=1 to its file; no version to the highest.
+  expect(graph.parents['model.shop.v']).toEqual(['model.shop.orders_v1', 'model.shop.orders_v2'])
+  expect(graph.parents['model.shop.py_model']).toEqual(['model.shop.fct'])
+  expect(graph.parents['snapshot.shop.orders_snap']).toEqual(['model.shop.stg_orders'])
+  expect(graph.parents['snapshot.shop.fct_snap']).toEqual(['model.shop.fct'])
   expect(graph.nodes['model.shop.fct']!.materialized).toBe('table')
   expect(graph.nodes['model.util.calendar']!.path).toBeNull()
-  expect(graph.nodes['snapshot.shop.orders_snap']!.type).toBe('snapshot')
   expect(graph.nodes['seed.shop.countries']).toBeDefined()
-  expect(Object.keys(graph.nodes).some(id => id.endsWith('.gone'))).toBe(false)
+  expect(Object.keys(graph.nodes).some(id => /\.(gone|fake)$/.test(id))).toBe(false)
   expect(findModel(graph, 'models/fct.sql')).toBe('model.shop.fct')
 })
 
 test('projectLayout reads the name and folder lists of dbt_project.yml, with dbt defaults', () => {
   expect(projectLayout("name: 'dbt_integration'\nmodel-paths: [\"models\", 'more']\n")).toEqual({ name: 'dbt_integration', models: ['models', 'more'], snapshots: ['snapshots'], seeds: ['seeds'] })
   expect(projectLayout('')).toEqual({ name: 'project', models: ['models'], snapshots: ['snapshots'], seeds: ['seeds'] })
+  expect(projectLayout("name: x\nmodel-paths:\n  - transform\n  - 'more'\nseed-paths: []\n")).toEqual({ name: 'x', models: ['transform', 'more'], snapshots: ['snapshots'], seeds: [] })
 })
 
 test('the subgraph keeps 500 ancestors, nearest first, and marks the cut', () => {

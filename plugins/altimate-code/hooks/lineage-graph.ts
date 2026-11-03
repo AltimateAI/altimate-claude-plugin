@@ -76,59 +76,83 @@ export function buildGraph(manifest: Manifest): LineageGraph {
   return { nodes, parents, children }
 }
 
-/** A dbt_project.yml's name and folders, read line by line: the few keys the SQL-file graph needs. */
+/** A dbt_project.yml's name and folders: the few keys the SQL-file graph needs, inline or block lists. */
 export function projectLayout(yml: string): { name: string; models: string[]; snapshots: string[]; seeds: string[] } {
-  const list = (key: string, fallback: string) => {
-    const match = new RegExp(`^${key}:\\s*\\[([^\\]]*)\\]`, 'm').exec(yml)
-    const items = match ? match[1]!.split(',').map(item => item.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean) : []
-    return items.length ? items : [fallback]
+  const unquote = (item: string) => item.trim().replace(/^['"]|['"]$/g, '')
+  const list = (keys: string[], fallback: string) => {
+    for (const key of keys) {
+      const inline = new RegExp(`^${key}:[ \\t]*\\[([^\\]]*)\\]`, 'm').exec(yml)
+      if (inline) return inline[1]!.split(',').map(unquote).filter(Boolean)
+      const block = new RegExp(`^${key}:[ \\t]*\\n((?:[ \\t]+-[^\\n]*\\n?)+)`, 'm').exec(yml)
+      if (block) return block[1]!.split('\n').map(line => unquote(line.replace(/^\s*-\s*/, ''))).filter(Boolean)
+    }
+    return [fallback]
   }
   const name = /^name:\s*['"]?([\w-]+)/m.exec(yml)?.[1] ?? 'project'
-  return { name, models: list('model-paths', 'models'), snapshots: list('snapshot-paths', 'snapshots'), seeds: list('seed-paths', 'seeds') }
+  // source-paths is model-paths' name before dbt 1.0.
+  return { name, models: list(['model-paths', 'source-paths'], 'models'), snapshots: list(['snapshot-paths'], 'snapshots'), seeds: list(['seed-paths', 'data-paths'], 'seeds') }
 }
 
-const REF = /\bref\(\s*(['"])([^'"]+)\1(?:\s*,\s*(['"])([^'"]+)\3)?[^)]*\)/g
-const SOURCE = /\bsource\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]+)\3\s*\)/g
-const SNAPSHOT_BLOCK = /\{%-?\s*snapshot\s+(\w+)\s*-?%\}/
+const REF = /\bref\s*\(\s*(['"])([^'"]+)\1(?:\s*,\s*(['"])([^'"]+)\3)?([^)]*)\)/g
+const SOURCE = /\bsource\s*\(\s*(['"])([^'"]+)\1\s*,\s*(['"])([^'"]+)\3\s*\)/g
+const VERSION = /\b(?:v|version)\s*=\s*['"]?(\d+)/
+const JINJA = /\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g
+const SNAPSHOT_BLOCK = /\{%-?\s*snapshot\s+(\w+)\s*-?%\}([\s\S]*?)\{%-?\s*endsnapshot\s*-?%\}/g
 const MATERIALIZED = /materialized\s*=\s*['"](\w+)['"]/
 
 /**
  * The project's graph from its files when there is no manifest: each model's and snapshot's ref() and
- * source() calls, the way dbt resolves them, with Jinja and SQL comments left out. A ref to a
- * package's model, which has no file here, becomes a node without a path. ponytail: no columns, no
- * exposures and no macros that build refs; `dbt parse` gives the manifest that has them.
+ * source() calls, read the way dbt renders them: inside Jinja only (`{{ }}`, `{% %}`), SQL comments
+ * included (dbt renders Jinja there too, e.g. `-- depends_on: {{ ref('x') }}`), Jinja comments not.
+ * Python models are read for dbt.ref() / dbt.source(). A versioned ref resolves to the `<name>_v<N>`
+ * file (the highest without a version). A ref to a package's model, which has no file here, becomes a
+ * node without a path. ponytail: no columns, exposures or refs built by macros; `dbt parse` gives them.
  */
 export function graphFromSql(project: string, files: { path: string; text: string; kind: 'model' | 'snapshot' | 'seed' }[]): LineageGraph {
   const nodes: Record<string, any> = {}
   const sources: Record<string, any> = {}
   const idOf = new Map<string, string>()
-  const byPath = new Map<string, string>()
-  for (const file of files) {
-    const base = file.path.split('/').pop()!.replace(/\.(sql|csv)$/, '')
-    const name = file.kind === 'snapshot' ? (SNAPSHOT_BLOCK.exec(file.text)?.[1] ?? base) : base
-    const id = `${file.kind}.${project}.${name}`
+  const units: { id: string; text: string; python: boolean }[] = []
+  const add = (kind: string, name: string, path: string, text: string, python = false) => {
+    const id = `${kind}.${project}.${name}`
     idOf.set(name.toLowerCase(), id)
-    byPath.set(file.path, id)
-    nodes[id] = { resource_type: file.kind, name, original_file_path: file.path, depends_on: { nodes: [] }, config: { materialized: MATERIALIZED.exec(file.text)?.[1] ?? null } }
+    nodes[id] = { resource_type: kind, name, original_file_path: path, depends_on: { nodes: [] }, config: { materialized: MATERIALIZED.exec(text)?.[1] ?? null } }
+    units.push({ id, text, python })
   }
   for (const file of files) {
-    if (file.kind === 'seed') continue
-    const node = nodes[byPath.get(file.path)!]
-    const sql = file.text.replace(/\{#[\s\S]*?#\}/g, '').replace(/--[^\n]*/g, '')
+    const base = file.path.split('/').pop()!.replace(/\.(sql|csv|py)$/, '')
+    if (file.kind === 'seed') {
+      nodes[`seed.${project}.${base}`] = { resource_type: 'seed', name: base, original_file_path: file.path, depends_on: { nodes: [] } }
+      idOf.set(base.toLowerCase(), `seed.${project}.${base}`)
+    } else if (file.kind === 'snapshot') {
+      // A file may hold several snapshot blocks, each its own node with its own refs.
+      for (const block of file.text.matchAll(SNAPSHOT_BLOCK)) add('snapshot', block[1]!, file.path, block[2]!)
+    } else add('model', base, file.path, file.text, file.path.endsWith('.py'))
+  }
+  const resolve = (name: string, rest: string) => {
+    const lowered = name.toLowerCase()
+    const version = VERSION.exec(rest)?.[1]
+    if (version) return idOf.get(`${lowered}_v${version}`) ?? idOf.get(lowered)
+    if (idOf.has(lowered)) return idOf.get(lowered)
+    const versions = [...idOf.keys()].filter(key => new RegExp(`^${lowered.replace(/[^\w]/g, '')}_v\\d+$`).test(key))
+    return versions.length ? idOf.get(versions.sort((a, b) => Number(b.split('_v').pop()) - Number(a.split('_v').pop()))[0]!) : undefined
+  }
+  for (const unit of units) {
+    const without = unit.text.replace(/\{#[\s\S]*?#\}/g, '')
+    const code = unit.python ? without : (without.match(JINJA) ?? []).join('\n')
     const parents = new Set<string>()
-    for (const match of sql.matchAll(REF)) {
+    for (const match of code.matchAll(REF)) {
       const [pkg, model] = match[4] ? [match[2]!, match[4]] : [null, match[2]!]
-      const known = !pkg || pkg === project ? idOf.get(model.toLowerCase()) : undefined
-      const id = known ?? `model.${pkg ?? project}.${model}`
+      const id = (!pkg || pkg === project ? resolve(model, match[5] ?? '') : undefined) ?? `model.${pkg ?? project}.${model}`
       nodes[id] ??= { resource_type: 'model', name: model, original_file_path: null, depends_on: { nodes: [] } }
       parents.add(id)
     }
-    for (const match of sql.matchAll(SOURCE)) {
+    for (const match of code.matchAll(SOURCE)) {
       const id = `source.${project}.${match[2]}.${match[4]}`
       sources[id] ??= { resource_type: 'source', name: match[4], source_name: match[2] }
       parents.add(id)
     }
-    node.depends_on.nodes = [...parents]
+    nodes[unit.id].depends_on.nodes = [...parents]
   }
   return buildGraph({ nodes, sources })
 }

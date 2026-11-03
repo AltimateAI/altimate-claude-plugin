@@ -55,7 +55,7 @@ test('graphView folds past the cap into one more box with the shared folder', ()
   const last = view.layers.at(-1)!
   expect(last.map(box => box.label)).toEqual(['m1', 'm2', '+3 more · marts'])
   const more = last.at(-1)!
-  expect(more).toEqual({ key: 'more:2', label: '+3 more · marts', kind: 'more' })
+  expect(more).toEqual({ key: 'more:2', label: '+3 more · marts', node: 'more:down', kind: 'more' })
   expect(view.edges.filter(([, to]) => to === 'more:2')).toEqual([[FCT, 'more:2']])
 })
 
@@ -172,7 +172,8 @@ test('drawLayered drops far layers to fit and narrows a single layer', () => {
   const long = chain('a_rather_long_model_name_for_a_box', 'b')
   const tight = drawLayered(graphView(long, 'model.shop.b', { up: 1, down: 0, capUp: 0, capDown: 0 }), 40)
   expect(tight.hidden).toBe(0)
-  expect(text(tight.rows)[1]).toContain('…')
+  expect(text(tight.rows)[1]).toContain('a_rather_long_')
+  expect(text(tight.rows)[2]).toContain('model_name_for_a_box')
   expect(Math.max(...text(tight.rows).map(row => [...row].length))).toBeLessThanOrEqual(40)
 })
 
@@ -184,7 +185,7 @@ test('drawLayered label cells carry the node and styles', () => {
   expect(segments.find(one => one.node === 'model.shop.m1')).toMatchObject({ color: 'warning', bold: true })
   expect(segments.find(one => one.node === 'model.shop.m2')).toMatchObject({ dim: true })
   expect(segments.filter(one => one.node === undefined && /[┌│└─]/.test(one.text)).length).toBeGreaterThan(0)
-  expect(segments.filter(one => one.text.includes('more')).every(one => one.node === undefined && one.dim)).toBe(true)
+  expect(segments.filter(one => one.text.includes('more')).every(one => one.node === 'more:down' && one.dim)).toBe(true)
 })
 
 test('endsView marks an upstream end with a prefix only when the ancestry was cut, and never a source', () => {
@@ -261,23 +262,27 @@ test("foldersView falls back to dbt's layer order when folders feed each other",
 })
 
 test('drawLayered cuts a long label in the middle and keeps look-alike names apart', () => {
+  const a = `${'a'.repeat(34)}TAGDAILY`
+  const b = `${'a'.repeat(34)}USERDAILY`
   const one = buildGraph({
     nodes: {
-      'model.shop.int_query_tag_daily': model('int_query_tag_daily', []),
-      'model.shop.int_query_user_daily': model('int_query_user_daily', []),
-      'model.shop.f': model('f', ['int_query_tag_daily', 'int_query_user_daily']),
+      [`model.shop.${a}`]: model(a, []),
+      [`model.shop.${b}`]: model(b, []),
+      'model.shop.f': model('f', [a, b]),
     },
     sources: {},
     exposures: {},
   } as any)
   const out = text(drawLayered(graphView(one, 'model.shop.f', { up: 1, down: 0, capUp: 0, capDown: 0 }), 30).rows).join('\n')
-  expect(out).toContain('int_…tag_daily')
-  expect(out).toContain('int_…ser_daily')
+  expect(out).toContain('…')
+  expect(out).toContain('TAGDAILY')
+  expect(out).toContain('USERDAILY')
   const long = chain('first_long_model_name_ending_daily', 'second_long_model_name_ending_daily')
   const view = graphView(long, 'model.shop.second_long_model_name_ending_daily', { up: 1, down: 0, capUp: 0, capDown: 0 })
   view.layers[0]![0]!.label = '◆ a_very_long_dashboard_name_here · via 3'
   const shown = text(drawLayered(view, 80).rows)[1]!
-  expect(shown).toMatch(/◆ a_ve….*name_here · via 3/)
+  expect(shown).toContain('◆ a_very_long_dashboard_')
+  expect(shown).not.toContain('…')
 })
 
 test('drawLayered gives every source in a gap its own channel', () => {
@@ -373,4 +378,41 @@ test('drawLayered never draws an unbroken line between two models that are not l
       expect(real.has(`${from}>${to}`) || `${from}>${to}`).toBe(true)
     }
   }
+})
+
+test('drawLayered wraps a long underscore name onto two lines in full', () => {
+  const long = chain('int_warehouse_workload_1d', 'b')
+  const out = text(drawLayered(graphView(long, 'model.shop.b', { up: 1, down: 0, capUp: 0, capDown: 0 }), 40).rows)
+  expect(out.join('\n')).not.toContain('…')
+  expect(out[1]).toContain('int_warehouse_')
+  expect(out[2]).toContain('workload_1d')
+  const cells = drawLayered(graphView(long, 'model.shop.b', { up: 1, down: 0, capUp: 0, capDown: 0 }), 40).rows.flat()
+  expect(cells.filter(one => one.node === 'model.shop.int_warehouse_workload_1d').map(one => one.text).join('')).toContain('workload_1d')
+})
+
+test('drawLayered boxes share a height and a name past two lines ends with a middle cut', () => {
+  const view = graphView(chain('short', 'b'), 'model.shop.b', { up: 1, down: 0, capUp: 0, capDown: 0 })
+  expect(drawLayered(view, 80).rows).toHaveLength(3)
+  const name = 'x'.repeat(60)
+  const tall = graphView(chain(name, 'b', 'c'), 'model.shop.b', { up: 1, down: 1, capUp: 0, capDown: 0 })
+  const rows = text(drawLayered(tall, 50).rows)
+  expect(rows).toHaveLength(4)
+  expect(rows[2]).toContain('…')
+})
+
+test('more boxes carry the side they fold so a press can open them', () => {
+  const sides = (view: Layered) => view.layers.flat().filter(box => box.kind === 'more').map(box => box.node)
+  expect(sides(graphView(graph, FCT, { up: 2, down: 1, capUp: 0, capDown: 2 }))).toEqual(['more:down'])
+  const wide = graphView(graph, FCT, { up: 2, down: 1, capUp: 1, capDown: 0 })
+  expect(sides(wide)).toEqual([])
+  const parents = ['p0', 'p1', 'p2', 'p3']
+  const fan = buildGraph({
+    nodes: { ...Object.fromEntries(parents.map(one => [`model.shop.${one}`, model(one, [])])), 'model.shop.f': model('f', parents), 'model.shop.k': model('k', ['f']) },
+    sources: {},
+    exposures: {},
+  } as any)
+  expect(sides(graphView(fan, 'model.shop.f', { up: 1, down: 1, capUp: 1, capDown: 0 }))).toEqual(['more:up'])
+  expect(sides(endsView(fan, 'model.shop.f', { capUp: 1, capDown: 1 }))).toEqual(['more:up'])
+  const drawn = drawLayered(endsView(graph, FCT, { capUp: 1, capDown: 1 }), 100).rows.flat()
+  expect(drawn.some(one => one.node === 'more:down')).toBe(true)
 })

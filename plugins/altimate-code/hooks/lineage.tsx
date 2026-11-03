@@ -166,14 +166,19 @@ async function projectsBelow($: EngineInterface, start: string, depth = 4): Prom
   if (depth === 0) return []
   const entries = await $.fs.list(start).catch(() => [])
   const dirs = entries.filter(entry => entry.kind === 'dir' && !entry.name.startsWith('.') && !SKIP_DIRS.has(entry.name))
-  return (await Promise.all(dirs.map(entry => projectsBelow($, `${start}/${entry.name}`, depth - 1)))).flat()
+  return (await Promise.all(dirs.map(entry => projectsBelow($, `${start}/${entry.name}`, depth - 1)))).flat().sort()
 }
 
 /** The project under a folder whose models include `model`: its manifest's when it can be read, else its SQL files'. */
-async function projectWith($: EngineInterface, start: string, model: string): Promise<string | null> {
-  for (const root of await projectsBelow($, start)) {
-    const manifest = await readGraph($, `${root}/target/manifest.json`).catch(() => null)
-    if (findModel(manifest ?? (await sqlGraph($, root)), model.split('.')[0]!)) return root
+// Projects are tried in path order, the one already followed first; a name in two projects resolves to that one.
+async function projectWith($: EngineInterface, start: string, model: string, prefer?: string): Promise<string | null> {
+  const roots = await projectsBelow($, start)
+  for (const root of prefer && roots.includes(prefer) ? [prefer, ...roots.filter(one => one !== prefer)] : roots) {
+    // ponytail: a manifest over 4 MiB is looked up through its SQL files; the names are the same.
+    const graph = (await readGraph($, `${root}/target/manifest.json`).catch(() => null)) ?? (await sqlGraph($, root))
+    // The whole text (a unique_id), else the part before a `.column`.
+    const at = model.lastIndexOf('.')
+    if (findModel(graph, model) || (at > 0 && findModel(graph, model.slice(0, at)))) return root
   }
   return null
 }
@@ -219,6 +224,12 @@ function commandDir(command: string, cwd: string): string {
 // Per project folder: the graph read from its SQL files when it has no manifest, kept until a refresh
 // or an edit of a .sql file.
 const sqlGraphs = new Map<string, LineageGraph>()
+// Bumped on every clear: a scan that started before an edit does not put its older graph back.
+let sqlGeneration = 0
+const clearSqlGraphs = () => {
+  sqlGraphs.clear()
+  sqlGeneration++
+}
 // The last drawing of the graph views and what it was drawn from.
 let drawnCache: { key: string; drawn: { rows: Segment[][]; hidden: number } | null } | null = null
 // ponytail: a cap on files read per project; past it the graph is partial. A walk that streams would lift it.
@@ -226,12 +237,15 @@ const MAX_SQL_FILES = 5000
 async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph> {
   const cached = sqlGraphs.get(root)
   if (cached) return cached
+  const generation = sqlGeneration
   const layout = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
   const files: { path: string; text: string; kind: 'model' | 'snapshot' | 'seed' }[] = []
   const walk = async (dir: string, kind: 'model' | 'snapshot' | 'seed'): Promise<void> => {
     const entries = await $.fs.list(`${root}/${dir}`).catch(() => [])
     const ext = kind === 'seed' ? '.csv' : '.sql'
-    const here = entries.filter(entry => entry.kind === 'file' && entry.name.endsWith(ext)).slice(0, Math.max(0, MAX_SQL_FILES - files.length))
+    const here = entries
+      .filter(entry => entry.kind === 'file' && (entry.name.endsWith(ext) || (kind === 'model' && entry.name.endsWith('.py'))))
+      .slice(0, Math.max(0, MAX_SQL_FILES - files.length))
     // A seed is only its name; its rows are not read.
     const texts = await Promise.all(here.map(entry => (kind === 'seed' ? '' : $.fs.read(`${root}/${dir}/${entry.name}`).catch(() => ''))))
     here.forEach((entry, i) => files.push({ path: `${dir}/${entry.name}`, text: texts[i]!, kind }))
@@ -241,7 +255,8 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
   for (const dir of layout.snapshots) await walk(dir, 'snapshot')
   for (const dir of layout.seeds) await walk(dir, 'seed')
   const graph = graphFromSql(layout.name, files)
-  sqlGraphs.set(root, graph)
+  if (files.length >= MAX_SQL_FILES) graph.partial = true
+  if (generation === sqlGeneration) sqlGraphs.set(root, graph)
   return graph
 }
 
@@ -378,10 +393,11 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     : input.file
       ? await projectRoot($, input.file, true)
       : ((input.root ? await projectRoot($, input.root, false) : null) ??
-        current?.root ??
         (await projectRoot($, sessionRoot, false)) ??
-        // A monorepo's root: the project below it that has the model.
-        (input.model ? await projectWith($, input.root ?? sessionRoot, input.model) : null))
+        // A monorepo's root: the project below it that has the model, the followed one first.
+        (input.model ? await projectWith($, input.root ?? sessionRoot, input.model, current?.root) : null) ??
+        current?.root ??
+        null)
   if (!root) {
     await say('Not inside a dbt project: no dbt_project.yml above this folder.')
     return false
@@ -389,14 +405,15 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const manifest = named ?? `${root}/target/manifest.json`
   const stat = await $.fs.stat(manifest).catch(() => null)
   // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
-  const fromSql = !stat && !named
+  // A default manifest that went away (dbt clean) also falls back to the SQL files.
+  const fromSql = !stat && (!named || named === `${root}/target/manifest.json`)
   if (!stat && !fromSql) {
     await say('No dbt manifest at that path: run `dbt parse` or `dbt compile` to see lineage.', true)
     return false
   }
   const mtimeMs = stat?.mtimeMs ?? 0
   if (input.refresh) {
-    sqlGraphs.delete(root)
+    clearSqlGraphs()
     manifestCache = null
     for (const key of toolsCache.keys()) if (key.startsWith(`${manifest}\u0000`)) toolsCache.delete(key)
   }
@@ -465,11 +482,11 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   const differs = (one: LineageFocus | null) => one?.model !== id || one.manifest !== manifest || one.mtimeMs !== mtimeMs
   const isNew = differs(latest) || differs(current) || !!input.refresh
   const node = graph.nodes[id]!
-  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs })))
+  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs, stamp: began })))
   if (superseded()) return false
   await update($, graphAtom, prev => (superseded() ? prev : (via === 'tools' ? graph! : subgraph(graph!, id!))))
   if (superseded()) return false
-  await update($, messageAtom, prev => (superseded() ? prev : fromSql ? 'No target/manifest.json: lineage from the SQL files\' ref() and source(). Run `dbt parse` for columns and dashboards.' : null))
+  await update($, messageAtom, prev => (superseded() ? prev : fromSql ? `No target/manifest.json: lineage from the SQL files' ref() and source()${graph!.partial ? ', the first 5000 files only' : ''}. Run \`dbt parse\` for columns and dashboards.` : null))
   if (isNew) {
     if (latest?.model !== id) await update($, expandedAtom, prev => (superseded() ? prev : ({ up: false, down: false })))
     await update($, columnsAtom, prev => (superseded() ? prev : null))
@@ -490,7 +507,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     paneOpened = true
     await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
   }
-  const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs }
+  const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
   // for this model (by unique_id when the answer gives one, else by name).
   const preload = columns && (columns.id ? columns.id === id : columns.model === node.name) ? columns : null
@@ -770,6 +787,7 @@ function parsedLineage(text: string | undefined): ColumnLineage | null {
 export async function startLineage($: EngineInterface) {
   // A new session opens the pane on its first follow again and owes Claude the context again.
   paneOpened = false
+  drawnCache = null
   contextGiven.clear()
   await $.command.register({
     name: COMMAND,
@@ -815,7 +833,15 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
   return (
     <Box key={key} flexDirection="row">
       {segments.map((one, i) =>
-        one.node && FOLLOWABLE.has(graph.nodes[one.node]?.type ?? '') ? (
+        // A "+N more" box unfolds its side, as u and d do.
+        one.node === 'more:up' || one.node === 'more:down' ? (
+          <Button
+            key={`${key}-${one.node}-${i}`}
+            plain
+            label={one.text}
+            onPress={() => update($, expandedAtom, current => (one.node === 'more:up' ? { ...current, up: !current.up } : { ...current, down: !current.down }))}
+          />
+        ) : one.node && FOLLOWABLE.has(graph.nodes[one.node]?.type ?? '') ? (
           <Button key={`${key}-${one.node}`} plain label={one.text} onPress={() => later($, async () => void (await follow($, { model: one.node! })))} />
         ) : (
           <Text key={`${key}-${i}`} color={one.color} dimColor={one.dim} bold={one.bold}>
@@ -832,6 +858,7 @@ export function registerLineage(on: On) {
   // A new user turn gets the lineage note again (its context may have been compacted since), once.
   on('session.end', async ($, e, next) => {
     paneOpened = false
+    drawnCache = null
     contextGiven.clear()
     return next(e)
   })
@@ -863,7 +890,6 @@ export function registerLineage(on: On) {
     const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? String(e.file_path) : null
     const isSql = !!file && /\.sql$/i.test(file)
     const isEdit = isSql && EDIT_TOOLS.has(e.tool)
-    if (isEdit) sqlGraphs.clear()
     let lookup: Promise<ImpactNote | null> | null = null
     let finished = false
     const progress = { project: false }
@@ -879,6 +905,8 @@ export function registerLineage(on: On) {
     if (note) $.ui.toast(note.toast, { timeoutMs: 8000 })
     const result = await next(e)
     if (result.deny || result.isError) return result
+    // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
+    if (file && EDIT_TOOLS.has(e.tool) && /(\.sql|\.py|dbt_project\.yml)$/i.test(file)) clearSqlGraphs()
 
     if (DBT_LINEAGE.test(e.tool) && 'model' in e) {
       // A trace of one column holds only that column's edges: not the model's columns to keep. The
@@ -896,7 +924,11 @@ export function registerLineage(on: On) {
       const dir = commandDir(command, await $.session.root().catch(() => '.'))
       const raw = (result as any).result ?? result.text
       const output = (typeof raw === 'string' ? raw : typeof raw?.stdout === 'string' ? raw.stdout : textOf(raw)).slice(0, 65536)
-      const named = [...sqlFilesIn(command, dir), ...sqlFilesIn(output, dir)].reverse()
+      // What the command names comes first, last named first; its output counts only when the command
+      // names no file and the output one (a listing of many is not a read).
+      const fromOutput = [...new Set(sqlFilesIn(output, dir))]
+      const fromCommand = sqlFilesIn(command, dir).reverse()
+      const named = fromCommand.length ? fromCommand : fromOutput.length === 1 ? fromOutput : []
       if (named.length) {
         later($, async () => {
           for (const file of named) if (await $.fs.exists(file).catch(() => false)) return void (await follow($, { file, auto: true }))
@@ -1006,7 +1038,8 @@ export function registerLineage(on: On) {
     const capUp = expanded.up ? UNFOLDED : BOX_CAP
     const capDown = expanded.down ? UNFOLDED : BOX_CAP
     // The pane redraws on every state change (loading, messages, columns); the drawing depends only on these.
-    const drawKey = JSON.stringify([focus, Object.keys(graph.nodes).length, view, upLevels, levels, capUp, capDown, width, column, view === 'graph' && column ? reach : null])
+    // The links themselves, not a count: an edit can swap a parent and keep the size.
+    const drawKey = JSON.stringify([focus, graph.parents, view, upLevels, levels, capUp, capDown, width, column, view === 'graph' && column ? reach : null])
     if (drawnCache?.key !== drawKey) {
       const layered =
         view === 'graph'
