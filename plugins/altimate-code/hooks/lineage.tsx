@@ -969,6 +969,8 @@ export function registerLineage(on: On) {
           let own = 0
           for (const file of named) {
             if (!(await $.fs.exists(file).catch(() => false))) continue
+            // A read that started while this check waited owns the pane now.
+            if (startedSeq - start > own) return
             own++
             if (await follow($, { file, auto: true })) return
             if (startedSeq - start > own) return
@@ -1116,9 +1118,10 @@ export function registerLineage(on: On) {
     // From what is shown: a stored pan past the edge (a narrower pane, a right-clamped start) is not the start.
     const panBy = (step: number) => update($, panAtom, () => Math.min(maxPan, Math.max(0, from + step)))
     // Once a new model's graph is drawn, scroll the pane to it: the canvas can be taller than the pane.
-    const focusRow = view === 'graph' ? shownRows.findIndex(row => row.some(one => one.node === focus.model)) : -1
-    if (revealFor === focus.model && focusRow >= 0) {
-      revealFor = null
+    // Looked up in the whole drawing: the model may be panned out of the window, but its row is the same.
+    const focusRow = view === 'graph' && drawn ? drawn.rows.findIndex(row => row.some(one => one.node === focus.model)) : -1
+    // Panning moves columns, never rows, so the model's row stays put.
+    const reveal = () =>
       later($, async () => {
         // The new drawing may not be on screen yet: retry briefly until the model's box is there.
         for (let tries = 0; tries < 10; tries++) {
@@ -1127,6 +1130,9 @@ export function registerLineage(on: On) {
           await $.clock.sleep(100).catch(() => {})
         }
       })
+    if (revealFor === focus.model && focusRow >= 0) {
+      revealFor = null
+      reveal()
     }
     // A "+N more" box opened: what it stands for, by name, each one followable; upstream above the
     // graph and downstream below it, beside the boxes that were pressed.
@@ -1175,18 +1181,19 @@ export function registerLineage(on: On) {
               {drawn.hidden ? ` · ${drawn.hidden} level${drawn.hidden === 1 ? '' : 's'} past the pane's width` : ''}
               {graph.upTruncated || graph.truncated ? ` · ${[graph.upTruncated && 'upstream', graph.truncated && 'downstream'].filter(Boolean).join(' and ')} cut at 500 nodes` : ''}
             </Text>
-            {drawn.canvas > room && (
+            {view === 'graph' && (
               <Box flexDirection="row" gap={2}>
-                <Button key="lineage-pan-left" plain hotkey="h" label="◀ pan" onPress={() => panBy(-Math.max(8, Math.floor(room / 2)))} />
-                <Button key="lineage-pan-right" plain hotkey="l" label="pan ▶" onPress={() => panBy(Math.max(8, Math.floor(room / 2)))} />
+                {drawn.canvas > room && <Button key="lineage-pan-left" plain hotkey="h" label="◀ pan" onPress={() => panBy(-Math.max(8, Math.floor(room / 2)))} />}
+                {drawn.canvas > room && <Button key="lineage-pan-right" plain hotkey="l" label="pan ▶" onPress={() => panBy(Math.max(8, Math.floor(room / 2)))} />}
+                {/* On a tall canvas the model can be scrolled out of view, whatever its width. */}
                 <Button
                   key="lineage-pan-focus"
                   plain
                   hotkey="f"
                   label="the model"
                   onPress={async () => {
-                    revealFor = focus.model
                     await update($, panAtom, () => null)
+                    if (focusRow >= 0) reveal()
                   }}
                 />
               </Box>
