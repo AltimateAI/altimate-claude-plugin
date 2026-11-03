@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -133,6 +133,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('mcp.connect', () => ({ value: mcp ? { isConnected: true, server: 'plugin:altimate-code:altimate-code' } : { isConnected: false, reason: 'not_connected', message: 'off' } }))
   on('mcp.call', (_: unknown, e: { server: string; tool: string; args?: Record<string, any> }) => {
     calls.push(`mcp:${e.tool}${e.args?.column ? `:${e.args.column}` : ''}`)
+    // A server that never answers this tool.
+    if (e.tool === options.mcpHang) return new Promise(() => {})
     // Claude Code passes structured content on as a JSON text block in place of the text.
     if (e.tool === 'dbt_lineage') {
       // With the dbt integration, the structured result is its model lineage, plus the report.
@@ -1233,4 +1235,27 @@ test('a cut impact note never ends inside an escape', async ($, on) => {
   const head = note.slice(0, note.indexOf('...\n'))
   expect(head.length).toBeGreaterThan(3000)
   expect(head.match(/\\*$/)![0].length % 2).toBe(0)
+})
+
+test('bare /lineage asks for warehouse lineage on the model shown', async ($, on) => {
+  const { clock, calls } = await start($, on, { warehouse: true })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls).not.toContain('mcp:table_lineage')
+  await $.command.run({ command: 'lineage', args: '' } as any)
+  await clock.settle()
+  expect(calls).toContain('mcp:table_lineage')
+})
+
+test('an MCP trace that never answers is given up on, so the next edit of that column traces again', async ($, on) => {
+  const { clock, calls } = await start($, on, { mcpHang: 'impact_analysis' })
+  const first = $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.advance(9_000)
+  await first
+  await clock.settle()
+  const second = $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'y as revenue', new_string: 'z as revenue' })
+  await clock.advance(9_000)
+  await second
+  await clock.settle()
+  expect(calls.filter(one => one === 'mcp:impact_analysis:revenue')).toEqual(['mcp:impact_analysis:revenue', 'mcp:impact_analysis:revenue'])
 })

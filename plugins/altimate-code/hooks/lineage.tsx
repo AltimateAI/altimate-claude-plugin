@@ -186,7 +186,7 @@ let askedFor: string | null = null
 let conversationSeq = 0
 // Set once a dbt project is seen this session: until then an answer never walks the session's folder.
 let projectSeen = false
-// Per folder, until a refresh or an edit of a .sql file or dbt_project.yml.
+// Per folder, until a refresh, a dbt_project.yml edit, or a new conversation.
 const projectsCache = new Map<string, Promise<string[]>>()
 const MAX_DIRS = 2000
 /** dbt projects under a folder (a monorepo's root), a few levels down, at most 2000 folders, 16 at a time. */
@@ -415,9 +415,12 @@ async function runTool($: EngineInterface, name: string, args: Record<string, un
   }
   const server = cliOnly ? null : await mcpServer($)
   if (server) {
-    await left()
+    const ms = await left()
     try {
-      const result = await $.mcp.call(server, name, args)
+      // The engine's MCP call has no timeout of its own: one that never answers is given up on, so a
+      // shared trace does not hold every later edit of that column, and the CLI is tried instead.
+      const result = await within($, ms, $.mcp.call(server, name, args))
+      if (!result) throw new Error('altimate-code did not answer over MCP')
       let text = textOf(result.content)
       // A long result comes back as a preview plus a link to the full text.
       const link = result.content.find((block: any) => block?.type === 'resource_link' && String(block.uri).startsWith('file://')) as
@@ -818,6 +821,7 @@ function mergeReach(reaches: ColumnReachView[]): ColumnReachView | null {
     }
   }
   const unique = <T,>(list: T[], by: (one: T) => string) => [...new Map(list.map(one => [by(one), one])).values()]
+  const exposuresError = reaches.find(one => one.exposuresError)?.exposuresError
   return {
     model: reaches[0]!.model,
     column: reaches.map(one => one.column).join(', '),
@@ -827,7 +831,7 @@ function mergeReach(reaches: ColumnReachView[]): ColumnReachView | null {
     uncertain: unique(reaches.flatMap(one => one.uncertain), key).filter(one => !models.has(key(one))),
     untraced: unique(reaches.flatMap(one => one.untraced), key),
     truncated: reaches.some(one => one.truncated),
-    ...(reaches.find(one => one.exposuresError) && { exposuresError: reaches.find(one => one.exposuresError)!.exposuresError }),
+    ...(exposuresError && { exposuresError }),
   }
 }
 
@@ -1138,7 +1142,11 @@ export function registerLineage(on: On) {
       return { text: `Could not open Altimate lineage: ${String(error)}` }
     }
     if (model) later($, async () => void (await follow($, { model, dottedColumn: true, open: true })))
-    else if (current) later($, () => loadDetails($, null, false))
+    else if (current) {
+      // Bare /lineage is the person asking for the model shown.
+      askedFor = `${current.model}\u0000${current.manifest}`
+      later($, () => loadDetails($, null, false))
+    }
     return { text: `Altimate lineage${model ? ` for ${e.args.trim()}` : ''} opened in the side pane.` }
   })
 
