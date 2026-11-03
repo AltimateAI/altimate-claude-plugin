@@ -992,7 +992,8 @@ export function registerLineage(on: On) {
       // below a monorepo root: the first whose models the answer names.
       const focus = await read($, focusAtom)
       const sessionRoot = await $.session.root().catch(() => '.')
-      const shown = focus ? [{ root: focus.root, manifest: focus.via === 'manifest' ? focus.manifest : undefined }] : []
+      // The manifest the shown graph came from, read directly or through altimate-code; none for SQL files.
+      const shown = focus ? [{ root: focus.root, manifest: focus.via === 'sql' ? undefined : focus.manifest }] : []
       const own = await projectRoot($, sessionRoot, false)
       // The shown project first, then the session's, then those below a monorepo root, each once.
       const candidates = [...shown, ...(own ? [{ root: own, manifest: undefined }] : (await projectsBelow($, sessionRoot)).map(root => ({ root, manifest: undefined })))]
