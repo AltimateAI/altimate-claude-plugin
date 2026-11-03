@@ -845,7 +845,7 @@ const quoted = (text: string) => {
 /** At most `max` entries, then how many more. */
 const capped = (items: string[], max: number) => items.slice(0, max).join(', ') + (items.length > max ? `, ... ${items.length - max} more` : '')
 const listed = (items: string[], max = 10) => capped(items.map(quoted), max)
-/** The first `max` characters of ASCII text (so `max` bytes), never ending inside a `\\uXXXX`, `\\\\` or `\\"` escape. */
+/** The first `max` characters of ASCII text (so `max` bytes), never ending on part of an escape (a backslash-u code, an escaped backslash or quote). */
 function cut(text: string, max: number): string {
   const head = text.slice(0, max).replace(/\\u[0-9a-f]{0,3}$/, '')
   return head.match(/\\*$/)![0].length % 2 ? head.slice(0, -1) : head

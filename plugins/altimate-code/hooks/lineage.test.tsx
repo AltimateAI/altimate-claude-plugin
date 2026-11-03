@@ -1223,7 +1223,8 @@ test('the impact note stays under 4 KB in bytes with non-ASCII names', async ($,
 })
 
 test('a cut impact note never ends inside an escape', async ($, on) => {
-  // Backslashes escape to two characters each, so the cut lands on either half across these lengths.
+  // Backslashes escape to two characters each; at this fixture's cut point the plain slice would end on
+  // the first half of one (checked: the test fails without the parity step).
   const models = Array.from({ length: 20 }, (_, i) => ({ name: `m${i}`, columns: Array.from({ length: 8 }, (_, j) => `${'\\'.repeat(30 + i + j)}`) }))
   const { clock } = await start($, on, { reach: { ...REACH, column_reach: { ...REACH.column_reach, models } } })
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
