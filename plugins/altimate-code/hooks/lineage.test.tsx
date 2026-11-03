@@ -167,8 +167,8 @@ test('reading a model points the pane at it: the manifest graph, then its column
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: 'UPSTREAM · manifest' })).toBeDefined()
-  expect(await ui.find({ key: 'up-1-model.shop.int_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest · ↑2 ↓2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
   await ui.unmount()
@@ -208,6 +208,9 @@ test('[c] picks a column and shows its reach; [d] unfolds downstream; a model in
   await clock.settle()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The text lists: graph → ends only → folders → list.
+  for (let i = 0; i < 3; i++) await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   expect(await ui.find({ type: 'Text', text: /2 more models/ })).toBeDefined()
   await ui.press({ key: 'lineage-down' })
   await clock.settle()
@@ -227,6 +230,33 @@ test('[c] picks a column and shows its reach; [d] unfolds downstream; a model in
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'COLUMN · revenue' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('the graph view draws boxes a press follows; [v] cycles the views and [l] the levels; a narrow pane gets the lists', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /┏━+┓/ })).toBeDefined()
+  await ui.press({ key: 'lineage-levels' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest · ↑2 ↓3/ })).toBeDefined()
+  for (const title of [/ENDS ONLY · manifest/, /FOLDERS · manifest/, 'UPSTREAM · manifest', /GRAPH · manifest/]) {
+    await ui.press({ key: 'lineage-view' })
+    await clock.settle()
+    expect(await ui.find({ type: 'Text', text: title })).toBeDefined()
+  }
+  const box = await ui.find({ type: 'Button', text: /int_orders/ })
+  await ui.press({ key: box!.key! })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
+  await ui.unmount()
+
+  const narrow = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 40 }, surface: 'terminal' })
+  expect(await narrow.find({ type: 'Text', text: 'UPSTREAM · manifest' })).toBeDefined()
+  expect(await narrow.find({ type: 'Text', text: /GRAPH/ })).toBeUndefined()
+  await narrow.unmount()
 })
 
 test('without the MCP server the CLI answers, and dbt_lineage text from an older build still parses', async ($, on) => {
@@ -291,7 +321,7 @@ test('a manifest over 4 MiB is read through altimate-code: the graph comes from 
   await clock.settle()
   expect(calls).toEqual(['tool:Read', 'cli:dbt_lineage:graph'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: 'UPSTREAM · altimate-code' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /GRAPH · altimate-code/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
   await ui.unmount()

@@ -10,6 +10,7 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
+import { drawLayered, endsView, foldersView, graphView, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
   buildGraph,
@@ -54,6 +55,10 @@ const columnAtom = atom({ plugin: 'altimate-code', key: 'lineageColumn' } as con
 const reachAtom = atom({ plugin: 'altimate-code', key: 'lineageReach' } as const, null, { shape: 'lineage-reach-1' })
 const warehouseAtom = atom({ plugin: 'altimate-code', key: 'lineageWarehouse' } as const, null, { shape: 'lineage-warehouse-1' })
 const expandedAtom = atom({ plugin: 'altimate-code', key: 'lineageExpanded' } as const, { up: false, down: false })
+// How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists.
+const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 'graph' as ViewKind | 'list')
+// Downstream levels the boxes view draws; upstream is the two levels the graph keeps.
+const levelsAtom = atom({ plugin: 'altimate-code', key: 'lineageLevels' } as const, 2)
 const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
 const messageAtom = atom({ plugin: 'altimate-code', key: 'lineageMessage' } as const, null as string | null)
 const loadingAtom = atom({ plugin: 'altimate-code', key: 'lineageLoading' } as const, false)
@@ -78,6 +83,16 @@ let ownerKey = ''
 let reachSeq = 0
 const contextGiven = new Set<string>()
 
+const VIEWS: (ViewKind | 'list')[] = ['graph', 'ends', 'folders', 'list']
+const VIEW_TITLE: Record<ViewKind | 'list', string> = { graph: 'GRAPH', ends: 'ENDS ONLY', folders: 'FOLDERS', list: 'LIST' }
+// Narrower than this, boxes do not fit and the text lists stand in.
+const MIN_GRAPH_COLUMNS = 48
+// Boxes per layer before the rest fold into "+N more" (u/d unfold them).
+const BOX_CAP = 4
+const MAX_LEVELS = 4
+// Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
+// surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
+const PANE_SIZE = { columns: 110, rows: 34 }
 const LENS_COLOR: Record<string, string> = {
   Original: 'success',
   Alias: 'suggestion',
@@ -395,7 +410,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
   }
   if (input.open || (!paneOpened && input.auto)) {
     paneOpened = true
-    await $.ui.open({ id: PANE, title: PANE_TITLE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
+    await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
   }
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs: stat.mtimeMs }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
@@ -499,7 +514,7 @@ async function loadWarehouse($: EngineInterface) {
 
 async function openPane($: EngineInterface) {
   paneOpened = true
-  await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true })
+  await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
 }
 
 /** The text an edit replaces and the text it writes: Edit's strings, MultiEdit's pairs, or a Write's whole file. */
@@ -859,6 +874,8 @@ export function registerLineage(on: On) {
     const expanded = await read($, expandedAtom)
     const message = await read($, messageAtom)
     const loading = await read($, loadingAtom)
+    const chosenView = await read($, viewAtom)
+    const levels = await read($, levelsAtom)
     const node = focus && graph ? graph.nodes[focus.model] : null
 
     if (!focus || !graph || !node) {
@@ -885,6 +902,18 @@ export function registerLineage(on: On) {
       selectColumn(columnNames[(at + 1) % columnNames.length]!)
     }
     const source = focus.via === 'tools' ? 'altimate-code' : 'manifest'
+    const width = Number((e as any).props?.bodyColumns) || 80
+    const view = chosenView !== 'list' && width < MIN_GRAPH_COLUMNS ? 'list' : chosenView
+    const cap = expanded.up || expanded.down ? Infinity : BOX_CAP
+    const layered =
+      view === 'graph'
+        ? graphView(graph, focus.model, { up: 2, down: levels, cap, reach: column ? reach : null })
+        : view === 'ends'
+          ? endsView(graph, focus.model, { cap })
+          : view === 'folders'
+            ? foldersView(graph, focus.model)
+            : null
+    const drawn = layered ? drawLayered(layered, width - 1) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
     return (
@@ -902,14 +931,31 @@ export function registerLineage(on: On) {
           {columns?.note && <Text color="warning">⚠ {columns.note}</Text>}
         </Box>
 
-        <Box flexDirection="column">
-          <Text dimColor>UPSTREAM · {source}</Text>
-          {upstreamArt(graph, focus.model, expanded.up).map((row, i) => drawRow(ui, $, graph, row, `up-${i}`))}
-        </Box>
+        {view !== 'list' && drawn && (
+          <Box flexDirection="column">
+            <Text dimColor>
+              {VIEW_TITLE[view]} · {source}
+              {view === 'graph' ? ` · ↑2 ↓${levels}` : ''}
+              {drawn.hidden ? ` · ${drawn.hidden} level${drawn.hidden === 1 ? '' : 's'} past the pane's width` : ''}
+            </Text>
+            {drawn.rows.map((row, i) => drawRow(ui, $, graph, row.some(one => one.text) ? row : [{ text: ' ' }], `graph-${i}`))}
+          </Box>
+        )}
+
+        {view === 'list' && (
+          <Box flexDirection="column" gap={1}>
+            <Box flexDirection="column">
+              <Text dimColor>UPSTREAM · {source}</Text>
+              {upstreamArt(graph, focus.model, expanded.up).map((row, i) => drawRow(ui, $, graph, row, `up-${i}`))}
+            </Box>
+            <Box flexDirection="column">
+              <Text dimColor>DOWNSTREAM · {source}</Text>
+              {downstreamArt(graph, focus.model, expanded.down).map((row, i) => drawRow(ui, $, graph, row, `down-${i}`))}
+            </Box>
+          </Box>
+        )}
 
         <Box flexDirection="column">
-          <Text dimColor>DOWNSTREAM · {source}</Text>
-          {downstreamArt(graph, focus.model, expanded.down).map((row, i) => drawRow(ui, $, graph, row, `down-${i}`))}
           <Text dimColor>
             {counts.direct} direct · {counts.transitive}{graph.truncated ? '+' : ''} transitive · {counts.tests} tests ·{' '}
             <Text color={SEVERITY_COLOR[counts.severity]}>{counts.severity}</Text>
@@ -1016,6 +1062,16 @@ export function registerLineage(on: On) {
           <Button key="lineage-up" plain hotkey="u" label="upstream" onPress={() => update($, expandedAtom, current => ({ ...current, up: !current.up }))} />
           <Button key="lineage-down" plain hotkey="d" label="downstream" onPress={() => update($, expandedAtom, current => ({ ...current, down: !current.down }))} />
           <Button key="lineage-column" plain hotkey="c" label="column" onPress={nextColumn} />
+          <Button
+            key="lineage-view"
+            plain
+            hotkey="v"
+            label={VIEW_TITLE[chosenView].toLowerCase()}
+            onPress={() => update($, viewAtom, current => VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length]!)}
+          />
+          {view === 'graph' && (
+            <Button key="lineage-levels" plain hotkey="l" label={`${levels} levels`} onPress={() => update($, levelsAtom, current => (current % MAX_LEVELS) + 1)} />
+          )}
           <Button
             key="lineage-refresh"
             plain

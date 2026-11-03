@@ -187,6 +187,10 @@ declare module 'claude-code' {
       lineageWarehouse: Shaped<WarehouseView | null>
       /** Whether the upstream and downstream sections show every node. */
       lineageExpanded: { up: boolean; down: boolean }
+      /** How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists. */
+      lineageView: 'graph' | 'ends' | 'folders' | 'list'
+      /** Downstream levels the boxes view draws. */
+      lineageLevels: number
       lineageImpact: Shaped<ImpactView | null>
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
