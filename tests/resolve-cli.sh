@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 FILES=(
   plugins/altimate-code/commands/altimate.md:2
   plugins/altimate-code/commands/review.md:1
-  plugins/altimate-code/skills/altimate-code/SKILL.md:3
+  plugins/altimate-code/skills/altimate-code/SKILL.md:5
   plugins/altimate-code/skills/review/SKILL.md:1
 )
 FAILURES=0
@@ -35,7 +35,7 @@ RESOLVER="$(printf '%b' "$(printf '%s' "$ALL_BLOCKS" | head -n1)")"
 # A command line that calls the CLI by name skips the resolver. User-typed `!` commands in prose are fine.
 for entry in "${FILES[@]}"; do
   file="${entry%:*}"
-  bare="$(grep -nE '^[[:space:]]*altimate(-code)? (run|review|workspace|link|auth|session)' "$file")"
+  bare="$(grep -nE '^[[:space:]]*altimate(-code)? (run|review|workspace|link|auth|session|tool)' "$file")"
   [ -z "$bare" ] || fail "$file calls the CLI without the resolver: $bare"
 done
 
