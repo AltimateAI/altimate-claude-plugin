@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> } }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -91,7 +91,7 @@ async function start($: any, on: any, options: Options = {}) {
   const sql = options.sqlFiles
   const hasManifest = !sql
   on('fs.exists', (_: unknown, e: { path: string }) => ({
-    value: e.path === `${ROOT}/dbt_project.yml` || (hasManifest && e.path === MANIFEST_PATH) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
+    value: (e.path === `${ROOT}/dbt_project.yml` && !options.noRootProject) || (hasManifest && e.path === MANIFEST_PATH) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
   }))
   on('fs.stat', async (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
@@ -99,11 +99,12 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }
   })
   on('fs.list', (_: unknown, e: { path: string }) => {
-    const dir = e.path.slice(ROOT.length + 1)
+    // The project root itself lists as the empty prefix.
+    const prefix = e.path === ROOT ? '' : `${e.path.slice(ROOT.length + 1)}/`
     const names = new Map<string, 'file' | 'dir'>()
     for (const path of Object.keys(sql ?? {})) {
-      if (!path.startsWith(`${dir}/`)) continue
-      const [head, ...rest] = path.slice(dir.length + 1).split('/')
+      if (!path.startsWith(prefix)) continue
+      const [head, ...rest] = path.slice(prefix.length).split('/')
       names.set(head!, rest.length ? 'dir' : 'file')
     }
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
@@ -931,6 +932,51 @@ test("a follow left running by the last conversation does not hold up the next o
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("from a monorepo root, an answer naming another project's model finds it, and its listed entry still opens after the pane moved", async ($, on) => {
+  const { clock } = await start($, on, {
+    noRootProject: true,
+    sqlFiles: {
+      'a/dbt_project.yml': "name: 'a'\n",
+      'a/models/a_model.sql': 'select 1',
+      'b/dbt_project.yml': "name: 'b'\n",
+      'b/models/b_model.sql': 'select 2',
+    },
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/a/models/a_model.sql` })
+  await clock.settle()
+  await $.turn.start({ text: 'q', turnId: 't14' } as any)
+  await $.turn.complete({ answer: 'That comes from `b_model`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't14' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Found in project b though the pane showed project a: the pane follows it.
+  expect(await ui.find({ type: 'Text', text: /lineage · b_model/ })).toBeDefined()
+  // A read moves the pane back to a; the listed b_model entry still opens in its own project.
+  await $.turn.start({ text: 'r', turnId: 't15' } as any)
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/a/models/a_model.sql` })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · a_model/ })).toBeDefined()
+  const entry = await ui.find({ type: 'Button', text: /^▸?b_model$/ })
+  await ui.press({ key: entry!.key! })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · b_model/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a follow started before the conversation ended never claims the new conversation's pane", async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, { holdManifestStat: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  // The follow starts and waits on the manifest before the conversation ends.
+  await clock.advance(0)
+  await $.session.end({ reason: 'clear' } as any)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  release()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeUndefined()
   await ui.unmount()
 })
 

@@ -155,7 +155,7 @@ export function graphView(graph: LineageGraph, id: string, opts: { up: number; d
     return node.type === 'exposure' ? 1 : 2
   }
   // How much of the shown graph hangs beyond a node, away from the focus: paths, not distinct nodes, so
-  // a diamond counts twice. ponytail: an estimate for ranking, linear with the memo; exact counts cost O(N·E) per render.
+  // a diamond counts twice. Limit: an estimate for ranking, linear with the memo; exact counts cost O(N·E) per render.
   const memo = new Map<string, number>()
   const beyond = (one: string, index: number): number => {
     const known = memo.get(one)

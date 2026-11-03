@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type {
+  AnswerModel,
   ColumnLineage,
   ColumnReachView,
   ImpactView,
@@ -63,7 +64,7 @@ const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 
 // A model the pane should scroll down to once its graph is drawn: the canvas can be taller than the pane.
 let revealFor: string | null = null
 // The dbt models Claude's last answer names, in the order it names them.
-const answerAtom = atom({ plugin: 'altimate-code', key: 'lineageAnswer' } as const, [] as { id: string; name: string; root: string; manifest?: string }[])
+const answerAtom = atom({ plugin: 'altimate-code', key: 'lineageAnswer' } as const, [] as AnswerModel[])
 // Where the graph canvas is panned to: its first visible column; null centres it on the model.
 const panAtom = atom({ plugin: 'altimate-code', key: 'lineagePan' } as const, null as number | null)
 const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
@@ -101,6 +102,8 @@ const newConversation = () => {
   followedTurn = -1
   followsInFlight = 0
   followSession++
+  // A follow started in the last conversation refuses at its claim: the new one owns the pane.
+  claimedSeq = ++startedSeq
 }
 
 const VIEWS: (ViewKind | 'list')[] = ['graph', 'ends', 'folders', 'list']
@@ -188,7 +191,7 @@ async function projectsBelow($: EngineInterface, start: string, depth = 4): Prom
 async function projectWith($: EngineInterface, start: string, model: string, prefer?: string): Promise<string | null> {
   const roots = await projectsBelow($, start)
   for (const root of prefer && roots.includes(prefer) ? [prefer, ...roots.filter(one => one !== prefer)] : roots) {
-    // ponytail: a manifest over 4 MiB is looked up through its SQL files; the names are the same.
+    // Limit: a manifest over 4 MiB is looked up through its SQL files; the names are the same.
     const graph = (await readGraph($, `${root}/target/manifest.json`).catch(() => null)) ?? (await sqlGraph($, root))
     if (findModelOrColumn(graph, model)) return root
   }
@@ -200,19 +203,22 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
  * backticks (a bare `orders` in prose is too often just a word). Read from the project shown, else the
  * session's.
  */
-async function modelsNamed($: EngineInterface, text: string, root: string, manifest = `${root}/target/manifest.json`): Promise<{ id: string; name: string; root: string; manifest?: string }[]> {
+async function modelsNamed($: EngineInterface, text: string, root: string, shownManifest?: string): Promise<AnswerModel[]> {
+  const manifest = shownManifest ?? `${root}/target/manifest.json`
   const fromManifest = await readGraph($, manifest).catch(() => null)
-  const graphFromManifest = !!fromManifest
+  // The manifest an entry keeps: the shown graph's (read here, or through altimate-code when over
+  // 4 MiB), else the default one when it was read; none when the names came from the SQL files.
+  const kept = shownManifest ?? (fromManifest ? manifest : undefined)
   const graph = fromManifest ?? (await sqlGraph($, root))
   const byName = new Map<string, string>()
   for (const node of Object.values(graph.nodes)) if (FOLLOWABLE.has(node.type) && node.path) byName.set(node.name.toLowerCase(), node.id)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
   const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
-  const found = new Map<string, { id: string; name: string; root: string; manifest?: string }>()
+  const found = new Map<string, AnswerModel>()
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
     const word = match[0].toLowerCase()
     const id = byName.get(word)
-    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root, ...(graphFromManifest && { manifest }) })
+    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root, ...(kept && { manifest: kept }) })
   }
   return [...found.values()].slice(0, 12)
 }
@@ -268,7 +274,7 @@ const clearSqlGraphs = () => {
 // `canvas`: the graph's full width when the pane shows a window of it (0 for the views that fit).
 type Drawn = { rows: Segment[][]; hidden: number; canvas: number; folded: { up: string[]; down: string[] } }
 let drawnCache: { key: string; drawn: Drawn | null } | null = null
-// ponytail: the whole canvas is mounted so the pane's own scrolling reaches every row; windowing rows would
+// Limit: the whole canvas is mounted so the pane's own scrolling reaches every row; windowing rows would
 // mean scrolling by hand. The slice is cached, so only a pan or a new drawing re-slices.
 let sliceCache: { key: string; rows: Segment[][] } | null = null
 /** The nodes the drawing's `+N more` boxes stand for, by side. */
@@ -277,7 +283,7 @@ const foldedOf = (view: Layered) => {
   for (const box of view.layers.flat()) if (box.kind === 'more' && box.folded) out[box.node === 'more:up' ? 'up' : 'down'].push(...box.folded)
   return out
 }
-// ponytail: a cap on files read per project; past it the graph is partial. A walk that streams would lift it.
+// Limit: a cap on files read per project; past it the graph is partial. A walk that streams would lift it.
 const MAX_SQL_FILES = 5000
 async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph> {
   const cached = sqlGraphs.get(root)
@@ -998,7 +1004,7 @@ export function registerLineage(on: On) {
       // The shown project first, then the session's, then those below a monorepo root, each once.
       const candidates = [...shown, ...(own ? [{ root: own, manifest: undefined }] : (await projectsBelow($, sessionRoot)).map(root => ({ root, manifest: undefined })))]
       const roots = candidates.filter((one, i) => candidates.findIndex(other => other.root === one.root) === i)
-      let named: { id: string; name: string; root: string; manifest?: string }[] = []
+      let named: AnswerModel[] = []
       for (const one of roots) {
         named = await modelsNamed($, text, one.root, one.manifest).catch(() => [])
         if (named.length) break

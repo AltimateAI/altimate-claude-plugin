@@ -76,7 +76,7 @@ export function buildGraph(manifest: Manifest): LineageGraph {
   return { nodes, parents, children }
 }
 
-/** A YAML line without its comment: a `#` at the start or after a space, outside quotes. ponytail: escaped quotes inside a quoted path are not handled; a YAML parser would. */
+/** A YAML line without its comment: a `#` at the start or after a space, outside quotes. Limit: escaped quotes inside a quoted path are not handled; a YAML parser would. */
 function withoutComment(line: string): string {
   let quote = ''
   for (let i = 0; i < line.length; i++) {
@@ -132,7 +132,7 @@ const blankStrings = (code: string) => code.replace(/(['"])(?:\\.|(?!\1)[^\\\n])
 /** The ref() and source() calls in code: only where the call itself is code, not text inside quotes. */
 function callsIn(code: string, python: boolean): { refs: RegExpExecArray[]; sources: RegExpExecArray[] } {
   // Python: triple-quoted strings (they span lines) and comments go first, then one-line strings.
-  // ponytail: a pattern, not a tokenizer: an escaped delimiter inside a docstring or a ref inside an
+  // Limit: a pattern, not a tokenizer: an escaped delimiter inside a docstring or a ref inside an
   // f-string's braces is misread. Without a manifest this graph is an approximation; `dbt parse` settles it.
   const blank = (text: string) => text.replace(/[^\n]/g, ' ')
   const masked = blankStrings(
@@ -160,7 +160,7 @@ const dropUnrendered = (text: string) => text.replace(/\{#[\s\S]*?#\}/g, '').rep
  * included (dbt renders Jinja there too, e.g. `-- depends_on: {{ ref('x') }}`), Jinja comments not.
  * Python models are read for dbt.ref() / dbt.source(). A versioned ref resolves to the `<name>_v<N>`
  * file (the highest without a version). A ref to a package's model, which has no file here, becomes a
- * node without a path. ponytail: no columns, exposures or refs built by macros; `dbt parse` gives them.
+ * node without a path. Limit: no columns, exposures or refs built by macros; `dbt parse` gives them.
  */
 export function graphFromSql(project: string, files: { path: string; text: string; kind: 'model' | 'snapshot' | 'seed' }[]): LineageGraph {
   const nodes: Record<string, any> = {}

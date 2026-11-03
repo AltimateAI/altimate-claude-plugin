@@ -99,6 +99,9 @@ export type ColumnEdge = {
   expression: string | null
 }
 
+/** A dbt model an answer names, with the project (and manifest) it was found in. */
+export type AnswerModel = { id: string; name: string; root: string; manifest?: string }
+
 /** dbt_lineage for one model. */
 export type ColumnLineage = {
   model: string
@@ -199,7 +202,7 @@ declare module 'claude-code' {
       lineagePan: number | null
       lineageImpact: Shaped<ImpactView | null>
       /** The dbt models Claude's last answer names, first named first. */
-      lineageAnswer: { id: string; name: string; root: string; manifest?: string }[]
+      lineageAnswer: AnswerModel[]
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
       lineageLoading: boolean
