@@ -198,6 +198,8 @@ declare module 'claude-code' {
       /** The graph canvas's first visible column; null centres it on the followed model. */
       lineagePan: number | null
       lineageImpact: Shaped<ImpactView | null>
+      /** The dbt models Claude's last answer names, first named first. */
+      lineageAnswer: { id: string; name: string }[]
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
       lineageLoading: boolean

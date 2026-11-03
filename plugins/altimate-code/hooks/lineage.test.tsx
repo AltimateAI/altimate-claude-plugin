@@ -68,6 +68,9 @@ async function start($: any, on: any, options: Options = {}) {
   const toasts: string[] = []
   const logs: string[] = []
   on('command.register', () => ({ value: { command: 'lineage' } }))
+  // A turn's start and end beneath the plugin: the engine's answer is the model's text.
+  on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
   on('ui.open', () => ({ value: {} }))
@@ -772,6 +775,31 @@ test('a shell read whose first candidate loses to a newer read does not take the
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · c_model/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an answer that names models lists them, and the pane follows the first when Claude read none of them', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.turn.start({ text: 'how is revenue built?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'Revenue starts in `int_orders` and fct_orders sums it; see orders too.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /IN THE ANSWER/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /fct_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an answer after Claude read a model leaves the pane on what it read', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.turn.start({ text: 'explain fct_orders', turnId: 't2' } as any)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  await $.turn.complete({ answer: 'fct_orders reads `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't2' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /IN THE ANSWER/ })).toBeDefined()
   await ui.unmount()
 })
 

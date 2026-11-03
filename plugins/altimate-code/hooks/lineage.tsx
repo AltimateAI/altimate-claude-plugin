@@ -62,6 +62,8 @@ const expandedAtom = atom({ plugin: 'altimate-code', key: 'lineageExpanded' } as
 const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 'graph' as ViewKind | 'list')
 // A model the pane should scroll down to once its graph is drawn: the canvas can be taller than the pane.
 let revealFor: string | null = null
+// The dbt models Claude's last answer names, in the order it names them.
+const answerAtom = atom({ plugin: 'altimate-code', key: 'lineageAnswer' } as const, [] as { id: string; name: string }[])
 // Where the graph canvas is panned to: its first visible column; null centres it on the model.
 const panAtom = atom({ plugin: 'altimate-code', key: 'lineagePan' } as const, null as number | null)
 const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
@@ -87,6 +89,8 @@ let ownerKey = ''
 // Each column-reach request takes a number; only the newest one's answer is shown.
 let reachSeq = 0
 const contextGiven = new Set<string>()
+// Whether something Claude did this turn (a read, an edit, a dbt_lineage call) already moved the pane.
+let claudeFollowed = false
 
 const VIEWS: (ViewKind | 'list')[] = ['graph', 'ends', 'folders', 'list']
 const VIEW_TITLE: Record<ViewKind | 'list', string> = { graph: 'GRAPH', ends: 'ENDS ONLY', folders: 'FOLDERS', list: 'LIST' }
@@ -178,6 +182,25 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
     if (findModelOrColumn(graph, model)) return root
   }
   return null
+}
+
+/**
+ * The dbt models an answer names, first named first: a name with an underscore, or any model name in
+ * backticks (a bare `orders` in prose is too often just a word). Read from the project shown, else the
+ * session's.
+ */
+async function modelsNamed($: EngineInterface, text: string, root: string): Promise<{ id: string; name: string }[]> {
+  const graph = (await readGraph($, `${root}/target/manifest.json`).catch(() => null)) ?? (await sqlGraph($, root))
+  const byName = new Map<string, string>()
+  for (const node of Object.values(graph.nodes)) if (FOLLOWABLE.has(node.type) && node.path) byName.set(node.name.toLowerCase(), node.id)
+  const ticked = new Set([...text.matchAll(/`([\w.]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
+  const found = new Map<string, { id: string; name: string }>()
+  for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
+    const word = match[0].toLowerCase()
+    const id = byName.get(word)
+    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0] })
+  }
+  return [...found.values()].slice(0, 12)
 }
 
 let serverName: string | null = null
@@ -545,6 +568,7 @@ async function follow($: EngineInterface, input: FollowInput): Promise<boolean> 
     paneOpened = true
     await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
   }
+  if (input.auto) claudeFollowed = true
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
   // for this model (by unique_id when the answer gives one, else by name).
@@ -903,8 +927,27 @@ export function registerLineage(on: On) {
 
   on('turn.start', async ($, e, next) => {
     // A subagent's turn starting does not clear the main conversation's context.
-    if (!(e as { agentId?: string }).agentId) contextGiven.clear()
+    if (!(e as { agentId?: string }).agentId) {
+      contextGiven.clear()
+      claudeFollowed = false
+    }
     return next(e)
+  })
+
+  // An answer that names models: the pane lists them, and when Claude read none of them this turn (it
+  // answered from memory) it follows the first one named, so the pane shows what the answer is about.
+  on('turn.complete', async ($, e, next) => {
+    const out = await next(e)
+    if ((e as { agentId?: string }).agentId || e.reason !== 'answer' || !out.text) return out
+    const text = out.text
+    later($, async () => {
+      const root = (await read($, focusAtom))?.root ?? (await projectRoot($, await $.session.root().catch(() => '.'), false))
+      if (!root) return
+      const named = await modelsNamed($, text, root).catch(() => [])
+      await update($, answerAtom, () => named)
+      if (!claudeFollowed && named[0]) await follow($, { model: named[0].id, auto: true })
+    })
+    return out
   })
 
   on('command.run', { command: COMMAND }, async ($, e) => {
@@ -1057,6 +1100,7 @@ export function registerLineage(on: On) {
     const loading = await read($, loadingAtom)
     const chosenView = await read($, viewAtom)
     const pan = await read($, panAtom)
+    const answer = await read($, answerAtom)
     const node = focus && graph ? graph.nodes[focus.model] : null
 
     if (!focus || !graph || !node) {
@@ -1178,6 +1222,15 @@ export function registerLineage(on: On) {
             {node.materialized ? ` · ${node.materialized}` : ''}
           </Text>
           {message && <Text color="warning">{message}</Text>}
+          {answer.length > 0 && (
+            // What Claude's last answer is about, each one a press away.
+            <Box flexDirection="row" flexWrap="wrap" columnGap={1}>
+              <Text dimColor>IN THE ANSWER ·</Text>
+              {answer.map(one => (
+                <Button key={`answer-${one.id}`} plain label={one.id === focus.model ? `▸${one.name}` : one.name} onPress={() => later($, async () => void (await follow($, { model: one.id, open: true })))} />
+              ))}
+            </Box>
+          )}
           {columns?.note && <Text color="warning">⚠ {columns.note}</Text>}
         </Box>
 
