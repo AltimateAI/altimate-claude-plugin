@@ -240,8 +240,9 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
   const result = await runTool($, 'dbt_lineage', { manifest_path: manifest, model, include_graph: true }, true)
   const graph = result.metadata?.graph as LineageGraph | undefined
   const id: string | undefined = result.metadata?.model_unique_id ?? undefined
-  // An answer the plugin could not read (too large, no output) is a failure to report, not "no model".
-  if (!result.ok && !result.metadata) throw new Error(result.text || 'altimate-code did not answer')
+  // An answer the plugin could not read (too large, no output) or the CLI's own failure (empty
+  // metadata) is a failure to report, not "no model": a missing model still carries its metadata.
+  if (!result.ok && Object.keys(result.metadata ?? {}).length === 0) throw new Error(`failed: ${result.text || 'no answer came back'}`)
   if (!result.ok && !id) return null
   if (id && !graph?.nodes?.[id]) throw new Error('needs an altimate-code build whose dbt_lineage supports include_graph')
   const built = id && graph ? { graph, id, columns: columnsFromMetadata(result.metadata) } : null

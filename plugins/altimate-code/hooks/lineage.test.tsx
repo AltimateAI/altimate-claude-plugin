@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -136,6 +136,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}`)
+    if (options.cliFailure) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'the dbt project could not start', metadata: {} }), stderr: '' } }
     if (options.cliTooLarge) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '', isStdoutTruncated: true } }
     // altimate-code's dbt_lineage with include_graph returns the subgraph the pane would build itself.
     const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
@@ -499,7 +500,16 @@ test("an answer from altimate-code too large to read says so, rather than that t
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /larger than the 4 MiB a plugin can read/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /altimate-code failed: dbt_lineage's answer was larger than the 4 MiB a plugin can read/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("altimate-code's own failure on a large manifest is shown as a failure, not as no such model", async ($, on) => {
+  const { clock } = await start($, on, { size: 6 * 1024 * 1024, cliFailure: true })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /altimate-code failed: the dbt project could not start/ })).toBeDefined()
   await ui.unmount()
 })
 
