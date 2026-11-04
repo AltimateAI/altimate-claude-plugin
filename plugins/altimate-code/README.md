@@ -56,14 +56,19 @@ What altimate-code learns during these tasks is saved to the workspace's memory 
 
 ### Team rules
 
-With learning on (the workspace's "Learn from sessions", or `altimate learn enable` in the project), the workspace's approved **team rules** apply to Claude Code itself, not only to the tasks it hands over:
+In a project linked to an Altimate workspace, the workspace's approved **team rules** apply to Claude Code itself, not only to the tasks it hands over. With learning on (`altimate learn enable` in the project, or the workspace's "Learn from sessions" if you have made no choice of your own), your corrections can become proposed rules too:
 
 - **At session start** the plugin gives Claude the team rules for this repository, tells it how many proposed rules are waiting for you, and reports the owner's reviews of your proposals since your last session (approved, or rejected with the reason).
 - **When you correct Claude** ("no, we never use FLOAT for money") the correction is recorded locally. When you correct it on the same topic in two sessions, or correct a team rule it was given, altimate-code words a proposed rule after the turn, in the background.
 - **"Remember this as a team rule: …"**, said to Claude or in a task handed to altimate-code, waits as a proposal the same way. It needs the words "team rule" (or "as a rule"): "remember to run the tests" is just part of the conversation.
 - **`/altimate-code:rules`** shows the proposals waiting for you, the team rules, and the status of the rules you proposed. For each proposal you choose: send it to the workspace owner's review (or approve it, if you are the owner), edit the wording, save it as a memory, or "Not a rule". Nothing reaches teammates until the owner approves it.
 
-Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gateway, or set a provider in altimate-code): if it has none it can use, the next session start says the check failed. The same commands work in a terminal: `altimate learn proposals`, `altimate learn proposals reply <id> --send`. This needs an altimate-code release with workspace rules.
+Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gateway, or set a provider in altimate-code): if it has none it can use, the next session start says the check failed. The same commands work in a terminal: `altimate learn proposals`, `altimate learn proposals reply <id> --send`. Proposals from Claude Code sessions are answered only there or with `/altimate-code:rules`: altimate-code's own `/rules` and its VS Code chat panel don't list them. This needs an altimate-code release with workspace rules.
+
+- **Start the session in the linked folder**, or a folder below it. If only a folder inside the repository is linked (a dbt project), a session started at the repository root gets no team rules.
+- **A new clone or worktree** gets no team rules until altimate-code has been linked, or run, in that checkout: the link is remembered per folder.
+- **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds), and only in a repository with team rules state or a linked folder.
+- **`ALTIMATE_LEARN=0`** turns all of it off: the hooks start nothing.
 
 ## Example prompts
 
@@ -91,7 +96,7 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | `UNKNOWN_USER` / `Database does not exist` mid-run | The CLI connects but your warehouse credentials don't match this project — reconfigure warehouse auth in the `altimate` TUI (`altimate-code` on npm installs older than v0.7.1) or `profiles.yml`. |
 | `Not signed in to Altimate` | Run `altimate auth login -p altimate-backend --method "Altimate LLM Gateway"` (`altimate-code` on npm installs older than v0.7.1). |
 | Answers ignore your workspace's skills or knowledge | Run `altimate workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate link` in a terminal. |
-| Team rules don't appear at session start | Check `altimate learn status` in the project: it needs learning on, a linked workspace and an Altimate sign-in. Update altimate-code if `altimate learn rules` is an unknown command. |
+| Team rules don't appear at session start | Check `altimate learn status` in the project: it needs a linked workspace and an Altimate sign-in, and `ALTIMATE_LEARN` not set to `0`. Start Claude Code in the linked folder (or below it), not at the repository root when only a subfolder is linked. Update altimate-code if `altimate learn rules` is an unknown command. |
 | Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 Still stuck? See [Support](#support).
@@ -101,7 +106,7 @@ Still stuck? See [Support](#support).
 - **Skill** — `skills/altimate-code/SKILL.md` — delegation logic and workspace guidance
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
 - **Command** — `commands/rules.md` — `/altimate-code:rules` to answer proposed team rules
-- **Hooks** — `hooks/hooks.json` — SessionStart capability description (static text), and the team rules hooks (`hooks-handlers/workspace-rules.sh`): SessionStart, UserPromptSubmit and Stop, which call `altimate learn hook <event>` and never block or fail the session
+- **Hooks** — `hooks/hooks.json` — SessionStart capability description (static text), and the team rules hooks (`hooks-handlers/workspace-rules.sh`): SessionStart, UserPromptSubmit and Stop, which call `altimate learn hook <event>` and never fail the session (the per-turn hooks run in the background; session start waits at most 15 seconds)
 
 ## Support
 

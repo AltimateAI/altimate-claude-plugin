@@ -34,29 +34,33 @@ Workflow (follow in order):
    - `dismiss` → "Not a rule" (that topic is not proposed again for 30 days)
    - and always "Decide later" (do nothing; it stays waiting).
 
-4. **Answer through the CLI.** Map the choice to one flag: `--send`, `--approve`, `--edit`, `--memory`, `--local` or `--dismiss`. For "Edit wording", ask for the new wording (one line, at most 140 characters). Pass it through a here-doc so the shell never interprets what the user typed:
-   ```bash
-   for ALTIMATE_NAME in altimate altimate-code; do
-     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
-     [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
-   done
-   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
-   PROPOSAL_ID='<the proposal id>'
-   WORDING="$(cat <<'ALTIMATE_RULE'
-   <the new wording>
-   ALTIMATE_RULE
-   )"
-   "$ALTIMATE_BIN" learn proposals reply "$PROPOSAL_ID" --json --edit="$WORDING" < /dev/null
-   ```
-   Keep `--edit="$WORDING"` in one argument (a wording that starts with `-` is otherwise read as a flag), and start the closing `ALTIMATE_RULE` line at the beginning of its line. If the wording itself has a line that is exactly `ALTIMATE_RULE`, use another delimiter. For any other choice, run the same command with that flag instead of `--edit="$WORDING"` (and without the here-doc).
+4. **Answer through the CLI.** Map the choice to one flag: `--send`, `--approve`, `--edit`, `--memory`, `--local` or `--dismiss` (`--approve`, and `--approve-anyway` below, work only for the workspace owner). For "Edit wording", ask for the new wording (one line, at most 140 characters) and pass it through a here-doc so the shell never interprets what the user typed. Run this block exactly as shown, flush left: the wording line and the closing `ALTIMATE_RULE` line start at the beginning of their lines. An indented `ALTIMATE_RULE` does not end the here-doc, and spaces before the wording become part of the rule.
 
-   The JSON answer is `{"ok": true, "message": …, "closed": …}` or `{"ok": false, "code": …, "error": …}`. Show the `message` or `error` to the user as it is. Then:
-   - `closed: false` after an edit: the proposal is still open with the new wording; ask about it again.
-   - `verification_flagged`: the rule weakens verification. Ask the user to confirm explicitly. Only if they confirm, reply with `--approve-anyway`.
-   - `invalid_text`: the wording was refused; ask for another wording.
-   - `refused`: the workspace refused the content; offer to edit it.
-   - `busy`: another session is answering it; skip it for now.
-   - `not_open`: it was already answered or closed; move on.
-   - `not_available` saying it "was being answered with" another action: an earlier answer stopped part-way; offer to finish it with that action.
+```bash
+for ALTIMATE_NAME in altimate altimate-code; do
+  ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+  [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+done
+[ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
+PROPOSAL_ID='<the proposal id>'
+WORDING="$(cat <<'ALTIMATE_RULE'
+<the new wording>
+ALTIMATE_RULE
+)"
+"$ALTIMATE_BIN" learn proposals reply "$PROPOSAL_ID" --json --edit="$WORDING" < /dev/null
+```
+
+   Keep `--edit="$WORDING"` in one argument (a wording that starts with `-` is otherwise read as a flag). If the wording itself has a line that is exactly `ALTIMATE_RULE`, use another delimiter. For any other choice, run the same command with that flag instead of `--edit="$WORDING"` (and without the here-doc).
+
+   The JSON answer is either `{"ok": true, "message": …, "closed": …}` or `{"ok": false, "code": …, "error": …}`. Show the `message` or `error` to the user as it is. Then:
+   - When `ok` is true, check `closed`. `closed: false` after an edit: the proposal is still open with the new wording; ask about it again. `closed: true`: it is answered; move on.
+   - When `ok` is false, branch on `code`:
+     - `verification_flagged`: the rule weakens verification. Ask the user to confirm explicitly. Only if they confirm, reply with `--approve-anyway`.
+     - `invalid_text`: the wording was refused; ask for another wording.
+     - `refused`: the workspace refused the content; offer to edit it.
+     - `busy`: another session is answering it; skip it for now.
+     - `not_open`: it was already answered or closed; move on.
+     - `not_available` with an `error` saying it "was being answered with" another action: an earlier answer stopped part-way. Offer to finish it with that action, and send it once if the user agrees. If that action is an approval of a rule that weakens verification, ask for the explicit confirmation again first: never repeat `--approve-anyway` without the user's fresh, explicit confirmation.
+     - any other `code` (such as `failed`): the answer did not go through; leave the proposal waiting and move on.
 
 5. **Finish** with one line on what was sent, approved, saved or dismissed, and how many proposals are still waiting. Do not change any project files.
