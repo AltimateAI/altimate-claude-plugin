@@ -276,10 +276,15 @@ async function loadForm($: EngineInterface, open: Expanded) {
   try {
     const { data, failure } = await runJson<Form & { message?: string }>($, ['fields', open.provider, ...(open.variant ? ['--variant', open.variant] : []), '--json'])
     if (data && Array.isArray(data.fields)) await update($, form, () => ({ ...data, variants: Array.isArray(data.variants) ? data.variants : [] }))
-    else await update($, formMessage, () => failure ?? 'Could not read the credential fields.')
+    else await update($, formMessage, current => joinNotes(current, failure ?? 'Could not read the credential fields.'))
   } catch (error) {
-    await update($, formMessage, () => `Could not run altimate: ${String(error)}`)
+    await update($, formMessage, current => joinNotes(current, `Could not run altimate: ${String(error)}`))
   }
+}
+
+/** Keeps an earlier note on the form (a failed discard, a refused connect) next to a new one. */
+function joinNotes(...notes: (string | null | undefined)[]): string | null {
+  return notes.filter(Boolean).join(' · ') || null
 }
 
 /** Forgets what was typed or pasted for a provider, so an abandoned form cannot leak into the next connect. Returns why it failed, or null. */
@@ -305,7 +310,7 @@ async function openForm($: EngineInterface, provider: ProviderId, mode: Expanded
   await update($, expanded, () => open)
   await update($, form, () => null)
   await update($, typed, () => ({}))
-  await update($, formMessage, () => [failure && `Could not clear earlier input: ${failure}`, note].filter(Boolean).join(' · ') || null)
+  await update($, formMessage, () => joinNotes(failure && `Could not clear earlier input: ${failure}`, note))
   await update($, message, () => null)
   await loadForm($, open)
 }
@@ -426,7 +431,7 @@ function submitForm($: EngineInterface, localOnly: boolean) {
       const verb = open.mode === 'update' && !localOnly ? 'update' : 'connect'
       const variant = open.variant ? ['--variant', open.variant] : []
       const run = await runJson<Outcome>($, [verb, open.provider, ...(localOnly ? ['--local-only'] : []), ...variant, '--json'], WORKSPACE_TIMEOUT_MS)
-      outcome = run.data ?? { status: 'failed', message: run.failure }
+      outcome = { status: 'failed', ...run.data, message: run.data?.message ?? run.failure }
     })
     const result = outcome as Outcome | null
     if (!result) return
