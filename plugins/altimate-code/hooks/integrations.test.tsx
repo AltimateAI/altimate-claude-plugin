@@ -557,3 +557,28 @@ test('signed out: the band and pane offer Sign in to sync and no sync control; t
   expect(await ui.find({ key: 'sync-everything' })).toBeDefined()
   await ui.unmount()
 })
+
+test('a CLI failure that answers with an error field is shown as the reason, and a failed discard on cancel is reported', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
+    const args = e.argv.slice(2)
+    const reply = (body: unknown, exitCode = 0) => ({ value: { exitCode, stdout: JSON.stringify(body), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (args[0] === 'fields') return reply({ error: 'catalog unavailable' }, 1)
+    if (args[0] === 'discard') return reply({ message: 'store locked' }, 1)
+    return reply(STATUS)
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'jira-add' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /catalog unavailable/ })).toBeDefined()
+  await ui.press({ key: 'jira-cancel' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Jira: could not clear what was entered: store locked/ })).toBeDefined()
+  await ui.unmount()
+})

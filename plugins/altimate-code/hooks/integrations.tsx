@@ -78,8 +78,7 @@ const ANSI = /\u001b\[[0-9;]*m/g
 async function runJson<T extends { message?: string | null }>($: EngineInterface, args: string[], timeoutMs?: number) {
   const result = await runCli($, args, timeoutMs)
   const data = parseJson<T>(result.stdout)
-  const failure = result.exitCode === 0 ? null : (data?.message ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed')
-  return { data, failure }
+  return { data, failure: result.exitCode === 0 ? null : failureText(result) }
 }
 
 /**
@@ -228,7 +227,8 @@ async function listWorkspaces($: EngineInterface) {
     const result = await runAltimate($, ['workspace', 'list', '--json'])
     const data = parseJson<{ ok?: boolean; workspaces?: WorkspaceChoice[] }>(result.stdout)
     if (result.exitCode !== 0 || !Array.isArray(data?.workspaces)) {
-      await update($, message, () => failureText(result) === 'failed' ? 'Could not list workspaces.' : failureText(result))
+      const reason = failureText(result)
+      await update($, message, () => (reason === 'failed' ? 'Could not list workspaces.' : reason))
     } else if (data.workspaces.length === 0) {
       await update($, message, () => 'No workspaces found for this account.')
     } else {
@@ -249,7 +249,8 @@ async function linkWorkspace($: EngineInterface, choice: WorkspaceChoice) {
   try {
     const link = await runAltimate($, ['link', '--workspace', String(choice.id), '-y'], WORKSPACE_TIMEOUT_MS)
     if (link.exitCode !== 0) {
-      await update($, message, () => (failureText(link) === 'failed' ? 'Could not link the workspace.' : failureText(link)))
+      const reason = failureText(link)
+      await update($, message, () => (reason === 'failed' ? 'Could not link the workspace.' : reason))
       return
     }
     await update($, workspaces, () => null)
@@ -274,28 +275,25 @@ type Outcome = { status?: string; sync?: string; account?: string | null; messag
 async function loadForm($: EngineInterface, open: Expanded) {
   try {
     const { data, failure } = await runJson<Form & { message?: string }>($, ['fields', open.provider, ...(open.variant ? ['--variant', open.variant] : []), '--json'])
-    if (data && Array.isArray(data.fields)) await update($, form, () => data)
+    if (data && Array.isArray(data.fields)) await update($, form, () => ({ ...data, variants: Array.isArray(data.variants) ? data.variants : [] }))
     else await update($, formMessage, () => failure ?? 'Could not read the credential fields.')
   } catch (error) {
     await update($, formMessage, () => `Could not run altimate: ${String(error)}`)
   }
 }
 
-/** Forgets what was typed or pasted for a provider, so an abandoned form cannot leak into the next connect. */
-async function discardEntries($: EngineInterface, provider: ProviderId) {
+/** Forgets what was typed or pasted for a provider, so an abandoned form cannot leak into the next connect. Returns why it failed, or null. */
+async function discardEntries($: EngineInterface, provider: ProviderId): Promise<string | null> {
   try {
-    await runJson($, ['discard', provider, '--json'])
-  } catch {}
+    return (await runJson($, ['discard', provider, '--json'])).failure
+  } catch (error) {
+    return String(error)
+  }
 }
 
 /** Discards what was entered for a provider ahead of an action that ignores the form; an open form for it is closed with it. Returns why it failed, or null. */
 async function discardForAction($: EngineInterface, provider: ProviderId): Promise<string | null> {
-  let failure: string | null
-  try {
-    failure = (await runJson($, ['discard', provider, '--json'])).failure
-  } catch (error) {
-    failure = String(error)
-  }
+  const failure = await discardEntries($, provider)
   if (failure) return failure
   if ((await read($, expanded))?.provider === provider) await closeForm($)
   return null
@@ -303,11 +301,11 @@ async function discardForAction($: EngineInterface, provider: ProviderId): Promi
 
 async function openForm($: EngineInterface, provider: ProviderId, mode: Expanded['mode'], note: string | null = null) {
   const open: Expanded = { provider, mode, variant: null }
-  await discardEntries($, provider)
+  const failure = await discardEntries($, provider)
   await update($, expanded, () => open)
   await update($, form, () => null)
   await update($, typed, () => ({}))
-  await update($, formMessage, () => note)
+  await update($, formMessage, () => [failure && `Could not clear earlier input: ${failure}`, note].filter(Boolean).join(' · ') || null)
   await update($, message, () => null)
   await loadForm($, open)
 }
@@ -320,8 +318,9 @@ async function closeForm($: EngineInterface) {
 }
 
 async function cancelForm($: EngineInterface, provider: ProviderId) {
-  await discardEntries($, provider)
+  const failure = await discardEntries($, provider)
   await closeForm($)
+  if (failure) await update($, message, () => `${nameOf(provider)}: could not clear what was entered: ${failure}`)
 }
 
 async function openPane($: EngineInterface) {
@@ -687,12 +686,10 @@ export const register: Register = on => {
           {choices && !running && (
             <Box flexDirection="column">
               <Text dimColor>Link this folder to:</Text>
-              <Box flexDirection="column">
-                {choices.map(one => (
-                  <Button key={`link-${one.id}`} label={one.name} onPress={() => later($, () => linkWorkspace($, one))} />
-                ))}
-                <Button key="link-cancel" label="Cancel" onPress={() => later($, () => update($, workspaces, () => null))} />
-              </Box>
+              {choices.map(one => (
+                <Button key={`link-${one.id}`} label={one.name} onPress={() => later($, () => linkWorkspace($, one))} />
+              ))}
+              <Button key="link-cancel" label="Cancel" onPress={() => later($, () => update($, workspaces, () => null))} />
             </Box>
           )}
         </Box>
