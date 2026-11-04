@@ -608,3 +608,21 @@ test('a form without variants loads, and a refused connect that answers with an 
   expect(await ui.find({ type: 'Text', text: /backend unavailable/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('a refused connect with no reason keeps the friendly fallback', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  fakeCli(on, { connect: { exitCode: 1, body: { status: 'failed' } } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'jira-add' })
+  await clock.settle()
+  await ui.press({ key: 'jira-submit' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Jira could not be connected\./ })).toBeDefined()
+  await ui.unmount()
+})

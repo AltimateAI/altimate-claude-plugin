@@ -431,7 +431,7 @@ function submitForm($: EngineInterface, localOnly: boolean) {
       const verb = open.mode === 'update' && !localOnly ? 'update' : 'connect'
       const variant = open.variant ? ['--variant', open.variant] : []
       const run = await runJson<Outcome>($, [verb, open.provider, ...(localOnly ? ['--local-only'] : []), ...variant, '--json'], WORKSPACE_TIMEOUT_MS)
-      outcome = { status: 'failed', ...run.data, message: run.data?.message ?? run.failure }
+      outcome = { status: 'failed', ...run.data, message: run.data?.message ?? (run.failure === 'failed' ? null : run.failure) }
     })
     const result = outcome as Outcome | null
     if (!result) return
