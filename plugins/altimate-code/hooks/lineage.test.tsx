@@ -66,6 +66,8 @@ async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
   const calls: string[] = []
   const toasts: string[] = []
+  // The per-edit impact note: logged for the record, never a toast (the person sees the end-of-task summary).
+  const notes: string[] = []
   const logs: string[] = []
   const lists: string[] = []
   on('command.register', () => ({ value: { command: 'lineage' } }))
@@ -82,6 +84,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('ui.log', (_: unknown, e: { text: string }) => {
     logs.push(e.text)
+    if (e.text.startsWith('◆ impact-first · ') && !e.text.startsWith('◆ impact-first · impact_analysis(')) notes.push(e.text)
     return { value: undefined }
   })
   on('ui.render', ($$: any, e: any) => {
@@ -188,7 +191,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, calls, toasts, logs, lists }
+  return { clock, calls, toasts, notes, logs, lists }
 }
 
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
@@ -209,26 +212,23 @@ test('reading a model points the pane at it: the manifest graph, then its column
   await ui.unmount()
 })
 
-test('an edit naming a column is held until its reach is known, then the reach goes to Claude and the band', async ($, on) => {
-  const { clock, calls, toasts, logs } = await start($, on)
+test('an edit naming a column is held until its reach is known, then the reach goes to Claude and the log, not the person', async ($, on) => {
+  const { clock, calls, toasts, notes, logs } = await start($, on)
   const edit = { tool: 'Edit' as const, file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' }
   const result: any = await $.tool.call(edit)
   await clock.settle()
 
   // The reach is looked up before the edit runs.
   expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('tool:Edit'))
-  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+  expect(toasts).toEqual([])
   expect(result.context?.[0]).toContain('read by 2 downstream models: fct_revenue_daily (revenue), rpt_finance_weekly (revenue)')
   expect(result.context?.[0]).toContain('dashboards on them: "Exec Revenue"')
   expect(logs).toContain("impact-first · added to Claude's context: lineage for fct_orders.revenue")
 
+  // The band waits for the end of the task (task-impact.tsx): nothing per edit.
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: 'fct_orders.revenue' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: 'MEDIUM' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: /direct 5 · transitive 1 · tests 1 · read by 2 models · 1 dashboards/ })).toBeDefined()
-  await band.press({ key: 'lineage-dismiss' })
-  await clock.settle()
-  expect(await band.find({ key: 'lineage-open' })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /fct_orders\.revenue/ })).toBeUndefined()
   await band.unmount()
 
   // The same column again adds nothing new to Claude's context.
@@ -352,7 +352,7 @@ test('/lineage names a model and column; an unknown model says so', async ($, on
 })
 
 test('a manifest over 4 MiB is read through altimate-code: the graph comes from dbt_lineage with include_graph', async ($, on) => {
-  const { clock, calls, toasts } = await start($, on, { size: 6 * 1024 * 1024 })
+  const { clock, calls, notes } = await start($, on, { size: 6 * 1024 * 1024 })
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   expect(calls).toEqual(['tool:Read', 'cli:dbt_lineage:graph'])
@@ -365,7 +365,7 @@ test('a manifest over 4 MiB is read through altimate-code: the graph comes from 
   // Impact-first works on the same path.
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
-  expect(toasts[0]).toContain('fct_orders.revenue is read by 2 models')
+  expect(notes[0]).toContain('fct_orders.revenue is read by 2 models')
 })
 
 test('a recompiled manifest is a new focus: the column lineage is read again', async ($, on) => {
@@ -384,17 +384,14 @@ test('a recompiled manifest is a new focus: the column lineage is read again', a
 
 test('a subagent gets the lineage context the main agent already got, and an untraced model keeps the count a lower bound', async ($, on) => {
   const reach = { ...REACH, column_reach: { ...REACH.column_reach, untraced: [{ name: 'mart_cohort_ltv', reason: 'No compiled SQL found' }], uncertain: [] } }
-  const { clock, toasts } = await start($, on, { reach })
+  const { clock, notes } = await start($, on, { reach })
   const edit = { tool: 'Edit' as const, file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' }
   const main: any = await $.tool.call(edit)
   const sub: any = await $.tool.call({ ...edit, agentId: 'sub-1' } as any)
   await clock.settle()
-  expect(toasts[0]).toContain('is read by at least 2 models')
+  expect(notes[0]).toContain('is read by at least 2 models')
   expect(main.context?.[0]).toContain('could not be traced: mart_cohort_ltv ("No compiled SQL found")')
   expect(sub.context?.[0]).toContain('read by at least 2 downstream models')
-  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /read by at least 2 models/ })).toBeDefined()
-  await band.unmount()
 })
 
 test('a read Claude makes outside a dbt project stays quiet', async ($, on) => {
@@ -444,10 +441,10 @@ test("a dbt_lineage result Claude's call got cut for size leaves the pane to fet
 
 test('dashboards on models that may read the column are counted and named', async ($, on) => {
   const reach = { ...REACH, column_reach: { ...REACH.column_reach, uncertain: [{ name: 'rpt_ops', reason: 'names it only outside its select list' }], uncertain_exposures: [{ name: 'ops', label: 'Ops Board' }] } }
-  const { clock, toasts } = await start($, on, { reach })
+  const { clock, notes } = await start($, on, { reach })
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
-  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by at least 2 models and 2 dashboards · Exec Revenue · Ops Board')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by at least 2 models and 2 dashboards · Exec Revenue · Ops Board')
   expect(edit.context?.[0]).toContain('dashboards on models that may read it: "Ops Board"')
 })
 
@@ -465,28 +462,28 @@ test('/lineage on the same model with another column traces that column', async 
   await ui.unmount()
 })
 
-test('the impact toast shows before the edit runs', async ($, on) => {
-  const { clock, toasts } = await start($, on, { toolResult: e => (e.tool === 'Edit' ? { toastsSoFar: toasts.length } : undefined) })
+test('the impact note is logged before the edit runs', async ($, on) => {
+  const { clock, notes } = await start($, on, { toolResult: e => (e.tool === 'Edit' ? { notesSoFar: notes.length } : undefined) })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
-  expect(result.result).toEqual({ toastsSoFar: 1 })
+  expect(result.result).toEqual({ notesSoFar: 1 })
 })
 
 test('an edit touching two columns traces both and reports their combined reach', async ($, on) => {
-  const { clock, calls, toasts } = await start($, on)
+  const { clock, calls, notes } = await start($, on)
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
   expect(calls).toContain('mcp:impact_analysis:revenue')
   expect(calls).toContain('mcp:impact_analysis:order_id')
-  expect(toasts[0]).toContain('fct_orders.')
-  expect(toasts[0]).toContain('is read by 2 models and 1 dashboard')
+  expect(notes[0]).toContain('fct_orders.')
+  expect(notes[0]).toContain('is read by 2 models and 1 dashboard')
 })
 
 test('a touched column whose check fails keeps the combined count a lower bound', async ($, on) => {
-  const { clock, toasts } = await start($, on, { failColumn: 'order_id' })
+  const { clock, notes } = await start($, on, { failColumn: 'order_id' })
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
-  expect(toasts[0]).toContain('fct_orders.revenue is read by at least 2 models')
+  expect(notes[0]).toContain('fct_orders.revenue is read by at least 2 models')
   expect(edit.context?.[0]).toContain('columns not checked (over the limit or no answer in time): order_id')
 })
 
@@ -500,7 +497,7 @@ test('a new unchecked column in the same turn still reaches Claude', async ($, o
 })
 
 test('columns beyond the cap are named as unchecked and make the count a lower bound', async ($, on) => {
-  const { clock, calls, toasts } = await start($, on)
+  const { clock, calls, notes } = await start($, on)
   const edit: any = await $.tool.call({
     tool: 'Edit',
     file_path: FILE,
@@ -509,7 +506,7 @@ test('columns beyond the cap are named as unchecked and make the count a lower b
   })
   await clock.settle()
   expect(calls.filter(call => call.startsWith('mcp:impact_analysis'))).toHaveLength(3)
-  expect(toasts[0]).toContain('is read by at least 2 models')
+  expect(notes[0]).toContain('is read by at least 2 models')
   expect(edit.context?.[0]).toMatch(/columns not checked \(over the limit or no answer in time\): \w+;/)
 })
 
@@ -1042,22 +1039,22 @@ test('an older column-reach answer does not replace the newer one', async ($, on
   await ui.unmount()
 })
 
-test('when the whole lookup runs out of time, a toast says the edit went ahead without lineage', async ($, on) => {
-  const { clock, toasts } = await start($, on, { holdFirstManifestRead: new Promise<void>(() => {}) })
+test('when the whole lookup runs out of time, the log says the edit went ahead without lineage', async ($, on) => {
+  const { clock, notes } = await start($, on, { holdFirstManifestRead: new Promise<void>(() => {}) })
   const call = $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.advance(9_000)
   await call
   await clock.settle()
-  expect(toasts).toContain('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
+  expect(notes).toContain('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
 })
 
-test('a .sql file outside any dbt project gets no timeout toast', async ($, on) => {
-  const { clock, toasts } = await start($, on)
+test('a .sql file outside any dbt project gets no timeout note', async ($, on) => {
+  const { clock, notes } = await start($, on)
   const call = $.tool.call({ tool: 'Edit', file_path: '/elsewhere/migrations/001.sql', old_string: 'a', new_string: 'b' })
   await clock.advance(9_000)
   await call
   await clock.settle()
-  expect(toasts).toEqual([])
+  expect(notes).toEqual([])
 })
 
 test("the pane reads the dbt integration's model lineage from altimate-code", async ($, on) => {
@@ -1140,14 +1137,11 @@ test("project text in the impact note is one line per name, quoted, capped, and 
 })
 
 test('an unreadable dashboards section keeps the dashboard count a lower bound', async ($, on) => {
-  const { clock, toasts } = await start($, on, { reach: { ...REACH, exposures_error: 'exposures: bad yaml' } })
+  const { clock, notes } = await start($, on, { reach: { ...REACH, exposures_error: 'exposures: bad yaml' } })
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
-  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and at least 1 dashboard · Exec Revenue')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and at least 1 dashboard · Exec Revenue')
   expect(edit.context?.[0]).toContain('the dashboards could not be read ("exposures: bad yaml")')
-  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /at least 1 dashboards/ })).toBeDefined()
-  await band.unmount()
 })
 
 test('no column trace starts once the hold has run out', async ($, on) => {

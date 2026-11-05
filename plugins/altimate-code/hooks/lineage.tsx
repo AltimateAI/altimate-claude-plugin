@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On, RenderElement } from 'claude-code'
+import type { EngineInterface, On } from 'claude-code'
 
 import type {
   AnswerModel,
@@ -33,6 +33,7 @@ import {
   upstreamArt,
   warehouseEdges,
 } from './lineage-graph'
+import { taskBeforeTool, taskTurnComplete, taskTurnStart } from './task-impact'
 
 const PANE = 'altimate-lineage'
 const PANE_TITLE = 'Altimate lineage'
@@ -67,10 +68,8 @@ let revealFor: string | null = null
 const answerAtom = atom({ plugin: 'altimate-code', key: 'lineageAnswer' } as const, [] as AnswerModel[])
 // Where the graph canvas is panned to: its first visible column; null centres it on the model.
 const panAtom = atom({ plugin: 'altimate-code', key: 'lineagePan' } as const, null as number | null)
-const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
 const messageAtom = atom({ plugin: 'altimate-code', key: 'lineageMessage' } as const, null as string | null)
 const loadingAtom = atom({ plugin: 'altimate-code', key: 'lineageLoading' } as const, false)
-const bandHiddenAtom = atom({ plugin: 'altimate-code', key: 'isLineageBandHidden' } as const, false)
 
 // Caches, rebuilt from the manifest file after a reload.
 let manifestCache: { path: string; mtimeMs: number; graph: LineageGraph } | null = null
@@ -135,7 +134,7 @@ const SEVERITY_COLOR: Record<ImpactView['severity'], string> = {
 }
 
 /** Resolves with the work's value, or null once `ms` pass or it fails. */
-function within<T>($: EngineInterface, ms: number, work: Promise<T>): Promise<T | null> {
+export function within<T>($: EngineInterface, ms: number, work: Promise<T>): Promise<T | null> {
   return new Promise(resolve => {
     let settled = false
     const settle = (value: T | null) => {
@@ -167,7 +166,7 @@ const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
 
 /** The dbt project above a file or folder: the closest folder holding dbt_project.yml. */
-async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {
+export async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {
   let dir = isFile ? dirname(start) : start
   for (let i = 0; i < 40; i++) {
     if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) return dir
@@ -406,7 +405,7 @@ function fileUriPath(uri: string): string {
  * `cliOnly` goes straight to the CLI, whose --json carries the whole metadata; a structured result
  * the server left out for size is fetched that way too.
  */
-async function runTool($: EngineInterface, name: string, args: Record<string, unknown>, cliOnly = false, until?: number) {
+export async function runTool($: EngineInterface, name: string, args: Record<string, unknown>, cliOnly = false, until?: number) {
   // With a deadline, nothing starts once it has passed, and the CLI is stopped at it.
   const left = async () => {
     const ms = until === undefined ? TOOL_TIMEOUT_MS : until - (await $.clock.now())
@@ -857,7 +856,7 @@ function cut(text: string, max: number): string {
 
 /**
  * Before an edit to a model's SQL: what reads the model, and, when the edit changes one of its
- * columns, which downstream models and dashboards read that column. Shown as a toast, then added to
+ * columns, which downstream models and dashboards read that column. Logged, then added to
  * Claude's context with the edit's result.
  */
 async function impactFirst($: EngineInterface, e: any, file: string, deadline: number, progress: { project: boolean }): Promise<ImpactNote | null> {
@@ -1012,36 +1011,6 @@ export async function startLineage($: EngineInterface) {
 
 type Ui = { Box: any; Button: any; Text: any }
 
-/** The band line after Claude edits a model; drawn by the plugin's one band hook. */
-export async function lineageBand($: EngineInterface, ui: Ui): Promise<RenderElement | null> {
-  const impact = await read($, impactAtom)
-  if (!impact || (await read($, bandHiddenAtom))) return null
-  const { Box, Button, Text } = ui
-  const target = impact.column ? `${impact.model}.${impact.column}` : impact.model
-  // One Text, so a narrow band wraps it as a line, not word by word in each piece.
-  return (
-    <Box key="lineage-band" flexDirection="column">
-      <Text>
-        <Text color="warning">⚠ Impact </Text>
-        <Text bold>{target}</Text>
-        <Text dimColor> (modify) </Text>
-        <Text color={SEVERITY_COLOR[impact.severity]} bold>
-          {impact.severity}
-        </Text>
-        <Text dimColor>
-          {'  '}direct {impact.direct} · transitive {impact.transitive}{impact.truncated ? '+' : ''} · tests {impact.tests}
-          {impact.readers !== null ? ` · read by ${impact.unsettled ? 'at least ' : ''}${impact.readers} models` : ''}
-          {impact.exposures.length || impact.dashboardsUnsettled ? ` · ${impact.dashboardsUnsettled ? 'at least ' : ''}${impact.exposures.length} dashboards` : ''}
-        </Text>
-      </Text>
-      <Box>
-        <Button key="lineage-open" label="Open lineage" onPress={() => later($, () => openPane($))} />
-        <Button key="lineage-dismiss" label="Dismiss" onPress={() => update($, bandHiddenAtom, () => true)} />
-      </Box>
-    </Box>
-  )
-}
-
 function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segment[], key: string) {
   const { Box, Button, Text } = ui
   return (
@@ -1084,6 +1053,8 @@ export function registerLineage(on: On) {
     if (!(e as { agentId?: string }).agentId) {
       contextGiven.clear()
       turnCount++
+      // The end-of-task summary's share of these events (a plugin hooks each event once).
+      await taskTurnStart($).catch(error => $.ui.log(`lineage-summary · task start: ${String(error)}`))
     }
     return next(e)
   })
@@ -1092,6 +1063,7 @@ export function registerLineage(on: On) {
   // answered from memory) it follows the first one named, so the pane shows what the answer is about.
   on('turn.complete', async ($, e, next) => {
     const out = await next(e)
+    taskTurnComplete($, e as { agentId?: string })
     if ((e as { agentId?: string }).agentId || e.reason !== 'answer' || !out.text) return out
     const text = out.text
     const turn = turnCount
@@ -1152,6 +1124,8 @@ export function registerLineage(on: On) {
 
   // Follow the model Claude reads or edits; before an edit lands, look up what it reaches.
   on('tool.call', async ($, e, next) => {
+    // Never holds an edit back on its own failure.
+    await taskBeforeTool($, e).catch(error => $.ui.log(`lineage-summary · before ${e.tool}: ${String(error)}`))
     const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? String(e.file_path) : null
     const isSql = !!file && /\.sql$/i.test(file)
     const isEdit = isSql && EDIT_TOOLS.has(e.tool)
@@ -1165,9 +1139,10 @@ export function registerLineage(on: On) {
     }
     const note = lookup ? await within($, HOLD_TOTAL_MS, lookup) : null
     // Out of time before even the model-level lookup finished: say so, rather than nothing.
-    if (lookup && !note && !finished && progress.project) $.ui.toast('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it', { timeoutMs: 8000 })
-    // Before the edit runs: the point is to see what it reaches first.
-    if (note) $.ui.toast(note.toast, { timeoutMs: 8000 })
+    // The person sees the end-of-task summary (task-impact.tsx), not a note per edit: these lines go
+    // to the log, and the note itself to Claude's context below.
+    if (lookup && !note && !finished && progress.project) $.ui.log('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
+    if (note) $.ui.log(note.toast)
     const result = await next(e)
     if (result.deny || result.isError) return result
     // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
@@ -1218,8 +1193,6 @@ export function registerLineage(on: On) {
       }
     }
     if (note) {
-      await update($, impactAtom, () => note.view)
-      await update($, bandHiddenAtom, () => false)
       if (!contextGiven.has(note.key)) {
         contextGiven.add(note.key)
         $.ui.log(`impact-first · added to Claude's context: lineage for ${note.view.column ? `${note.view.model}.${note.view.column}` : note.view.model}`)

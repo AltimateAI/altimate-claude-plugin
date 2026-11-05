@@ -172,6 +172,33 @@ export type ImpactView = {
   truncated: boolean
 }
 
+/** How far a changed column's value reaches downstream. */
+export type Reach = {
+  columns: number
+  models: number
+  ends: number
+  hops: number
+  mayCarry: number
+  cleared: number | null
+  unresolved: number
+  modelLevel: number | null
+  truncated: boolean
+}
+
+export type SummaryColumn = { name: string; how: string | null; reach: Reach | null; failed: boolean }
+
+/** What the band shows after a task that changed models. */
+export type TaskSummaryView = {
+  state: 'tracing' | 'ready'
+  models: { name: string; modelLevel: number | null; columns: SummaryColumn[] }[]
+  /** Models whose SQL could not be read, across every column traced: the reach is a lower bound. */
+  unresolved: number
+  truncated: boolean
+  report: string | null
+  /** The report could not be opened: its path is shown as a link instead. */
+  openFailed: boolean
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -204,13 +231,14 @@ declare module 'claude-code' {
       lineageView: 'graph' | 'ends' | 'folders' | 'list'
       /** The graph canvas's first visible column; null centres it on the followed model. */
       lineagePan: number | null
-      lineageImpact: Shaped<ImpactView | null>
       /** The dbt models Claude's last answer names, first named first. */
       lineageAnswer: AnswerModel[]
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
       lineageLoading: boolean
-      isLineageBandHidden: boolean
+      /** The end-of-task column impact summary the band shows; null until a task changes a model. */
+      lineageTaskSummary: Shaped<TaskSummaryView | null>
+      isLineageSummaryHidden: boolean
     }
   }
 }

@@ -2,6 +2,14 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- End-of-task column impact: after a task that changed a dbt model, a band sums up each changed column's downstream reach from `impact_analysis`, and **Open report** or `/lineage-report` opens an offline HTML report with upstream and downstream lineage, two levels by default, and click-to-highlight paths. The task's start copies `target/manifest.json` aside, so the answer reflects the SQL before the task.
+
+### Changed
+- The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result.
+
 ## [1.4.0] — 2026-10-28
 
 ### Added
