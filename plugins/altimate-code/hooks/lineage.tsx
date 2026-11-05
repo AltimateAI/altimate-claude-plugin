@@ -790,7 +790,7 @@ async function loadWarehouse($: EngineInterface) {
   $.ui.log(`lineage-pane · ${server} · ${tool}(${node.relation}) · ${elapsed(ms)}`)
 }
 
-async function openPane($: EngineInterface) {
+export async function openPane($: EngineInterface) {
   paneOpened = true
   await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
 }

@@ -15,7 +15,8 @@ export type ColumnAnswer = {
   counts?: Record<string, unknown>
   nodes: { id?: string; name?: string; folder?: string; materialized?: string; contract?: boolean; tests?: number; exposures?: string[] }[]
   columns: { model: number; column: string; hop: number; end?: boolean; how?: string; how_from?: string; type?: string }[]
-  edges?: [number, number, string?][]
+  /** [from, to, how], plus "name" when the how was inferred from matching names. */
+  edges?: [number, number, string?, string?][]
   also_reads?: { model: number; columns?: string[]; downstream?: number }[]
   unresolved?: { model: number; reason?: string; downstream?: number }[]
   cleared?: (number | { model: number })[]
@@ -36,7 +37,6 @@ export const MAX_TASK_COLUMNS = 3
 export const DEFAULT_LEVELS = 2
 export const GLYPHS = ['=', '~', 'ƒ', 'Σ', '?'] as const
 const RANK: Record<string, number> = { 'Σ': 4, 'ƒ': 3, '~': 2, '=': 1, '?': 0 }
-export const HOW_NAME: Record<string, string> = { '=': 'same value', '~': 'renamed', 'ƒ': 'calculated', 'Σ': 'aggregated', '?': 'unknown' }
 
 /** A select item's expression for the header: the last scope's (the model's own select) when several share the name. */
 const lastExpr = (items: Map<string, string>, name: string) => items.get(name)?.split('\u0000').pop()?.replace(/\s+/g, ' ').trim() ?? null
@@ -76,36 +76,35 @@ export function modelLevelOf(metadata: unknown): number | null {
 
 const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null)
 
-/** A how as the contract spells it: its glyph, and whether the link was matched by name rather than traced. */
-export function parseHow(how: unknown, howFrom?: unknown): { glyph: string; byName: boolean } {
+export type How = { glyph: string; byName: boolean }
+
+/** A how as the contract spells it: its glyph, and whether the link was inferred from matching names rather than traced. */
+export function parseHow(how: unknown, howFrom?: unknown): How {
   const text = typeof how === 'string' ? how : ''
-  const glyph = GLYPHS.find(one => text.startsWith(one)) ?? '?'
-  return { glyph, byName: howFrom === 'name' || (text.length > 1 && text.endsWith('?')) }
+  return { glyph: GLYPHS.find(one => text === one) ?? '?', byName: howFrom === 'name' }
 }
 
-/** The strongest derivation among several edges: aggregated, calculated, renamed, same, unknown. */
-function strongest(hows: string[]): string | null {
-  if (hows.length === 0) return null
-  return hows.reduce((best, one) => ((RANK[parseHow(one).glyph] ?? 0) > (RANK[parseHow(best).glyph] ?? 0) ? one : best))
+/** The strongest derivation among several edges (aggregated, calculated, renamed, same, unknown); a traced one over one matched by name. */
+function strongest(edges: NonNullable<ColumnAnswer['edges']>): How | null {
+  const hows = edges.map(edge => parseHow(edge[2], edge[3]))
+  const score = (one: How) => (RANK[one.glyph] ?? 0) * 2 + (one.byName ? 0 : 1)
+  return hows.length ? hows.reduce((best, one) => (score(one) > score(best) ? one : best)) : null
 }
 
-/** How one column of an answer is derived: its own how, else the strongest edge into it (downstream) or out of it (upstream). */
-function howOf(answer: ColumnAnswer, index: number): string | null {
-  const own = answer.columns[index]?.how
-  if (typeof own === 'string' && own) return own
+/** How one column of an answer is derived: the edge that first reached it, else the strongest edge into it (downstream) or out of it (upstream). */
+function howOf(answer: ColumnAnswer, index: number): How | null {
+  const col = answer.columns[index]
+  if (typeof col?.how === 'string' && col.how) return parseHow(col.how, col.how_from)
   const upstream = answer.direction === 'upstream'
-  const edges = (answer.edges ?? []).filter(edge => Array.isArray(edge) && (upstream ? edge[0] === index : edge[1] === index))
-  return strongest(edges.map(edge => String(edge[2] ?? '?')))
+  return strongest((answer.edges ?? []).filter(edge => Array.isArray(edge) && (upstream ? edge[0] === index : edge[1] === index)))
 }
 
 /** The focus column's own derivation, from the upstream answer: how it is made from what it reads. */
-export function focusHow(upstream: ColumnAnswer | null): string | null {
+export function focusHow(upstream: ColumnAnswer | null): How | null {
   if (!upstream) return null
   const focus = upstream.columns.findIndex(one => one.hop === 0)
   if (focus < 0) return null
-  const own = upstream.columns[focus]!.how
-  if (typeof own === 'string' && own) return own
-  return strongest((upstream.edges ?? []).filter(edge => edge[1] === focus).map(edge => String(edge[2] ?? '?')))
+  return strongest((upstream.edges ?? []).filter(edge => Array.isArray(edge) && edge[1] === focus))
 }
 
 /** The downstream reach in counts, read from the answer's counts where it gives them, else counted. */
@@ -118,7 +117,7 @@ export function reachOf(answer: ColumnAnswer): Reach {
     models: num(counts.models) ?? new Set(beyond.map(one => one.model)).size,
     ends: num(counts.ends) ?? beyond.filter(one => one.end).length,
     hops: num(counts.hops) ?? Math.max(0, ...answer.columns.map(one => one.hop)),
-    mayCarry: num(counts.may_carry_models) ?? num(counts.also_reads_models) ?? answer.also_reads?.length ?? 0,
+    mayCarry: num(counts.may_carry_models) ?? answer.also_reads?.length ?? 0,
     cleared,
     unresolved: num(counts.unresolved_models) ?? answer.unresolved?.length ?? 0,
     modelLevel: num(counts.model_level),
@@ -142,7 +141,8 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
         const reach = one.down ? reachOf(one.down) : null
         for (const entry of one.down?.unresolved ?? []) unresolved.add(one.down!.nodes[entry.model]?.id ?? one.down!.nodes[entry.model]?.name ?? String(entry.model))
         if (reach?.truncated) truncated = true
-        return { name: one.column!, how: focusHow(one.up), reach, failed: one.failed }
+        const how = focusHow(one.up)
+        return { name: one.column!, how: how?.glyph ?? null, byName: how?.byName ?? false, reach, failed: one.failed }
       })
     return { name: change.model, modelLevel, columns }
   })
@@ -157,7 +157,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
     lines.push(`${model.name}${model.modelLevel !== null ? ` · ${plural(model.modelLevel, 'downstream model')} at model level` : ''}`)
     if (model.columns.length === 0) lines.push('  no output column changed: the model-level count stands')
     for (const col of model.columns) {
-      const glyph = col.how ? parseHow(col.how).glyph : '·'
+      const glyph = col.how ? `${col.how}${col.byName ? ' (by name)' : ''}` : '·'
       if (view.state === 'tracing' && !col.reach) lines.push(`  ${col.name} ${glyph}  tracing…`)
       else if (!col.reach) lines.push(`  ${col.name} ${glyph}  ${col.failed ? 'could not be traced' : 'no column answer'}`)
       else {
@@ -190,6 +190,8 @@ export type ReportModel = {
   contract: boolean
   tests: number
   exposures: string[]
+  /** What the engine noted on the model, such as a filter it rewrote before analysis. */
+  flags: string[]
   columns: ReportColumn[]
 }
 export type ReportSection = { hops: { hop: number; models: ReportModel[] }[]; truncated: boolean; error: string | null }
@@ -247,10 +249,11 @@ export function sectionOf(answer: ColumnAnswer | null, failed = false): ReportSe
       contract: node.contract === true,
       tests: num(node.tests) ?? 0,
       exposures: Array.isArray(node.exposures) ? node.exposures.map(String) : [],
+      flags: [...new Set((answer.flags ?? []).filter(one => one?.model === col.model).map(one => String(one.flag).replace(/_/g, ' ')))],
       columns: [],
     }
     hop.set(col.model, model)
-    const how = parseHow(howOf(answer, i), col.how_from)
+    const how = howOf(answer, i) ?? { glyph: '?', byName: false }
     model.columns.push({ key: keyOf(answer, i), column: String(col.column), glyph: how.glyph, byName: how.byName, end: col.end === true, type: col.type ?? null, hop: col.hop })
   })
   const hops = [...byHop.entries()]
@@ -265,7 +268,7 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
   const up = trace?.up ?? null
   const any = down ?? up
   const focusIndex = any ? any.columns.findIndex(one => one.hop === 0) : -1
-  const how = parseHow(focusHow(up), up?.columns.find(one => one.hop === 0)?.how_from)
+  const how = focusHow(up)
   const edges: [string, string, string][] = []
   for (const answer of [up, down]) {
     if (!answer) continue
@@ -281,8 +284,8 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
     model: change.model,
     column: column?.name ?? null,
     key: any && focusIndex >= 0 ? keyOf(any, focusIndex) : null,
-    glyph: up ? how.glyph : null,
-    byName: how.byName,
+    glyph: how?.glyph ?? null,
+    byName: how?.byName ?? false,
     before: column?.before ?? null,
     after: column?.after ?? null,
     reach,
@@ -413,6 +416,7 @@ header.top .when{color:var(--muted);font-size:12.5px}
 .badge{font-size:11px;border-radius:4px;padding:0 5px;border:1px solid var(--line-strong);color:var(--muted);line-height:17px}
 .badge.c{border-color:var(--accent);color:var(--accent);font-weight:700}
 .badge.x{border-color:var(--agg);color:var(--agg)}
+.badge.f{border-color:var(--warn);color:var(--warn);background:var(--warn-bg)}
 .model-meta{color:var(--faint);font-size:11.5px;margin-bottom:4px}
 .col{display:flex;align-items:center;gap:7px;width:100%;appearance:none;border:0;background:transparent;color:inherit;font:inherit;text-align:left;padding:3px 4px;border-radius:6px;cursor:pointer}
 .col:hover{background:var(--accent-soft)}
@@ -469,7 +473,7 @@ function graphOf(f){var fwd={},back={};f.edges.forEach(function(e){(fwd[e[0]]=fw
 function walk(start,adj){var seen={},q=[start];seen[start]=1;while(q.length){var k=q.shift();(adj[k]||[]).forEach(function(n){if(!seen[n]){seen[n]=1;q.push(n)}})}return seen}
 function pathOf(f,key){var g=graphOf(f),up=walk(key,g.back),down=walk(key,g.fwd),all={};Object.keys(up).forEach(function(k){all[k]=1});Object.keys(down).forEach(function(k){all[k]=1});return{all:all,up:Object.keys(up).length-1,down:Object.keys(down).length-1}}
 function colButton(c){var b=el('button','col');b.type='button';b.dataset.key=c.key;b.appendChild(glyph(c.glyph,c.byName));b.appendChild(el('span','name mono',c.column));if(c.type)b.appendChild(el('span','type',c.type));if(c.end){var e=el('span','end','end');e.title='Nothing further downstream reads it';b.appendChild(e)}b.addEventListener('click',function(ev){ev.stopPropagation();select(c.key)});return b}
-function modelCard(m){var card=el('div','panel model');var head=el('div','model-head');head.appendChild(el('span','model-name mono',m.name));if(m.contract){var c=el('span','badge c','C');c.title='Contract enforced: a change to this column can fail its build';head.appendChild(c)}if(m.tests){head.appendChild(el('span','badge',plural(m.tests,'test')))}m.exposures.forEach(function(x){var b=el('span','badge x','\\u25a3 '+x);b.title='Exposure (dashboard or app) on this model';head.appendChild(b)});card.appendChild(head);var meta=[m.folder,m.materialized].filter(Boolean).join(' \\u00b7 ');if(meta)card.appendChild(el('div','model-meta',meta));m.columns.forEach(function(c){card.appendChild(colButton(c))});return card}
+function modelCard(m){var card=el('div','panel model');var head=el('div','model-head');head.appendChild(el('span','model-name mono',m.name));if(m.contract){var c=el('span','badge c','C');c.title='Contract enforced: a change to this column can fail its build';head.appendChild(c)}if(m.tests){head.appendChild(el('span','badge',plural(m.tests,'test')))}m.exposures.forEach(function(x){var b=el('span','badge x','\\u25a3 '+x);b.title='Exposure (dashboard or app) on this model';head.appendChild(b)});(m.flags||[]).forEach(function(x){var b=el('span','badge f',x);b.title='Noted by the engine: the trace through this model is less certain';head.appendChild(b)});card.appendChild(head);var meta=[m.folder,m.materialized].filter(Boolean).join(' \\u00b7 ');if(meta)card.appendChild(el('div','model-meta',meta));m.columns.forEach(function(c){card.appendChild(colButton(c))});return card}
 function hopBlock(h,dir){var d=el('div','hop');var cols=h.models.reduce(function(n,m){return n+m.columns.length},0);d.appendChild(el('div','hop-label',(dir==='up'?'Reads from \\u00b7 ':'')+plural(h.hop,'hop')+' '+(dir==='up'?'up':'down')+' \\u00b7 '+plural(h.models.length,'model')+' \\u00b7 '+plural(cols,'column')));var grid=el('div','models');h.models.forEach(function(m){grid.appendChild(modelCard(m))});d.appendChild(grid);return d}
 function section(f,i,dir){var sec=f[dir],lv=state.levels[i][dir],s=el('section','section');var head=el('div','section-head');head.appendChild(el('h2',null,dir==='up'?'Upstream: where it comes from':'Downstream: where it goes'));var total=sec.hops.length,hidden=sec.hops.filter(function(h){return h.hop>lv}).length;if(hidden>0){var more=el('button','more',hidden===1?'Show 1 more level':'Show more levels ('+hidden+' hidden)');more.type='button';more.addEventListener('click',function(){state.levels[i][dir]=lv+1;render()});head.appendChild(more);if(hidden>1){var all=el('button','more','Show all');all.type='button';all.addEventListener('click',function(){state.levels[i][dir]=Infinity;render()});head.appendChild(all)}}else if(total>DATA.defaultLevels&&lv>DATA.defaultLevels){var less=el('button','more','Back to '+DATA.defaultLevels+' levels');less.type='button';less.addEventListener('click',function(){state.levels[i][dir]=DATA.defaultLevels;render()});head.appendChild(less)}s.appendChild(head);if(sec.error){s.appendChild(el('div','empty',sec.error));return s}var shown=sec.hops.filter(function(h){return h.hop<=lv});if(!shown.length)s.appendChild(el('div','empty',dir==='up'?'Nothing upstream was traced for this column.':'No downstream model carries this column\\u2019s value.'));if(dir==='up')shown=shown.slice().reverse();shown.forEach(function(h){s.appendChild(hopBlock(h,dir))});if(sec.truncated)s.appendChild(el('div','note warn','The trace stopped at its limit: more may sit beyond the last level.'));return s}
 function stat(n,label,dim){var d=el('div','stat'+(dim?' dim':''));d.appendChild(el('b',null,n==null?'\\u2013':n));d.appendChild(el('span',null,label));return d}
@@ -486,21 +490,22 @@ function render(){
   stats.appendChild(stat(f.modelLevel,'downstream at model level',true));wrap.appendChild(stats);
   if(r&&(r.unresolved||r.truncated))wrap.appendChild(el('div','note warn','\\u26a0 Lower bound: '+[r.unresolved?plural(r.unresolved,'model')+' could not be read':'',r.truncated?'the trace hit its limit':''].filter(Boolean).join('; ')+'. See \\u201cNot resolved\\u201d below.'));
   else if(r)wrap.appendChild(el('div','note ok','\\u2713 Every downstream model was read.'));
-  var inp=[];if(f.inputs.engine)inp.push('engine '+f.inputs.engine);inp.push(f.inputs.catalog?'with catalog types':'no catalog: types from the manifest');if(f.inputs.olderThanSql)inp.push('the manifest is older than the SQL');f.inputs.workarounds.forEach(function(w){inp.push(w)});wrap.appendChild(el('div','inputs',inp.join(' \\u00b7 ')));
+  var inp=[];if(f.inputs.engine)inp.push('engine '+f.inputs.engine);inp.push(f.inputs.catalog?'with catalog types':'no catalog: types from the manifest');if(f.inputs.olderThanSql)inp.push('the manifest is older than the SQL');wrap.appendChild(el('div','inputs',inp.join(' \\u00b7 ')));
   var lg=el('div','legend');['=','~','\\u0192','\\u03a3','?'].forEach(function(g){var s=el('span');s.appendChild(glyph(g,false));s.appendChild(document.createTextNode(HOW[g]));lg.appendChild(s)});var bn=el('span');bn.appendChild(glyph('=',true));bn.appendChild(document.createTextNode('matched by name'));lg.appendChild(bn);var cb=el('span');cb.appendChild(el('span','badge c','C'));cb.appendChild(document.createTextNode(' contract enforced'));lg.appendChild(cb);wrap.appendChild(lg);
   wrap.appendChild(section(f,i,'up'));
-  var fc=el('div','panel focus');fc.appendChild(el('div','label','The changed column'));var ti=el('div','title');if(f.key){ti.appendChild(colButton({key:f.key,column:f.model+'.'+(f.column||''),glyph:f.glyph||'?',byName:f.byName,end:false,type:null}))}else ti.appendChild(el('span','mono',f.column?f.model+'.'+f.column:f.model));fc.appendChild(ti);if(f.glyph)var hw=HOW[f.glyph]||'unknown';fc.appendChild(el('div','empty',hw.charAt(0).toUpperCase()+hw.slice(1)+' from what it reads'+(f.byName?' (matched by name)':'')+'. Click any column to light up its path.'));wrap.appendChild(fc);
+  var fc=el('div','panel focus');fc.appendChild(el('div','label','The changed column'));var ti=el('div','title');if(f.key){ti.appendChild(colButton({key:f.key,column:f.model+'.'+(f.column||''),glyph:f.glyph||'?',byName:f.byName,end:false,type:null}))}else ti.appendChild(el('span','mono',f.column?f.model+'.'+f.column:f.model));fc.appendChild(ti);var hw=f.glyph?HOW[f.glyph]||'unknown':'';fc.appendChild(el('div','empty',(hw?hw.charAt(0).toUpperCase()+hw.slice(1)+' from what it reads'+(f.byName?' (matched by name)':'')+'. ':'')+(f.key?'Click any column to light up its path.':'')));wrap.appendChild(fc);
   wrap.appendChild(section(f,i,'down'));
   wrap.appendChild(fold('Also reads it, outside the select',f.alsoReads.length,f.alsoReads.map(function(a){return li(a.name,'reads '+a.columns.join(', ')+(a.downstream!=null?' \\u00b7 '+plural(a.downstream,'model')+' downstream of it':''))})));
   wrap.appendChild(fold('Not resolved',f.unresolved.length,f.unresolved.map(function(u){return li(u.name,u.reason+(u.downstream!=null?' \\u00b7 '+plural(u.downstream,'model')+' downstream of it':''))})));
   wrap.appendChild(fold('Cleared: downstream, but does not carry it',f.cleared.count,f.cleared.names.map(function(n){return li(n,'')})));
+  if(f.inputs.workarounds.length)wrap.appendChild(fold('How the engine read the SQL',f.inputs.workarounds.length,f.inputs.workarounds.map(function(w){var l=el('li','why',w);return l})));
   app.appendChild(wrap);applyHighlight();
 }
 function select(key){state.selected=state.selected===key?null:key;applyHighlight()}
 function applyHighlight(){var f=DATA.focuses[state.focus],bar=document.getElementById('pathbar');var cols=document.querySelectorAll('.col');if(!state.selected){document.body.classList.remove('hl');cols.forEach(function(c){c.classList.remove('on','sel')});document.querySelectorAll('.model').forEach(function(m){m.classList.remove('has-on')});return}
   var p=pathOf(f,state.selected);document.body.classList.add('hl');cols.forEach(function(c){var on=!!p.all[c.dataset.key];c.classList.toggle('on',on);c.classList.toggle('sel',c.dataset.key===state.selected)});document.querySelectorAll('.model').forEach(function(m){m.classList.toggle('has-on',!!m.querySelector('.col.on'))});
   var shown={};cols.forEach(function(c){shown[c.dataset.key]=1});var hidden=Object.keys(p.all).filter(function(k){return!shown[k]}).length;
-  bar.textContent='';bar.appendChild(el('span',null,'Path of '+state.selected.split('|').pop()+': '+plural(p.up,'column')+' upstream, '+plural(p.down,'column')+' downstream'+(hidden?' \\u00b7 '+hidden+' more on hidden levels':'')));var clr=el('button',null,'Clear');clr.type='button';clr.addEventListener('click',function(){select(state.selected)});bar.appendChild(clr)}
+  bar.textContent='';bar.appendChild(el('span',null,'Path of '+state.selected.split('|')[0].split('.').pop()+'.'+state.selected.split('|').pop()+': '+plural(p.up,'column')+' upstream, '+plural(p.down,'column')+' downstream'+(hidden?' \\u00b7 '+hidden+' more on hidden levels':'')));var clr=el('button',null,'Clear');clr.type='button';clr.addEventListener('click',function(){select(state.selected)});bar.appendChild(clr)}
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&state.selected)select(state.selected)});
 render();
 })();

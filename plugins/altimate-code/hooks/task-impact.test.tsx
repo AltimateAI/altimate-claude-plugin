@@ -9,6 +9,7 @@ const REPORT = `${ROOT}/target/.altimate-lineage/report.html`
 const MODEL = `${ROOT}/models/fct_orders.sql`
 const STAGING = `${ROOT}/models/stg_payments.sql`
 const MACRO = `${ROOT}/macros/cents.sql`
+const SNAPSHOT_SQL = `${ROOT}/snapshots/orders_snap.sql`
 
 const BAND = {
   plugin: 'altimate-code',
@@ -42,6 +43,7 @@ async function start($: any, on: any, options: Options = {}) {
     [MODEL]: ORDERS_SQL,
     [STAGING]: PAYMENTS_SQL,
     [MACRO]: '{% macro cents(x) %}{{ x }} / 100{% endmacro %}',
+    [SNAPSHOT_SQL]: '{% snapshot orders_snap %}select id, status from orders{% endsnapshot %}',
   }
   const runs: string[][] = []
   const tools: Record<string, any>[] = []
@@ -163,6 +165,7 @@ test('an edited model is traced both ways from the snapshot at the task end, and
   expect(await band.find({ type: 'Text', text: '  revenue Σ  reaches 4 columns in 3 models (2 ends) · 1 may carry it · 2 cleared' })).toBeDefined()
   expect(await band.find({ type: 'Text', text: '⚠ Lower bound: 1 model could not be read' })).toBeDefined()
   expect(await band.find({ key: 'lineage-report-open' })).toBeDefined()
+  expect(await band.find({ key: 'lineage-open' })).toBeDefined()
   await band.press({ key: 'lineage-summary-dismiss' })
   await clock.settle()
   expect(await band.find({ key: 'lineage-report-open' })).toBeUndefined()
@@ -178,14 +181,15 @@ test('an edited model is traced both ways from the snapshot at the task end, and
 
 test('model files changed outside the edit tools are found through git, and only what changed this task', async ($, on) => {
   let changed: string[] = ['models/fct_orders.sql']
-  const opts = { gitChanged: () => changed, head: { 'models/stg_payments.sql': PAYMENTS_SQL, 'macros/cents.sql': 'x' } }
+  const opts = { gitChanged: () => changed, head: { 'models/stg_payments.sql': PAYMENTS_SQL, 'macros/cents.sql': 'x', 'snapshots/orders_snap.sql': 'x' } }
   const { tools, files, turn } = await start($, on, opts)
   await turn('t1', async () => {
     // A sed in Bash: git sees the file, HEAD has its text before. fct_orders was already dirty
-    // before the task and is untouched by it; a macro is not a model.
+    // before the task and is untouched by it; a macro is not a model, and impact_analysis takes no snapshot.
     files[STAGING] = PAYMENTS_SQL.replace('amount_cents / 100 as amount', 'amount_cents / 100.0 as amount')
     files[MACRO] = 'changed'
-    changed = ['models/fct_orders.sql', 'models/stg_payments.sql', 'macros/cents.sql']
+    files[SNAPSHOT_SQL] = '{% snapshot orders_snap %}select id, upper(status) as status from orders{% endsnapshot %}'
+    changed = ['models/fct_orders.sql', 'models/stg_payments.sql', 'macros/cents.sql', 'snapshots/orders_snap.sql']
   })
   expect(directional(tools).map(one => `${one.model}.${one.column}:${one.direction}`)).toEqual(['stg_payments.amount:downstream', 'stg_payments.amount:upstream'])
 })

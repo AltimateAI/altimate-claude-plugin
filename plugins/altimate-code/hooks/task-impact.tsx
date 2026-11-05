@@ -19,7 +19,7 @@ import {
   summaryOf,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
-import { projectRoot, runTool, within } from './lineage'
+import { openPane, projectRoot, runTool, within } from './lineage'
 
 export const REPORT_COMMAND = 'lineage-report'
 // Under the project's target/, which dbt already keeps out of git.
@@ -51,7 +51,7 @@ const newTask = (): Task => ({ roots: new Map(), originals: new Map() })
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
 const modelName = (file: string) => (file.split(/[\\/]/).pop() ?? file).replace(/\.sql$/i, '')
 
-/** Whether a project-relative path is a model's or a snapshot's SQL. */
+/** Whether a project-relative path is a model's SQL. */
 function isModelFile(layout: Layout, rel: string): boolean {
   if (!/\.sql$/i.test(rel)) return false
   return layout.models.some(dir => {
@@ -83,7 +83,8 @@ function prepareRoot($: EngineInterface, t: Task, root: string): Promise<RootSta
   if (known) return known
   const work = (async (): Promise<RootState> => {
     const layout = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
-    const models = { models: [...layout.models, ...layout.snapshots] }
+    // Models only: impact_analysis does not take a snapshot as the column's model.
+    const models = { models: layout.models }
     let snapshot: string | null = null
     const manifest = `${root}/target/manifest.json`
     if (await $.fs.exists(manifest).catch(() => false)) {
@@ -288,6 +289,7 @@ export async function taskBand($: EngineInterface, ui: Ui): Promise<RenderElemen
       ) : null}
       <Box>
         {report ? <Button key="lineage-report-open" label="Open report" onPress={() => later($, () => openAndSay($, report))} /> : null}
+        <Button key="lineage-open" label="Open lineage" onPress={() => later($, () => openPane($))} />
         <Button key="lineage-summary-dismiss" label="Dismiss" onPress={() => update($, hiddenAtom, () => true)} />
       </Box>
     </Box>

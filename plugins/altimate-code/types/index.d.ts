@@ -185,7 +185,8 @@ export type Reach = {
   truncated: boolean
 }
 
-export type SummaryColumn = { name: string; how: string | null; reach: Reach | null; failed: boolean }
+/** `how`: how the column is made from what it reads, before the task; `byName` when that was inferred from matching names. */
+export type SummaryColumn = { name: string; how: string | null; byName?: boolean; reach: Reach | null; failed: boolean }
 
 /** What the band shows after a task that changed models. */
 export type TaskSummaryView = {

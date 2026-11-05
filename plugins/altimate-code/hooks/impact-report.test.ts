@@ -32,7 +32,7 @@ export const DOWN: ColumnAnswer = {
     { id: 'model.shop.rpt_broken', name: 'rpt_broken', folder: 'reports', materialized: 'view', contract: false, tests: 0, exposures: [] },
   ],
   columns: [
-    { model: 0, column: 'revenue', hop: 0 },
+    { model: 0, column: 'revenue', hop: 0, how: null as any, how_from: null as any },
     { model: 1, column: 'daily_revenue', hop: 1, type: 'number' },
     { model: 1, column: 'revenue', hop: 1, end: true, how: '=', how_from: 'name' },
     { model: 2, column: 'weekly_revenue', hop: 2 },
@@ -40,12 +40,13 @@ export const DOWN: ColumnAnswer = {
   ],
   edges: [
     [0, 1, 'Σ'],
-    [0, 2, '='],
+    [0, 2, '=', 'name'],
     [1, 3, 'ƒ'],
-    [3, 4, '~'],
+    [3, 4, '~', 'name'],
   ],
   also_reads: [{ model: 4, columns: ['revenue'], downstream: 2 }],
   unresolved: [{ model: 5, reason: 'parse error' }],
+  flags: [{ model: 2, flag: 'filter_rewritten' }],
   truncated: false,
 }
 
@@ -59,12 +60,14 @@ export const UP: ColumnAnswer = {
     { id: 'source.shop.raw.orders', name: 'orders' },
   ],
   columns: [
-    { model: 0, column: 'revenue', hop: 0 },
+    { model: 0, column: 'revenue', hop: 0, how: null as any, how_from: null as any },
     { model: 1, column: 'amount', hop: 1 },
     { model: 2, column: 'amount_cents', hop: 2, end: true },
   ],
   edges: [
+    // Two edges into the focus: the traced aggregate is its how, not the name match.
     [1, 0, 'Σ'],
+    [2, 0, 'Σ', 'name'],
     [2, 1, 'ƒ'],
   ],
 }
@@ -126,6 +129,12 @@ describe('the summary', () => {
     ])
   })
 
+  test('a how inferred from matching names says so', () => {
+    const up = { ...UP, edges: [[1, 0, '=', 'name']] as ColumnAnswer['edges'] }
+    const lines = summaryLines(summaryOf([CHANGE], [{ ...TRACE, up }], null))
+    expect(lines[2]).toBe('  revenue = (by name)  reaches 4 columns in 3 models (2 ends) · 1 may carry it · 2 cleared')
+  })
+
   test('a model with no changed output column shows its model-level count alone', () => {
     const change = { ...CHANGE, columns: [] }
     const lines = summaryLines(summaryOf([change], [{ model: 'fct_orders', column: null, down: null, up: null, modelLevel: 6, failed: false }], null))
@@ -143,8 +152,12 @@ describe('the report', () => {
       ['daily_revenue', 'Σ', false, false],
       ['revenue', '=', true, true],
     ])
-    // Upstream: how each column feeds the one below it.
-    expect(sectionOf(UP).hops.map(one => one.models[0]!.columns[0]!.glyph)).toEqual(['Σ', 'ƒ'])
+    // An edge inferred from names (its 4th element) reads as matched by name, not traced.
+    const board = down.hops[2]!.models[0]!.columns[0]!
+    expect([board.column, board.glyph, board.byName]).toEqual(['board_revenue', '~', true])
+    expect(down.hops[1]!.models[0]!.flags).toEqual(['filter rewritten'])
+    // Upstream: how each column feeds the one below it, the strongest edge when several.
+    expect(sectionOf(UP).hops.map(one => one.models[0]!.columns.map(col => `${col.glyph}${col.byName ? '*' : ''}`).join())).toEqual(['Σ', 'Σ*'])
   })
 
   test('embeds both directions with edges keyed by model and column, folds, and two levels by default', () => {
@@ -154,7 +167,7 @@ describe('the report', () => {
     expect(data.defaultLevels).toBe(DEFAULT_LEVELS)
     expect(DEFAULT_LEVELS).toBe(2)
     const focus = data.focuses[0]
-    expect(focus).toMatchObject({ model: 'fct_orders', column: 'revenue', key: 'model.shop.fct_orders|revenue', glyph: 'Σ', before: 'sum(amount) as revenue' })
+    expect(focus).toMatchObject({ model: 'fct_orders', column: 'revenue', key: 'model.shop.fct_orders|revenue', glyph: 'Σ', byName: false, before: 'sum(amount) as revenue' })
     expect(focus.up.hops.map((one: any) => one.hop)).toEqual([1, 2])
     expect(focus.down.hops.map((one: any) => one.hop)).toEqual([1, 2, 3])
     // The highlight walks these edges both ways from the clicked column.
