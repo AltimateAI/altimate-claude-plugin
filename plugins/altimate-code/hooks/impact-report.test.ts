@@ -6,6 +6,7 @@ import {
   type ColumnAnswer,
   type ColumnTrace,
   DEFAULT_LEVELS,
+  focusOf,
   type ModelChange,
   openerFor,
   reachOf,
@@ -47,6 +48,10 @@ export const DOWN: ColumnAnswer = {
   also_reads: [{ model: 4, columns: ['revenue'], downstream: 2 }],
   unresolved: [{ model: 5, reason: 'parse error' }],
   flags: [{ model: 2, flag: 'filter_rewritten' }],
+  cleared: [
+    { id: 'model.shop.dim_dates', name: 'dim_dates' },
+    { id: 'model.shop.rpt_ops', name: 'rpt_ops' },
+  ],
   truncated: false,
 }
 
@@ -113,8 +118,10 @@ describe('the answer', () => {
 
   test('reach takes the contract counts, and counts for itself where they are absent', () => {
     expect(reachOf(DOWN)).toEqual({ columns: 4, models: 3, ends: 2, hops: 3, mayCarry: 1, cleared: 2, unresolved: 1, modelLevel: 6, truncated: false })
-    const bare = { ...DOWN, counts: undefined }
+    const bare = { ...DOWN, counts: undefined, cleared: undefined }
     expect(reachOf(bare)).toEqual({ columns: 4, models: 3, ends: 2, hops: 3, mayCarry: 1, cleared: null, unresolved: 1, modelLevel: null, truncated: false })
+    // With the cleared list but no counts, the list gives the cleared count.
+    expect(reachOf({ ...DOWN, counts: undefined }).cleared).toBe(2)
   })
 })
 
@@ -175,7 +182,9 @@ describe('the report', () => {
     expect(focus.edges).toContainEqual(['model.shop.rpt_finance|weekly_revenue', 'model.shop.rpt_board|board_revenue', '~'])
     expect(focus.alsoReads).toEqual([{ name: 'rpt_misc', columns: ['revenue'], downstream: 2 }])
     expect(focus.unresolved).toEqual([{ name: 'rpt_broken', reason: 'parse error', downstream: null }])
-    expect(focus.cleared).toEqual({ names: [], count: 2 })
+    expect(focus.cleared).toEqual({ names: ['dim_dates', 'rpt_ops'], count: 2 })
+    // An answer without the list keeps the count alone.
+    expect(focusOf(CHANGE, CHANGE.columns[0]!, { ...TRACE, down: { ...DOWN, cleared: undefined } }).cleared).toEqual({ names: [], count: 2 })
     expect(data.changes[0].columns[0].after).toBe('sum(amount) - sum(refunds) as revenue')
   })
 

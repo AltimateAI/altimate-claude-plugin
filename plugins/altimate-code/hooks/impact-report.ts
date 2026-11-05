@@ -19,7 +19,8 @@ export type ColumnAnswer = {
   edges?: [number, number, string?, string?][]
   also_reads?: { model: number; columns?: string[]; downstream?: number }[]
   unresolved?: { model: number; reason?: string; downstream?: number }[]
-  cleared?: (number | { model: number })[]
+  /** Models at the model level that do not carry the value: off the path, so not in `nodes`. */
+  cleared?: { id?: string; name?: string }[]
   flags?: { model: number; flag: string }[]
   truncated?: boolean
   next?: unknown
@@ -277,7 +278,7 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
       edges.push([keyOf(answer, edge[0]), keyOf(answer, edge[1]), String(edge[2] ?? '?')])
     }
   }
-  const clearedNames = (down?.cleared ?? []).map(one => nameOf(down!, typeof one === 'number' ? one : one?.model))
+  const clearedNames = (Array.isArray(down?.cleared) ? down!.cleared : []).map(one => String(one?.name ?? one?.id ?? '?'))
   const reach = down ? reachOf(down) : null
   const manifestInput = (down?.inputs ?? up?.inputs)?.manifest as any
   return {
@@ -429,7 +430,8 @@ header.top .when{color:var(--muted);font-size:12.5px}
 .g.calc{color:var(--calc);background:var(--calc-bg)}
 .g.agg{color:var(--agg);background:var(--agg-bg)}
 .g.unk{color:var(--unk);background:var(--unk-bg)}
-.g.byname{outline:1.5px dashed currentColor;outline-offset:-1.5px;background:transparent}
+.g.byname{outline:1.5px dashed currentColor;outline-offset:-1.5px;background:transparent;opacity:.7}
+.col .g.byname+.name{opacity:.8}
 .focus{padding:12px 14px;border:1.5px solid var(--focus-line);background:var(--focus);margin:6px 0}
 .focus .label{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
 .focus .title{font-size:17px;font-weight:650;margin:2px 0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}

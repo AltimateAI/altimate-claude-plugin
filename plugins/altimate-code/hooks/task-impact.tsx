@@ -158,6 +158,8 @@ async function traceChanges($: EngineInterface, t: Task, changes: ModelChange[])
   const ask = async (change: ModelChange, column: string | null, direction: 'downstream' | 'upstream') => {
     const state = await t.roots.get(change.root)?.catch(() => null)
     const manifest = state?.snapshot ?? `${change.root}/target/manifest.json`
+    // Known limit: the model goes by its file name, which misses a versioned model (x_v2.sql) or a file
+    // named apart from its model.
     const args = { manifest_path: manifest, model: change.model, ...(column && { column }), change_type: 'modify', direction }
     const result = await runTool($, 'impact_analysis', args).catch(() => null)
     return result?.ok ? result.metadata : null
