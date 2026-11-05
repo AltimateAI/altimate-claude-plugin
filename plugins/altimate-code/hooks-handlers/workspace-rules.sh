@@ -11,11 +11,11 @@
 #   stop                the post-turn check, at most one model call per check
 #                       round, a few per Stop at most (in the background)
 # It never fails the session: every path exits 0 and the CLI's errors are
-# dropped. The per-turn events never block: they run in the background, and only
-# where workspace rules state exists. Session start waits for the CLI, and starts
-# it only where that state exists or the workspace link cache names the host's
-# directory or a folder above it in the repository. With ALTIMATE_LEARN=0 (or
-# false) nothing is started at all.
+# dropped. Every event starts the CLI only where altimate-code's workspace link
+# cache (in the person's own state directory, never in the repository) names the
+# host's directory or a folder above it in the repository. The per-turn events
+# never block: they run in the background. Session start waits for the CLI. With
+# ALTIMATE_LEARN=0 (or false) nothing is started at all.
 #
 # The hook input is passed through on stdin; nothing here parses it.
 
@@ -34,10 +34,10 @@ for ALTIMATE_NAME in altimate altimate-code; do
 done
 [ -n "$ALTIMATE_BIN" ] || exit 0
 
-# $ROOT only locates the state file, which the CLI keeps at the repository root. The CLI runs in the host's directory
-# (no `cd`), because a workspace link can be for a folder inside the repository (a dbt project).
+# $ROOT bounds the walk up the link cache. The CLI runs in the host's directory (no `cd`), because a workspace link can
+# be for a folder inside the repository (a dbt project). Nothing in the repository decides whether the CLI runs: a file
+# there can come from a branch or a merge.
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
-STATE="$ROOT/.altimate-code/learn/workspace-rules/rules.json"
 
 # linked: whether the workspace link cache has a key for the host's directory or a folder above it, up to the
 # repository root. This mirrors the CLI, which looks there and never below the directory it runs in. Keys are native
@@ -62,9 +62,8 @@ linked() {
 
 case "$EVENT" in
   session-start)
-    # Only a repository with workspace rules state, or a directory the link cache names, can have team rules:
-    # elsewhere the CLI is not started at all.
-    [ -f "$STATE" ] || linked || exit 0
+    # Only a directory the link cache names can have team rules: elsewhere the CLI is not started at all.
+    linked || exit 0
     OUTPUT="$(printf '%s' "$INPUT" | "$ALTIMATE_BIN" learn hook session-start --host "$HOST" 2>/dev/null)"
     # Only the hook's JSON: an altimate-code without `learn hook` prints its help instead.
     case "$OUTPUT" in
@@ -72,7 +71,7 @@ case "$EVENT" in
     esac
     ;;
   user-prompt-submit|stop)
-    [ -f "$STATE" ] || exit 0
+    linked || exit 0
     ( printf '%s' "$INPUT" | nohup "$ALTIMATE_BIN" learn hook "$EVENT" --host "$HOST" & ) >/dev/null 2>&1 </dev/null
     ;;
 esac

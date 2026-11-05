@@ -67,7 +67,7 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 - **Start the session in the linked folder**, or a folder below it. If only a folder inside the repository is linked (a dbt project), a session started at the repository root gets no team rules.
 - **A new clone or worktree** gets no team rules until altimate-code has been linked, or run, in that checkout: the link is remembered per folder.
-- **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds), and only in a repository with team rules state or a linked folder.
+- **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds). All of them run only in a linked folder (or below it), as recorded in altimate-code's link cache in your own state directory: nothing in the repository turns them on.
 - **`ALTIMATE_LEARN=0`** turns all of it off: the hooks start nothing.
 
 ## Example prompts

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Checks the workspace-rules hook against a stub CLI: hooks.json runs it for the right events, arguments and timeouts;
-# it passes the hook input through, prints only the CLI's hook JSON at session start, starts the CLI at session start
-# only where workspace rules state exists or the link cache names the directory or a folder above it in the
-# repository, runs the per-turn events in the background and only where workspace rules state exists, starts nothing
-# with ALTIMATE_LEARN=0, and never fails or blocks the session.
+# it passes the hook input through, prints only the CLI's hook JSON at session start, starts the CLI for any event only
+# where the link cache names the directory or a folder above it in the repository (never because of a file in the
+# repository), runs the per-turn events in the background, starts nothing with ALTIMATE_LEARN=0, and never fails or
+# blocks the session.
 set -u
 cd "$(dirname "$0")/.."
 PLUGIN="$PWD/plugins/altimate-code"
@@ -83,9 +83,15 @@ started() { [ -s "$STARTED" ]; }
 reset() { : > "$LOG"; : > "$STARTED"; }
 
 reset
-# Neither workspace rules state nor a workspace link: the CLI is not started at session start.
+# No workspace link: the CLI is not started at session start.
 [ "$(hook "$WORK/project" session-start "$BIN:$SYS")" = "0|" ] || fail "session start printed output in a project with no link"
 ! started || fail "session start ran the CLI in a project with no link: $(cat "$LOG")"
+# A workspace rules state file in the repository (a branch or a merge can bring one) does not make it linked.
+mkdir -p "$WORK/project/.altimate-code/learn/workspace-rules"
+echo '{"version":1,"scope":{"datamateId":1}}' > "$WORK/project/.altimate-code/learn/workspace-rules/rules.json"
+reset
+[ "$(hook "$WORK/project" session-start "$BIN:$SYS")" = "0|" ] || fail "a rules state file in the repository printed output"
+! started || fail "a rules state file in the repository ran the CLI at session start"
 
 # A link for a folder inside the repository (a dbt project), started below it: the CLI runs.
 link "$WORK/project/dbt"
@@ -138,23 +144,23 @@ for off in 0 false FALSE; do
   ! started || fail "session start with ALTIMATE_LEARN=$off ran the CLI"
 done
 
-# Per-turn events with no workspace rules state, and with ALTIMATE_LEARN=0 where the state exists, start nothing.
-# They would run the CLI in the background, so a positive call made afterwards has to land first (proving background
-# calls get through) and the log is then watched for a bounded time.
+# Per-turn events with no link (the repository's planted rules state file still there), and with ALTIMATE_LEARN=0 where
+# the repository is linked, start nothing. They would run the CLI in the background, so a positive call made afterwards
+# has to land first (proving background calls get through) and the log is then watched for a bounded time.
+link
 reset
 for event in user-prompt-submit stop; do
-  [ "$(hook "$WORK/project" "$event" "$BIN:$SYS")" = "0|" ] || fail "$event without rules state did not exit quietly"
+  [ "$(hook "$WORK/project" "$event" "$BIN:$SYS")" = "0|" ] || fail "$event without a link did not exit quietly"
 done
-mkdir -p "$WORK/project/.altimate-code/learn/workspace-rules"
-echo '{}' > "$WORK/project/.altimate-code/learn/workspace-rules/rules.json"
+link "$WORK/project"
 for event in user-prompt-submit stop; do
   [ "$(hook "$WORK/project" "$event" "$BIN:$SYS" ok ALTIMATE_LEARN=0)" = "0|" ] || fail "$event with ALTIMATE_LEARN=0 did not exit quietly"
 done
-[ "$(hook "$WORK/project" stop "$BIN:$SYS")" = "0|" ] || fail "stop with rules state did not exit quietly"
-await_log "learn hook stop --host $HOST" || fail "stop with rules state did not run the CLI"
+[ "$(hook "$WORK/project" stop "$BIN:$SYS")" = "0|" ] || fail "stop in a linked repository did not exit quietly"
+await_log "learn hook stop --host $HOST" || fail "stop in a linked repository did not run the CLI"
 for _ in $(seq 20); do [ "$(grep -c . "$STARTED")" -gt 1 ] && break; sleep 0.1; done
 [ "$(cat "$STARTED")" = "learn hook stop --host $HOST" ] \
-  || fail "per-turn events ran the CLI without rules state or with ALTIMATE_LEARN=0: $(cat "$STARTED")"
+  || fail "per-turn events ran the CLI without a link or with ALTIMATE_LEARN=0: $(cat "$STARTED")"
 
 reset
 for event in user-prompt-submit stop; do
