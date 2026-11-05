@@ -33,6 +33,7 @@ import {
   upstreamArt,
   warehouseEdges,
 } from './lineage-graph'
+import { answerOf, carriersOf, type ColumnAnswer, reachOf } from './impact-report'
 import { taskBeforeTool, taskTurnComplete, taskTurnStart } from './task-impact'
 
 const PANE = 'altimate-lineage'
@@ -889,6 +890,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   const touched = everyTouched.slice(0, MAX_EDIT_COLUMNS)
 
   let reach: ColumnReachView | null = null
+  const answered: { column: string; answer: ColumnAnswer }[] = []
   const traced: string[] = []
   // Touched columns whose check failed or ran out of time: what they reach is unknown.
   // Columns beyond the cap are never traced either.
@@ -907,24 +909,41 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
         return within($, left, shared(`impact\u0000${manifest}\u0000${stat.mtimeMs}\u0000${id}\u0000${col}`, () => runTool($, 'impact_analysis', args, false, deadline)))
       }),
     )
-    const reaches = results.map((result, i) => (result?.ok ? reachFromMetadata(result.metadata, node.name, touched[i]!) : null))
-    reaches.forEach((one, i) => (one ? traced : unchecked).push(touched[i]!))
-    reach = mergeReach(reaches.filter((one): one is ColumnReachView => !!one))
+    // The column answer, as the end-of-task summary reads it, so Claude and the person see one set of
+    // numbers; the older column reach only from an altimate-code that sends no column answer.
+    const answers = results.map(result => (result?.ok ? answerOf(result.metadata) : null))
+    if (answers.some(Boolean)) {
+      answers.forEach((one, i) => {
+        ;(one ? traced : unchecked).push(touched[i]!)
+        if (one) answered.push({ column: touched[i]!, answer: one })
+      })
+    } else {
+      const reaches = results.map((result, i) => (result?.ok ? reachFromMetadata(result.metadata, node.name, touched[i]!) : null))
+      reaches.forEach((one, i) => (one ? traced : unchecked).push(touched[i]!))
+      reach = mergeReach(reaches.filter((one): one is ColumnReachView => !!one))
+    }
     const ms = Math.round((await $.clock.now()) - began)
-    if (reach) $.ui.log(`impact-first · impact_analysis(${node.name}.${traced.join(', ')}) · ${elapsed(ms)}`)
+    if (traced.length) $.ui.log(`impact-first · impact_analysis(${node.name}.${traced.join(', ')}) · ${elapsed(ms)}`, { to: 'debug' })
   }
   const column = traced.length ? traced.join(', ') : null
 
-  const target = column && reach ? `${node.name}.${column}` : node.name
+  const target = column && (reach || answered.length) ? `${node.name}.${column}` : node.name
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
   // What the engine could not settle keeps the count a lower bound, never a confident zero.
   const unsettled = reach ? reach.uncertain.length + reach.untraced.length + (reach.truncated ? 1 : 0) + unchecked.length : 0
   const atLeast = unsettled > 0 ? 'at least ' : ''
   // Dashboards on models that may read the column count too: a rename breaks a filter for certain.
-  const dashboards = reach ? [...reach.exposures, ...reach.uncertainExposures] : counts.exposures
+  const carried = answered.map(one => ({ ...one, reach: reachOf(one.answer), carriers: carriersOf(one.answer) }))
+  const dashboards = reach
+    ? [...reach.exposures, ...reach.uncertainExposures]
+    : carried.length
+      ? [...new Set(carried.flatMap(one => one.carriers.flatMap(model => model.exposures)))]
+      : counts.exposures
   const toast = reach
     ? `${target} is read by ${atLeast}${plural(reach.models.length, 'model')} and ${reach.exposuresError ? 'at least ' : ''}${plural(dashboards.length, 'dashboard')}`
-    : `${target} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'model')} and ${plural(dashboards.length, 'dashboard')}`
+    : carried.length
+      ? carried.map(one => `${node.name}.${one.column} reaches ${plural(one.reach.columns, 'column')} in ${plural(one.reach.models, 'model')}, ${one.reach.mayCarry} may carry it`).join('; ')
+      : `${target} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'model')} and ${plural(dashboards.length, 'dashboard')}`
   const toastText = `◆ impact-first · ${toast}${dashboards.length ? ` · ${dashboards.slice(0, 3).join(' · ')}` : ''}`.replace(CONTROL, ' ').slice(0, 300)
 
   // Names and labels come from the project's files, which anyone who wrote the repo controls: each is
@@ -940,6 +959,21 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
     if (reach.uncertain.length) lines.push(`- may also read it: ${capped(reach.uncertain.map(one => `${quoted(one.name)} (${quoted(one.reason)})`), 10)}`)
     if (reach.untraced.length) lines.push(`- could not be traced: ${capped(reach.untraced.map(one => `${quoted(one.name)} (${quoted(one.reason)})`), 10)}`)
   }
+  for (const one of carried) {
+    const r = one.reach
+    const named = one.carriers.map(model => `${quoted(model.name)} (${listed(model.columns, 8)})`)
+    lines.push(`- ${quoted(one.column)}: its value reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'downstream model')} (${plural(r.ends, 'end column')})${named.length ? `: ${capped(named, 15)}` : ''}`)
+    const exposures = [...new Set(one.carriers.flatMap(model => model.exposures))]
+    if (exposures.length) lines.push(`  dashboards on them: ${listed(exposures)}`)
+    lines.push(
+      `  ${plural(r.mayCarry, 'more model')} may carry it (they read it outside the select, or sit below a model that could not be read); ${r.cleared === null ? 'the other downstream models do' : `${plural(r.cleared, 'other downstream model')} ${r.cleared === 1 ? 'does' : 'do'}`} not carry it${r.modelLevel === null ? '' : `; ${plural(r.modelLevel, 'downstream model')} at model level`}`,
+    )
+    const unresolved = one.answer.unresolved ?? []
+    if (unresolved.length || r.truncated) {
+      const why = unresolved.map(entry => `${quoted(String(one.answer.nodes[entry.model]?.name ?? entry.model))} (${quoted(String(entry.reason ?? 'not read'))})`)
+      lines.push(`  lower bound: ${plural(unresolved.length, 'model')} could not be read${why.length ? `: ${capped(why, 10)}` : ''}${r.truncated ? '; the trace stopped at its limit' : ''}`)
+    }
+  }
   lines.push(
     `- ${quoted(node.name)} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'downstream model')} in all (${counts.direct} direct, ${counts.transitive} transitive), ${plural(counts.tests, 'test')}${counts.exposures.length ? ` and ${plural(counts.exposures.length, 'exposure')} (${listed(counts.exposures)})` : ''}.`,
   )
@@ -954,14 +988,14 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
     context: `${body.length > MAX_NOTE ? `${cut(body, MAX_NOTE)}...` : body}\n${close}`,
     view: {
       model: node.name,
-      column: reach ? column : null,
+      column: reach || carried.length ? column : null,
       severity: counts.severity,
       direct: counts.direct,
       transitive: counts.transitive,
       tests: counts.tests,
       exposures: dashboards,
-      readers: reach ? reach.models.length : null,
-      unsettled,
+      readers: reach ? reach.models.length : carried.length ? new Set(carried.flatMap(one => one.carriers.map(model => model.name))).size : null,
+      unsettled: unsettled + carried.reduce((n, one) => n + one.reach.unresolved + one.reach.mayCarry, 0),
       ...(reach?.exposuresError && { dashboardsUnsettled: true }),
       truncated: !!graph.truncated,
     },
@@ -1141,8 +1175,9 @@ export function registerLineage(on: On) {
     // Out of time before even the model-level lookup finished: say so, rather than nothing.
     // The person sees the end-of-task summary (task-impact.tsx), not a note per edit: these lines go
     // to the log, and the note itself to Claude's context below.
-    if (lookup && !note && !finished && progress.project) $.ui.log('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
-    if (note) $.ui.log(note.toast)
+    // The debug log only: the person's one line is the end-of-task summary.
+    if (lookup && !note && !finished && progress.project) $.ui.log('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it', { to: 'debug' })
+    if (note) $.ui.log(note.toast, { to: 'debug' })
     const result = await next(e)
     if (result.deny || result.isError) return result
     // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
@@ -1195,7 +1230,7 @@ export function registerLineage(on: On) {
     if (note) {
       if (!contextGiven.has(note.key)) {
         contextGiven.add(note.key)
-        $.ui.log(`impact-first · added to Claude's context: lineage for ${note.view.column ? `${note.view.model}.${note.view.column}` : note.view.model}`)
+        $.ui.log(`impact-first · added to Claude's context: lineage for ${note.view.column ? `${note.view.model}.${note.view.column}` : note.view.model}`, { to: 'debug' })
         return { ...result, context: [...(result.context ?? []), note.context] } as typeof result
       }
     }

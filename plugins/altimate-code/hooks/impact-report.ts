@@ -126,6 +126,20 @@ export function reachOf(answer: ColumnAnswer): Reach {
   }
 }
 
+/** The downstream models that carry the value, each with the columns it lands in and its exposures, nearest first. */
+export function carriersOf(answer: ColumnAnswer): { name: string; columns: string[]; exposures: string[] }[] {
+  const byModel = new Map<number, { name: string; columns: string[]; exposures: string[]; hop: number }>()
+  for (const col of answer.columns) {
+    if (!(col.hop > 0)) continue
+    const node = answer.nodes[col.model]
+    const entry = byModel.get(col.model) ?? { name: String(node?.name ?? node?.id ?? col.model), columns: [], exposures: Array.isArray(node?.exposures) ? node!.exposures!.map(String) : [], hop: col.hop }
+    if (!entry.columns.includes(String(col.column))) entry.columns.push(String(col.column))
+    entry.hop = Math.min(entry.hop, col.hop)
+    byModel.set(col.model, entry)
+  }
+  return [...byModel.values()].sort((a, b) => a.hop - b.hop || a.name.localeCompare(b.name)).map(({ hop: _hop, ...rest }) => rest)
+}
+
 /** The traced answers for one changed column: downstream and upstream, each null when it failed. */
 export type ColumnTrace = { model: string; column: string | null; down: ColumnAnswer | null; up: ColumnAnswer | null; modelLevel: number | null; failed: boolean }
 

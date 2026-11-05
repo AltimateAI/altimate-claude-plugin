@@ -69,6 +69,7 @@ async function start($: any, on: any, options: Options = {}) {
   // The per-edit impact note: logged for the record, never a toast (the person sees the end-of-task summary).
   const notes: string[] = []
   const logs: string[] = []
+  const debug: string[] = []
   const lists: string[] = []
   on('command.register', () => ({ value: { command: 'lineage' } }))
   // A turn's start and end beneath the plugin: the engine's answer is the model's text.
@@ -82,9 +83,10 @@ async function start($: any, on: any, options: Options = {}) {
     toasts.push(e.text)
     return { value: undefined }
   })
-  on('ui.log', (_: unknown, e: { text: string }) => {
-    logs.push(e.text)
-    if (e.text.startsWith('◆ impact-first · ') && !e.text.startsWith('◆ impact-first · impact_analysis(')) notes.push(e.text)
+  // The transcript's lines, and the debug log's apart.
+  on('ui.log', (_: unknown, e: { text: string; to?: string }) => {
+    ;(e.to === 'debug' ? debug : logs).push(e.text)
+    if (e.to === 'debug' && e.text.startsWith('◆ impact-first · ')) notes.push(e.text)
     return { value: undefined }
   })
   on('ui.render', ($$: any, e: any) => {
@@ -191,7 +193,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, calls, toasts, notes, logs, lists }
+  return { clock, calls, toasts, notes, logs, debug, lists }
 }
 
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
@@ -213,7 +215,7 @@ test('reading a model points the pane at it: the manifest graph, then its column
 })
 
 test('an edit naming a column is held until its reach is known, then the reach goes to Claude and the log, not the person', async ($, on) => {
-  const { clock, calls, toasts, notes, logs } = await start($, on)
+  const { clock, calls, toasts, notes, logs, debug } = await start($, on)
   const edit = { tool: 'Edit' as const, file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' }
   const result: any = await $.tool.call(edit)
   await clock.settle()
@@ -224,7 +226,9 @@ test('an edit naming a column is held until its reach is known, then the reach g
   expect(toasts).toEqual([])
   expect(result.context?.[0]).toContain('read by 2 downstream models: fct_revenue_daily (revenue), rpt_finance_weekly (revenue)')
   expect(result.context?.[0]).toContain('dashboards on them: "Exec Revenue"')
-  expect(logs).toContain("impact-first · added to Claude's context: lineage for fct_orders.revenue")
+  expect(debug).toContain("impact-first · added to Claude's context: lineage for fct_orders.revenue")
+  // Nothing per edit reaches the transcript: the person's one line is the end-of-task summary.
+  expect(logs.filter(line => line.includes('impact-first'))).toEqual([])
 
   // The band waits for the end of the task (task-impact.tsx): nothing per edit.
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -235,6 +239,44 @@ test('an edit naming a column is held until its reach is known, then the reach g
   const again: any = await $.tool.call(edit)
   await clock.settle()
   expect(again.context ?? []).toEqual([])
+})
+
+test('with a column answer, the note Claude gets has the numbers the end-of-task summary shows', async ($, on) => {
+  // The same call carries the older column reach too: the column answer wins.
+  const answer = {
+    version: 1,
+    focus: { model: 'model.shop.fct_orders', column: 'revenue' },
+    direction: 'downstream',
+    counts: { columns: 3, models: 2, hops: 2, contracts: 0, ends: 2, may_carry_models: 4, cleared_models: 1, model_level: 6 },
+    nodes: [
+      { id: 'model.shop.fct_orders', name: 'fct_orders', exposures: [] },
+      { id: 'model.shop.fct_revenue_daily', name: 'fct_revenue_daily', exposures: ['exec_revenue'] },
+      { id: 'model.shop.rpt_finance_weekly', name: 'rpt_finance_weekly', exposures: [] },
+      { id: 'model.shop.rpt_broken', name: 'rpt_broken', exposures: [] },
+    ],
+    columns: [
+      { model: 0, column: 'revenue', hop: 0, how: null, how_from: null },
+      { model: 1, column: 'revenue', hop: 1, end: false, how: '=', how_from: 'engine' },
+      { model: 1, column: 'daily_revenue', hop: 1, end: true, how: '\u03a3', how_from: 'engine' },
+      { model: 2, column: 'weekly_revenue', hop: 2, end: true, how: '\u03a3', how_from: 'engine' },
+    ],
+    edges: [[0, 1, '='], [0, 2, '\u03a3'], [1, 3, '\u03a3']],
+    also_reads: [],
+    unresolved: [{ model: 3, reason: 'parse error' }],
+    cleared: [{ id: 'model.shop.dim_dates', name: 'dim_dates' }],
+    truncated: false,
+  }
+  const { clock, notes } = await start($, on, { reach: { ...REACH, column_answer: answer } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  const note = result.context?.[0] as string
+  expect(note).toContain('- revenue: its value reaches 3 columns in 2 downstream models (2 end columns): fct_revenue_daily (revenue, daily_revenue), rpt_finance_weekly (weekly_revenue)')
+  expect(note).toContain('  dashboards on them: exec_revenue')
+  expect(note).toContain('  4 more models may carry it (they read it outside the select, or sit below a model that could not be read); 1 other downstream model does not carry it; 6 downstream models at model level')
+  expect(note).toContain('  lower bound: 1 model could not be read: rpt_broken ("parse error")')
+  // The older reach numbers are not given alongside.
+  expect(note).not.toContain('read by 2 downstream models')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue reaches 3 columns in 2 models, 4 may carry it · exec_revenue')
 })
 
 test('[c] picks a column and shows its reach; [d] unfolds downstream; a model in the graph is followed on press', async ($, on) => {
