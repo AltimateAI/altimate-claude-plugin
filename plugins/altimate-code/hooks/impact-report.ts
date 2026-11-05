@@ -513,13 +513,21 @@ render();
 })();
 `
 
-/** The command that opens a file in the person's browser, per platform; null when none applies. */
+/** The commands that may open a file in the person's browser, per platform, in the order to try them. */
 export type Platform = 'mac' | 'linux' | 'wsl' | 'windows'
-export function openerFor(platform: Platform, path: string, wsl: { wslview: boolean; windowsPath?: string | null } = { wslview: false }): { argv: string[]; okExits: number[] } | null {
-  if (platform === 'mac') return { argv: ['open', path], okExits: [0] }
-  if (platform === 'linux') return { argv: ['xdg-open', path], okExits: [0] }
-  if (platform === 'windows') return { argv: ['cmd', '/c', 'start', '', path], okExits: [0] }
-  if (wsl.wslview) return { argv: ['wslview', path], okExits: [0] }
+export type Opener = { argv: string[]; okExits: number[] }
+export function openersFor(platform: Platform, path: string, wsl: { windowsPath?: string | null; explorerAtC?: boolean } = {}): Opener[] {
+  if (platform === 'mac') return [{ argv: ['open', path], okExits: [0] }]
+  if (platform === 'linux') return [{ argv: ['xdg-open', path], okExits: [0] }]
+  if (platform === 'windows') return [{ argv: ['cmd', '/c', 'start', '', path], okExits: [0] }]
+  // WSL: wslview when installed; else Windows' explorer.exe on the Windows form of the path, by name
+  // (on PATH when Windows' folders are appended) and then where Windows keeps it; xdg-open last.
   // explorer.exe exits 1 even when it opened the file.
-  return wsl.windowsPath ? { argv: ['explorer.exe', wsl.windowsPath], okExits: [0, 1] } : null
+  const explorer = (bin: string): Opener => ({ argv: [bin, wsl.windowsPath!], okExits: [0, 1] })
+  return [
+    { argv: ['wslview', path], okExits: [0] },
+    ...(wsl.windowsPath ? [explorer('explorer.exe'), ...(wsl.explorerAtC ? [explorer(WINDOWS_EXPLORER)] : [])] : []),
+    { argv: ['xdg-open', path], okExits: [0] },
+  ]
 }
+export const WINDOWS_EXPLORER = '/mnt/c/Windows/explorer.exe'

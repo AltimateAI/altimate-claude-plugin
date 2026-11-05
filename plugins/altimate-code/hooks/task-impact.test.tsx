@@ -30,6 +30,8 @@ type Options = {
   /** HEAD's text per project-relative path. */
   head?: Record<string, string>
   noManifest?: boolean
+  /** Other paths that exist, such as Windows' explorer.exe under /mnt/c. */
+  present?: string[]
 }
 
 /**
@@ -64,7 +66,9 @@ async function start($: any, on: any, options: Options = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path in files || (e.path === MANIFEST && !options.noManifest) || writes.has(e.path) }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({
+    value: e.path in files || (e.path === MANIFEST && !options.noManifest) || writes.has(e.path) || !!options.present?.includes(e.path),
+  }))
   on('fs.stat', (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST && options.noManifest) throw new Error('ENOENT')
     return { value: { kind: 'file', size: 50 * 1024 * 1024, mtimeMs: 1, isLink: false } }
@@ -157,7 +161,8 @@ test('an edited model is traced both ways from the snapshot at the task end, and
     { manifest_path: SNAPSHOT, model: 'fct_orders', column: 'revenue', change_type: 'modify', direction: 'downstream' },
     { manifest_path: SNAPSHOT, model: 'fct_orders', column: 'revenue', change_type: 'modify', direction: 'upstream' },
   ])
-  expect(logs.some(line => line.startsWith('◆ Lineage after this task'))).toBe(true)
+  // One log line: the transcript draws a newline in a log as a replacement glyph.
+  expect(logs).toContain('◆ Lineage after this task · 1 model changed · fct_orders · 6 downstream models at model level · revenue Σ  reaches 4 columns in 3 models (2 ends) · 1 may carry it · 2 cleared · ⚠ Lower bound: 1 model could not be read')
 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: '◆ Lineage after this task · 1 model changed' })).toBeDefined()
@@ -236,6 +241,31 @@ test('Open report on WSL falls back to explorer.exe, whose exit 1 is success; /l
   await band.unmount()
 
   const out: any = await $.command.run({ command: 'lineage-report', args: '' } as any)
+  expect(out.text).toBe(`Opened the column impact report: ${REPORT}`)
+})
+
+test('on WSL with no wslview and no explorer.exe on PATH, Windows\' own explorer.exe opens the report', async ($, on) => {
+  // The kernel release names Microsoft; WSL_DISTRO_NAME is unset.
+  const { runs, turn, clock } = await start($, on, { uname: 'Linux 6.6.87.2-microsoft-standard-WSL2', openers: { '/mnt/c/Windows/explorer.exe': 1 }, present: ['/mnt/c/Windows/explorer.exe'] })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const out: any = await $.command.run({ command: 'lineage-report', args: '' } as any)
+  await clock.settle()
+  const win = '\\\\wsl.localhost\\dev\\repo\\target\\.altimate-lineage\\report.html'
+  const tried = runs.filter(one => ['wslview', 'explorer.exe', '/mnt/c/Windows/explorer.exe', 'xdg-open'].includes(one[0]!))
+  expect(tried).toEqual([['wslview', REPORT], ['explorer.exe', win], ['/mnt/c/Windows/explorer.exe', win]])
+  expect(out.text).toBe(`Opened the column impact report: ${REPORT}`)
+})
+
+test('on WSL with no Windows opener at all, xdg-open is the last try', async ($, on) => {
+  const { runs, turn } = await start($, on, { uname: 'Linux 6.6.87.2-microsoft-standard-WSL2', openers: { 'xdg-open': 0 } })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const out: any = await $.command.run({ command: 'lineage-report', args: '' } as any)
+  const tried = runs.filter(one => ['wslview', 'explorer.exe', '/mnt/c/Windows/explorer.exe', 'xdg-open'].includes(one[0]!)).map(one => one[0])
+  expect(tried).toEqual(['wslview', 'explorer.exe', 'xdg-open'])
   expect(out.text).toBe(`Opened the column impact report: ${REPORT}`)
 })
 

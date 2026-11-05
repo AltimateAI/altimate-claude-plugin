@@ -8,13 +8,14 @@ import {
   DEFAULT_LEVELS,
   focusOf,
   type ModelChange,
-  openerFor,
+  openersFor,
   reachOf,
   reportData,
   reportHtml,
   sectionOf,
   summaryLines,
   summaryOf,
+  WINDOWS_EXPLORER,
 } from './impact-report'
 
 // A synthetic project: orders → fct_orders.revenue → three hops of readers.
@@ -200,17 +201,21 @@ describe('the report', () => {
 })
 
 describe('the opener', () => {
-  test('per platform: open, xdg-open, wslview or explorer.exe on the Windows path, start', () => {
+  test('per platform: open, xdg-open, start; on WSL wslview, explorer.exe by name then by path, xdg-open last', () => {
     const path = '/repo/target/.altimate-lineage/report.html'
-    expect(openerFor('mac', path)).toEqual({ argv: ['open', path], okExits: [0] })
-    expect(openerFor('linux', path)).toEqual({ argv: ['xdg-open', path], okExits: [0] })
-    expect(openerFor('wsl', path, { wslview: true })).toEqual({ argv: ['wslview', path], okExits: [0] })
+    const win = '\\\\wsl.localhost\\x\\report.html'
+    expect(openersFor('mac', path)).toEqual([{ argv: ['open', path], okExits: [0] }])
+    expect(openersFor('linux', path)).toEqual([{ argv: ['xdg-open', path], okExits: [0] }])
+    expect(openersFor('windows', path)).toEqual([{ argv: ['cmd', '/c', 'start', '', path], okExits: [0] }])
     // explorer.exe exits 1 even when it opened the file.
-    expect(openerFor('wsl', path, { wslview: false, windowsPath: '\\\\wsl.localhost\\x\\report.html' })).toEqual({
-      argv: ['explorer.exe', '\\\\wsl.localhost\\x\\report.html'],
-      okExits: [0, 1],
-    })
-    expect(openerFor('wsl', path, { wslview: false, windowsPath: null })).toBeNull()
-    expect(openerFor('windows', path)).toEqual({ argv: ['cmd', '/c', 'start', '', path], okExits: [0] })
+    expect(openersFor('wsl', path, { windowsPath: win, explorerAtC: true })).toEqual([
+      { argv: ['wslview', path], okExits: [0] },
+      { argv: ['explorer.exe', win], okExits: [0, 1] },
+      { argv: [WINDOWS_EXPLORER, win], okExits: [0, 1] },
+      { argv: ['xdg-open', path], okExits: [0] },
+    ])
+    expect(WINDOWS_EXPLORER).toBe('/mnt/c/Windows/explorer.exe')
+    // No Windows path: nothing for explorer.exe to open.
+    expect(openersFor('wsl', path, { windowsPath: null, explorerAtC: true }).map(one => one.argv[0])).toEqual(['wslview', 'xdg-open'])
   })
 })

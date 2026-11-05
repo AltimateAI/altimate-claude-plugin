@@ -11,12 +11,13 @@ import {
   type ColumnTrace,
   type ModelChange,
   modelLevelOf,
-  openerFor,
+  openersFor,
   type Platform,
   reportData,
   reportHtml,
   summaryLines,
   summaryOf,
+  WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
 import { openPane, projectRoot, runTool, within } from './lineage'
@@ -217,14 +218,17 @@ async function finishTask($: EngineInterface, t: Task) {
   if (seq !== finishSeq) return
   const view = summaryOf(changes, traces, report)
   await update($, summaryAtom, () => view)
-  $.ui.log(summaryLines(view).join('\n'))
+  // One line: a log line draws a newline as a replacement glyph.
+  $.ui.log(summaryLines(view).map(line => line.trim()).join(' · '))
 }
 
 /** Which opener family this machine has: macOS, Linux, WSL (Linux under Windows), or Windows itself. */
 async function platformOf($: EngineInterface): Promise<Platform> {
-  const uname = await $.process.run(['uname', '-s'], { timeoutMs: 5_000 }).catch(() => null)
+  // -r too: a WSL kernel's release names Microsoft, with no environment variable needed.
+  const uname = await $.process.run(['uname', '-sr'], { timeoutMs: 5_000 }).catch(() => null)
   if (!uname || uname.exitCode !== 0) return 'windows'
   if (/darwin/i.test(uname.stdout)) return 'mac'
+  if (/microsoft/i.test(uname.stdout)) return 'wsl'
   if (await $.env.get('WSL_DISTRO_NAME').catch(() => undefined)) return 'wsl'
   return /microsoft/i.test(await $.fs.read('/proc/version').catch(() => '')) ? 'wsl' : 'linux'
 }
@@ -232,17 +236,17 @@ async function platformOf($: EngineInterface): Promise<Platform> {
 /** Opens the report in the person's browser; false when no opener worked. */
 export async function openReport($: EngineInterface, path: string): Promise<boolean> {
   const platform = await platformOf($)
-  let opener = openerFor(platform, path)
+  let wsl = {}
   if (platform === 'wsl') {
-    // wslview when installed, else Windows' own explorer.exe on the Windows form of the path.
-    const viewed = await $.process.run(['wslview', path], { timeoutMs: 15_000 }).catch(() => null)
-    if (viewed?.exitCode === 0) return true
     const windows = await $.process.run(['wslpath', '-w', path], { timeoutMs: 5_000 }).catch(() => null)
-    opener = openerFor('wsl', path, { wslview: false, windowsPath: windows?.exitCode === 0 ? windows.stdout.trim() : null })
+    wsl = { windowsPath: windows?.exitCode === 0 ? windows.stdout.trim() || null : null, explorerAtC: await $.fs.exists(WINDOWS_EXPLORER).catch(() => false) }
   }
-  if (!opener) return false
-  const result = await $.process.run(opener.argv, { timeoutMs: 15_000 }).catch(() => null)
-  return !!result && opener.okExits.includes(result.exitCode)
+  // The first that starts and exits as it does on success; one that cannot start, or fails, gives way to the next.
+  for (const opener of openersFor(platform, path, wsl)) {
+    const result = await $.process.run(opener.argv, { timeoutMs: 15_000 }).catch(() => null)
+    if (result && opener.okExits.includes(result.exitCode)) return true
+  }
+  return false
 }
 
 async function openAndSay($: EngineInterface, path: string): Promise<boolean> {
