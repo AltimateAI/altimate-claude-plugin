@@ -15,7 +15,11 @@ Thanks for taking the time to contribute. This plugin lives in one repo (`Altima
    ```
    Both must exit clean. **Validating the repo root alone is not sufficient** — the marketplace-level validator does not descend into skills, so skill-frontmatter parse errors go undetected unless you also validate the plugin path.
 
-   If you touch the CLI resolver block in a skill or command, run `./tests/resolve-cli.sh` — it checks every copy is identical and resolves correctly in bash and zsh.
+   Run the shell tests (CI runs them too, on Linux and macOS):
+   ```bash
+   bash tests/resolve-cli.sh         # the CLI resolver block: every copy identical, resolves in bash and zsh
+   bash tests/workspace-rules-hook.sh # the workspace-rules hook against a stub CLI (needs python3 and git)
+   ```
 4. Open a PR against `AltimateAI/altimate-claude-plugin:main`.
 
 ## Repo layout
@@ -24,22 +28,34 @@ Thanks for taking the time to contribute. This plugin lives in one repo (`Altima
 altimate-claude-plugin/
 ├── .claude-plugin/
 │   └── marketplace.json     # marketplace descriptor (source: ./plugins/altimate-code)
+├── .github/workflows/
+│   └── tests.yml            # runs tests/*.sh on Linux and macOS
 ├── plugins/
 │   └── altimate-code/
 │       ├── .claude-plugin/
 │       │   └── plugin.json      # plugin manifest
 │       ├── skills/
-│       │   └── altimate-code/
-│       │       └── SKILL.md     # delegation logic
+│       │   ├── altimate-code/
+│       │   │   └── SKILL.md     # delegation logic
+│       │   └── review/
+│       │       └── SKILL.md     # dbt/SQL PR reviewer routing
 │       ├── hooks/
-│       │   └── hooks.json       # SessionStart hook config
+│       │   └── hooks.json       # SessionStart, UserPromptSubmit and Stop hook config
 │       ├── hooks-handlers/
-│       │   └── session-start.sh # SessionStart hook handler
+│       │   ├── session-start.sh   # SessionStart capability description
+│       │   └── workspace-rules.sh # team rules hooks (session-start, user-prompt-submit, stop)
 │       ├── commands/
-│       │   └── altimate.md      # /altimate-code:altimate slash command
+│       │   ├── altimate.md      # /altimate-code:altimate slash command
+│       │   ├── review.md        # /altimate-code:review slash command
+│       │   └── rules.md         # /altimate-code:rules slash command
 │       ├── README.md            # plugin-specific docs
 │       └── CHANGELOG.md         # plugin-specific changelog
+├── tests/
+│   ├── resolve-cli.sh           # CLI resolver block check
+│   └── workspace-rules-hook.sh  # workspace-rules hook check
 ├── README.md                # repo overview
+├── PRIVACY.md
+├── TERMS.md
 ├── SECURITY.md
 ├── CODE_OF_CONDUCT.md
 ├── CONTRIBUTING.md
@@ -81,6 +97,7 @@ claude plugin install altimate-code@altimate-claude-plugin
 
 - **Skill** — `plugins/altimate-code/skills/altimate-code/SKILL.md` — the delegation logic (`altimate-code run "$USER_TASK"` and surface the result).
 - **Hook** — `plugins/altimate-code/hooks/hooks.json` + `plugins/altimate-code/hooks-handlers/session-start.sh` — SessionStart hook that describes the plugin's capabilities in the system prompt so Claude can route to it when the task shape fits.
+- **Hooks** — `plugins/altimate-code/hooks-handlers/workspace-rules.sh` — the team rules hooks (SessionStart, UserPromptSubmit, Stop), which call `altimate learn hook <event>` only in a folder altimate-code's link cache names, and never fail the session.
 - **Command** — `plugins/altimate-code/commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation.
 
 ## Reporting bugs / requesting features

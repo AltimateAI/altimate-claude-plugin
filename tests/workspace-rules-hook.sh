@@ -114,6 +114,19 @@ link "$WORK/project-old" "$WORK/projectX/dbt"
 reset
 [ "$(hook "$WORK/project" session-start "$BIN:$SYS")" = "0|" ] || fail "a sibling-prefix link printed output"
 ! started || fail "session start ran the CLI for a link to $WORK/project-old"
+# A folder named only as a value (another row's `projectPath`), not as a key: not linked.
+python3 -c 'import json, sys; print(json.dumps({"bindings": {sys.argv[1] + "/dbt": {"datamateId": 1, "projectPath": sys.argv[1]}}}, indent=2))' "$WORK/project" > "$CACHE"
+reset
+[ "$(hook "$WORK/project" session-start "$BIN:$SYS")" = "0|" ] || fail "a folder named only as a value printed output"
+! started || fail "session start ran the CLI for a folder named only as a projectPath value"
+# Pretty-printed keys still match, and a dot in a folder name is not a regular-expression wildcard.
+mkdir -p "$WORK/dot.repo" && git -C "$WORK/dot.repo" init -q
+link "$WORK/dotXrepo"
+reset
+[ "$(hook "$WORK/dot.repo" session-start "$BIN:$SYS")" = "0|" ] && ! started || fail "a dot in a folder name matched another character"
+python3 -c 'import json, sys; print(json.dumps({"bindings": {sys.argv[1]: {"datamateId": 1}}}, indent=2))' "$WORK/dot.repo" > "$CACHE"
+reset
+[ "$(hook "$WORK/dot.repo" session-start "$BIN:$SYS")" = "$JSON" ] || fail "a pretty-printed link cache key was not found"
 # Folder names with a quote or a backslash are matched as their JSON-escaped keys.
 ODD="$WORK/odd\"name\\repo"
 mkdir -p "$ODD/sub" && git -C "$ODD" init -q

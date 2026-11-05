@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Workspace rules hook for the altimate-code plugin. In a project linked to an
 # Altimate workspace, it brings the workspace's team rules into this session and,
-# with learning on, lets corrections made here become proposed rules, through
-# `altimate learn hook <event>` (which applies every gate: learning and
-# workspaces on, signed in, linked).
+# with learning from sessions on, lets corrections made here become proposed
+# rules, through `altimate learn hook <event>` (`altimate-code` is the same CLI),
+# which applies every gate. Team rules need workspaces on, a sign-in, a link and
+# the learning kill switch not off (ALTIMATE_LEARN / learn.enabled). Capturing
+# corrections and drafting also need learning from sessions on: your own
+# `learn enable` / `learn disable` choice, else the workspace's "Learn from
+# sessions" setting.
 #   session-start       team rules, proposals waiting for the person and new
 #                       reviews, printed as context (one CLI call, a bounded sync)
 #   user-prompt-submit  the prompt is recorded if it reads as a correction
@@ -41,8 +45,9 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
 # linked: whether the workspace link cache has a key for the host's directory or a folder above it, up to the
 # repository root. This mirrors the CLI, which looks there and never below the directory it runs in. Keys are native
-# paths written as JSON strings, so each folder is converted (`cygpath -w` on Windows) and escaped, and matched with
-# both quotes, so `/x/app` never matches `/x/app-old`.
+# paths written as JSON strings, so each folder is converted (`cygpath -w` on Windows), JSON-escaped, then escaped for
+# the regular expression. It is matched with both quotes and the colon after them: `/x/app` never matches `/x/app-old`,
+# and a folder that appears only as a value (a row's `projectPath`) is not a key.
 linked() {
   local cache="${XDG_STATE_HOME:-$HOME/.local/state}/altimate-code/altimate-workspace-bindings.json"
   local top dir key
@@ -53,8 +58,8 @@ linked() {
   while :; do
     key="$dir"
     command -v cygpath >/dev/null 2>&1 && key="$(cygpath -w "$dir")"
-    key="$(printf '%s' "$key" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')"
-    grep -qF "\"$key\"" "$cache" 2>/dev/null && return 0
+    key="$(printf '%s' "$key" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[][\.*^$+?(){}|]/\\&/g')"
+    grep -qE "\"$key\"[[:space:]]*:" "$cache" 2>/dev/null && return 0
     case "$dir" in "$top"|/) return 1 ;; esac
     dir="$(dirname "$dir")"
   done
