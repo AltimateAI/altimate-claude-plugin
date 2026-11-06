@@ -120,6 +120,9 @@ const UNFOLDED = 40
 // Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
 // surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
 const PANE_SIZE = { columns: 110, rows: 34 }
+// The engine's label for a column it could not classify, which is every column read from a CTE or a
+// qualified table, so all of a dbt model's. It says nothing about the column, so the pane leaves it out.
+const NOT_SURE = 'Not sure'
 const LENS_COLOR: Record<string, string> = {
   Original: 'success',
   Alias: 'suggestion',
@@ -1259,7 +1262,7 @@ export function registerLineage(on: On) {
         {(e.props.isExpanded ? direct : direct.slice(0, 12)).map((edge, i) => (
           <Text key={`edge-${i}`}>
             {edge.target.padEnd(w1)} <Text dimColor>←</Text> {edge.source.padEnd(w2)}{'  '}
-            <Text color={LENS_COLOR[edge.lens] ?? 'subtle'}>{edge.lens}</Text>
+            {edge.lens === NOT_SURE ? null : <Text color={LENS_COLOR[edge.lens] ?? 'subtle'}>{edge.lens}</Text>}
             {edge.expression ? <Text dimColor> ({edge.expression})</Text> : null}
           </Text>
         ))}
@@ -1520,7 +1523,7 @@ export function registerLineage(on: On) {
                 <Button key={`col-${name}-pick`} plain label={name} onPress={() => selectColumn(name === column ? null : name)} />
                 <Text dimColor>
                   {sources.length ? ` ← ${sources.join(', ')}` : ''}
-                  {lens ? `  ${lens}` : ''}
+                  {lens && lens !== NOT_SURE ? `  ${lens}` : ''}
                 </Text>
               </Box>
             )

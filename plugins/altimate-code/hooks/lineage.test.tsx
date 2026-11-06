@@ -318,6 +318,34 @@ test('a connected SaaS table_lineage tool adds what the warehouse has observed, 
   await ui.unmount()
 })
 
+test("a column the engine could not classify prints no label, in the pane and on Claude's own call, and a real label still prints", async ($, on) => {
+  const answer = JSON.stringify({
+    ...LINEAGE,
+    edges: [
+      { source: '"int_orders"."order_id"', target: 'order_id', lineage_type: 'direct', lens_type: 'Not sure', lens_code: [] },
+      { source: '"int_orders"."revenue"', target: 'revenue', lineage_type: 'direct', lens_type: 'Transformation', lens_code: [] },
+    ],
+  })
+  const { clock } = await start($, on, { lineageText: answer })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /← int_orders\.order_id/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Not sure/ })).toBeUndefined()
+  await pane.unmount()
+  const row = await $.ui.mount({
+    plugin: 'altimate-code',
+    component: 'ToolResult',
+    requestId: 'tu-1',
+    props: { tool_use_id: 'tu-1', tool: 'mcp__plugin_altimate-code_altimate-code__dbt_lineage', output: [{ type: 'text', text: answer }], isErrored: false, isExpanded: false },
+    surface: 'terminal',
+  } as any)
+  expect(await row.find({ type: 'Text', text: 'Transformation' })).toBeDefined()
+  expect(await row.find({ type: 'Text', text: /Not sure/ })).toBeUndefined()
+  await row.unmount()
+})
+
 test("Claude's own dbt_lineage result is drawn as a colored edge list, with the original under it on ctrl+o", async ($, on) => {
   await start($, on)
   const row = {
