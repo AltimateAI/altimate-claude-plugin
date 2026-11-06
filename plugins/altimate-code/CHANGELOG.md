@@ -9,10 +9,10 @@ All notable changes to this plugin will be documented in this file.
 - Impact first: before an edit to a model's SQL lands, the plugin checks what reads the model and the columns the edit touches. It adds the result to Claude's context and leaves a band above the prompt with the severity and counts.
 
 ### Fixed
-- A manifest over 4 MiB is read through altimate-code. When the answer arrives cut off, the pane now reports that the answer could not be read, and asking again tries again. Before, it said "No dbt model matches" for a model that exists, kept saying so until the manifest changed, and left the edit with no note. altimate-code releases up to 0.12.9 can cut off a large answer on a pipe.
+- A manifest over 4 MiB is read through altimate-code. When the answer arrives cut off, the pane now reports that the answer could not be read, and asking again tries again. An edit that hits this goes ahead with a toast saying the lookup failed, and Claude is told that what reads the model is unknown. Before, the pane said "No dbt model matches" for a model that exists and kept saying so until the manifest changed, and the edit got no note and no message. altimate-code releases up to 0.12.9 can cut off a large answer on a pipe.
 
 ### Upgrading
-- Installs of 1.4.0 made before this release have no lineage, because `plugin update` compares versions. In a terminal, run `claude plugin marketplace update altimate-claude-plugin`, then `claude plugin update altimate-code@altimate-claude-plugin`, then restart Claude Code.
+- A 1.4.0 install from this marketplace made before lineage merged has no lineage, and `plugin update` calls it current, because it compares versions. In a terminal, run `claude plugin marketplace update altimate-claude-plugin`, then `claude plugin update altimate-code@altimate-claude-plugin`, then restart Claude Code.
 
 ## [1.4.0] — 2026-10-28
 

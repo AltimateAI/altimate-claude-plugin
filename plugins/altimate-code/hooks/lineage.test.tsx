@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: () => boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -173,7 +173,8 @@ async function start($: any, on: any, options: Options = {}) {
     calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}`)
     if (options.cliFailure) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'the dbt project could not start', metadata: {} }), stderr: '' } }
     if (options.cliTooLarge) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '', isStdoutTruncated: true } }
-    if (options.cliCutOff?.()) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '' } }
+    if (options.cliCutOff?.(tool)) return { value: { exitCode: options.cliCutOffExit ?? 0, stdout: '{"status":"ok","out', stderr: '' } }
+    if (options.cliStdout !== undefined) return { value: { exitCode: 0, stdout: options.cliStdout, stderr: '' } }
     // altimate-code's dbt_lineage with include_graph returns the subgraph the pane would build itself.
     const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
     const body =
@@ -605,7 +606,7 @@ test('an answer cut off on its way is a failure, not "no such model": it is not 
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /altimate-code failed: dbt_lineage's answer could not be read/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /altimate-code failed: the answer could not be read/ })).toBeDefined()
   await ui.unmount()
   cut = false
   const before = calls.filter(one => one === 'cli:dbt_lineage:graph').length
@@ -616,6 +617,77 @@ test('an answer cut off on its way is a failure, not "no such model": it is not 
   expect(await again.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await again.unmount()
 })
+
+test('an edit whose graph read is cut off goes ahead, says so in a toast and tells Claude what reads it is unknown', async ($, on) => {
+  let cut = true
+  const { clock, calls, toasts } = await start($, on, { size: 6 * 1024 * 1024, cliCutOff: () => cut })
+  const edit = { tool: 'Edit' as const, file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' }
+  const result: any = await $.tool.call(edit)
+  await clock.settle()
+  expect(calls).toContain('tool:Edit')
+  expect(toasts).toContain('◆ impact-first · the lineage lookup failed; the edit went ahead without it')
+  expect(toasts).not.toContain('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
+  expect(result.context?.[0]).toContain('Altimate lineage could not be read before this edit of fct_orders, so what reads it downstream is unknown')
+  // Not remembered: once the answer comes through, the next edit gets its note.
+  cut = false
+  const again: any = await $.tool.call(edit)
+  await clock.settle()
+  expect(again.context?.[0]).toContain('read by 2 downstream models')
+})
+
+test('an edit of a file the manifest does not know stays silent: nothing failed', async ($, on) => {
+  const { clock, toasts } = await start($, on, { size: 6 * 1024 * 1024 })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/not_in_the_manifest.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(toasts.filter((one: string) => one.includes('lineage lookup'))).toEqual([])
+  expect(result.context ?? []).toEqual([])
+})
+
+test('a cut-off impact_analysis leaves its column not checked, and the note still goes to Claude', async ($, on) => {
+  const { clock } = await start($, on, { mcp: false, cliCutOff: tool => tool === 'impact_analysis' })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(result.context?.[0]).toContain('columns not checked (over the limit or no answer in time): revenue; what they reach is unknown')
+})
+
+test('a cut-off plain dbt_lineage shows a failure in the pane, naming the tool once', async ($, on) => {
+  const { clock } = await start($, on, { mcp: false, cliCutOff: tool => tool === 'dbt_lineage' })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /dbt_lineage failed: the answer could not be read/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a non-zero exit with cut-off stdout on a large manifest is a failure, and is asked again', async ($, on) => {
+  const { clock, calls } = await start($, on, { size: 6 * 1024 * 1024, cliCutOff: () => true, cliCutOffExit: 1 })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /reading it through altimate-code failed/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
+  await ui.unmount()
+  const before = calls.filter(one => one === 'cli:dbt_lineage:graph').length
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls.filter(one => one === 'cli:dbt_lineage:graph').length).toBe(before + 1)
+})
+
+for (const stdout of ['{"status":"ok"}', '{}', '[]', '"x"', '12', 'null', '0', '']) {
+  test(`exit 0 with ${stdout || 'no output'} on a large manifest is a failure, and is asked again`, async ($, on) => {
+    const { clock, calls } = await start($, on, { size: 6 * 1024 * 1024, cliStdout: stdout })
+    await $.tool.call({ tool: 'Read', file_path: FILE })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /reading it through altimate-code failed/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
+    await ui.unmount()
+    const before = calls.filter(one => one === 'cli:dbt_lineage:graph').length
+    await $.tool.call({ tool: 'Read', file_path: FILE })
+    await clock.settle()
+    expect(calls.filter(one => one === 'cli:dbt_lineage:graph').length).toBe(before + 1)
+  })
+}
 
 test("altimate-code's own failure on a large manifest is shown as a failure, not as no such model", async ($, on) => {
   const { clock } = await start($, on, { size: 6 * 1024 * 1024, cliFailure: true })
