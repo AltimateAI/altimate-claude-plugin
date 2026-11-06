@@ -120,12 +120,15 @@ const UNFOLDED = 40
 // Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
 // surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
 const PANE_SIZE = { columns: 110, rows: 34 }
+// The engine's label for a column it could not classify, which is every column read from a CTE or a
+// qualified table, so all of a dbt model's. It says nothing about the column, so the pane leaves it out.
+const NOT_SURE = 'Not sure'
 const LENS_COLOR: Record<string, string> = {
   Original: 'success',
   Alias: 'suggestion',
   Transformation: 'warning',
   'Non select': 'inactive',
-  'Not sure': 'subtle',
+  [NOT_SURE]: 'subtle',
 }
 const SEVERITY_COLOR: Record<ImpactView['severity'], string> = {
   SAFE: 'success',
@@ -446,6 +449,11 @@ async function runTool($: EngineInterface, name: string, args: Record<string, un
     return { metadata: null as any, text: `${name}'s answer was larger than the 4 MiB a plugin can read`, ok: false }
   }
   const data = parseJson<{ status?: string; output?: string; metadata?: unknown }>(result.stdout)
+  // Anything but the CLI's answer object (an altimate-code that exits before a pipe drains cuts it off) is a
+  // failure to report and ask again, not "no such model".
+  if (result.exitCode === 0 && (!data || typeof data !== 'object' || typeof data.status !== 'string')) {
+    return { metadata: null as any, text: 'the answer could not be read', ok: false }
+  }
   return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? '', ok: result.exitCode === 0 && data?.status !== 'error' }
 }
 
@@ -475,7 +483,7 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
   const id: string | undefined = result.metadata?.model_unique_id ?? undefined
   // An answer the plugin could not read (too large, no output) or the CLI's own failure (empty
   // metadata) is a failure to report, not "no model": a missing model still carries its metadata.
-  if (!result.ok && Object.keys(result.metadata ?? {}).length === 0) throw new Error(`failed: ${result.text || 'no answer came back'}`)
+  if (Object.keys(result.metadata ?? {}).length === 0) throw new Error(`failed: ${result.text || 'no answer came back'}`)
   if (!result.ok && !id) return null
   if (id && !graph?.nodes?.[id]) throw new Error(result.metadata?.graph_error ? `failed: ${firstLine(String(result.metadata.graph_error))}` : 'needs an altimate-code build whose dbt_lineage supports include_graph')
   const built = id && graph ? { graph, id, columns: columnsFromMetadata(result.metadata) } : null
@@ -860,7 +868,7 @@ function cut(text: string, max: number): string {
  * columns, which downstream models and dashboards read that column. Shown as a toast, then added to
  * Claude's context with the edit's result.
  */
-async function impactFirst($: EngineInterface, e: any, file: string, deadline: number, progress: { project: boolean }): Promise<ImpactNote | null> {
+async function impactFirst($: EngineInterface, e: any, file: string, deadline: number, progress: { project: boolean; failed?: boolean }): Promise<ImpactNote | null> {
   const root = await projectRoot($, file, true)
   if (!root) return null
   projectSeen = true
@@ -873,7 +881,10 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   let id = graph ? findModel(graph, relative(root, file)) : null
   if (!graph) {
     const name = (file.split(/[\\/]/).pop() ?? file).replace(/\.sql$/i, '')
-    const built = await graphFromTools($, manifest, stat.mtimeMs, name, relative(root, file)).catch(() => null)
+    const built = await graphFromTools($, manifest, stat.mtimeMs, name, relative(root, file)).catch(() => {
+      progress.failed = true
+      return null
+    })
     graph = built?.graph ?? null
     id = built?.id ?? null
   }
@@ -1157,7 +1168,7 @@ export function registerLineage(on: On) {
     const isEdit = isSql && EDIT_TOOLS.has(e.tool)
     let lookup: Promise<ImpactNote | null> | null = null
     let finished = false
-    const progress = { project: false }
+    const progress: { project: boolean; failed?: boolean } = { project: false }
     if (isEdit) {
       // The columns stop half a second before the hold ends, leaving time to write the note.
       lookup = impactFirst($, e, file!, (await $.clock.now()) + HOLD_TOTAL_MS - 500, progress)
@@ -1166,6 +1177,9 @@ export function registerLineage(on: On) {
     const note = lookup ? await within($, HOLD_TOTAL_MS, lookup) : null
     // Out of time before even the model-level lookup finished: say so, rather than nothing.
     if (lookup && !note && !finished && progress.project) $.ui.toast('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it', { timeoutMs: 8000 })
+    // It finished, but its answer could not be used: as worth telling.
+    const lookupFailed = !!lookup && !note && finished && !!progress.failed
+    if (lookupFailed) $.ui.toast('◆ impact-first · the lineage lookup failed; the edit went ahead without it', { timeoutMs: 8000 })
     // Before the edit runs: the point is to see what it reaches first.
     if (note) $.ui.toast(note.toast, { timeoutMs: 8000 })
     const result = await next(e)
@@ -1226,6 +1240,12 @@ export function registerLineage(on: On) {
         return { ...result, context: [...(result.context ?? []), note.context] } as typeof result
       }
     }
+    if (lookupFailed) {
+      const name = (file!.split(/[\\/]/).pop() ?? file!).replace(/\.sql$/i, '')
+      $.ui.log(`impact-first · added to Claude's context: the lineage lookup failed for ${name}`)
+      const line = `Altimate lineage could not be read before this edit of ${quoted(name)}, so what reads it downstream is unknown. Tell the user the edit went ahead without that check.`
+      return { ...result, context: [...(result.context ?? []), line] } as typeof result
+    }
     return result
   })
 
@@ -1256,7 +1276,7 @@ export function registerLineage(on: On) {
         {(e.props.isExpanded ? direct : direct.slice(0, 12)).map((edge, i) => (
           <Text key={`edge-${i}`}>
             {edge.target.padEnd(w1)} <Text dimColor>←</Text> {edge.source.padEnd(w2)}{'  '}
-            <Text color={LENS_COLOR[edge.lens] ?? 'subtle'}>{edge.lens}</Text>
+            {edge.lens === NOT_SURE ? null : <Text color={LENS_COLOR[edge.lens] ?? 'subtle'}>{edge.lens}</Text>}
             {edge.expression ? <Text dimColor> ({edge.expression})</Text> : null}
           </Text>
         ))}
@@ -1517,7 +1537,7 @@ export function registerLineage(on: On) {
                 <Button key={`col-${name}-pick`} plain label={name} onPress={() => selectColumn(name === column ? null : name)} />
                 <Text dimColor>
                   {sources.length ? ` ← ${sources.join(', ')}` : ''}
-                  {lens ? `  ${lens}` : ''}
+                  {lens && lens !== NOT_SURE ? `  ${lens}` : ''}
                 </Text>
               </Box>
             )

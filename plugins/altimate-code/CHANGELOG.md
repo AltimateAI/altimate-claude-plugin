@@ -2,6 +2,18 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.4.1] — 2026-11-06
+
+### Added
+- Lineage beside the chat (`hooks/lineage.tsx`, a Claude Code mod): a pane follows the dbt model Claude reads or edits and draws its upstream and downstream models, dashboards and column lineage from `target/manifest.json`, with no model calls. `/lineage <model>[.column]` opens it on a model. A column the engine can't classify shows no derivation label, rather than "Not sure" on every column. See the README's "Lineage beside the chat".
+- Impact first: before an edit to a model's SQL lands, the plugin checks what reads the model and the columns the edit touches. It adds the result to Claude's context and leaves a band above the prompt with the severity and counts.
+
+### Fixed
+- A manifest over 4 MiB is read through altimate-code. When the answer arrives cut off, the pane now reports that the answer could not be read, and asking again tries again. An edit that hits this goes ahead with a toast saying the lookup failed, and Claude is told that what reads the model is unknown. Before, the pane said "No dbt model matches" for a model that exists and kept saying so until the manifest changed, and the edit got no note and no message. altimate-code releases up to 0.12.9 can cut off a large answer on a pipe.
+
+### Upgrading
+- A 1.4.0 install from this marketplace made before lineage merged has no lineage, and `plugin update` calls it current, because it compares versions. In a terminal, run `claude plugin marketplace update altimate-claude-plugin`, then `claude plugin update altimate-code@altimate-claude-plugin`, then restart Claude Code.
+
 ## [1.4.0] — 2026-10-28
 
 ### Added
