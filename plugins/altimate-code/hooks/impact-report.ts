@@ -21,10 +21,14 @@ export type ColumnAnswer = {
   unresolved?: { model: number; reason?: string; downstream?: number }[]
   /** Models at the model level that do not carry the value: off the path, so not in `nodes`. */
   cleared?: { id?: string; name?: string }[]
+  /** Exposures on the model or downstream, by what they read; `declared` counts the whole project's. */
+  consumers?: { declared?: number; exposures?: RawExposure[] }
   flags?: { model: number; flag: string }[]
   truncated?: boolean
   next?: unknown
 }
+
+type RawExposure = { unique_id?: string; name?: string; label?: string; type?: string; url?: string; owner?: string; tier?: string; via?: string[] }
 
 /** A model file the task changed, with the columns it changed (at most three). */
 export type ModelChange = {
@@ -32,6 +36,23 @@ export type ModelChange = {
   file: string
   root: string
   columns: { name: string; before: string | null; after: string | null }[]
+  /** The file's fingerprint as the task ended, to tell whether it changed since. */
+  ended?: string
+}
+
+export type ConsumerTier = 'carries' | 'may_carry' | 'cleared'
+/** An exposure: `tier` says how the models it reads relate to the value; null when only a model was traced. */
+export type Consumer = { id: string; label: string; type: string; url: string | null; owner: string | null; tier: ConsumerTier | null; via: string[]; columns: string[] }
+/** `declared` is what the whole project declares; null when the answer did not say. */
+export type ReportConsumers = { declared: number | null; error: string | null; list: Consumer[] }
+/** Running text, with names set apart. */
+export type Words = (string | { code: string })[]
+
+/** A cheap fingerprint of a file's text. */
+export function fingerprint(text: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193)
+  return `${(hash >>> 0).toString(16)}:${text.length}`
 }
 
 export const MAX_TASK_COLUMNS = 3
@@ -140,8 +161,62 @@ export function carriersOf(answer: ColumnAnswer): { name: string; columns: strin
   return [...byModel.values()].sort((a, b) => a.hop - b.hop || a.name.localeCompare(b.name)).map(({ hop: _hop, ...rest }) => rest)
 }
 
-/** The traced answers for one changed column: downstream and upstream, each null when it failed. */
-export type ColumnTrace = { model: string; column: string | null; down: ColumnAnswer | null; up: ColumnAnswer | null; modelLevel: number | null; failed: boolean }
+/** What one impact_analysis result says about exposures, tiered when it carries a column answer. */
+export function consumersOf(metadata: unknown): ReportConsumers {
+  const m = metadata as any
+  const answer = answerOf(m)
+  const tiered = answer?.consumers?.exposures
+  const raw: RawExposure[] = Array.isArray(tiered) ? tiered : Array.isArray(m?.exposures) ? m.exposures : []
+  return {
+    declared: num(answer?.consumers?.declared) ?? num(m?.exposures_declared),
+    error: typeof m?.exposures_error === 'string' ? m.exposures_error : null,
+    list: raw.map(one => ({
+      id: String(one.unique_id ?? one.name ?? one.label ?? '?'),
+      label: String(one.label ?? one.name ?? one.unique_id ?? '?'),
+      type: String(one.type ?? 'exposure'),
+      url: typeof one.url === 'string' && /^https?:\/\//i.test(one.url) ? one.url : null,
+      owner: typeof one.owner === 'string' ? one.owner : null,
+      tier: one.tier === 'carries' || one.tier === 'may_carry' || one.tier === 'cleared' ? one.tier : null,
+      via: Array.isArray(one.via) ? one.via.map(String) : [],
+      columns: [],
+    })),
+  }
+}
+
+const TIER_ORDER: (ConsumerTier | null)[] = ['carries', 'may_carry', 'cleared', null]
+
+/** One list across every traced column: an exposure once, in its closest tier, naming the columns behind it. */
+export function mergeConsumers(traces: ColumnTrace[]): ReportConsumers {
+  const merged = new Map<string, Consumer>()
+  for (const trace of traces) {
+    for (const one of trace.consumers?.list ?? []) {
+      const known = merged.get(one.id)
+      const column = trace.column ? `${trace.model}.${trace.column}` : null
+      if (!known || TIER_ORDER.indexOf(one.tier) < TIER_ORDER.indexOf(known.tier)) {
+        merged.set(one.id, { ...one, columns: [...new Set([...(known?.columns ?? []), ...(column ? [column] : [])])] })
+      } else if (column && !known.columns.includes(column)) {
+        known.columns.push(column)
+      }
+    }
+  }
+  const declared = traces.map(one => one.consumers?.declared ?? null).filter((one): one is number => one !== null)
+  return {
+    declared: declared.length ? Math.max(...declared) : null,
+    error: traces.map(one => one.consumers?.error ?? null).find(Boolean) ?? null,
+    list: [...merged.values()].sort((a, b) => TIER_ORDER.indexOf(a.tier) - TIER_ORDER.indexOf(b.tier) || a.label.localeCompare(b.label)),
+  }
+}
+
+/** The traced answers for one changed column: downstream and upstream, each null when not asked or failed. */
+export type ColumnTrace = {
+  model: string
+  column: string | null
+  down: ColumnAnswer | null
+  up: ColumnAnswer | null
+  modelLevel: number | null
+  failed: boolean
+  consumers?: ReportConsumers
+}
 
 /** The band's view of a finished task. */
 export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report: string | null): TaskSummaryView {
@@ -156,8 +231,7 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
         const reach = one.down ? reachOf(one.down) : null
         for (const entry of one.down?.unresolved ?? []) unresolved.add(one.down!.nodes[entry.model]?.id ?? one.down!.nodes[entry.model]?.name ?? String(entry.model))
         if (reach?.truncated) truncated = true
-        const how = focusHow(one.up)
-        return { name: one.column!, how: how?.glyph ?? null, byName: how?.byName ?? false, reach, failed: one.failed }
+        return { name: one.column!, reach, failed: one.failed }
       })
     return { name: change.model, modelLevel, columns }
   })
@@ -172,15 +246,14 @@ export function summaryLines(view: TaskSummaryView): string[] {
     lines.push(`${model.name}${model.modelLevel !== null ? ` · ${plural(model.modelLevel, 'downstream model')} at model level` : ''}`)
     if (model.columns.length === 0) lines.push('  no output column changed: the model-level count stands')
     for (const col of model.columns) {
-      const glyph = col.how ? `${col.how}${col.byName ? ' (by name)' : ''}` : '·'
-      if (view.state === 'tracing' && !col.reach) lines.push(`  ${col.name} ${glyph}  tracing…`)
-      else if (!col.reach) lines.push(`  ${col.name} ${glyph}  ${col.failed ? 'could not be traced' : 'no column answer'}`)
+      if (view.state === 'tracing' && !col.reach) lines.push(`  ${col.name}  tracing…`)
+      else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : 'no column answer'}`)
       else {
         const r = col.reach
         const parts = [`reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'model')} (${plural(r.ends, 'end')})`]
         parts.push(`${r.mayCarry} may carry it`)
         if (r.cleared !== null) parts.push(`${r.cleared} cleared`)
-        lines.push(`  ${col.name} ${glyph}  ${parts.join(' · ')}`)
+        lines.push(`  ${col.name}  ${parts.join(' · ')}`)
       }
     }
   }
@@ -220,6 +293,8 @@ export type ReportFocus = {
   after: string | null
   reach: Reach | null
   modelLevel: number | null
+  /** What to expect downstream, in plain words. */
+  impact: Words[]
   up: ReportSection
   down: ReportSection
   edges: [string, string, string][]
@@ -230,12 +305,18 @@ export type ReportFocus = {
 }
 export type ReportData = {
   title: string
-  generatedAt: string
+  finishedAt: string
+  builtAt: string
   manifest: string
+  /** Files that changed after the task ended. */
+  movedOn: string[]
   defaultLevels: number
   changes: { model: string; file: string; columns: ModelChange['columns'] }[]
   focuses: ReportFocus[]
+  consumers: ReportConsumers
 }
+/** When the task ended and the report was built, what was read, and what changed since. */
+export type ReportTask = { finishedAt: string; builtAt: string; manifest: string; movedOn: string[] }
 
 const keyOf = (answer: ColumnAnswer, index: number) => {
   const col = answer.columns[index]!
@@ -277,6 +358,48 @@ export function sectionOf(answer: ColumnAnswer | null, failed = false): ReportSe
   return { hops, truncated: answer.truncated === true, error: null }
 }
 
+const count = (n: number, word: string, many = `${word}s`) => `${n} ${n === 1 ? word : many}`
+
+function namesList(names: string[], max = 5): Words {
+  const shown = names.slice(0, max)
+  const out: Words = []
+  shown.forEach((name, i) => {
+    if (i > 0) out.push(i === shown.length - 1 && names.length <= max ? ' and ' : ', ')
+    out.push({ code: name })
+  })
+  if (names.length > max) out.push(` and ${names.length - max} more`)
+  return out
+}
+
+/** What to expect downstream of one changed column (or model), in plain words. */
+export function impactWords(model: string, column: string | null, trace: ColumnTrace | undefined): Words[] {
+  const down = trace?.down ?? null
+  const level = trace?.modelLevel ?? (down ? reachOf(down).modelLevel : null)
+  const downstream: Words = level === null ? [] : level === 0 ? ['Nothing sits downstream of ', { code: model }, '. '] : [{ code: model }, ` has ${count(level, 'model')} downstream. `]
+  if (!column) {
+    if (level === null) return [['The downstream count could not be read for ', { code: model }, '.']]
+    return [[...downstream, ...(level > 0 ? ["No output column changed (a filter or a join, say), so this can't say which of them are affected."] : [])]]
+  }
+  if (!down) return [[...downstream, 'The column ', { code: column }, ' could not be traced.']]
+  const r = reachOf(down)
+  const lines: Words[] = []
+  const value = [...new Set(down.columns.filter(one => one.hop > 0).map(one => one.model))].map(index => down.nodes[index]).filter(Boolean)
+  if (r.models > 0) lines.push([...downstream, 'The value of ', { code: column }, ` flows into ${r.models} of them, in ${count(r.columns, 'column')}. Expect those to change with it: `, ...namesList(carriersOf(down).map(one => one.name)), '.'])
+  else if (level !== 0) lines.push([...downstream, 'The value of ', { code: column }, " doesn't flow into any column of theirs."])
+  else lines.push(downstream)
+  if (r.mayCarry > 0) lines.push([`${r.mayCarry} more may change: ${r.mayCarry === 1 ? 'it uses' : 'they use'} the value in a way the trace can't follow (a filter or a join, say), ${r.mayCarry === 1 ? 'its' : 'their'} SQL couldn't be read, or ${r.mayCarry === 1 ? 'it reads' : 'they read'} from a model like that.`])
+  if (r.cleared) lines.push([`${r.cleared} shouldn't change: ${r.cleared === 1 ? "it's" : "they're"} downstream of the model, but the value doesn't reach ${r.cleared === 1 ? 'it' : 'them'}.`])
+  const self = down.nodes[down.columns.find(one => one.hop === 0)?.model ?? -1]
+  if (self?.contract) lines.push([{ code: model }, ' enforces a contract, so a type change can fail its build.'])
+  const contracts = value.filter(one => one!.contract).map(one => String(one!.name ?? one!.id))
+  if (contracts.length > 0) lines.push([`${contracts.length === 1 ? 'One model it reaches enforces' : `${contracts.length} models it reaches enforce`} a contract, so a type change can fail the build there: `, ...namesList(contracts), '.'])
+  const tests = value.reduce((sum, one) => sum + (num(one!.tests) ?? 0), 0)
+  if (tests > 0) lines.push([`Tests on the models it reaches: ${tests}.`])
+  const short = [r.unresolved ? `${count(r.unresolved, "model")} couldn't be read` : '', r.truncated ? 'the trace hit its limit' : ''].filter(Boolean).join(' and ')
+  lines.push([short ? `${short.charAt(0).toUpperCase()}${short.slice(1)}, so the real numbers can only be higher.` : 'Every downstream model was read.'])
+  return lines
+}
+
 /** The page's data for one changed column (or one model, when no column changed). */
 export function focusOf(change: ModelChange, column: ModelChange['columns'][number] | null, trace: ColumnTrace | undefined): ReportFocus {
   const down = trace?.down ?? null
@@ -305,8 +428,9 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
     after: column?.after ?? null,
     reach,
     modelLevel: trace?.modelLevel ?? reach?.modelLevel ?? null,
-    up: sectionOf(up, !!trace?.failed && !up && !!column),
-    down: sectionOf(down, !!trace?.failed && !down && !!column),
+    impact: impactWords(change.model, column?.name ?? null, trace),
+    up: sectionOf(up, !up && !!column),
+    down: sectionOf(down, !down && !!column),
     edges,
     alsoReads: (down?.also_reads ?? []).map(one => ({ name: nameOf(down!, one.model), columns: (one.columns ?? []).map(String), downstream: num(one.downstream) })),
     unresolved: (down?.unresolved ?? []).map(one => ({ name: nameOf(down!, one.model), reason: String(one.reason ?? 'not read'), downstream: num(one.downstream) })),
@@ -321,7 +445,7 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
 }
 
 /** Everything the report draws, from the task's changes and their traces. */
-export function reportData(changes: ModelChange[], traces: ColumnTrace[], generatedAt: string, manifest: string): ReportData {
+export function reportData(changes: ModelChange[], traces: ColumnTrace[], task: ReportTask): ReportData {
   const focuses: ReportFocus[] = []
   for (const change of changes) {
     if (change.columns.length === 0) focuses.push(focusOf(change, null, traces.find(one => one.model === change.model && one.column === null)))
@@ -330,11 +454,11 @@ export function reportData(changes: ModelChange[], traces: ColumnTrace[], genera
   const names = changes.map(one => one.model)
   return {
     title: `Column impact · ${names.slice(0, 2).join(', ')}${names.length > 2 ? ` +${names.length - 2}` : ''}`,
-    generatedAt,
-    manifest,
+    ...task,
     defaultLevels: DEFAULT_LEVELS,
     changes: changes.map(one => ({ model: one.model, file: one.file, columns: one.columns })),
     focuses,
+    consumers: mergeConsumers(traces),
   }
 }
 
@@ -389,8 +513,8 @@ header.top{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;margin-
 header.top h1{font-size:20px;margin:0;font-weight:650;letter-spacing:-.01em}
 header.top .when{color:var(--muted);font-size:12.5px}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow)}
-.changes{padding:14px 16px;margin-bottom:14px}
-.changes h2,.section h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 8px;font-weight:600}
+.changes,.impact,.consumers{padding:14px 16px;margin-bottom:14px}
+.changes h2,.impact h2,.consumers h2,.section h2{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:0 0 8px;font-weight:600}
 .change-model{margin:8px 0 2px;font-weight:600;overflow-wrap:anywhere}
 .change-model .file{color:var(--faint);font-weight:400;margin-left:6px;font-size:12px}
 .diff{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:6px 0 10px;align-items:start}
@@ -400,6 +524,19 @@ header.top .when{color:var(--muted);font-size:12.5px}
 .diff .now{background:var(--add-bg);color:var(--add)}
 .diff .none{opacity:.7;font-style:italic}
 .diff .same{grid-column:2;color:var(--muted);font-size:12.5px}
+.impact h3{font-size:13px;font-weight:600;margin:10px 0 4px;overflow-wrap:anywhere}
+.impact ul{margin:0;padding-left:18px}
+.impact li{margin:5px 0}
+.impact code,.consumers code{overflow-wrap:anywhere}
+.consumers .tier{font-size:12.5px;font-weight:600;margin:10px 0 2px}
+.consumers ul{margin:0 0 4px;padding-left:18px}
+.consumers li{margin:3px 0;overflow-wrap:anywhere}
+.consumers .why{color:var(--muted)}
+.consumers .foot{color:var(--muted);font-size:12.5px;margin:10px 0 0}
+.consumers a{color:var(--accent)}
+.deep{margin:26px 0 12px;padding-top:16px;border-top:1px solid var(--line-strong)}
+.deep h2{font-size:15px;font-weight:650;margin:0 0 2px}
+.deep p{margin:0;color:var(--muted);font-size:13px}
 .tabs{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}
 .tab{appearance:none;border:1px solid var(--line-strong);background:var(--panel);color:var(--ink);border-radius:999px;padding:5px 12px;font:inherit;cursor:pointer}
 .tab[aria-selected=true]{background:var(--accent);border-color:var(--accent);color:#fff}
@@ -495,11 +632,25 @@ function section(f,i,dir){var sec=f[dir],lv=state.levels[i][dir],s=el('section',
 function stat(n,label,dim){var d=el('div','stat'+(dim?' dim':''));d.appendChild(el('b',null,n==null?'\\u2013':n));d.appendChild(el('span',null,label));return d}
 function fold(title,count,items){var d=el('details','panel fold');var s=el('summary',null,title+' ');s.appendChild(el('span',null,'('+(count==null?'not reported':count)+')'));d.appendChild(s);var ul=el('ul');items.forEach(function(it){ul.appendChild(it)});if(!items.length)ul.appendChild(el('li','why',count==null?'Not reported by this altimate-code build.':count?'Only the count is known.':'None.'));d.appendChild(ul);return d}
 function li(name,rest){var l=el('li');l.appendChild(el('span','mono',name));if(rest){l.appendChild(document.createTextNode(' '));l.appendChild(el('span','why',rest))}return l}
+function words(parent,line){line.forEach(function(w){if(typeof w==='string')parent.appendChild(document.createTextNode(w));else parent.appendChild(el('code',null,w.code))});return parent}
+function impactPanel(){var p=el('div','panel impact');p.appendChild(el('h2',null,'What to expect downstream'));DATA.focuses.forEach(function(g){if(DATA.focuses.length>1)p.appendChild(el('h3','mono',g.column?g.model+'.'+g.column:g.model));var ul=el('ul');g.impact.forEach(function(line){ul.appendChild(words(el('li'),line))});p.appendChild(ul)});return p}
+function consumerItem(c){var l=el('li');if(c.url){var a=el('a',null,c.label);a.href=c.url;a.rel='noopener noreferrer';a.target='_blank';l.appendChild(a)}else l.appendChild(document.createTextNode(c.label));var bits=[c.type];if(c.via.length)bits.push('reads '+c.via.join(', '));if(c.owner)bits.push('owner: '+c.owner);if(DATA.focuses.length>1&&c.columns.length)bits.push('for '+c.columns.join(', '));l.appendChild(el('span','why',' \\u00b7 '+bits.join(' \\u00b7 ')));return l}
+var TIERS=[['carries','Read a model the value reaches'],['may_carry','Read a model that may carry it'],['cleared',"Read only models the value doesn't reach"],[null,'Read this model or one downstream of it']];
+function consumersPanel(){var c=DATA.consumers,p=el('div','panel consumers');p.appendChild(el('h2',null,'Who consumes it'));
+  if(c.error)p.appendChild(el('div','empty','The project\\u2019s exposures could not be read: '+c.error));
+  else if(c.declared===null)p.appendChild(el('div','empty','This version of altimate-code does not report exposures, so consumers are unknown.'));
+  else if(c.declared===0)p.appendChild(el('div','empty','This dbt project declares no exposures, so no dashboards or other consumers can be named. That does not mean nothing reads these tables.'));
+  else if(!c.list.length)p.appendChild(el('div','empty','This dbt project declares '+plural(c.declared,'exposure')+', but none reads this model or anything downstream of it.'));
+  TIERS.forEach(function(t){var mine=c.list.filter(function(x){return x.tier===t[0]});if(!mine.length)return;p.appendChild(el('div','tier',t[1]+' ('+mine.length+')'));var ul=el('ul');mine.forEach(function(x){ul.appendChild(consumerItem(x))});p.appendChild(ul)});
+  p.appendChild(el('p','foot','From the exposures this dbt project declares'+(c.list.length?'. dbt records which models an exposure reads, not which columns, so each may or may not use this one':'')+'. Anything not declared, such as other BI tools or backend services, is not listed.'));return p}
 function render(){
   var f=DATA.focuses[state.focus],i=state.focus;app.textContent='';
   var bar=el('div','pathbar');bar.id='pathbar';var wrap=el('div','wrap');wrap.appendChild(bar);
-  var top=el('header','top');top.appendChild(el('h1',null,DATA.title));top.appendChild(el('span','when','Generated '+DATA.generatedAt+' \\u00b7 downstream read from '+DATA.manifest));wrap.appendChild(top);
+  var top=el('header','top');top.appendChild(el('h1',null,DATA.title));top.appendChild(el('span','when','Task finished '+DATA.finishedAt+' \\u00b7 report built '+DATA.builtAt+' \\u00b7 read from '+DATA.manifest));wrap.appendChild(top);
+  if(DATA.movedOn.length)wrap.appendChild(el('div','note warn','\\u26a0 Since this task ended, '+DATA.movedOn.join(', ')+(DATA.movedOn.length===1?' has':' have')+' changed. This report describes the task, not the files as they are now.'));
   var ch=el('div','panel changes');ch.appendChild(el('h2',null,'What this task changed'));DATA.changes.forEach(function(c){var m=el('div','change-model mono',c.model);m.appendChild(el('span','file',c.file));ch.appendChild(m);if(!c.columns.length){ch.appendChild(el('div','empty','No output column changed (a filter or a join): only the model-level count applies.'));return}var d=el('div','diff');c.columns.forEach(function(col){d.appendChild(el('div','col-name mono',col.name));var was=el('div','was mono'+(col.before?'':' none'),col.before||'(not in the model before)');var now=el('div','now mono'+(col.after?'':' none'),col.after||'(removed)');if(col.before&&col.after&&col.before===col.after){d.appendChild(el('div','same','Expression unchanged; the column is named on a changed line.'));d.appendChild(el('div'))}else{d.appendChild(was);d.appendChild(now)}});ch.appendChild(d)});wrap.appendChild(ch);
+  wrap.appendChild(impactPanel());wrap.appendChild(consumersPanel());
+  var deep=el('div','deep');deep.appendChild(el('h2',null,'Column by column'));deep.appendChild(el('p',null,'Two levels up and down, with more on request. Click any column to light up its path; nothing is hidden.'));wrap.appendChild(deep);
   if(DATA.focuses.length>1){var tabs=el('div','tabs');tabs.setAttribute('role','tablist');DATA.focuses.forEach(function(g,j){var t=el('button','tab',g.column?g.model+'.'+g.column:g.model+' (model)');t.type='button';t.setAttribute('role','tab');t.setAttribute('aria-selected',j===i?'true':'false');t.addEventListener('click',function(){state.focus=j;state.selected=null;render()});tabs.appendChild(t)});wrap.appendChild(tabs)}
   var r=f.reach,stats=el('div','stats');
   if(r){stats.appendChild(stat(r.columns,'columns downstream'));stats.appendChild(stat(r.models,'models carry it'));stats.appendChild(stat(r.ends,'end columns'));stats.appendChild(stat(r.mayCarry,'may carry it',!r.mayCarry));stats.appendChild(stat(r.cleared,'cleared',r.cleared==null))}

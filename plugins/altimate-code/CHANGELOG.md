@@ -5,11 +5,15 @@ All notable changes to this plugin will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- End-of-task column impact: after a task that changed a dbt model, a band sums up each changed column's downstream reach from `impact_analysis`, and **Open report** or `/lineage-report` opens an offline HTML report with upstream and downstream lineage, two levels by default, and click-to-highlight paths. The task's start copies `target/manifest.json` aside, so the answer reflects the SQL before the task.
+- End-of-task column impact: after a task that changed a dbt model, a band sums up each changed column's downstream reach from `impact_analysis`. The task's start copies `target/manifest.json` aside, so the answer reflects the SQL before the task.
+- An offline HTML report, built when **Open report** or `/lineage-report` asks for it: what changed and what to expect downstream in plain words, who consumes it from dbt exposures, then upstream and downstream lineage, two levels by default, and click-to-highlight paths.
 
 ### Changed
 - The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result.
 - The lineage pane no longer opens by itself at any width. `/lineage` and **Open lineage** open it, on the model it has been following.
+
+### Fixed
+- An altimate-code answer that arrives cut off is a failure that gets asked again, not "no such model" remembered for the session.
 
 ## [1.4.0] — 2026-10-28
 

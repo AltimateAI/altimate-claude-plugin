@@ -1,5 +1,5 @@
 // The end-of-task column impact: what a task changed in its dbt models, how far each changed column's
-// value reaches, as one summary in the band, and a full offline report that opens in the browser.
+// value reaches, as one summary in the band, and a full offline report built when asked for.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderElement } from 'claude-code'
 
@@ -9,6 +9,8 @@ import {
   answerOf,
   changedColumns,
   type ColumnTrace,
+  consumersOf,
+  fingerprint,
   type ModelChange,
   modelLevelOf,
   openersFor,
@@ -25,6 +27,11 @@ import { openPane, projectRoot, runTool, within } from './lineage'
 export const REPORT_COMMAND = 'lineage-report'
 // Under the project's target/, which dbt already keeps out of git.
 const LINEAGE_DIR = 'target/.altimate-lineage'
+// A task's copy of the manifest while it runs, and the last finished task's, kept for its report.
+const RUNNING_MANIFEST = 'manifest-before.json'
+const TASK_MANIFEST = 'task-manifest.json'
+// What a report needs of the last finished task, so one can be built after a restart too.
+const TASK_FILE = 'last-task.json'
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
 // The most changed models one task traces; the rest are named in the log.
 const MAX_MODELS = 5
@@ -43,9 +50,21 @@ type GitStart = { top: string; dirty: Map<string, string | null> }
 type RootState = { snapshot: string | null; layout: Layout; git: GitStart | null }
 type Task = { roots: Map<string, Promise<RootState>>; originals: Map<string, { root: string; text: string }> }
 
+/** The last task that changed a model: all a report needs, frozen as the task ended. */
+type Finished = {
+  finishedAt: number
+  changes: ModelChange[]
+  /** Each project's copy of the manifest from the task's start; null when there was none. */
+  manifests: Record<string, string | null>
+  /** The downstream answers, once asked for; a restart loses them. */
+  downs: Promise<ColumnTrace[]> | null
+  /** Both directions, once a report asked for them. */
+  full: Promise<ColumnTrace[]> | null
+}
+
 // The task under way: from a main-loop turn's start to its end.
 let task: Task | null = null
-let lastReport: string | null = null
+let finished: Finished | null = null
 let finishSeq = 0
 
 const newTask = (): Task => ({ roots: new Map(), originals: new Map() })
@@ -92,8 +111,8 @@ function prepareRoot($: EngineInterface, t: Task, root: string): Promise<RootSta
       // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read.
       const dir = `${root}/${LINEAGE_DIR}`
       const made = await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5_000 }).catch(() => null)
-      const copied = made?.exitCode === 0 ? await $.process.run(['cp', manifest, `${dir}/manifest-before.json`], { timeoutMs: 20_000 }).catch(() => null) : null
-      if (copied?.exitCode === 0) snapshot = `${dir}/manifest-before.json`
+      const copied = made?.exitCode === 0 ? await $.process.run(['cp', manifest, `${dir}/${RUNNING_MANIFEST}`], { timeoutMs: 20_000 }).catch(() => null) : null
+      if (copied?.exitCode === 0) snapshot = `${dir}/${RUNNING_MANIFEST}`
     }
     const top = (await git($, ['-C', root, 'rev-parse', '--show-toplevel']))?.trim()
     let gitStart: GitStart | null = null
@@ -133,7 +152,7 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     if (state && !isModelFile(state.layout, relative(one.root, file))) continue
     const current = await $.fs.read(file).catch(() => '')
     if (current === one.original) continue
-    changes.push({ model: modelName(file), file: relative(one.root, file), root: one.root, columns: changedColumns(one.original, current) })
+    changes.push({ model: modelName(file), file: relative(one.root, file), root: one.root, columns: changedColumns(one.original, current), ended: fingerprint(current) })
   }
   if (changes.length > MAX_MODELS) $.ui.log(`lineage-summary · ${changes.length} models changed; tracing the first ${MAX_MODELS}`)
   return changes.slice(0, MAX_MODELS)
@@ -154,46 +173,79 @@ async function pool<T>(items: (() => Promise<T>)[], limit: number): Promise<T[]>
   return out
 }
 
-/** Downstream and upstream answers for each changed column; the model-level count for a model with none. */
-async function traceChanges($: EngineInterface, t: Task, changes: ModelChange[]): Promise<ColumnTrace[]> {
-  const ask = async (change: ModelChange, column: string | null, direction: 'downstream' | 'upstream') => {
-    const state = await t.roots.get(change.root)?.catch(() => null)
-    const manifest = state?.snapshot ?? `${change.root}/target/manifest.json`
-    // Known limit: the model goes by its file name, which misses a versioned model (x_v2.sql) or a file
-    // named apart from its model.
-    const args = { manifest_path: manifest, model: change.model, ...(column && { column }), change_type: 'modify', direction }
-    const result = await runTool($, 'impact_analysis', args).catch(() => null)
-    return result?.ok ? result.metadata : null
-  }
+/** The copy of the manifest a project's answers read: the task's own, else the project's as it is now. */
+const manifestOf = (done: Finished, root: string) => done.manifests[root] ?? `${root}/target/manifest.json`
+
+/** One impact_analysis call for a change; null when it failed. */
+async function ask($: EngineInterface, done: Finished, change: ModelChange, column: string | null, direction: 'downstream' | 'upstream') {
+  // Known limit: the model goes by its file name, which misses a versioned model (x_v2.sql) or a file
+  // named apart from its model.
+  const args = { manifest_path: manifestOf(done, change.root), model: change.model, ...(column && { column }), change_type: 'modify', direction }
+  // Through the CLI: nobody asked for these calls by name, and a call over MCP can raise a permission dialog.
+  const result = await runTool($, 'impact_analysis', args, true).catch(() => null)
+  return result?.ok ? result.metadata : null
+}
+
+/** What the band needs: each changed column's downstream answer, and the model-level count for a model with none. */
+async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrace[]> {
   const jobs: (() => Promise<ColumnTrace>)[] = []
-  for (const change of changes) {
+  for (const change of done.changes) {
     if (change.columns.length === 0) {
       jobs.push(async () => {
-        const meta = await ask(change, null, 'downstream')
-        return { model: change.model, column: null, down: null, up: null, modelLevel: modelLevelOf(meta), failed: meta === null }
+        const meta = await ask($, done, change, null, 'downstream')
+        return { model: change.model, column: null, down: null, up: null, modelLevel: modelLevelOf(meta), failed: meta === null, consumers: consumersOf(meta) }
       })
     }
     for (const col of change.columns) {
       jobs.push(async () => {
-        const [down, up] = await Promise.all([ask(change, col.name, 'downstream'), ask(change, col.name, 'upstream')])
-        const downAnswer = answerOf(down)
-        return { model: change.model, column: col.name, down: downAnswer, up: answerOf(up), modelLevel: modelLevelOf(down), failed: !downAnswer }
+        const meta = await ask($, done, change, col.name, 'downstream')
+        const down = answerOf(meta)
+        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down, consumers: consumersOf(meta) }
       })
     }
   }
-  return pool(jobs, PARALLEL / 2)
+  return pool(jobs, PARALLEL)
+}
+
+/** What a report adds: where each changed column comes from. */
+async function traceFull($: EngineInterface, done: Finished): Promise<ColumnTrace[]> {
+  const downs = await (done.downs ??= traceDown($, done))
+  const jobs = downs.map(trace => async () => {
+    if (!trace.column) return trace
+    const change = done.changes.find(one => one.model === trace.model)!
+    return { ...trace, up: answerOf(await ask($, done, change, trace.column, 'upstream')) }
+  })
+  return pool(jobs, PARALLEL)
 }
 
 const stamp = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
 
-/** At a task's end: what changed, traced, summed up in the band, and written as the report. */
+/** Moves each project's copy of the manifest out of the next task's way. */
+async function freezeManifests($: EngineInterface, t: Task, changes: ModelChange[]): Promise<Record<string, string | null>> {
+  const out: Record<string, string | null> = {}
+  for (const root of new Set(changes.map(one => one.root))) {
+    const state = await t.roots.get(root)?.catch(() => null)
+    if (!state?.snapshot) {
+      out[root] = null
+      continue
+    }
+    const frozen = `${root}/${LINEAGE_DIR}/${TASK_MANIFEST}`
+    const moved = await $.process.run(['mv', '-f', state.snapshot, frozen], { timeoutMs: 5_000 }).catch(() => null)
+    out[root] = moved?.exitCode === 0 ? frozen : state.snapshot
+  }
+  return out
+}
+
+const reportPathOf = (done: Finished) => `${done.changes[0]!.root}/${LINEAGE_DIR}/report.html`
+
+/** At a task's end: what changed, traced downstream and summed up in the band. The report waits until it is asked for. */
 async function finishTask($: EngineInterface, t: Task) {
   const seq = ++finishSeq
   const changes = await collectChanges($, t)
   if (changes.length === 0) return
   const tracing: TaskSummaryView = {
     state: 'tracing',
-    models: changes.map(one => ({ name: one.model, modelLevel: null, columns: one.columns.map(col => ({ name: col.name, how: null, reach: null, failed: false })) })),
+    models: changes.map(one => ({ name: one.model, modelLevel: null, columns: one.columns.map(col => ({ name: col.name, reach: null, failed: false })) })),
     unresolved: 0,
     truncated: false,
     report: null,
@@ -201,25 +253,83 @@ async function finishTask($: EngineInterface, t: Task) {
   }
   await update($, summaryAtom, () => tracing)
   await update($, hiddenAtom, () => false)
-  const traces = await traceChanges($, t, changes)
+  const done: Finished = { finishedAt: await $.clock.now(), changes, manifests: await freezeManifests($, t, changes), downs: null, full: null }
   const root = changes[0]!.root
-  const state = await t.roots.get(root)?.catch(() => null)
-  const data = reportData(changes, traces, stamp(await $.clock.now()), state?.snapshot ? 'the manifest as it was when the task started' : 'target/manifest.json')
-  const path = `${root}/${LINEAGE_DIR}/report.html`
-  let report: string | null = null
-  try {
-    await $.fs.write(path, reportHtml(data))
-    report = path
-    lastReport = path
-  } catch (error) {
-    $.ui.log(`lineage-summary · the report could not be written: ${String(error)}`)
-  }
+  // The last task's report is no longer the last task's.
+  await $.process.run(['rm', '-f', reportPathOf(done)], { timeoutMs: 5_000 }).catch(() => null)
+  finished = done
+  await $.fs
+    .write(`${root}/${LINEAGE_DIR}/${TASK_FILE}`, JSON.stringify({ version: 1, finishedAt: done.finishedAt, changes, manifests: done.manifests }))
+    .catch(error => $.ui.log(`lineage-summary · the task could not be saved: ${String(error)}`, { to: 'debug' }))
+  const traces = await (done.downs = traceDown($, done))
   // A newer task finished first: its summary stays.
   if (seq !== finishSeq) return
-  const view = summaryOf(changes, traces, report)
+  const view = summaryOf(changes, traces, null)
   await update($, summaryAtom, () => view)
   // One line: a log line draws a newline as a replacement glyph.
   $.ui.log(summaryLines(view).map(line => line.trim()).join(' · '))
+}
+
+/** The last task that changed a model: this session's, else the one a project's saved file names. */
+async function lastTask($: EngineInterface): Promise<Finished | null> {
+  if (finished) return finished
+  const own = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
+  if (!own) return null
+  const text = await $.fs.read(`${own}/${LINEAGE_DIR}/${TASK_FILE}`).catch(() => null)
+  if (!text) return null
+  try {
+    const saved = JSON.parse(text)
+    if (saved?.version !== 1 || !Array.isArray(saved.changes) || saved.changes.length === 0) return null
+    return (finished = { finishedAt: Number(saved.finishedAt), changes: saved.changes, manifests: saved.manifests ?? {}, downs: null, full: null })
+  } catch {
+    return null
+  }
+}
+
+/** The files a task changed that differ now from how it left them. */
+async function movedOn($: EngineInterface, done: Finished): Promise<string[]> {
+  const out: string[] = []
+  for (const change of done.changes) {
+    const now = await $.fs.read(`${change.root}/${change.file}`).catch(() => '')
+    if (change.ended && fingerprint(now) !== change.ended) out.push(change.file)
+  }
+  return out
+}
+
+/** Builds the report of a finished task; what it reads was frozen as the task ended, so later turns don't change it. */
+async function buildReport($: EngineInterface, done: Finished): Promise<{ path: string } | { error: string }> {
+  const missing: string[] = []
+  for (const [root, frozen] of Object.entries(done.manifests)) {
+    if (frozen && !(await $.fs.exists(frozen).catch(() => false))) {
+      // Its copy is gone (`dbt clean`, say): the project's manifest as it is now, or nothing.
+      done.manifests[root] = null
+      done.downs = null
+      done.full = null
+    }
+    if (!done.manifests[root] && !(await $.fs.exists(`${root}/target/manifest.json`).catch(() => false))) missing.push(root)
+  }
+  if (missing.length > 0) return { error: `The manifest this task was read from is gone. Run \`dbt compile\` and ask again.` }
+  const traces = await (done.full ??= traceFull($, done))
+  const allRead = traces.every(one => !one.column || (one.down && one.up))
+  // A failed direction is asked again next time.
+  if (!allRead) {
+    done.full = null
+    done.downs = null
+  }
+  const frozen = Object.values(done.manifests).every(Boolean)
+  const data = reportData(done.changes, traces, {
+    finishedAt: stamp(done.finishedAt),
+    builtAt: stamp(await $.clock.now()),
+    manifest: frozen ? 'the manifest as it was when the task started' : 'target/manifest.json as it is now, as the copy from the task\'s start is gone',
+    movedOn: await movedOn($, done),
+  })
+  const path = reportPathOf(done)
+  try {
+    await $.fs.write(path, reportHtml(data))
+    return { path }
+  } catch (error) {
+    return { error: `The report could not be written: ${String(error)}` }
+  }
 }
 
 /** Which opener family this machine has: macOS, Linux, WSL (Linux under Windows), or Windows itself. */
@@ -249,20 +359,30 @@ export async function openReport($: EngineInterface, path: string): Promise<bool
   return false
 }
 
-async function openAndSay($: EngineInterface, path: string): Promise<boolean> {
-  const opened = await openReport($, path)
-  if (!opened) await update($, summaryAtom, view => (view && view.report === path ? { ...view, openFailed: true } : view))
-  return opened
+/** Builds the last task's report and opens it, for the button and the command; what to say about it. */
+async function buildAndOpen($: EngineInterface): Promise<string> {
+  const done = await lastTask($)
+  if (!done) return 'No column impact report yet: one can be built after a task changes a dbt model.'
+  await update($, summaryAtom, view => (view ? { ...view, building: true, openFailed: false } : view))
+  const built = await buildReport($, done)
+  if ('error' in built) {
+    await update($, summaryAtom, view => (view ? { ...view, building: false } : view))
+    $.ui.toast(built.error)
+    return built.error
+  }
+  const opened = await openReport($, built.path)
+  await update($, summaryAtom, view => (view ? { ...view, building: false, report: built.path, openFailed: !opened } : view))
+  return opened ? `Opened the column impact report for the task that finished at ${stamp(done.finishedAt)}: ${built.path}` : `No browser could be opened. The report is at ${built.path}`
 }
 
 /** Registers /lineage-report; called from the plugin's one session.start hook. */
 export async function startTaskImpact($: EngineInterface) {
   task = null
-  lastReport = null
+  finished = null
   await update($, summaryAtom, () => null)
   await $.command.register({
     name: REPORT_COMMAND,
-    description: 'Open the last column impact report (what a task changed in dbt models and what it reaches) in the browser',
+    description: 'Build and open the column impact report of the last task that changed a dbt model: what changed and what it reaches',
   })
 }
 
@@ -288,13 +408,14 @@ export async function taskBand($: EngineInterface, ui: Ui): Promise<RenderElemen
           {line}
         </Text>
       ))}
+      {view.building ? <Text dimColor>Building the report…</Text> : null}
       {report && view.openFailed ? (
         <Text dimColor>
           No browser opened. Report: {Link ? <Link href={`file://${report}`}>{report}</Link> : report}
         </Text>
       ) : null}
       <Box>
-        {report ? <Button key="lineage-report-open" label="Open report" onPress={() => later($, () => openAndSay($, report))} /> : null}
+        {view.state === 'ready' ? <Button key="lineage-report-open" label="Open report" onPress={() => later($, async () => void (await buildAndOpen($)))} /> : null}
         <Button key="lineage-open" label="Open lineage" onPress={() => later($, () => openPane($))} />
         <Button key="lineage-summary-dismiss" label="Dismiss" onPress={() => update($, hiddenAtom, () => true)} />
       </Box>
@@ -335,17 +456,7 @@ export function taskTurnComplete($: EngineInterface, e: { agentId?: string }) {
   later($, () => finishTask($, done).catch(error => $.ui.log(`lineage-summary · failed: ${String(error)}`)))
 }
 
-/** /lineage-report: opens the last report. */
+/** /lineage-report: builds the last finished task's report and opens it. */
 export function registerTaskImpact(on: On) {
-  on('command.run', { command: REPORT_COMMAND }, async $ => {
-    let path = lastReport
-    if (!path) {
-      const own = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
-      const candidate = own ? `${own}/${LINEAGE_DIR}/report.html` : null
-      if (candidate && (await $.fs.exists(candidate).catch(() => false))) path = candidate
-    }
-    if (!path) return { text: 'No column impact report yet: one is written when a task changes a dbt model.' }
-    const opened = await openAndSay($, path)
-    return { text: opened ? `Opened the column impact report: ${path}` : `No browser could be opened. The report is at ${path}` }
-  })
+  on('command.run', { command: REPORT_COMMAND }, async $ => ({ text: await buildAndOpen($) }))
 }

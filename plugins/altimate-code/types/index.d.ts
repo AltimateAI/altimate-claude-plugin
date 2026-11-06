@@ -185,8 +185,7 @@ export type Reach = {
   truncated: boolean
 }
 
-/** `how`: how the column is made from what it reads, before the task; `byName` when that was inferred from matching names. */
-export type SummaryColumn = { name: string; how: string | null; byName?: boolean; reach: Reach | null; failed: boolean }
+export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean }
 
 /** What the band shows after a task that changed models. */
 export type TaskSummaryView = {
@@ -195,7 +194,10 @@ export type TaskSummaryView = {
   /** Models whose SQL could not be read, across every column traced: the reach is a lower bound. */
   unresolved: number
   truncated: boolean
+  /** Where the report was written, once one was asked for. */
   report: string | null
+  /** Tracing upstream and writing the report, after a press. */
+  building?: boolean
   /** The report could not be opened: its path is shown as a link instead. */
   openFailed: boolean
 }

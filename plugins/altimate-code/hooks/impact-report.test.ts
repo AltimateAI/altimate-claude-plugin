@@ -5,8 +5,12 @@ import {
   changedColumns,
   type ColumnAnswer,
   type ColumnTrace,
+  consumersOf,
   DEFAULT_LEVELS,
+  fingerprint,
   focusOf,
+  impactWords,
+  mergeConsumers,
   type ModelChange,
   openersFor,
   reachOf,
@@ -85,6 +89,9 @@ export const CHANGE: ModelChange = {
   columns: [{ name: 'revenue', before: 'sum(amount) as revenue', after: 'sum(amount) - sum(refunds) as revenue' }],
 }
 const TRACE: ColumnTrace = { model: 'fct_orders', column: 'revenue', down: DOWN, up: UP, modelLevel: 6, failed: false }
+const TASK = { finishedAt: '2026-01-01 00:00 UTC', builtAt: '2026-01-01 00:05 UTC', manifest: 'the manifest as it was when the task started', movedOn: [] as string[] }
+/** Words as the page reads them, with names in backticks. */
+const plain = (lines: (string | { code: string })[][]) => lines.map(line => line.map(one => (typeof one === 'string' ? one : `\`${one.code}\``)).join(''))
 
 /** The data a report embeds, read back out of its page. */
 export function embedded(html: string): any {
@@ -127,20 +134,14 @@ describe('the answer', () => {
 })
 
 describe('the summary', () => {
-  test('names each changed column with its how and its reach, and says the reach is a lower bound', () => {
-    const lines = summaryLines(summaryOf([CHANGE], [TRACE], '/repo/target/.altimate-lineage/report.html'))
+  test('names each changed column with its reach, and says the reach is a lower bound', () => {
+    const lines = summaryLines(summaryOf([CHANGE], [{ ...TRACE, up: null }], null))
     expect(lines).toEqual([
       '◆ Lineage after this task · 1 model changed',
       'fct_orders · 6 downstream models at model level',
-      '  revenue Σ  reaches 4 columns in 3 models (2 ends) · 1 may carry it · 2 cleared',
+      '  revenue  reaches 4 columns in 3 models (2 ends) · 1 may carry it · 2 cleared',
       '⚠ Lower bound: 1 model could not be read',
     ])
-  })
-
-  test('a how inferred from matching names says so', () => {
-    const up = { ...UP, edges: [[1, 0, '=', 'name']] as ColumnAnswer['edges'] }
-    const lines = summaryLines(summaryOf([CHANGE], [{ ...TRACE, up }], null))
-    expect(lines[2]).toBe('  revenue = (by name)  reaches 4 columns in 3 models (2 ends) · 1 may carry it · 2 cleared')
   })
 
   test('a model with no changed output column shows its model-level count alone', () => {
@@ -150,7 +151,105 @@ describe('the summary', () => {
   })
 })
 
+describe('what to expect downstream, in plain words', () => {
+  test('says what the value reaches, what may change, what should not, what to watch and how sure it is', () => {
+    expect(plain(impactWords('fct_orders', 'revenue', TRACE))).toEqual([
+      '`fct_orders` has 6 models downstream. The value of `revenue` flows into 3 of them, in 4 columns. Expect those to change with it: `fct_revenue_daily`, `rpt_finance` and `rpt_board`.',
+      "1 more may change: it uses the value in a way the trace can't follow (a filter or a join, say), its SQL couldn't be read, or it reads from a model like that.",
+      "2 shouldn't change: they're downstream of the model, but the value doesn't reach them.",
+      'One model it reaches enforces a contract, so a type change can fail the build there: `fct_revenue_daily`.',
+      'Tests on the models it reaches: 2.',
+      "1 model couldn't be read, so the real numbers can only be higher.",
+    ])
+  })
+
+  test('caps the names, says when the changed model has a contract, and when everything was read', () => {
+    const nodes = Array.from({ length: 7 }, (_, i) => ({ id: `model.s.m${i}`, name: `m${i}`, contract: i === 0, tests: 0 }))
+    const down: ColumnAnswer = {
+      ...DOWN,
+      nodes,
+      columns: [{ model: 0, column: 'x', hop: 0 }, ...nodes.slice(1).map((_, i) => ({ model: i + 1, column: 'x', hop: 1 }))],
+      counts: { columns: 6, models: 6, ends: 6, may_carry_models: 0, cleared_models: 0, model_level: 6 },
+      also_reads: [],
+      unresolved: [],
+    }
+    expect(plain(impactWords('m0', 'x', { ...TRACE, model: 'm0', column: 'x', down, modelLevel: 6 }))).toEqual([
+      '`m0` has 6 models downstream. The value of `x` flows into 6 of them, in 6 columns. Expect those to change with it: `m1`, `m2`, `m3`, `m4`, `m5` and 1 more.',
+      '`m0` enforces a contract, so a type change can fail its build.',
+      'Every downstream model was read.',
+    ])
+  })
+
+  test('a model with no changed column has its count alone; a failed trace says so; nothing downstream says so', () => {
+    expect(plain(impactWords('m', null, { model: 'm', column: null, down: null, up: null, modelLevel: 6, failed: false }))).toEqual([
+      "`m` has 6 models downstream. No output column changed (a filter or a join, say), so this can't say which of them are affected.",
+    ])
+    expect(plain(impactWords('m', 'c', { model: 'm', column: 'c', down: null, up: null, modelLevel: 6, failed: true }))).toEqual(['`m` has 6 models downstream. The column `c` could not be traced.'])
+    expect(plain(impactWords('m', null, { model: 'm', column: null, down: null, up: null, modelLevel: 0, failed: false }))).toEqual(['Nothing sits downstream of `m`. '])
+  })
+})
+
+describe('consumers', () => {
+  const answerWith = (consumers: unknown) => ({ column_answer: { ...DOWN, consumers }, exposures_declared: 9 })
+  const exposure = (name: string, tier: string, via: string[], more = {}) => ({ unique_id: `exposure.s.${name}`, name, label: name, type: 'dashboard', tier, via, ...more })
+
+  test('a column answer gives the tiers; a model-only result gives the list, untiered, and the declared count', () => {
+    const tiered = consumersOf(answerWith({ declared: 2, exposures: [exposure('board', 'carries', ['rpt_board'], { url: 'https://bi.example.com/1', owner: 'Data' })] }))
+    expect(tiered).toEqual({
+      declared: 2,
+      error: null,
+      list: [{ id: 'exposure.s.board', label: 'board', type: 'dashboard', url: 'https://bi.example.com/1', owner: 'Data', tier: 'carries', via: ['rpt_board'], columns: [] }],
+    })
+    const modelOnly = consumersOf({ exposures_declared: 1, exposures: [{ unique_id: 'exposure.s.a', name: 'a', label: 'A', type: 'notebook' }] })
+    expect(modelOnly.declared).toBe(1)
+    expect(modelOnly.list[0]).toMatchObject({ label: 'A', tier: null, via: [] })
+  })
+
+  test('none declared and exposures that could not be read stay apart, and an older answer is unknown', () => {
+    expect(consumersOf({ exposures_declared: 0, exposures: [] })).toEqual({ declared: 0, error: null, list: [] })
+    expect(consumersOf({ exposures: [], exposures_error: 'bad manifest' })).toEqual({ declared: null, error: 'bad manifest', list: [] })
+    expect(consumersOf(null)).toEqual({ declared: null, error: null, list: [] })
+  })
+
+  test('only a web address becomes a link', () => {
+    const list = consumersOf({ exposures: [{ name: 'x', url: 'javascript:alert(1)' }, { name: 'y', url: 'HTTP://bi.example.com' }] }).list
+    expect(list.map(one => one.url)).toEqual([null, 'HTTP://bi.example.com'])
+  })
+
+  test('across columns an exposure is listed once, in its closest tier, naming the columns', () => {
+    const trace = (column: string, tier: string, name = 'board') => ({
+      ...TRACE,
+      column,
+      consumers: consumersOf(answerWith({ declared: 3, exposures: [exposure(name, tier, ['m'])] })),
+    })
+    const merged = mergeConsumers([trace('a', 'may_carry'), trace('b', 'carries'), trace('c', 'cleared'), trace('d', 'cleared', 'other')])
+    expect(merged.declared).toBe(3)
+    expect(merged.list.map(one => [one.label, one.tier, one.columns])).toEqual([
+      ['board', 'carries', ['fct_orders.a', 'fct_orders.b', 'fct_orders.c']],
+      ['other', 'cleared', ['fct_orders.d']],
+    ])
+  })
+
+  test('the report carries them and says what it leaves out', () => {
+    const none = reportHtml(reportData([CHANGE], [{ ...TRACE, consumers: consumersOf({ exposures_declared: 0, exposures: [] }) }], TASK))
+    expect(embedded(none).consumers).toEqual({ declared: 0, error: null, list: [] })
+    expect(none).toContain('This dbt project declares no exposures')
+    expect(none).toContain('Anything not declared, such as other BI tools or backend services, is not listed.')
+  })
+})
+
 describe('the report', () => {
+  test('leads with what changed and what to expect, and keeps the levels and paths underneath', () => {
+    const html = reportHtml(reportData([{ ...CHANGE, ended: fingerprint('x') }], [TRACE], { ...TASK, movedOn: ['models/fct_orders.sql'] }))
+    const order = ['What this task changed', 'wrap.appendChild(impactPanel())', 'wrap.appendChild(consumersPanel())', 'Column by column', "section(f,i,'up')", "section(f,i,'down')"].map(one => html.indexOf(one, html.indexOf('function render(){')))
+    expect(order.every(one => one >= 0)).toBe(true)
+    expect([...order].sort((a, b) => a - b)).toEqual(order)
+    const data = embedded(html)
+    expect(data).toMatchObject({ finishedAt: TASK.finishedAt, builtAt: TASK.builtAt, movedOn: ['models/fct_orders.sql'] })
+    expect(data.focuses[0].impact.length).toBeGreaterThan(2)
+    expect(html).toContain('This report describes the task, not the files as they are now.')
+  })
+
   test('groups downstream by hop then model, with the how per column, ends and contracts', () => {
     const down = sectionOf(DOWN)
     expect(down.hops.map(one => one.hop)).toEqual([1, 2, 3])
@@ -169,7 +268,7 @@ describe('the report', () => {
   })
 
   test('embeds both directions with edges keyed by model and column, folds, and two levels by default', () => {
-    const html = reportHtml(reportData([CHANGE], [TRACE], '2026-01-01 00:00 UTC', 'the manifest as it was when the task started'))
+    const html = reportHtml(reportData([CHANGE], [TRACE], TASK))
     expect(html).toContain('data-levels="2"')
     const data = embedded(html)
     expect(data.defaultLevels).toBe(DEFAULT_LEVELS)
@@ -191,7 +290,7 @@ describe('the report', () => {
 
   test('is one offline file: no external resource, and project text cannot close its script', () => {
     const hostile = { ...CHANGE, model: 'x</script><script>alert(1)</script>' }
-    const html = reportHtml(reportData([hostile], [{ ...TRACE, model: hostile.model }], 'now', 'm'))
+    const html = reportHtml(reportData([hostile], [{ ...TRACE, model: hostile.model }], TASK))
     expect(html).not.toMatch(/(src|href)="(https?:)?\/\//)
     expect(html).not.toContain('<script>alert(1)')
     expect(html.match(/<\/script>/g)!.length).toBe(2)
