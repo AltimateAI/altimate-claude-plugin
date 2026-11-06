@@ -446,6 +446,9 @@ async function runTool($: EngineInterface, name: string, args: Record<string, un
     return { metadata: null as any, text: `${name}'s answer was larger than the 4 MiB a plugin can read`, ok: false }
   }
   const data = parseJson<{ status?: string; output?: string; metadata?: unknown }>(result.stdout)
+  // An answer that is not JSON (an altimate-code that exits before a pipe drains cuts it off) is a failure
+  // to report and ask again, not "no such model".
+  if (result.exitCode === 0 && !data) return { metadata: null as any, text: `${name}'s answer could not be read`, ok: false }
   return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? '', ok: result.exitCode === 0 && data?.status !== 'error' }
 }
 

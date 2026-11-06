@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: () => boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -173,6 +173,7 @@ async function start($: any, on: any, options: Options = {}) {
     calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}`)
     if (options.cliFailure) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'the dbt project could not start', metadata: {} }), stderr: '' } }
     if (options.cliTooLarge) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '', isStdoutTruncated: true } }
+    if (options.cliCutOff?.()) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '' } }
     // altimate-code's dbt_lineage with include_graph returns the subgraph the pane would build itself.
     const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
     const body =
@@ -568,6 +569,24 @@ test("an answer from altimate-code too large to read says so, rather than that t
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /altimate-code failed: dbt_lineage's answer was larger than the 4 MiB a plugin can read/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('an answer cut off on its way is a failure, not "no such model": it is not remembered, and the next look asks again', async ($, on) => {
+  let cut = true
+  const { clock, calls } = await start($, on, { size: 6 * 1024 * 1024, cliCutOff: () => cut })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /altimate-code failed: dbt_lineage's answer could not be read/ })).toBeDefined()
+  await ui.unmount()
+  cut = false
+  const before = calls.filter(one => one === 'cli:dbt_lineage:graph').length
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls.filter(one => one === 'cli:dbt_lineage:graph').length).toBe(before + 1)
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await again.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await again.unmount()
 })
 
 test("altimate-code's own failure on a large manifest is shown as a failure, not as no such model", async ($, on) => {
