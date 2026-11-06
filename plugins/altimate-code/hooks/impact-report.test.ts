@@ -13,6 +13,7 @@ import {
   mergeConsumers,
   type ModelChange,
   openersFor,
+  planLines,
   reachOf,
   reportData,
   reportHtml,
@@ -235,6 +236,24 @@ describe('consumers', () => {
     expect(embedded(none).consumers).toEqual({ declared: 0, error: null, list: [] })
     expect(none).toContain('This dbt project declares no exposures')
     expect(none).toContain('Anything not declared, such as other BI tools or backend services, is not listed.')
+  })
+})
+
+describe('a plan', () => {
+  const model = { name: 'mrt_usage', modelLevel: 39, tests: 307, exposures: 0, declared: 0, failed: false }
+
+  test('names its models at the model level and says nothing has changed yet', () => {
+    expect(planLines({ state: 'ready', models: [model, { ...model, name: 'stg_a', modelLevel: 1, tests: 1, exposures: 2, declared: 4 }, { ...model, name: 'stg_b', modelLevel: null, tests: null, exposures: null, failed: true }], more: 2 })).toEqual([
+      '◆ Before this plan · it names 5 dbt models · model level, nothing has changed yet',
+      'mrt_usage · 39 downstream models · 307 tests · no exposures declared',
+      'stg_a · 1 downstream model · 1 test · 2 exposures',
+      'stg_b · could not be read',
+      '… and 2 more',
+    ])
+  })
+
+  test('while it looks them up, says so', () => {
+    expect(planLines({ state: 'tracing', models: [{ ...model, modelLevel: null, tests: null, exposures: null, declared: null }], more: 0 })[1]).toBe('mrt_usage · tracing…')
   })
 })
 

@@ -236,7 +236,7 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
  * backticks (a bare `orders` in prose is too often just a word). Read from the project shown, else the
  * session's.
  */
-async function modelsNamed($: EngineInterface, text: string, root: string, shownManifest?: string): Promise<AnswerModel[]> {
+export async function modelsNamed($: EngineInterface, text: string, root: string, shownManifest?: string): Promise<AnswerModel[]> {
   const manifest = shownManifest ?? `${root}/target/manifest.json`
   const fromManifest = await readGraph($, manifest).catch(() => null)
   // The manifest an entry keeps: the shown graph's (read here, or through altimate-code when over

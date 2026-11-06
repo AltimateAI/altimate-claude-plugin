@@ -320,6 +320,39 @@ test("when the task's copy of the manifest is gone it reads the project's and sa
   expect(toasts).toContain(out.text)
 })
 
+test('a plan going up for approval: the models it names, at the model level, without holding the dialog', async ($, on) => {
+  const impact = (args: Record<string, any>) => (args.column ? {} : { test_count: 12, exposures: [], exposures_declared: 0 })
+  const { tools, logs, dialogs, clock, turn, mcpAsked } = await start($, on, { impact })
+  await $.turn.start({ text: 'plan it', turnId: 'p1' })
+  await clock.settle()
+  const plan = 'Round revenue in `fct_orders` (models/fct_orders.sql); check `stg_payments` and nothing_like_a_model.'
+  await $.tool.call({ tool: 'ExitPlanMode', plan, planFilePath: '/plans/p.md' } as any)
+  // The dialog opened before any lookup ran.
+  expect(dialogs).toEqual([0])
+  await clock.settle()
+  expect(directional(tools).map(one => [one.model, one.column, one.manifest_path])).toEqual([
+    ['model.shop.fct_orders', undefined, MANIFEST],
+    ['model.shop.stg_payments', undefined, MANIFEST],
+  ])
+  expect(logs).toContain('◆ Before this plan · it names 2 dbt models · model level, nothing has changed yet · fct_orders · 6 downstream models · 12 tests · no exposures declared · stg_payments · 6 downstream models · 12 tests · no exposures declared')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: 'fct_orders · 6 downstream models · 12 tests · no exposures declared' })).toBeDefined()
+  expect(mcpAsked).toEqual([])
+  // No report for a plan: nothing has changed.
+  expect(await band.find({ key: 'lineage-report-open' })).toBeUndefined()
+  expect(await band.find({ key: 'lineage-open' })).toBeDefined()
+
+  // Approved, the task runs in the same turn: its summary takes the band.
+  await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'round(sum(amount), 2) as revenue' })
+  await clock.settle()
+  await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 'p1' } as any)
+  await clock.settle()
+  expect(await band.find({ type: 'Text', text: '◆ Lineage after this task · 1 model changed' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /Before this plan/ })).toBeUndefined()
+  await band.unmount()
+  await turn('t2', async () => {})
+})
+
 test('a failed upstream trace is asked again next time, and the band keeps its numbers', async ($, on) => {
   let up = false
   const { tools, writes, turn, clock } = await start($, on, { openers: { 'xdg-open': 0 }, impact: args => (args.direction === 'upstream' && !up ? { column_answer: null } : {}) })
@@ -333,6 +366,28 @@ test('a failed upstream trace is asked again next time, and the band keeps its n
   await clock.settle()
   expect(embedded(writes.get(REPORT)!).focuses[0].up.error).toBeNull()
   expect(directional(tools).map(one => one.direction)).toEqual(['downstream', 'upstream', 'downstream', 'upstream'])
+})
+
+test('a plan that names no model, or a subagent\'s, shows nothing; a new turn clears a plan\'s band; a plan file is the fallback', async ($, on) => {
+  const { tools, logs, clock, files } = await start($, on)
+  await $.turn.start({ text: 'plan it', turnId: 'p1' })
+  await clock.settle()
+  await $.tool.call({ tool: 'ExitPlanMode', plan: 'Tidy up the README.', planFilePath: '/plans/p.md' } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'ExitPlanMode', plan: 'Change `fct_orders`.', planFilePath: '/plans/p.md', agentId: 'a1' } as any)
+  await clock.settle()
+  expect(directional(tools)).toEqual([])
+  expect(logs.filter(one => one.includes('Before this plan'))).toEqual([])
+
+  files['/plans/q.md'] = 'Change `fct_orders`.'
+  await $.tool.call({ tool: 'ExitPlanMode', planFilePath: '/plans/q.md' } as any)
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /Before this plan · it names 1 dbt model/ })).toBeDefined()
+  await $.turn.start({ text: 'never mind', turnId: 'p2' })
+  await clock.settle()
+  expect(await band.find({ type: 'Text', text: /Before this plan/ })).toBeUndefined()
+  await band.unmount()
 })
 
 test('model files changed outside the edit tools are found through git, and only what changed this task', async ($, on) => {

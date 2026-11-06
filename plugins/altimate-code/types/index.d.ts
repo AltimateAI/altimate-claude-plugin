@@ -202,6 +202,14 @@ export type TaskSummaryView = {
   openFailed: boolean
 }
 
+/** What the band shows for a plan: the models it names, at the model level. */
+export type PlanImpactView = {
+  state: 'tracing' | 'ready'
+  models: { name: string; modelLevel: number | null; tests: number | null; exposures: number | null; declared: number | null; failed: boolean }[]
+  /** Models the plan names past the ones looked up. */
+  more: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -241,6 +249,7 @@ declare module 'claude-code' {
       lineageLoading: boolean
       /** The end-of-task column impact summary the band shows; null until a task changes a model. */
       lineageTaskSummary: Shaped<TaskSummaryView | null>
+      lineagePlanImpact: Shaped<PlanImpactView | null>
       isLineageSummaryHidden: boolean
     }
   }

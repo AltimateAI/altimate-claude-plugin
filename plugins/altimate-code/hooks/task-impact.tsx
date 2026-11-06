@@ -1,9 +1,10 @@
 // The end-of-task column impact: what a task changed in its dbt models, how far each changed column's
-// value reaches, as one summary in the band, and a full offline report built when asked for.
+// value reaches, as one summary in the band, and a full offline report built when asked for. When a plan
+// is put up for approval, the models it names, at the model level.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderElement } from 'claude-code'
 
-import type { TaskSummaryView } from '../types'
+import type { PlanImpactView, TaskSummaryView } from '../types'
 import { later } from './altimate-cli'
 import {
   answerOf,
@@ -15,6 +16,7 @@ import {
   modelLevelOf,
   openersFor,
   type Platform,
+  planLines,
   reportData,
   reportHtml,
   summaryLines,
@@ -22,7 +24,7 @@ import {
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
-import { openPane, projectRoot, runTool, within } from './lineage'
+import { modelsNamed, openPane, projectRoot, runTool, within } from './lineage'
 
 export const REPORT_COMMAND = 'lineage-report'
 // Under the project's target/, which dbt already keeps out of git.
@@ -43,6 +45,7 @@ const PARALLEL = 4
 const MAX_BAND_LINES = 8
 
 const summaryAtom = atom({ plugin: 'altimate-code', key: 'lineageTaskSummary' } as const, null, { shape: 'lineage-task-summary-1' })
+const planAtom = atom({ plugin: 'altimate-code', key: 'lineagePlanImpact' } as const, null, { shape: 'lineage-plan-impact-1' })
 const hiddenAtom = atom({ plugin: 'altimate-code', key: 'isLineageSummaryHidden' } as const, false)
 
 type Layout = { models: string[] }
@@ -66,6 +69,7 @@ type Finished = {
 let task: Task | null = null
 let finished: Finished | null = null
 let finishSeq = 0
+let planSeq = 0
 
 const newTask = (): Task => ({ roots: new Map(), originals: new Map() })
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
@@ -252,6 +256,7 @@ async function finishTask($: EngineInterface, t: Task) {
     openFailed: false,
   }
   await update($, summaryAtom, () => tracing)
+  await update($, planAtom, () => null)
   await update($, hiddenAtom, () => false)
   const done: Finished = { finishedAt: await $.clock.now(), changes, manifests: await freezeManifests($, t, changes), downs: null, full: null }
   const root = changes[0]!.root
@@ -332,6 +337,47 @@ async function buildReport($: EngineInterface, done: Finished): Promise<{ path: 
   }
 }
 
+/** The models a plan names and what sits downstream of each, for the person deciding on it. Holds nothing back. */
+async function planReady($: EngineInterface, e: { plan?: unknown; planFilePath?: unknown }) {
+  const seq = ++planSeq
+  // The engine hands the hook the plan's text, though the tool's input type leaves it out; its file is the fallback.
+  const text = typeof e.plan === 'string' && e.plan ? e.plan : await $.fs.read(String(e.planFilePath ?? '')).catch(() => '')
+  if (!text) return
+  const root = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
+  if (!root) return
+  const named = (await modelsNamed($, text, root)).filter(one => one.id.startsWith('model.'))
+  if (named.length === 0) return
+  const shown = named.slice(0, MAX_MODELS)
+  const models = shown.map(one => ({ name: one.name, modelLevel: null, tests: null, exposures: null, declared: null, failed: false }))
+  const more = named.length - shown.length
+  const tracing: PlanImpactView = { state: 'tracing', models, more }
+  await update($, planAtom, () => tracing)
+  await update($, hiddenAtom, () => false)
+  const looked = await pool(
+    shown.map(one => async () => {
+      const args = { manifest_path: `${root}/target/manifest.json`, model: one.id, change_type: 'modify', direction: 'downstream' }
+      // Through the CLI: over MCP this could raise a permission dialog on top of the plan's.
+      const result = await runTool($, 'impact_analysis', args, true).catch(() => null)
+      const meta = result?.ok ? (result.metadata as any) : null
+      const consumers = consumersOf(meta)
+      return {
+        name: one.name,
+        modelLevel: modelLevelOf(meta),
+        tests: typeof meta?.test_count === 'number' ? meta.test_count : null,
+        exposures: meta && !consumers.error ? consumers.list.length : null,
+        declared: consumers.declared,
+        failed: modelLevelOf(meta) === null,
+      }
+    }),
+    PARALLEL,
+  )
+  if (seq !== planSeq) return
+  const view: PlanImpactView = { state: 'ready', models: looked, more }
+  await update($, planAtom, () => view)
+  // In the transcript too: the band is not drawn while the approval dialog is up, and this line is.
+  $.ui.log(planLines(view).map(line => line.trim()).join(' · '))
+}
+
 /** Which opener family this machine has: macOS, Linux, WSL (Linux under Windows), or Windows itself. */
 async function platformOf($: EngineInterface): Promise<Platform> {
   // -r too: a WSL kernel's release names Microsoft, with no environment variable needed.
@@ -380,6 +426,7 @@ export async function startTaskImpact($: EngineInterface) {
   task = null
   finished = null
   await update($, summaryAtom, () => null)
+  await update($, planAtom, () => null)
   await $.command.register({
     name: REPORT_COMMAND,
     description: 'Build and open the column impact report of the last task that changed a dbt model: what changed and what it reaches',
@@ -388,14 +435,16 @@ export async function startTaskImpact($: EngineInterface) {
 
 type Ui = { Box: any; Button: any; Text: any; Link?: any }
 
-/** The summary of the last task that changed a model; drawn by the plugin's one band hook. */
+/** The summary of the last task that changed a model, or a plan's models; drawn by the plugin's one band hook. */
 export async function taskBand($: EngineInterface, ui: Ui): Promise<RenderElement | null> {
+  if (await read($, hiddenAtom)) return null
   const view = await read($, summaryAtom)
-  if (!view || (await read($, hiddenAtom))) return null
+  const plan = await read($, planAtom)
+  if (!view && !plan) return null
   const { Box, Button, Link, Text } = ui
-  const lines = summaryLines(view)
+  const lines = view ? summaryLines(view) : planLines(plan!)
   const shown = lines.length > MAX_BAND_LINES ? [...lines.slice(0, MAX_BAND_LINES - 1), `… ${lines.length - MAX_BAND_LINES + 1} more lines in the report`] : lines
-  const report = view.report
+  const report = view?.report ?? null
   return (
     <Box key="lineage-summary" flexDirection="column">
       {shown.map((line, i) => (
@@ -408,14 +457,14 @@ export async function taskBand($: EngineInterface, ui: Ui): Promise<RenderElemen
           {line}
         </Text>
       ))}
-      {view.building ? <Text dimColor>Building the report…</Text> : null}
-      {report && view.openFailed ? (
+      {view?.building ? <Text dimColor>Building the report…</Text> : null}
+      {report && view?.openFailed ? (
         <Text dimColor>
           No browser opened. Report: {Link ? <Link href={`file://${report}`}>{report}</Link> : report}
         </Text>
       ) : null}
       <Box>
-        {view.state === 'ready' ? <Button key="lineage-report-open" label="Open report" onPress={() => later($, async () => void (await buildAndOpen($)))} /> : null}
+        {view?.state === 'ready' ? <Button key="lineage-report-open" label="Open report" onPress={() => later($, async () => void (await buildAndOpen($)))} /> : null}
         <Button key="lineage-open" label="Open lineage" onPress={() => later($, () => openPane($))} />
         <Button key="lineage-summary-dismiss" label="Dismiss" onPress={() => update($, hiddenAtom, () => true)} />
       </Box>
@@ -431,12 +480,15 @@ export async function taskTurnStart($: EngineInterface) {
   const t = newTask()
   task = t
   await update($, summaryAtom, () => null)
+  await update($, planAtom, () => null)
   const own = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
   if (own) await within($, 20_000, prepareRoot($, t, own))
 }
 
 /** Before an edit lands: the model file's text as it was, the first time the task touches it. */
 export async function taskBeforeTool($: EngineInterface, e: any) {
+  // A plan is about to go up for approval: `next(e)` is what opens the dialog, and this does not hold it.
+  if (e.tool === 'ExitPlanMode' && !e.agentId) later($, () => planReady($, e).catch(error => $.ui.log(`lineage-summary · plan: ${String(error)}`, { to: 'debug' })))
   const file = EDIT_TOOLS.has(e.tool) && 'file_path' in e ? String(e.file_path) : null
   if (!file || !/\.sql$/i.test(file)) return
   const t = (task ??= newTask())

@@ -1,10 +1,10 @@
 // The end-of-task column impact: altimate-code's column answers read into a short summary for the band
 // and a self-contained HTML report. Pure functions only; the hooks live in task-impact.tsx.
 
-import type { Reach, TaskSummaryView } from '../types'
+import type { PlanImpactView, Reach, TaskSummaryView } from '../types'
 import { selectItems, touchedColumns } from './lineage-graph'
 
-export type { Reach, TaskSummaryView }
+export type { PlanImpactView, Reach, TaskSummaryView }
 
 /** One column answer from impact_analysis (`metadata.column_answer`, contract version 1). Any field may be absent. */
 export type ColumnAnswer = {
@@ -263,6 +263,25 @@ export function summaryLines(view: TaskSummaryView): string[] {
   } else if (view.state === 'ready' && view.models.some(one => one.columns.some(col => col.reach))) {
     lines.push('✓ Every downstream model was read')
   }
+  return lines
+}
+
+/** The band's lines for a plan about to be approved or just approved: the models it names, at the model level. */
+export function planLines(view: PlanImpactView): string[] {
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+  const total = view.models.length + view.more
+  const lines = [`◆ Before this plan · it names ${plural(total, 'dbt model')} · model level, nothing has changed yet`]
+  for (const model of view.models) {
+    if (view.state === 'tracing' && model.modelLevel === null && !model.failed) lines.push(`${model.name} · tracing…`)
+    else if (model.failed) lines.push(`${model.name} · could not be read`)
+    else {
+      const parts = [`${plural(model.modelLevel ?? 0, 'downstream model')}`]
+      if (model.tests !== null) parts.push(plural(model.tests, 'test'))
+      if (model.exposures !== null) parts.push(model.exposures > 0 ? plural(model.exposures, 'exposure') : model.declared === 0 ? 'no exposures declared' : 'no exposures downstream')
+      lines.push(`${model.name} · ${parts.join(' · ')}`)
+    }
+  }
+  if (view.more > 0) lines.push(`… and ${view.more} more`)
   return lines
 }
 

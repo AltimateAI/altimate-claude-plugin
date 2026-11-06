@@ -7,6 +7,7 @@ All notable changes to this plugin will be documented in this file.
 ### Added
 - End-of-task column impact: after a task that changed a dbt model, a band sums up each changed column's downstream reach from `impact_analysis`. The task's start copies `target/manifest.json` aside, so the answer reflects the SQL before the task.
 - An offline HTML report, built when **Open report** or `/lineage-report` asks for it: what changed and what to expect downstream in plain words, who consumes it from dbt exposures, then upstream and downstream lineage, two levels by default, and click-to-highlight paths.
+- When a plan goes up for approval, a line above the dialog gives the downstream models, tests and exposures of each model the plan names.
 
 ### Changed
 - The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result.
