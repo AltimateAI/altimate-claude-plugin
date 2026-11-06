@@ -76,8 +76,6 @@ const loadingAtom = atom({ plugin: 'altimate-code', key: 'lineageLoading' } as c
 let manifestCache: { path: string; mtimeMs: number; graph: LineageGraph } | null = null
 // Graphs altimate-code returned for a manifest over 4 MiB, by manifest, revision and model.
 const toolsCache = new Map<string, { graph: LineageGraph; id: string; columns: ColumnLineage | null } | null>()
-// Per conversation: reset on session start and end (a /clear ends one).
-let paneOpened = false
 /** The latest follow: an older one still reading its manifest must not write over it. */
 // Follows run concurrently. Each takes a number when it starts; one that finds its model claims the
 // pane unless a newer one already has. A follow that fails claims nothing, so it cancels nobody.
@@ -677,10 +675,8 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     await update($, columnAtom, prev => (superseded() ? prev : column ?? null))
     await update($, reachAtom, prev => (superseded() ? prev : null))
   }
-  if (input.open || (!paneOpened && input.auto)) {
-    paneOpened = true
-    await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => {})
-  }
+  // Only when asked: a pane that opens by itself takes a narrow terminal's width.
+  if (input.open) await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true }).catch(() => {})
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
   // for this model (by unique_id when the answer gives one, else by name).
@@ -792,7 +788,6 @@ async function loadWarehouse($: EngineInterface) {
 }
 
 export async function openPane($: EngineInterface) {
-  paneOpened = true
   await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
 }
 
@@ -1029,8 +1024,7 @@ function parsedLineage(text: string | undefined): ColumnLineage | null {
 
 /** Registers /lineage; called from the plugin's one session.start hook. */
 export async function startLineage($: EngineInterface) {
-  // A new session opens the pane on its first follow again and owes Claude the context again.
-  paneOpened = false
+  // A new session owes Claude the context again.
   drawnCache = null
   contextGiven.clear()
   newConversation()
@@ -1074,7 +1068,6 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
 export function registerLineage(on: On) {
   // A new user turn gets the lineage note again (its context may have been compacted since), once.
   on('session.end', async ($, e, next) => {
-    paneOpened = false
     drawnCache = null
     contextGiven.clear()
     newConversation()

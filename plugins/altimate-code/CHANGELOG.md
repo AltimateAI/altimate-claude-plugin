@@ -9,6 +9,7 @@ All notable changes to this plugin will be documented in this file.
 
 ### Changed
 - The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result.
+- The lineage pane no longer opens by itself at any width. `/lineage` and **Open lineage** open it, on the model it has been following.
 
 ## [1.4.0] — 2026-10-28
 

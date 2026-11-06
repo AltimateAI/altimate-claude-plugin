@@ -71,6 +71,7 @@ async function start($: any, on: any, options: Options = {}) {
   const logs: string[] = []
   const debug: string[] = []
   const lists: string[] = []
+  const opens: string[] = []
   on('command.register', () => ({ value: { command: 'lineage' } }))
   // A turn's start and end beneath the plugin: the engine's answer is the model's text.
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
@@ -78,7 +79,10 @@ async function start($: any, on: any, options: Options = {}) {
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
-  on('ui.open', () => ({ value: {} }))
+  on('ui.open', (_: unknown, e: { id: string }) => {
+    opens.push(e.id)
+    return { value: {} }
+  })
   on('ui.toast', (_: unknown, e: { text: string }) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -193,7 +197,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, calls, toasts, notes, logs, debug, lists }
+  return { clock, calls, toasts, notes, logs, debug, lists, opens }
 }
 
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
@@ -211,6 +215,28 @@ test('reading a model points the pane at it: the manifest graph, then its column
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the pane never opens by itself: reads, edits, shell commands and answers only move what it shows', async ($, on) => {
+  const { clock, opens } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  await clock.settle()
+  await $.tool.call({ tool: 'Bash', command: `cat ${FILE}` })
+  await clock.settle()
+  await $.turn.start({ text: 'which model?', turnId: 't2' })
+  await $.turn.complete({ answer: 'Look at `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't2' } as any)
+  await clock.settle()
+  expect(opens).toEqual([])
+
+  // It stays one command away, on the model it followed.
+  await $.command.run({ command: 'lineage', args: '' } as any)
+  await clock.settle()
+  expect(opens).toEqual(['altimate-lineage'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()
 })
 
