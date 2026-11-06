@@ -235,7 +235,7 @@ describe('consumers', () => {
     const none = reportHtml(reportData([CHANGE], [{ ...TRACE, consumers: consumersOf({ exposures_declared: 0, exposures: [] }) }], TASK))
     expect(embedded(none).consumers).toEqual({ declared: 0, error: null, list: [] })
     expect(none).toContain('This dbt project declares no exposures')
-    expect(none).toContain('Anything not declared, such as other BI tools or backend services, is not listed.')
+    expect(none).toContain('Only exposures a dbt project declares can appear here: other BI tools and backend services do not.')
   })
 })
 
