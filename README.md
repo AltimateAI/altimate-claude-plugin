@@ -13,20 +13,20 @@ Source queries are read-only by default: database-enforced on Postgres, SQLite, 
 
 ## Install
 
-From Anthropic's plugin directory:
-
 ```bash
-claude plugin install altimate-code
-```
-
-Or from this marketplace:
-
-```
-/plugin marketplace add AltimateAI/altimate-claude-plugin
-/plugin install altimate-code@altimate-claude-plugin
+claude plugin install altimate-code --marketplace AltimateAI/altimate-claude-plugin
 ```
 
 See [plugins/altimate-code/README.md](./plugins/altimate-code/README.md) for plugin-specific docs (prerequisites, data-handling, components).
+
+## Update
+
+```bash
+claude plugin marketplace update altimate-claude-plugin
+claude plugin update altimate-code@altimate-claude-plugin
+```
+
+Then restart Claude Code.
 
 ## Contributing
 
