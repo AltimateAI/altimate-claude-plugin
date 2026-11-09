@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -98,7 +98,9 @@ async function start($: any, on: any, options: Options = {}) {
   on('fs.stat', async (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
     if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
-    return { value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }
+    // A model's own file can be newer than the manifest (edited after the last compile).
+    const fileMtime = e.path === MANIFEST_PATH ? undefined : options.fileMtime?.(e.path)
+    return { value: { kind: 'file', size, mtimeMs: fileMtime ?? mtime(), isLink: false } }
   })
   on('fs.list', (_: unknown, e: { path: string }) => {
     lists.push(e.path)
@@ -397,6 +399,7 @@ test('a pane left undrawn on a narrow terminal is said once, with the width it n
   expect((await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } })).text).toBe(
     'Altimate lineage for fct_orders is open above the prompt.',
   )
+  await clock.settle()
   expect(toasts).toHaveLength(1)
 })
 
@@ -407,14 +410,55 @@ test('a run with no surface to draw on gets no narrow-terminal hint', async ($, 
   expect(toasts).toEqual([])
 })
 
+test('a model whose SQL changed after the manifest was written says so; r keeps saying it until a compile', async ($, on) => {
+  let manifestMtime = 1
+  const { clock } = await start($, on, { mtime: () => manifestMtime, fileMtime: path => (path === FILE ? 5 : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const warning = /⚠ fct_orders\.sql changed after the manifest was written: run `dbt compile`, then r/
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  // r reads the same manifest again: still out of date.
+  await ui.press({ key: 'lineage-refresh' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  // dbt compile writes a newer manifest: r reads it and the warning goes.
+  manifestMtime = 10
+  await ui.press({ key: 'lineage-refresh' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a shell command that changes the shown model\'s file brings the warning up, and the edit note says the manifest is older', async ($, on) => {
+  let fileMtime = 1
+  const { clock, toasts } = await start($, on, { fileMtime: path => (path === FILE ? fileMtime : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /changed after the manifest was written/ })).toBeUndefined()
+  // sed -i through Bash: no Edit, but the file is newer now.
+  fileMtime = 5
+  await $.tool.call({ tool: 'Bash', command: "sed -i 's/x/y/' models/fct_orders.sql" } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /⚠ fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
+  await ui.unmount()
+  // An edit on top of it: Claude is told the lineage may be out of date.
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  expect(toasts.at(-1)).toMatch(/ · the manifest is older than this file$/)
+  expect(result.context?.[0]).toContain('- the manifest is older than this file (it changed after the last `dbt compile`)')
+})
+
 test('/lineage says where the pane is: beside the chat when docked, above the prompt otherwise', async ($, on) => {
-  await start($, on)
+  const { clock } = await start($, on)
   const run = (presentation: { isFullscreen: boolean; columns: number }) =>
     $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation })
   expect((await run({ isFullscreen: true, columns: 200 })).text).toBe('Altimate lineage for fct_orders is open beside the chat.')
   // Fullscreen below 110 columns and the main screen at any width draw the pane above the prompt.
   expect((await run({ isFullscreen: true, columns: 100 })).text).toBe('Altimate lineage for fct_orders is open above the prompt.')
   expect((await run({ isFullscreen: false, columns: 200 })).text).toBe('Altimate lineage for fct_orders is open above the prompt.')
+  await clock.settle()
 })
 
 test('an edit whose column no model reads for certain never says "at least 0", and a dashboard that may read it says so', async ($, on) => {

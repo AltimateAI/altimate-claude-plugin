@@ -5,6 +5,7 @@ import type {
   AnswerModel,
   ColumnLineage,
   ColumnReachView,
+  GraphNode,
   ImpactView,
   LineageFocus,
   LineageGraph,
@@ -75,6 +76,8 @@ const answerAtom = atom({ plugin: 'altimate-code', key: 'lineageAnswer' } as con
 const panAtom = atom({ plugin: 'altimate-code', key: 'lineagePan' } as const, null as number | null)
 const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
 const messageAtom = atom({ plugin: 'altimate-code', key: 'lineageMessage' } as const, null as string | null)
+// The shown model's SQL file changed after the manifest was written: what the pane shows may be out of date.
+const staleAtom = atom({ plugin: 'altimate-code', key: 'lineageStale' } as const, null as string | null)
 const loadingAtom = atom({ plugin: 'altimate-code', key: 'lineageLoading' } as const, false)
 const bandHiddenAtom = atom({ plugin: 'altimate-code', key: 'isLineageBandHidden' } as const, false)
 
@@ -682,6 +685,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     await update($, columnsAtom, prev => (superseded() ? prev : null))
     await update($, reachAtom, prev => (superseded() ? prev : null))
     await update($, warehouseAtom, prev => (superseded() ? prev : null))
+    await update($, staleAtom, prev => (superseded() ? prev : null))
     if (latest?.model !== id) await update($, columnAtom, prev => (superseded() ? prev : null))
     if (latest?.model !== id) $.ui.log(`lineage-pane · following ${node.name} →`)
     $.ui.log(`lineage-pane · ${relative(root, manifest)} · ${elapsed(readMs)}${via === 'tools' ? ' · via altimate-code' : via === 'sql' ? ' · from the SQL files' : ' · offline'}`)
@@ -703,6 +707,8 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // for this model (by unique_id when the answer gives one, else by name).
   const preload = columns && (columns.id ? columns.id === id : columns.model === node.name) ? columns : null
   later($, () => loadDetails($, preload, isNew, focus))
+  // Whether the model's file changed after this manifest was written; r and every tool call check again.
+  later($, () => recheckStale($))
   return true
 }
 
@@ -806,6 +812,26 @@ async function loadWarehouse($: EngineInterface) {
   await update($, warehouseAtom, prev => (mine() ? view : prev))
   const ms = Math.round((await $.clock.now()) - began)
   $.ui.log(`lineage-pane · ${server} · ${tool}(${node.relation}) · ${elapsed(ms)}`)
+}
+
+/**
+ * Whether the model's SQL file changed after the manifest was written (one stat): the pane's columns and
+ * reach come from the manifest's compiled SQL, so they may be out of date until the next `dbt compile`.
+ */
+async function staleSql($: EngineInterface, root: string, node: GraphNode | undefined, manifestMtimeMs: number): Promise<string | null> {
+  if (!node?.path || !manifestMtimeMs) return null
+  const stat = await $.fs.stat(`${root}/${node.path}`).catch(() => null)
+  if (!stat || stat.mtimeMs <= manifestMtimeMs) return null
+  return `${node.path.split(/[\\/]/).pop()} changed after the manifest was written: run \`dbt compile\`, then r`
+}
+
+/** The shown model's file may have changed since the pane read it (an edit, a shell command): checked again. */
+async function recheckStale($: EngineInterface) {
+  const focus = await read($, focusAtom)
+  const graph = await read($, graphAtom)
+  if (!focus || !graph || focus.via === 'sql') return
+  const stale = await staleSql($, focus.root, graph.nodes[focus.model], focus.mtimeMs)
+  if (sameFocus(await read($, focusAtom), focus)) await update($, staleAtom, prev => (prev === stale ? prev : stale))
 }
 
 /**
@@ -913,6 +939,9 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   }
   if (!graph || !id) return null
   const node = graph.nodes[id]!
+  // The file already changed after the last compile: the manifest describes an older version of it.
+  const fileStat = await $.fs.stat(file).catch(() => null)
+  const stale = !!fileStat && fileStat.mtimeMs > stat.mtimeMs
   const counts = impactOf(graph, id)
   const downstream = counts.direct + counts.transitive
   if (downstream === 0 && counts.exposures.length === 0) return null
@@ -964,7 +993,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
       (maybeDashboards.length ? `; ${plural(maybeDashboards.length, 'dashboard')} may read it` : '') +
       (reach.exposuresError && !reach.exposures.length ? '; its dashboards could not be read' : '')
     : `${target} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'model')}${dashboards.length ? ` and ${plural(dashboards.length, 'dashboard')}` : ''}`
-  const toastText = `◆ impact-first · ${toast}${dashboards.length ? ` · ${dashboards.slice(0, 3).join(' · ')}` : ''}`.replace(CONTROL, ' ').slice(0, 300)
+  const toastText = `◆ impact-first · ${toast}${dashboards.length ? ` · ${dashboards.slice(0, 3).join(' · ')}` : ''}${stale ? ' · the manifest is older than this file' : ''}`.replace(CONTROL, ' ').slice(0, 300)
 
   // Names and labels come from the project's files, which anyone who wrote the repo controls: each is
   // one line, capped and quoted unless it is a plain name, and the note is framed as data.
@@ -983,6 +1012,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
     `- ${quoted(node.name)} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'downstream model')} in all (${counts.direct} direct, ${counts.transitive} transitive), ${plural(counts.tests, 'test')}${counts.exposures.length ? ` and ${plural(counts.exposures.length, 'exposure')} (${listed(counts.exposures)})` : ''}.`,
   )
   if (unchecked.length) lines.push(`- columns not checked (over the limit or no answer in time): ${listed(unchecked)}; what they reach is unknown`)
+  if (stale) lines.push('- the manifest is older than this file (it changed after the last `dbt compile`), so the lineage above may be out of date; `dbt compile` gives a current answer')
   const close = 'Keep these consumers working, or tell the user which of them this edit changes.'
   const body = lines.join('\n')
   return {
@@ -1231,6 +1261,8 @@ export function registerLineage(on: On) {
     // Before the edit runs: the point is to see what it reaches first.
     if (note) $.ui.toast(note.toast, { timeoutMs: 8000 })
     const result = await next(e)
+    // Any tool may have changed the shown model's file (Edit, a shell command): one stat says so.
+    later($, () => recheckStale($))
     if (result.deny || result.isError) return result
     // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
     if (file && EDIT_TOOLS.has(e.tool) && /(\.sql|\.py|dbt_project\.yml)$/i.test(file)) clearSqlGraphs()
@@ -1351,6 +1383,7 @@ export function registerLineage(on: On) {
     const warehouse = await read($, warehouseAtom)
     const expanded = await read($, expandedAtom)
     const message = await read($, messageAtom)
+    const stale = await read($, staleAtom)
     const loading = await read($, loadingAtom)
     const chosenView = await read($, viewAtom)
     const pan = await read($, panAtom)
@@ -1475,6 +1508,7 @@ export function registerLineage(on: On) {
             {node.path ?? node.id}
             {node.materialized ? ` · ${node.materialized}` : ''}
           </Text>
+          {stale && <Text color="warning">⚠ {stale}</Text>}
           {message && <Text color="warning">{message}</Text>}
           {answer.length > 0 && (
             // What Claude's last answer is about, each one a press away.

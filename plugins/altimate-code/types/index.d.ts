@@ -213,6 +213,8 @@ declare module 'claude-code' {
       lineageAnswer: AnswerModel[]
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
+      /** The shown model's SQL file changed after the manifest was written, said so; null when it didn't. */
+      lineageStale: string | null
       lineageLoading: boolean
       isLineageBandHidden: boolean
     }
