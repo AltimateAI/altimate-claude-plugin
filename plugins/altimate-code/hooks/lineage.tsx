@@ -77,7 +77,9 @@ let revealFor: string | null = null
 const answerAtom = atom({ plugin: 'altimate-code', key: 'lineageAnswer' } as const, [] as AnswerModel[])
 // Where the graph canvas is panned to: its first visible column; null centres it on the model.
 const panAtom = atom({ plugin: 'altimate-code', key: 'lineagePan' } as const, null as number | null)
-const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-1' })
+// lineage-impact-2 (1.4.2): `exposures` holds the may-read dashboards too, counted by `maybeExposures`. A band kept
+// from 1.4.1 can't tell them apart, so it reads as absent.
+const impactAtom = atom({ plugin: 'altimate-code', key: 'lineageImpact' } as const, null, { shape: 'lineage-impact-2' })
 const messageAtom = atom({ plugin: 'altimate-code', key: 'lineageMessage' } as const, null as string | null)
 // The shown model's SQL file changed after the manifest was written: what the pane shows may be out of date.
 const staleAtom = atom({ plugin: 'altimate-code', key: 'lineageStale' } as const, null as string | null)
@@ -329,12 +331,12 @@ const inFlight = new Map<string, Promise<any>>()
 // reads a model's columns, and an edit's check fills it for a model the pane never showed.
 const modelColumns = new Map<string, string[]>()
 const columnsKey = (manifest: string, mtimeMs: number, id: string) => `${manifest}\u0000${mtimeMs}\u0000${id}`
-function rememberColumns(key: string, columns: ColumnLineage | null) {
-  if (!columns) return
+function rememberColumns(key: string, names: string[]) {
   // A long session can see many revisions: the oldest go first.
   if (modelColumns.size >= 500) modelColumns.delete(modelColumns.keys().next().value!)
-  modelColumns.set(key, columns.columns.map(one => one.name))
+  modelColumns.set(key, names)
 }
+const namesOf = (columns: ColumnLineage) => columns.columns.map(one => one.name)
 
 function shared<T>(key: string, work: () => Promise<T>): Promise<T> {
   const running = inFlight.get(key)
@@ -350,8 +352,8 @@ let drawnCache: { key: string; drawn: Drawn | null } | null = null
 // Limit: the whole canvas is mounted so the pane's own scrolling reaches every row; windowing rows would
 // mean scrolling by hand. The slice is cached, so only a pan or a new drawing re-slices.
 let sliceCache: { key: string; rows: Segment[][] } | null = null
-// A graph drawing too big for a pane, by drawing and window: shown as folders without drawing it again.
-let tooBigCache: { key: string; size: { elements: number; chars: number } } | null = null
+// Graph drawings too big for a pane, by drawing and width: shown as folders without drawing them again.
+const tooBigCache = new Map<string, { elements: number; chars: number }>()
 // What a pane may hold, under Claude Code's limits (20,000 elements, 100,000 characters) with room for the rest of it.
 // drawingSize undercounts Claude Code's elements (a 600-box graph it counted past 20,000 sizes at about 12,000 here).
 const MAX_DRAWN_ELEMENTS = 8_000
@@ -733,7 +735,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   if (input.open || (!paneOpened && input.auto)) {
     paneOpened = true
     const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
-    if (opened && !opened.isPlaced && !input.open) await narrowHint($, opened.reason)
+    if (opened && opened.isPlaced === false && !input.open) await narrowHint($, opened.reason)
   }
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
@@ -758,7 +760,7 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
   await update($, loadingAtom, () => true)
   try {
     if (preloaded) {
-      rememberColumns(columnsKey(focus.manifest, focus.mtimeMs, focus.model), preloaded)
+      rememberColumns(columnsKey(focus.manifest, focus.mtimeMs, focus.model), namesOf(preloaded))
       await update($, columnsAtom, prev => (mine() ? preloaded : prev))
     }
     // Without a manifest there are no columns to ask for: the plugin's calls are read-only, so altimate-code
@@ -769,7 +771,7 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
       if (!sameFocus(await read($, focusAtom), focus)) return
       const answer = result?.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
       const columns = answer
-      rememberColumns(columnsKey(focus.manifest, focus.mtimeMs, focus.model), columns)
+      if (columns) rememberColumns(columnsKey(focus.manifest, focus.mtimeMs, focus.model), namesOf(columns))
       await update($, columnsAtom, prev => (mine() ? columns : prev))
       if (!result?.ok) await update($, messageAtom, prev => (mine() ? `dbt_lineage failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}` : prev))
       const ms = Math.round((await $.clock.now()) - began)
@@ -1096,7 +1098,9 @@ function modelColumnsFromCli($: EngineInterface, manifest: string, mtimeMs: numb
   const fetching = shared(`columns\u0000${key}`, async () => {
     const result = await runTool($, 'dbt_lineage', { manifest_path: manifest, model: id }, true)
     const columns = result.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
-    rememberColumns(key, columns)
+    // An answer with no columns (a failure the CLI reported) is kept too: this revision is not asked again.
+    // A call that never answered throws instead, and the next edit asks again.
+    rememberColumns(key, columns ? namesOf(columns) : [])
     return modelColumns.get(key) ?? []
   })
   // Nothing may be waiting for it: a failure is the edit's loss of detail, not an error.
@@ -1163,11 +1167,9 @@ export async function lineageBand($: EngineInterface, ui: Ui): Promise<RenderEle
   if (!impact || (await read($, bandHiddenAtom))) return null
   const { Box, Button, Text } = ui
   const target = impact.column ? `${impact.model}.${impact.column}` : impact.model
-  // A value stored before 1.4.2 has no split of the maybes: all of its unsettled count is "more may".
-  const maybeReaders = impact.maybeReaders ?? 0
-  const maybeExposures = impact.maybeExposures ?? 0
-  const readers = impact.readers !== null ? countText(impact.readers, maybeReaders, impact.unsettled > maybeReaders) : null
-  const dashboards = impact.exposures.length || impact.dashboardsUnsettled ? countText(impact.exposures.length - maybeExposures, maybeExposures, !!impact.dashboardsUnsettled, 'dashboard') : null
+  const readers = impact.readers !== null ? countText(impact.readers, impact.maybeReaders, impact.unsettled > impact.maybeReaders) : null
+  const dashboards =
+    impact.exposures.length || impact.dashboardsUnsettled ? countText(impact.exposures.length - impact.maybeExposures, impact.maybeExposures, !!impact.dashboardsUnsettled, 'dashboard') : null
   // One Text, so a narrow band wraps it as a line, not word by word in each piece.
   return (
     <Box key="lineage-band" flexDirection="column">
@@ -1299,10 +1301,8 @@ export function registerLineage(on: On) {
       // altimate-code) goes on, and the pane shows its answer. A message left from before is not this one's.
       await update($, messageAtom, () => null)
       const landed = await within($, COMMAND_WAIT_MS, follow($, { model, dottedColumn: true, open: true }))
-      if (landed === false) {
-        const message = await read($, messageAtom)
-        if (message) return { text: message }
-      }
+      // It did not land: the pane's message says why (no such model), else a newer lookup took the pane.
+      if (landed === false) return { text: (await read($, messageAtom)) ?? `Altimate lineage did not open ${model}: the pane shows why.` }
       return { text: landed === null ? `Altimate lineage is looking up ${model} ${where}.` : `Altimate lineage for ${model} is open ${where}.` }
     }
     if (current) {
@@ -1497,7 +1497,7 @@ export function registerLineage(on: On) {
     const keyOf = (kind: ViewKind | 'list') => JSON.stringify([focus, graph.parents, graph.upTruncated, graph.truncated, graph.partial, kind, kind === 'graph' || kind === 'folders' ? 0 : capUp, kind === 'graph' || kind === 'folders' ? 0 : capDown, kind === 'graph' ? 0 : width, column, kind === 'graph' && column ? reach : null])
     // A graph already found too big for this pane is not drawn again: the pane shows folders.
     const graphWindowKey = `${keyOf('graph')}\u0000${width}`
-    let tooBig = view === 'graph' && tooBigCache?.key === graphWindowKey ? tooBigCache.size : null
+    let tooBig = view === 'graph' ? (tooBigCache.get(graphWindowKey) ?? null) : null
     if (tooBig) view = 'folders'
     const draw = () => {
       const drawKey = keyOf(view)
@@ -1542,7 +1542,9 @@ export function registerLineage(on: On) {
     if (view === 'graph' && drawn) {
       const size = drawingSize(shownRows)
       if (size.elements > MAX_DRAWN_ELEMENTS || size.chars > MAX_DRAWN_CHARS) {
-        tooBigCache = { key: graphWindowKey, size }
+        // A resize back and forth meets each width once: a few of them are kept.
+        if (tooBigCache.size >= 8) tooBigCache.delete(tooBigCache.keys().next().value!)
+        tooBigCache.set(graphWindowKey, size)
         tooBig = size
         $.ui.log(`lineage-pane · graph of ${node.name} too big to draw (${size.elements} elements, ${size.chars} characters): folders`, { to: 'debug' })
         view = 'folders'

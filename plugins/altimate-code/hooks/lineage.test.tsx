@@ -200,7 +200,10 @@ async function start($: any, on: any, options: Options = {}) {
   // The tool itself, beneath the plugin.
   on('tool.call', (_: unknown, e: { tool: string }) => {
     calls.push(`tool:${e.tool}`)
-    return { result: options.toolResult?.(e) ?? { ok: true } }
+    const result = options.toolResult?.(e)
+    // A denial is the hook's own answer, not a result.
+    if (result && typeof result === 'object' && 'deny' in result) return result
+    return { result: result ?? { ok: true } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
@@ -539,6 +542,36 @@ test('a saved long answer the plugin cannot read is asked of the CLI, not taken 
   await clock.settle()
   expect(calls).toContain('cli:impact_analysis')
   expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+})
+
+test("a model's columns the CLI could not give are not asked again for the same manifest", async ($, on) => {
+  // Denied edits: the pane follows no model, so nothing but the CLI could give the columns.
+  const { clock, calls } = await start($, on, { cliFailure: true, toolResult: e => (e.tool === 'Edit' ? { deny: 'not now' } : undefined) })
+  // net_revenue is undeclared, so each edit would want the model's own columns.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as net_revenue', new_string: 'sum(amount) - 1 as net_revenue' })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) - 1 as net_revenue', new_string: 'sum(amount) - 2 as net_revenue' })
+  await clock.settle()
+  expect(calls.filter(one => one === 'cli:dbt_lineage')).toHaveLength(1)
+})
+
+test('a graph found too big is not drawn again when the pane goes back to a width it had', async ($, on) => {
+  const nodes: Record<string, unknown> = { ...MANIFEST.nodes }
+  for (let i = 1; i <= 600; i++) {
+    const name = `order_slice_${String(i).padStart(4, '0')}`
+    nodes[`model.shop.${name}`] = { resource_type: 'model', name, original_file_path: `models/fan/${name}.sql`, depends_on: { nodes: ['model.shop.fct_orders'] }, config: { materialized: 'view' } }
+  }
+  const { clock, logs } = await start($, on, { manifest: { ...MANIFEST, nodes } })
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  const measured = () => logs.filter(line => line.includes('too big to draw')).length
+  for (const bodyColumns of [90, 91, 90, 91]) {
+    const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns }, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^FOLDERS · manifest/ })).toBeDefined()
+    await ui.unmount()
+  }
+  // Each width was measured once.
+  expect(measured()).toBe(2)
 })
 
 test('/lineage says where the pane is: beside the chat when docked, above the prompt otherwise', async ($, on) => {
@@ -1323,7 +1356,9 @@ test('an older follow that resolves after a newer one does not overwrite it', as
   await clock.settle()
   release()
   await clock.settle()
-  await Promise.all([first, second])
+  const [firstReply] = await Promise.all([first, second])
+  // The first lookup lost the pane to the second: its reply never says fct_orders is open.
+  expect(firstReply.text).not.toMatch(/for fct_orders is open/)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()

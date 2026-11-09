@@ -166,10 +166,10 @@ export type ImpactView = {
   readers: number | null
   /** Models that may read it or could not be traced: `readers` is then a lower bound. */
   unsettled: number
-  /** Of `unsettled`, the models that may read it or could not be traced (absent before 1.4.2). */
-  maybeReaders?: number
-  /** Of `exposures`, the dashboards on models that only may read it (absent before 1.4.2). */
-  maybeExposures?: number
+  /** Of `unsettled`, the models that may read it or could not be traced. */
+  maybeReaders: number
+  /** Of `exposures`, the dashboards on models that only may read it. */
+  maybeExposures: number
   /** The dashboards could not be read: the count is a lower bound. */
   dashboardsUnsettled?: boolean
   /** altimate-code stopped the graph at its node limit: `transitive` is a lower bound. */
