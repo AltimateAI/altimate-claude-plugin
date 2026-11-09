@@ -56,7 +56,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean } }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void> }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -179,8 +179,10 @@ async function start($: any, on: any, options: Options = {}) {
     }
     return { value: { content: [], isError: true } }
   })
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
+    // A slow CLI dbt_lineage: it answers once the test lets it.
+    if (command === 'tool' && tool === 'dbt_lineage' && options.holdCliLineage) await options.holdCliLineage
     // The integrations half of the plugin asks the CLI for its status at session start.
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
@@ -553,6 +555,25 @@ test("a model's columns the CLI could not give are not asked again for the same 
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) - 1 as net_revenue', new_string: 'sum(amount) - 2 as net_revenue' })
   await clock.settle()
   expect(calls.filter(one => one === 'cli:dbt_lineage')).toHaveLength(1)
+})
+
+test("a CLI column answer that fails late never replaces the columns the pane read meanwhile", async ($, on) => {
+  let release!: () => void
+  // The pane's read (MCP) knows net_revenue; the edit check's own CLI fetch fails, and only after the pane's read.
+  const lineageText = JSON.stringify({ ...LINEAGE, columns: { ...LINEAGE.columns, net_revenue: ['"int_orders"."revenue"'] }, report: LINEAGE_TEXT })
+  const { clock, calls } = await start($, on, { cliFailure: true, lineageText, holdCliLineage: new Promise<void>(resolve => (release = resolve)) })
+  // revenue is declared: the edit goes ahead at once while the CLI fetch for fct_orders' columns is held.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  // The pane followed the edit and read fct_orders' columns; then it moves to another model.
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/int_orders.sql` })
+  await clock.settle()
+  release()
+  await clock.settle()
+  // An edit of net_revenue (undeclared, known from the pane's read) is still traced.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as net_revenue', new_string: 'sum(amount) - 1 as net_revenue' })
+  await clock.settle()
+  expect(calls).toContain('mcp:impact_analysis:net_revenue')
 })
 
 test('a graph found too big is not drawn again when the pane goes back to a width it had', async ($, on) => {
@@ -1357,8 +1378,9 @@ test('an older follow that resolves after a newer one does not overwrite it', as
   release()
   await clock.settle()
   const [firstReply] = await Promise.all([first, second])
-  // The first lookup lost the pane to the second: its reply never says fct_orders is open.
+  // The first lookup lost the pane to the second: its reply says so, never that fct_orders is open.
   expect(firstReply.text).not.toMatch(/for fct_orders is open/)
+  if (!/looking up/.test(firstReply.text)) expect(firstReply.text).toBe('Altimate lineage did not open fct_orders: a newer lookup took the pane.')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()

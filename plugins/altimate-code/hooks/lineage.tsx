@@ -1098,9 +1098,11 @@ function modelColumnsFromCli($: EngineInterface, manifest: string, mtimeMs: numb
   const fetching = shared(`columns\u0000${key}`, async () => {
     const result = await runTool($, 'dbt_lineage', { manifest_path: manifest, model: id }, true)
     const columns = result.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
-    // An answer with no columns (a failure the CLI reported) is kept too: this revision is not asked again.
-    // A call that never answered throws instead, and the next edit asks again.
-    rememberColumns(key, columns ? namesOf(columns) : [])
+    // An answer with no columns (a failure the CLI reported) is kept too, so this revision is not asked
+    // again, but never over columns the pane read meanwhile. A call that never answered throws instead,
+    // and the next edit asks again.
+    if (columns) rememberColumns(key, namesOf(columns))
+    else if (!modelColumns.has(key)) rememberColumns(key, [])
     return modelColumns.get(key) ?? []
   })
   // Nothing may be waiting for it: a failure is the edit's loss of detail, not an error.
@@ -1302,7 +1304,7 @@ export function registerLineage(on: On) {
       await update($, messageAtom, () => null)
       const landed = await within($, COMMAND_WAIT_MS, follow($, { model, dottedColumn: true, open: true }))
       // It did not land: the pane's message says why (no such model), else a newer lookup took the pane.
-      if (landed === false) return { text: (await read($, messageAtom)) ?? `Altimate lineage did not open ${model}: the pane shows why.` }
+      if (landed === false) return { text: (await read($, messageAtom)) ?? `Altimate lineage did not open ${model}: a newer lookup took the pane.` }
       return { text: landed === null ? `Altimate lineage is looking up ${model} ${where}.` : `Altimate lineage for ${model} is open ${where}.` }
     }
     if (current) {
