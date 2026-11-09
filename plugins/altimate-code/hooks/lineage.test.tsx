@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -75,7 +75,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
-  on('ui.open', () => ({ value: {} }))
+  // A narrow terminal: Claude Code leaves a pane the plugin opens on its own undrawn, and says why.
+  on('ui.open', (_: unknown, e: { focus?: boolean }) => ({ value: options.narrow && !e.focus ? { isPlaced: false, reason: options.narrow } : {} }))
   on('ui.toast', (_: unknown, e: { text: string }) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -381,6 +382,29 @@ test('/lineage names a model and column; an unknown model says so', async ($, on
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /No dbt model matches "nope"/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('a pane left undrawn on a narrow terminal is said once, with the width it needs, and /lineage still opens it', async ($, on) => {
+  const narrow = 'unasked below 144 columns (100 now): placed when the person opens it, or when the terminal is widened to 144 columns'
+  const { clock, toasts } = await start($, on, { narrow })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(toasts).toEqual(['◆ lineage · the pane opens by itself only in a terminal at least 144 columns wide; /lineage opens it now'])
+  // A second read in the same conversation says nothing more.
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/int_orders.sql` })
+  await clock.settle()
+  expect(toasts).toHaveLength(1)
+  expect((await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } })).text).toBe(
+    'Altimate lineage for fct_orders is open above the prompt.',
+  )
+  expect(toasts).toHaveLength(1)
+})
+
+test('a run with no surface to draw on gets no narrow-terminal hint', async ($, on) => {
+  const { clock, toasts } = await start($, on, { narrow: 'no-surface: this is a -p run' })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(toasts).toEqual([])
 })
 
 test('/lineage says where the pane is: beside the chat when docked, above the prompt otherwise', async ($, on) => {
