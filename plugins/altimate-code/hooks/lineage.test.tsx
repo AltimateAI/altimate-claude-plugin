@@ -1380,7 +1380,8 @@ test('an older follow that resolves after a newer one does not overwrite it', as
   const [firstReply] = await Promise.all([first, second])
   // The first lookup lost the pane to the second: its reply says so, never that fct_orders is open.
   expect(firstReply.text).not.toMatch(/for fct_orders is open/)
-  if (!/looking up/.test(firstReply.text)) expect(firstReply.text).toBe('Altimate lineage did not open fct_orders: a newer lookup took the pane.')
+  const firstText = firstReply.text ?? ''
+  if (!/looking up/.test(firstText)) expect(firstText).toBe('Altimate lineage did not open fct_orders: a newer lookup took the pane.')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
