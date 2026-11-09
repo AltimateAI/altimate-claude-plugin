@@ -227,7 +227,7 @@ test('an edit naming a column is held until its reach is known, then the reach g
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: 'fct_orders.revenue' })).toBeDefined()
   expect(await band.find({ type: 'Text', text: 'MEDIUM' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: /direct 5 · transitive 1 · tests 1 · read by 2 models · 1 dashboards/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /direct 5 · transitive 1 · tests 1 · read by 2 models · 1 dashboard(?!s)/ })).toBeDefined()
   await band.press({ key: 'lineage-dismiss' })
   await clock.settle()
   expect(await band.find({ key: 'lineage-open' })).toBeUndefined()
@@ -259,7 +259,7 @@ test('[c] picks a column and shows its reach; [d] unfolds downstream; a model in
   await clock.settle()
   expect(calls).toContain('mcp:impact_analysis:revenue')
   expect(await ui.find({ type: 'Text', text: 'COLUMN · revenue' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboards/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboard(?!s)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Exec Revenue' })).toBeDefined()
 
   await ui.press({ key: 'up-1-model.shop.int_orders' })
@@ -374,11 +374,45 @@ test('/lineage names a model and column; an unknown model says so', async ($, on
   await clock.settle()
   expect(calls).toContain('mcp:impact_analysis:revenue')
 
-  await run('nope')
+  // The reply says what the lookup found, not that a pane opened on a model that isn't there.
+  const missing = await run('nope')
+  expect(missing.text).toBe('No dbt model matches "nope" in the manifest.')
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /No dbt model matches "nope"/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('/lineage says where the pane is: beside the chat when docked, above the prompt otherwise', async ($, on) => {
+  await start($, on)
+  const run = (presentation: { isFullscreen: boolean; columns: number }) =>
+    $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation })
+  expect((await run({ isFullscreen: true, columns: 200 })).text).toBe('Altimate lineage for fct_orders is open beside the chat.')
+  // Fullscreen below 110 columns and the main screen at any width draw the pane above the prompt.
+  expect((await run({ isFullscreen: true, columns: 100 })).text).toBe('Altimate lineage for fct_orders is open above the prompt.')
+  expect((await run({ isFullscreen: false, columns: 200 })).text).toBe('Altimate lineage for fct_orders is open above the prompt.')
+})
+
+test('an edit whose column no model reads for certain never says "at least 0", and a dashboard that may read it says so', async ($, on) => {
+  const reach = {
+    severity: 'LOW',
+    column_reach: {
+      models: [],
+      uncertain: [{ name: 'rpt_finance_weekly', reason: 'reads it through select *' }],
+      exposures: [],
+      uncertain_exposures: [{ name: 'exec_revenue', label: 'Exec Revenue', type: 'dashboard' }],
+      truncated: false,
+    },
+  }
+  const { clock, toasts } = await start($, on, { reach })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by no model for certain (1 may); 1 dashboard may read it · Exec Revenue')
+  expect(result.context?.[0]).toContain('- read by no downstream model for certain (1 may)')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /read by no model for certain \(1 may\) · no dashboard for certain \(1 may\)/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /at least 0|dashboards/ })).toBeUndefined()
+  await band.unmount()
 })
 
 test('a manifest over 4 MiB is read through altimate-code: the graph comes from dbt_lineage with include_graph', async ($, on) => {
@@ -419,11 +453,11 @@ test('a subagent gets the lineage context the main agent already got, and an unt
   const main: any = await $.tool.call(edit)
   const sub: any = await $.tool.call({ ...edit, agentId: 'sub-1' } as any)
   await clock.settle()
-  expect(toasts[0]).toContain('is read by at least 2 models')
+  expect(toasts[0]).toContain('is read by 2 models (1 more may)')
   expect(main.context?.[0]).toContain('could not be traced: mart_cohort_ltv ("No compiled SQL found")')
-  expect(sub.context?.[0]).toContain('read by at least 2 downstream models')
+  expect(sub.context?.[0]).toContain('read by 2 downstream models (1 more may)')
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /read by at least 2 models/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /read by 2 models \(1 more may\)/ })).toBeDefined()
   await band.unmount()
 })
 
@@ -446,7 +480,7 @@ test('a result the MCP server left out for size is fetched again through the CLI
   expect(calls).toContain('mcp:impact_analysis:revenue')
   expect(calls).toContain('cli:impact_analysis')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboards/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboard(?!s)/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -477,7 +511,7 @@ test('dashboards on models that may read the column are counted and named', asyn
   const { clock, toasts } = await start($, on, { reach })
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
-  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by at least 2 models and 2 dashboards · Exec Revenue · Ops Board')
+  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models (1 more may) and 1 dashboard; 1 dashboard may read it · Exec Revenue · Ops Board')
   expect(edit.context?.[0]).toContain('dashboards on models that may read it: "Ops Board"')
 })
 
@@ -1013,14 +1047,15 @@ test("the person's press still loading when the answer ends wins over the answer
   let release!: () => void
   const { clock } = await start($, on, { holdManifestStat: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
   await $.turn.start({ text: 'q', turnId: 't10' } as any)
-  // The person's /lineage, still loading...
-  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  // The person's /lineage, still loading (its reply waits for the lookup)...
+  const reply = $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
   // ...when an answer naming another model ends the turn.
   await $.turn.complete({ answer: 'See `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't10' } as any)
   await clock.advance(100)
   release()
   await clock.advance(6000)
   await clock.settle()
+  await reply
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()
@@ -1122,12 +1157,14 @@ test('an older follow that resolves after a newer one does not overwrite it', as
   const { clock } = await start($, on, { holdFirstManifestRead: new Promise<void>(resolve => (release = resolve)) })
   // fct_orders by name first, then int_orders: the second claims the pane; the first, landing later, yields.
   const run = (args: string) => $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
-  await run('fct_orders')
+  // The first reply waits for its held lookup, so neither is awaited until the hold is released.
+  const first = run('fct_orders')
   await clock.settle()
-  await run('int_orders')
+  const second = run('int_orders')
   await clock.settle()
   release()
   await clock.settle()
+  await Promise.all([first, second])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
@@ -1265,7 +1302,7 @@ test('an unreadable dashboards section keeps the dashboard count a lower bound',
   expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and at least 1 dashboard · Exec Revenue')
   expect(edit.context?.[0]).toContain('the dashboards could not be read ("exposures: bad yaml")')
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /at least 1 dashboards/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /at least 1 dashboard(?!s)/ })).toBeDefined()
   await band.unmount()
 })
 
