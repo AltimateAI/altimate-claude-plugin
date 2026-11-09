@@ -5,6 +5,7 @@ import { MANIFEST } from './lineage-graph.test'
 
 const ROOT = '/repo'
 const MANIFEST_PATH = `${ROOT}/target/manifest.json`
+const PERSISTED_PATH = '/home/me/.claude/projects/repo/session/tool-results/toolu_plugin_1.txt'
 const FILE = `${ROOT}/models/fct_orders.sql`
 
 const PANE = {
@@ -55,7 +56,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean } }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -128,6 +129,11 @@ async function start($: any, on: any, options: Options = {}) {
       await options.holdFirstSqlRead
     }
     if (sql) return { value: e.path === `${ROOT}/dbt_project.yml` ? (sql['dbt_project.yml'] ?? "name: 'shop'\n") : (sql[e.path.slice(ROOT.length + 1)] ?? '') }
+    // The file Claude Code saved a long MCP answer to.
+    if (e.path === PERSISTED_PATH) {
+      if (!options.persisted?.readable) throw new Error('EACCES')
+      return { value: JSON.stringify({ ...reach, report: 'Impact' }) }
+    }
     return { value: e.path === MANIFEST_PATH ? JSON.stringify(options.manifest ?? MANIFEST) : 'select 1' }
   })
   on('tool.list', () => ({
@@ -152,6 +158,11 @@ async function start($: any, on: any, options: Options = {}) {
       return options.holdReach.until.then(() => ({
         value: { content: [{ type: 'text', text: JSON.stringify({ severity: 'LOW', column_reach: { models: [{ name: 'stale_reader', columns: [] }], exposures: [] }, report: 'x' }) }], isError: false },
       }))
+    }
+    // Claude Code 2.1.319 hands a mod a preview of an answer over about 49 KB, naming the file with the rest.
+    if (e.tool === 'impact_analysis' && options.persisted) {
+      const text = `<persisted-output>\nOutput too large (51.9KB). Full output saved to: ${PERSISTED_PATH}\n\nPreview (first 2KB):\n{"model":"fct_orders","column":"revenue"\n</persisted-output>`
+      return { value: { content: [{ type: 'text', text }], isError: false } }
     }
     if (e.tool === 'impact_analysis') {
       const body = capped ? { report: 'Impact', truncated: true } : { ...reach, report: 'Impact' }
@@ -182,7 +193,7 @@ async function start($: any, on: any, options: Options = {}) {
     const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
     const body =
       tool === 'dbt_lineage'
-        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...graph } : { model_name: 'fct_orders', confidence: 'high' } }
+        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...graph } : (options.cliLineage ?? { model_name: 'fct_orders', confidence: 'high' }) }
         : { status: 'ok', output: '', metadata: reach }
     return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '' } }
   })
@@ -484,6 +495,50 @@ test('a graph too big for Claude Code to draw is shown as folders, saying why, n
   expect(await ui.find({ type: 'Text', text: /^ENDS ONLY · manifest/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /shown as folders/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test("an edit of a column the project doesn't declare is traced from the model's own columns, wherever the pane is", async ($, on) => {
+  // net_revenue is in fct_orders' SQL but not in its schema.yml, and the pane shows another model.
+  const cliLineage = { model_name: 'fct_orders', confidence: 'high', columns: { order_id: ['"int_orders"."order_id"'], net_revenue: ['"int_orders"."revenue"'] }, edges: [] }
+  const { clock, calls, toasts } = await start($, on, { cliLineage })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/int_orders.sql` })
+  await clock.settle()
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as net_revenue', new_string: 'sum(amount) - sum(fees) as net_revenue' })
+  await clock.settle()
+  // Its columns come through the CLI (no permission dialog), before the reach.
+  expect(calls.indexOf('cli:dbt_lineage')).toBeGreaterThan(-1)
+  expect(calls.indexOf('cli:dbt_lineage')).toBeLessThan(calls.indexOf('mcp:impact_analysis:net_revenue'))
+  expect(toasts.at(-1)).toMatch(/^◆ impact-first · fct_orders\.net_revenue is read by 2 models/)
+  expect(result.context?.[0]).toContain('Altimate lineage for fct_orders.net_revenue')
+  // The next edit of the same model uses the columns it already has.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(fees) as net_revenue', new_string: 'sum(fees) + 1 as net_revenue' })
+  await clock.settle()
+  expect(calls.filter(one => one === 'cli:dbt_lineage')).toHaveLength(1)
+})
+
+test('an edit whose declared columns already show what it touches does not wait for the CLI', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on)
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  // revenue is declared: traced at once, while the model's columns are fetched for later edits.
+  expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('tool:Edit'))
+  expect(toasts[0]).toMatch(/^◆ impact-first · fct_orders\.revenue is read by 2 models/)
+})
+
+test("a column reach Claude Code saved to a file is read from it, with no CLI call", async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { persisted: { readable: true } })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+  expect(calls).not.toContain('cli:impact_analysis')
+})
+
+test('a saved long answer the plugin cannot read is asked of the CLI, not taken as no answer', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { persisted: { readable: false } })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  expect(calls).toContain('cli:impact_analysis')
+  expect(toasts[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
 })
 
 test('/lineage says where the pane is: beside the chat when docked, above the prompt otherwise', async ($, on) => {

@@ -58,6 +58,9 @@ const COMMAND_WAIT_MS = 2_000
 const DOCK_COLUMNS = 110
 // The most columns one edit's impact check traces.
 const MAX_EDIT_COLUMNS = 3
+// How long an edit waits for its model's own columns from the CLI, and the time it keeps for the reach after.
+const EDIT_COLUMNS_MS = 3_000
+const REACH_RESERVE_MS = 2_500
 
 const focusAtom = atom({ plugin: 'altimate-code', key: 'lineageFocus' } as const, null, { shape: 'lineage-focus-1' })
 const graphAtom = atom({ plugin: 'altimate-code', key: 'lineageGraph' } as const, null, { shape: 'lineage-graph-1' })
@@ -322,6 +325,17 @@ const clearSqlGraphs = () => {
 
 // Work asked for again while the same work still runs (a burst of edits, a re-read) shares its answer.
 const inFlight = new Map<string, Promise<any>>()
+// Each model's output columns from dbt_lineage, by manifest revision and model: the pane fills it as it
+// reads a model's columns, and an edit's check fills it for a model the pane never showed.
+const modelColumns = new Map<string, string[]>()
+const columnsKey = (manifest: string, mtimeMs: number, id: string) => `${manifest}\u0000${mtimeMs}\u0000${id}`
+function rememberColumns(key: string, columns: ColumnLineage | null) {
+  if (!columns) return
+  // A long session can see many revisions: the oldest go first.
+  if (modelColumns.size >= 500) modelColumns.delete(modelColumns.keys().next().value!)
+  modelColumns.set(key, columns.columns.map(one => one.name))
+}
+
 function shared<T>(key: string, work: () => Promise<T>): Promise<T> {
   const running = inFlight.get(key)
   if (running) return running
@@ -414,6 +428,15 @@ function textOf(content: unknown): string {
     .join('\n')
 }
 
+/**
+ * The file a `<persisted-output>` preview says holds the whole answer: null when the text is no such
+ * preview, undefined when it is one but names no file.
+ */
+export function persistedPath(text: string): string | null | undefined {
+  if (!/^\s*(?:<|&lt;)persisted-output(?:>|&gt;)/.test(text)) return null
+  return /Full output saved to: ([^\n]+?)\s*$/m.exec(text)?.[1]
+}
+
 /** A file:// URI as a filesystem path; a Windows drive path keeps no leading slash. */
 function fileUriPath(uri: string): string {
   const path = decodeURIComponent(new URL(uri).pathname)
@@ -446,8 +469,12 @@ async function runTool($: EngineInterface, name: string, args: Record<string, un
       const link = result.content.find((block: any) => block?.type === 'resource_link' && String(block.uri).startsWith('file://')) as
         | { uri: string }
         | undefined
-      // An unreadable link leaves only the preview: fetch the whole answer through the CLI instead.
-      const full = link ? await $.fs.read(fileUriPath(link.uri)).catch(() => null) : text
+      // Claude Code (2.1.319) swaps an answer of about 49 KB or more for a preview that names the file it
+      // saved the whole answer to, with no link block: the answer is that file.
+      const saved = link ? null : persistedPath(text)
+      if (!link && saved === undefined) throw new Error('a cut-off preview with no file named')
+      // An unreadable link or file leaves only the preview: fetch the whole answer through the CLI instead.
+      const full = link ? await $.fs.read(fileUriPath(link.uri)).catch(() => null) : saved ? await $.fs.read(saved).catch(() => null) : text
       if (full === null) throw new Error('the full result could not be read')
       text = full
       // Claude Code hands a tool's structured content over as one JSON text block in place of the
@@ -730,7 +757,10 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
   if (!focus || !node || (expected && !sameFocus(focus, expected))) return
   await update($, loadingAtom, () => true)
   try {
-    if (preloaded) await update($, columnsAtom, prev => (mine() ? preloaded : prev))
+    if (preloaded) {
+      rememberColumns(columnsKey(focus.manifest, focus.mtimeMs, focus.model), preloaded)
+      await update($, columnsAtom, prev => (mine() ? preloaded : prev))
+    }
     // Without a manifest there are no columns to ask for: the plugin's calls are read-only, so altimate-code
     // answers from the manifest alone.
     else if (focus.via !== 'sql' && (isNew || !(await read($, columnsAtom)))) {
@@ -739,6 +769,7 @@ async function loadDetails($: EngineInterface, preloaded: ColumnLineage | null, 
       if (!sameFocus(await read($, focusAtom), focus)) return
       const answer = result?.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
       const columns = answer
+      rememberColumns(columnsKey(focus.manifest, focus.mtimeMs, focus.model), columns)
       await update($, columnsAtom, prev => (mine() ? columns : prev))
       if (!result?.ok) await update($, messageAtom, prev => (mine() ? `dbt_lineage failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}` : prev))
       const ms = Math.round((await $.clock.now()) - began)
@@ -951,11 +982,22 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   const counts = impactOf(graph, id)
   const downstream = counts.direct + counts.transitive
   if (downstream === 0 && counts.exposures.length === 0) return null
-  const known = (await read($, focusAtom))?.model === id ? ((await read($, columnsAtom))?.columns.map(one => one.name) ?? []) : []
+  // The edited model's own columns: the pane's, else remembered from an earlier read of this revision.
+  const key = columnsKey(manifest, stat.mtimeMs, id)
+  const known = ((await read($, focusAtom))?.model === id ? (await read($, columnsAtom))?.columns.map(one => one.name) : undefined) ?? modelColumns.get(key)
   const { before, after } = await editTexts($, e)
   // Every column the edit touches is traced (up to three): picking one from raw dbt SQL is a guess,
   // and a wrong guess would hide the column that changed.
-  const everyTouched = touchedColumns(before, after, [...new Set([...known, ...node.columns])])
+  let everyTouched = touchedColumns(before, after, [...new Set([...(known ?? []), ...node.columns])])
+  if (!known) {
+    // Not known yet: dbt_lineage through the CLI. Waited for only when the declared columns find nothing the
+    // edit touches (a column schema.yml leaves out); otherwise it runs on, for the next edit of this model.
+    const fetching = modelColumnsFromCli($, manifest, stat.mtimeMs, id)
+    if (everyTouched.length === 0) {
+      const own = await waitForColumns($, fetching, id, deadline)
+      if (own.length) everyTouched = touchedColumns(before, after, [...new Set([...own, ...node.columns])])
+    }
+  }
   const touched = everyTouched.slice(0, MAX_EDIT_COLUMNS)
 
   let reach: ColumnReachView | null = null
@@ -1043,6 +1085,32 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
       truncated: !!graph.truncated,
     },
   }
+}
+
+/**
+ * An edited model's output columns from dbt_lineage, through the CLI (which raises no permission dialog,
+ * where the MCP server can), remembered for this manifest revision. One fetch per model and revision.
+ */
+function modelColumnsFromCli($: EngineInterface, manifest: string, mtimeMs: number, id: string): Promise<string[]> {
+  const key = columnsKey(manifest, mtimeMs, id)
+  const fetching = shared(`columns\u0000${key}`, async () => {
+    const result = await runTool($, 'dbt_lineage', { manifest_path: manifest, model: id }, true)
+    const columns = result.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
+    rememberColumns(key, columns)
+    return modelColumns.get(key) ?? []
+  })
+  // Nothing may be waiting for it: a failure is the edit's loss of detail, not an error.
+  fetching.catch(() => {})
+  return fetching
+}
+
+/** The columns as they arrive, waited for at most EDIT_COLUMNS_MS and never into the time the reach needs. */
+async function waitForColumns($: EngineInterface, fetching: Promise<string[]>, id: string, deadline: number): Promise<string[]> {
+  const began = await $.clock.now()
+  const wait = Math.min(EDIT_COLUMNS_MS, deadline - REACH_RESERVE_MS - began)
+  const own = wait > 0 ? await within($, wait, fetching) : null
+  $.ui.log(`impact-first · dbt_lineage(${id}) through the CLI · ${own ? `${own.length} columns` : 'no answer in time'} · ${elapsed(Math.round((await $.clock.now()) - began))}`, { to: 'debug' })
+  return own ?? []
 }
 
 /** dbt_lineage's answer as a ToolResult row carries it: structured content, or its text. */
