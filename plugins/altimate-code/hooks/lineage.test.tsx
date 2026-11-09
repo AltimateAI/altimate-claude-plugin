@@ -55,7 +55,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -128,7 +128,7 @@ async function start($: any, on: any, options: Options = {}) {
       await options.holdFirstSqlRead
     }
     if (sql) return { value: e.path === `${ROOT}/dbt_project.yml` ? (sql['dbt_project.yml'] ?? "name: 'shop'\n") : (sql[e.path.slice(ROOT.length + 1)] ?? '') }
-    return { value: e.path === MANIFEST_PATH ? JSON.stringify(MANIFEST) : 'select 1' }
+    return { value: e.path === MANIFEST_PATH ? JSON.stringify(options.manifest ?? MANIFEST) : 'select 1' }
   })
   on('tool.list', () => ({
     value: warehouse ? [{ name: 'mcp__altimate_saas__table_lineage', description: 'Snowflake table lineage', mcp: true }] : [],
@@ -448,6 +448,42 @@ test('a shell command that changes the shown model\'s file brings the warning up
   await clock.settle()
   expect(toasts.at(-1)).toMatch(/ · the manifest is older than this file$/)
   expect(result.context?.[0]).toContain('- the manifest is older than this file (it changed after the last `dbt compile`)')
+})
+
+test('a graph too big for Claude Code to draw is shown as folders, saying why, not as a blank pane', async ($, on) => {
+  // 600 models read fct_orders: drawn whole, the graph passes what Claude Code draws in a pane.
+  const nodes: Record<string, unknown> = { ...MANIFEST.nodes }
+  for (let i = 1; i <= 600; i++) {
+    const name = `order_slice_${String(i).padStart(4, '0')}`
+    nodes[`model.shop.${name}`] = {
+      resource_type: 'model',
+      name,
+      original_file_path: `models/fan/${name}.sql`,
+      relation_name: `"shop"."main"."${name}"`,
+      depends_on: { nodes: ['model.shop.fct_orders'] },
+      config: { materialized: 'view' },
+    }
+  }
+  const { clock } = await start($, on, { manifest: { ...MANIFEST, nodes } })
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^FOLDERS · manifest/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /the whole graph is more than Claude Code can draw in a pane, so it is shown as folders/ })).toBeDefined()
+  // A small graph (upstream of a report, away from the 600) is still drawn whole.
+  await $.command.run({ command: 'lineage', args: 'rpt_finance_weekly', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^GRAPH · manifest/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /shown as folders/ })).toBeUndefined()
+  // Back on the big one, v moves on from the graph the person chose: ends only next.
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^FOLDERS · manifest/ })).toBeDefined()
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^ENDS ONLY · manifest/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /shown as folders/ })).toBeUndefined()
+  await ui.unmount()
 })
 
 test('/lineage says where the pane is: beside the chat when docked, above the prompt otherwise', async ($, on) => {

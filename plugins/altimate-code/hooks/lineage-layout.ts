@@ -715,3 +715,21 @@ export function columnOf(rows: Segment[][], node: string): number {
   }
   return first
 }
+
+/**
+ * What drawing these rows costs Claude Code: its elements (a row's box and each piece of it, a press
+ * target counted twice for its label) and its characters. Claude Code refuses a pane over 20,000
+ * elements and draws only the first 100,000 characters of its text.
+ */
+export function drawingSize(rows: Segment[][]): { elements: number; chars: number } {
+  let elements = 0
+  let chars = 0
+  for (const row of rows) {
+    elements += 1
+    for (const one of row) {
+      elements += one.node ? 2 : 1
+      chars += one.text.length
+    }
+  }
+  return { elements, chars }
+}

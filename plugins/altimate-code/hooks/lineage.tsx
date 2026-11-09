@@ -12,7 +12,7 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
-import { columnOf, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
+import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
   buildGraph,
@@ -336,6 +336,12 @@ let drawnCache: { key: string; drawn: Drawn | null } | null = null
 // Limit: the whole canvas is mounted so the pane's own scrolling reaches every row; windowing rows would
 // mean scrolling by hand. The slice is cached, so only a pan or a new drawing re-slices.
 let sliceCache: { key: string; rows: Segment[][] } | null = null
+// A graph drawing too big for a pane, by drawing and window: shown as folders without drawing it again.
+let tooBigCache: { key: string; size: { elements: number; chars: number } } | null = null
+// What a pane may hold, under Claude Code's limits (20,000 elements, 100,000 characters) with room for the rest of it.
+// drawingSize undercounts Claude Code's elements (a 600-box graph it counted past 20,000 sizes at about 12,000 here).
+const MAX_DRAWN_ELEMENTS = 8_000
+const MAX_DRAWN_CHARS = 80_000
 /** The nodes the drawing's `+N more` boxes stand for, by side. */
 const foldedOf = (view: Layered) => {
   const out = { up: [] as string[], down: [] as string[] }
@@ -1415,46 +1421,66 @@ export function registerLineage(on: On) {
     }
     const source = focus.via === 'tools' ? 'altimate-code' : focus.via === 'sql' ? 'SQL files' : 'manifest'
     const width = e.props.bodyColumns || 80
-    const view = chosenView !== 'list' && width < MIN_GRAPH_COLUMNS ? 'list' : chosenView
+    let view = chosenView !== 'list' && width < MIN_GRAPH_COLUMNS ? 'list' : chosenView
     const capUp = expanded.up ? UNFOLDED : BOX_CAP
     const capDown = expanded.down ? UNFOLDED : BOX_CAP
     // The pane redraws on every state change (loading, messages, columns); the drawing depends only on these.
     // The links themselves, not a count: an edit can swap a parent and keep the size.
-    const drawKey = JSON.stringify([focus, graph.parents, graph.upTruncated, graph.truncated, graph.partial, view, view === 'graph' || view === 'folders' ? 0 : capUp, view === 'graph' || view === 'folders' ? 0 : capDown, view === 'graph' ? 0 : width, column, view === 'graph' && column ? reach : null])
-    if (drawnCache?.key !== drawKey) {
-      // The graph is the whole lineage, every level, model and name in full, as one canvas the pane
-      // pans across (dbt-lineage-viewer's view): nothing folded, dropped or cut.
-      const layered =
-        view === 'graph'
-          ? graphView(graph, focus.model, { up: Infinity, down: Infinity, capUp: Infinity, capDown: Infinity, reach: column ? reach : null })
-          : view === 'ends'
-            ? endsView(graph, focus.model, { capUp, capDown })
-            : view === 'folders'
-              ? foldersView(graph, focus.model)
-              : null
-      // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
-      const rows: Drawn | null = !layered
-        ? null
-        : view === 'folders'
-          ? { rows: drawStack(layered, width - 1), hidden: 0, canvas: 0, folded: { up: [], down: [] } }
-          : view === 'graph'
-            ? (() => {
-                const whole = drawLayered(layered, Infinity).rows
-                return { rows: whole, hidden: 0, canvas: Math.max(0, ...whole.map(row => row.reduce((n, one) => n + one.text.length, 0))), folded: { up: [], down: [] } }
-              })()
-            : { ...drawLayered(layered, width - 1), canvas: 0, folded: foldedOf(layered) }
-      drawnCache = { key: drawKey, drawn: rows }
+    const keyOf = (kind: ViewKind | 'list') => JSON.stringify([focus, graph.parents, graph.upTruncated, graph.truncated, graph.partial, kind, kind === 'graph' || kind === 'folders' ? 0 : capUp, kind === 'graph' || kind === 'folders' ? 0 : capDown, kind === 'graph' ? 0 : width, column, kind === 'graph' && column ? reach : null])
+    // A graph already found too big for this pane is not drawn again: the pane shows folders.
+    const graphWindowKey = `${keyOf('graph')}\u0000${width}`
+    let tooBig = view === 'graph' && tooBigCache?.key === graphWindowKey ? tooBigCache.size : null
+    if (tooBig) view = 'folders'
+    const draw = () => {
+      const drawKey = keyOf(view)
+      if (drawnCache?.key !== drawKey) {
+        // The graph is the whole lineage, every level, model and name in full, as one canvas the pane
+        // pans across (dbt-lineage-viewer's view): nothing folded, dropped or cut.
+        const layered =
+          view === 'graph'
+            ? graphView(graph, focus.model, { up: Infinity, down: Infinity, capUp: Infinity, capDown: Infinity, reach: column ? reach : null })
+            : view === 'ends'
+              ? endsView(graph, focus.model, { capUp, capDown })
+              : view === 'folders'
+                ? foldersView(graph, focus.model)
+                : null
+        // Folders read top to bottom: a source-to-mart chain is too long to lay out across a side pane.
+        const rows: Drawn | null = !layered
+          ? null
+          : view === 'folders'
+            ? { rows: drawStack(layered, width - 1), hidden: 0, canvas: 0, folded: { up: [], down: [] } }
+            : view === 'graph'
+              ? (() => {
+                  const whole = drawLayered(layered, Infinity).rows
+                  return { rows: whole, hidden: 0, canvas: Math.max(0, ...whole.map(row => row.reduce((n, one) => n + one.text.length, 0))), folded: { up: [], down: [] } }
+                })()
+              : { ...drawLayered(layered, width - 1), canvas: 0, folded: foldedOf(layered) }
+        drawnCache = { key: drawKey, drawn: rows }
+      }
+      const drawn = drawnCache.drawn
+      // The window onto the graph canvas: centred on the model until panned.
+      const room = width - 1
+      const maxPan = Math.max(0, (drawn?.canvas ?? 0) - room)
+      const centre = drawn?.canvas ? Math.max(0, columnOf(drawn.rows, focus.model) - Math.floor(room / 3)) : 0
+      const from = Math.min(maxPan, Math.max(0, pan ?? centre))
+      // The window's rows, kept while the drawing and the pan stand: a redraw for a message or a column pick reuses them.
+      const sliceKey = `${drawnCache.key}\u0000${from}\u0000${room}`
+      if (sliceCache?.key !== sliceKey) sliceCache = { key: sliceKey, rows: drawn ? (drawn.canvas > room ? sliceRows(drawn.rows, from, room) : drawn.rows) : [] }
+      return { drawn, room, maxPan, from, shownRows: sliceCache.rows }
     }
-    const drawn = drawnCache.drawn
-    // The window onto the graph canvas: centred on the model until panned.
-    const room = width - 1
-    const maxPan = Math.max(0, (drawn?.canvas ?? 0) - room)
-    const centre = drawn?.canvas ? Math.max(0, columnOf(drawn.rows, focus.model) - Math.floor(room / 3)) : 0
-    const from = Math.min(maxPan, Math.max(0, pan ?? centre))
-    // The window's rows, kept while the drawing and the pan stand: a redraw for a message or a column pick reuses them.
-    const sliceKey = `${drawnCache.key}\u0000${from}\u0000${room}`
-    if (sliceCache?.key !== sliceKey) sliceCache = { key: sliceKey, rows: drawn ? (drawn.canvas > room ? sliceRows(drawn.rows, from, room) : drawn.rows) : [] }
-    const shownRows = sliceCache.rows
+    let { drawn, room, maxPan, from, shownRows } = draw()
+    // Claude Code refuses a pane past its element limit (it stays blank) and cuts its text past its character
+    // limit: a graph window that would pass either is shown as folders, and the header says why.
+    if (view === 'graph' && drawn) {
+      const size = drawingSize(shownRows)
+      if (size.elements > MAX_DRAWN_ELEMENTS || size.chars > MAX_DRAWN_CHARS) {
+        tooBigCache = { key: graphWindowKey, size }
+        tooBig = size
+        $.ui.log(`lineage-pane · graph of ${node.name} too big to draw (${size.elements} elements, ${size.chars} characters): folders`, { to: 'debug' })
+        view = 'folders'
+        ;({ drawn, room, maxPan, from, shownRows } = draw())
+      }
+    }
     // From what is shown: a stored pan past the edge (a narrower pane, a right-clamped start) is not the start.
     const panBy = (step: number) => update($, panAtom, () => Math.min(maxPan, Math.max(0, from + step)))
     // Once a new model's graph is drawn, scroll the pane to it: the canvas can be taller than the pane.
@@ -1531,6 +1557,7 @@ export function registerLineage(on: On) {
               {drawn.hidden ? ` · ${drawn.hidden} level${drawn.hidden === 1 ? '' : 's'} past the pane's width` : ''}
               {graph.upTruncated || graph.truncated ? ` · ${[graph.upTruncated && 'upstream', graph.truncated && 'downstream'].filter(Boolean).join(' and ')} cut at 500 nodes` : ''}
             </Text>
+            {tooBig && <Text color="warning">⚠ the whole graph is more than Claude Code can draw in a pane, so it is shown as folders · v: ends only, list</Text>}
             {view === 'graph' && (
               <Box flexDirection="row" gap={2}>
                 {drawn.canvas > room && <Button key="lineage-pan-left" plain hotkey="h" label="◀ pan" onPress={() => panBy(-Math.max(8, Math.floor(room / 2)))} />}
