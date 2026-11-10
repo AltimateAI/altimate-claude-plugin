@@ -13,6 +13,18 @@ All notable changes to this plugin will be documented in this file.
 - Start the session in the linked folder or below it: with only a subfolder linked (a dbt project), a session started at the repository root gets no team rules.
 - The hooks need an altimate-code release with `learn hook`; with an older one they do nothing.
 
+## [1.4.2] — 2026-11-09
+
+### Fixed
+- Lineage counts read right. "No model for certain (2 may)" replaces "at least 0 models", a dashboard that only may read a column is called a maybe, and one dashboard is "1 dashboard".
+- `/lineage` replies with what it found, so a model that doesn't exist says so. It also says where the pane is: beside the chat when docked, above the prompt otherwise.
+- In a terminal under 144 columns, Claude Code holds back a pane the plugin opens on its own. A toast now says so once, and that `/lineage` opens it.
+- The pane says when the shown model's `.sql` changed after the manifest was written, by an edit or a shell command, until `dbt compile` and `r`. The edit note and toast say it too.
+- A graph too big for Claude Code to draw in a pane is shown as folders, with a line saying why. Before, the pane was blank or cut off.
+- An edit's column check uses the edited model's own columns: the pane's, an earlier read's, or `dbt_lineage` through the CLI. A column that `schema.yml` leaves out is traced, whatever model the pane shows.
+- Claude Code hands over a column reach of about 49 KB or more as a preview of a saved file. That file is now read, so a widely read column keeps its column detail.
+- Work the plugin schedules no longer fails a session that has ended, such as after a reload or `/clear`.
+
 ## [1.4.1] — 2026-11-06
 
 ### Added

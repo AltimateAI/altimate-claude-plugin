@@ -36,9 +36,14 @@ export function parseJson<T>(text: string): T | null {
 }
 
 // A press has a short budget, so a press only schedules its work; the work then
-// runs on the clock, outside the press.
+// runs on the clock, outside the press. Nothing awaits it, so a failure is caught here: work still
+// running when its session ends (a reload, /clear) finds the engine gone, and that is no error to raise.
 export function later($: EngineInterface, work: () => Promise<unknown>) {
   $.clock.after(0, () => {
-    void work()
+    work().catch(error => {
+      try {
+        $.ui.log(`scheduled work failed: ${String(error)}`, { to: 'debug' })
+      } catch {}
+    })
   })
 }

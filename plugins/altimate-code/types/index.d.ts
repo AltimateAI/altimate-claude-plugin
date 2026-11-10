@@ -166,6 +166,10 @@ export type ImpactView = {
   readers: number | null
   /** Models that may read it or could not be traced: `readers` is then a lower bound. */
   unsettled: number
+  /** Of `unsettled`, the models that may read it or could not be traced. */
+  maybeReaders: number
+  /** Of `exposures`, the dashboards on models that only may read it. */
+  maybeExposures: number
   /** The dashboards could not be read: the count is a lower bound. */
   dashboardsUnsettled?: boolean
   /** altimate-code stopped the graph at its node limit: `transitive` is a lower bound. */
@@ -209,6 +213,8 @@ declare module 'claude-code' {
       lineageAnswer: AnswerModel[]
       /** Why there is no lineage to show, or what the last step reported. */
       lineageMessage: string | null
+      /** The shown model's SQL file changed after the manifest was written, said so; null when it didn't. */
+      lineageStale: string | null
       lineageLoading: boolean
       isLineageBandHidden: boolean
     }

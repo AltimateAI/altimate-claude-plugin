@@ -5,6 +5,7 @@ import {
   columnsFromModelLineage,
   selectItems,
   columnsFromMetadata,
+  countText,
   downstreamArt,
   findModel,
   graphFromSql,
@@ -100,6 +101,18 @@ test('impact counts over models and snapshots, with impact_analysis\' severity t
     severity: 'MEDIUM',
   })
   expect([0, 3, 4, 10, 11].map(severityOf)).toEqual(['SAFE', 'LOW', 'MEDIUM', 'MEDIUM', 'HIGH'])
+})
+
+test('a count of what reads a column never says "at least 0", and says one in the singular', () => {
+  expect(countText(0, 0, false)).toBe('no model')
+  // Nothing certain, but some may read it: no lower bound of zero.
+  expect(countText(0, 2, false)).toBe('no model for certain (2 may)')
+  expect(countText(0, 0, true)).toBe('no model for certain')
+  expect(countText(1, 0, false)).toBe('1 model')
+  expect(countText(2, 1, false)).toBe('2 models (1 more may)')
+  expect(countText(2, 0, true)).toBe('at least 2 models')
+  expect(countText(1, 0, false, 'dashboard')).toBe('1 dashboard')
+  expect(countText(0, 1, false, 'dashboard')).toBe('no dashboard for certain (1 may)')
 })
 
 test('a snapshot is followable like a model', () => {

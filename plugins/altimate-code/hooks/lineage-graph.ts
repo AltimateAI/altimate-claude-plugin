@@ -284,6 +284,19 @@ export function severityOf(downstreamModels: number): Severity {
   return downstreamModels === 0 ? 'SAFE' : downstreamModels <= 3 ? 'LOW' : downstreamModels <= 10 ? 'MEDIUM' : 'HIGH'
 }
 
+/** "1 dashboard", "2 dashboards". */
+export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+
+/**
+ * What reads a column, as a count: `certain` read it for sure, `maybe` may read it (or could not be
+ * traced), and `incomplete` says more may (the trace stopped, columns went unchecked). A lower bound of
+ * nothing reads as "no model for certain", never "at least 0 models".
+ */
+export function countText(certain: number, maybe: number, incomplete: boolean, noun = 'model'): string {
+  const known = certain === 0 ? `no ${noun}${maybe || incomplete ? ' for certain' : ''}` : `${incomplete ? 'at least ' : ''}${plural(certain, noun)}`
+  return maybe ? `${known} (${certain ? `${maybe} more` : maybe} may)` : known
+}
+
 export type ImpactCounts = { direct: number; transitive: number; tests: number; exposures: string[]; severity: Severity }
 
 export function impactOf(graph: LineageGraph, id: string): ImpactCounts {
