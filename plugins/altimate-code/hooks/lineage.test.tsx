@@ -407,7 +407,9 @@ test('a pane left undrawn on a narrow terminal is said once, with the width it n
   const { clock, toasts } = await start($, on, { narrow })
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
-  expect(toasts).toEqual(['◆ lineage · the pane opens by itself only in a terminal at least 144 columns wide; /lineage opens it now'])
+  // The action comes first, and the whole toast fits a 100-column terminal with Claude Code's prefix.
+  expect(toasts).toEqual(['◆ lineage · /lineage opens the pane (it opens by itself from 144 columns)'])
+  expect(`altimate-code: ${toasts[0]}`.length).toBeLessThanOrEqual(100)
   // A second read in the same conversation says nothing more.
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/int_orders.sql` })
   await clock.settle()
@@ -1385,6 +1387,16 @@ test('an older follow that resolves after a newer one does not overwrite it', as
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('/lineage on a slow lookup says it is looking, and where the pane is', async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, { holdFirstManifestRead: new Promise<void>(resolve => (release = resolve)) })
+  const reply = $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await clock.advance(2_100)
+  expect((await reply).text).toBe('Altimate lineage is looking up fct_orders; the pane is above the prompt.')
+  release()
+  await clock.settle()
 })
 
 test('/lineage <model> with no column clears the selected column', async ($, on) => {

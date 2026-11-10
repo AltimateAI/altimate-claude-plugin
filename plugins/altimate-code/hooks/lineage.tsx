@@ -884,7 +884,8 @@ async function narrowHint($: EngineInterface, reason: string) {
   narrowHintShown = true
   // "unasked below 144 columns (100 now): …"
   const floor = /below (\d+) columns/.exec(reason)?.[1]
-  $.ui.toast(`◆ lineage · the pane opens by itself only in a terminal ${floor ? `at least ${floor} columns wide` : 'wider than this one'}; /lineage opens it now`, { timeoutMs: 10000 })
+  // The action first: Claude Code cuts a toast to one line of the narrow terminal it is for.
+  $.ui.toast(`◆ lineage · /lineage opens the pane (it opens by itself ${floor ? `from ${floor} columns` : 'in a wider terminal'})`, { timeoutMs: 10000 })
 }
 
 async function openPane($: EngineInterface) {
@@ -1305,7 +1306,7 @@ export function registerLineage(on: On) {
       const landed = await within($, COMMAND_WAIT_MS, follow($, { model, dottedColumn: true, open: true }))
       // It did not land: the pane's message says why (no such model), else a newer lookup took the pane.
       if (landed === false) return { text: (await read($, messageAtom)) ?? `Altimate lineage did not open ${model}: a newer lookup took the pane.` }
-      return { text: landed === null ? `Altimate lineage is looking up ${model} ${where}.` : `Altimate lineage for ${model} is open ${where}.` }
+      return { text: landed === null ? `Altimate lineage is looking up ${model}; the pane is ${where}.` : `Altimate lineage for ${model} is open ${where}.` }
     }
     if (current) {
       // Bare /lineage is the person asking for the model shown.
