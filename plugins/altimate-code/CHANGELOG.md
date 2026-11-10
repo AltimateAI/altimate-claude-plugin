@@ -2,6 +2,17 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.5.0] — 2026-11-10
+
+### Added
+- Team rules from a linked Altimate workspace apply in Claude Code sessions. At session start the plugin gives Claude the workspace's approved rules for the repository, the number of proposed rules waiting for you, and the owner's reviews of your proposals since your last session.
+- Corrections you make to Claude are recorded locally (UserPromptSubmit, no model call). After a turn, altimate-code checks them in the background (Stop) and keeps a proposed rule when you corrected the same topic in two sessions or corrected a team rule Claude was given.
+- "Remember this as a team rule: …" said to Claude waits as a proposal (no model call).
+- `/altimate-code:rules`: answer proposed rules (send for review, approve as owner, edit, save as memory, or "Not a rule"), and see the team rules and the review status of your proposals.
+- The hooks run altimate-code only where the session's folder (or a folder above it in the repository) is in altimate-code's workspace link cache, which is in your own state directory: nothing in the repository turns them on. Team rules arrive in a linked project when you are signed in; recording corrections and drafting proposals also need learning on. `ALTIMATE_LEARN=0` turns all of it off and the hooks start nothing.
+- Start the session in the linked folder or below it: with only a subfolder linked (a dbt project), a session started at the repository root gets no team rules.
+- The hooks need an altimate-code release with `learn hook`; with an older one they do nothing.
+
 ## [1.4.2] — 2026-11-09
 
 ### Fixed

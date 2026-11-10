@@ -49,7 +49,7 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 
 ## How it works
 
-1. A **SessionStart hook** adds a description of the available tools and both modes to the session, and copies the linked workspace's skills (see below). It does not start the MCP server.
+1. A **SessionStart hook** adds a description of the available tools and both modes to the session, and copies the linked workspace's skills (see below). It does not start the MCP server. In a linked project, the [team rules](#team-rules) hooks add the workspace's rules too.
 2. **MCP mode.** Claude calls `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns columns and value profiles; large results spill to a local file), `sql_materialize` (session-local `scratch` DuckDB for cross-database joins), `answer_commit`, and `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence`, `sql_translate`.
 3. **CLI mode.** The **skill** has Claude run `altimate tool context` once (connections, schema listing, analyst method), then `altimate tool run <name> --args '<json>'` through Bash and reason over the structured output. `altimate tool list --json` shows every tool and its input schema. A warm process per project starts automatically.
 4. Calls are read-only unless you approve `--allow-write` (CLI mode); `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are always blocked. Read-only is enforced by the database on Postgres, SQLite and DuckDB and by SQL classification elsewhere, so use a read-only DB user for the strongest boundary.
@@ -113,6 +113,22 @@ The plugin's lineage pane follows the dbt model Claude reads or edits (by Read, 
 
 `/lineage <model>[.column]` opens the pane on a model, at any width. When the pane follows Claude's reads on its own, Claude Code draws it only in a terminal at least 144 columns wide (110 once you have opened it yourself); in a narrower one it waits, and a toast says so once. Lineage calls go to the plugin's MCP server without a permission prompt, or to `altimate tool run` when the server is not available. A manifest over 4 MiB is read through altimate-code (`dbt_lineage` with `include_graph`). Run `dbt parse` or `dbt compile` first; column lineage and reach need compiled SQL. When the shown model's `.sql` file changed after the manifest was written, the pane and the edit note say so: run `dbt compile`, then `r`.
 
+### Team rules
+
+In a project linked to an Altimate workspace, the workspace's approved **team rules** apply to Claude Code itself, not only to the tasks it hands over. With learning on (`altimate learn enable` in the project, or the workspace's "Learn from sessions" if you have made no choice of your own), your corrections can become proposed rules too:
+
+- **At session start** the plugin gives Claude the team rules for this repository, tells it how many proposed rules are waiting for you, and reports the owner's reviews of your proposals since your last session (approved, or rejected with the reason).
+- **When you correct Claude** ("no, we never use FLOAT for money") the correction is recorded locally. When you correct it on the same topic in two sessions, or correct a team rule it was given, altimate-code words a proposed rule after the turn, in the background.
+- **"Remember this as a team rule: …"**, said to Claude, waits as a proposal the same way. It needs "as a rule" or "team rule" followed by ":" or "-": "remember to run the tests", a question, or "don't remember this as a team rule" is just part of the conversation. A task handed to altimate-code decides this as an altimate-code session does.
+- **`/altimate-code:rules`** shows the proposals waiting for you, the team rules, and the status of the rules you proposed. For each proposal you choose: send it to the workspace owner's review (or approve it, if you are the owner), edit the wording, save it as a memory, or "Not a rule". Nothing reaches teammates until the owner approves it.
+
+Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gateway, or set a provider in altimate-code): if it has none it can use, the next session start says the check failed. The same commands work in a terminal: `altimate learn proposals`, `altimate learn proposals reply <id> --send`. Proposals from Claude Code sessions are answered only there or with `/altimate-code:rules`: altimate-code's own `/rules` and its VS Code chat panel don't list them. This needs an altimate-code release with workspace rules.
+
+- **Start the session in the linked folder**, or a folder below it. If only a folder inside the repository is linked (a dbt project), a session started at the repository root gets no team rules.
+- **A new clone or worktree** gets no team rules until altimate-code has been linked, or run, in that checkout: the link is remembered per folder.
+- **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds). All of them run only in a linked folder (or below it), as recorded in altimate-code's link cache in your own state directory: nothing in the repository turns them on.
+- **`ALTIMATE_LEARN=0`** turns all of it off: the hooks start nothing.
+
 ## Example prompts
 
 Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):
@@ -144,6 +160,7 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | Answers ignore your workspace's skills or knowledge | Run `altimate workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate link` in a terminal. If it is linked, check that your CLI has `tool run --workspace-tools` (`altimate upgrade`). |
 | `Altimate account or workspace changed` | The sign-in or link changed since Claude read the workspace. Claude re-reads `workspace_context` and retries once; if it repeats, ask Claude to check `altimate workspace status`. |
 | Workspace engine `needs_engine` | Let Claude run `altimate workspace-client engine-install`, or run it yourself. |
+| Team rules don't appear at session start | Check `altimate learn status` in the project: it needs a linked workspace and an Altimate sign-in, and `ALTIMATE_LEARN` not set to `0`. Start Claude Code in the linked folder (or below it), not at the repository root when only a subfolder is linked. Update altimate-code if `altimate learn rules` is an unknown command. |
 | Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 Still stuck? See [Support](#support).
@@ -154,7 +171,8 @@ Still stuck? See [Support](#support).
 - **Skill** — `skills/altimate-code/SKILL.md` — MCP and `tool run` guidance, delegation for long jobs, workspace guidance
 - **Agent** — `agents/analyst.md` — read-only data analyst (MCP or CLI)
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
-- **Hooks** — `hooks/hooks.json` — SessionStart capability description and workspace skill copy; Stop hook hourly background skill refresh; opt-in PreToolUse `warehouse-guard.sh` (needs `ALTIMATE_ROUTE_GUARD=1`)
+- **Command** — `commands/rules.md` — `/altimate-code:rules` to answer proposed team rules
+- **Hooks** — `hooks/hooks.json` — SessionStart capability description and workspace skill copy; Stop hook hourly background skill refresh; the team rules hooks (`hooks-handlers/workspace-rules.sh`): SessionStart, UserPromptSubmit and Stop, which call `altimate learn hook <event>` and never fail the session (the per-turn hooks run in the background; session start waits at most 15 seconds); opt-in PreToolUse `warehouse-guard.sh` (needs `ALTIMATE_ROUTE_GUARD=1`)
 
 ## Support
 
