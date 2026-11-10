@@ -1,5 +1,5 @@
 {
-  "description": "SessionStart nudge directing the agent to delegate data-engineering tasks to altimate-code via the altimate-code skill, and workspace rules for a project linked to an Altimate workspace: the team rules at session start, corrections recorded on prompt submit, and the post-turn check after each turn (the last two in the background). The old UserPromptSubmit pre-run hook stays removed: it double-invoked altimate-code (once at hook time, once when the model fired the skill), doubling token consumption on the altimate-gateway without improving delegation rate. The workspace-rules prompt hook runs no agent and no model call.",
+  "description": "SessionStart context describing altimate-code's data tools (with the CLI routing guidance when the MCP server is unavailable or disallowed) that also copies the linked Altimate workspace's skills into `.claude/skills/`; the team rules hooks for a project linked to an Altimate workspace (the team rules at session start, corrections recorded on prompt submit with no model call, and the post-turn check at Stop, the last two in the background); a Stop hook that refreshes those skills in the background once they are an hour old; and an opt-in PreToolUse guard (active only when ALTIMATE_ROUTE_GUARD=1) that points direct warehouse client commands at `altimate tool run`.",
   "hooks": {
     "SessionStart": [
       {
@@ -34,9 +34,27 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/workspace-rules.sh\" stop",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/refresh-skills.sh\" --if-stale"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/warehouse-guard.sh\""
           }
         ]
       }
     ]
-  }
+  },
+  "modules": [
+    "./integrations.tsx"
+  ]
 }
