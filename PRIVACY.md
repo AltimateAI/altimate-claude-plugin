@@ -128,7 +128,7 @@ The plugin and the altimate-code CLI are professional developer tools, not direc
 
 We will update this document in this repository and revise the effective date when our practices change. Material changes to Altimate-wide practices are governed by the master [Privacy Policy](https://www.altimate.ai/privacy).
 
-**November 4, 2026:** added [Workspace rules](#workspace-rules) (the workspace-rules hooks and `/altimate-code:rules` in plugin 1.2.0), and the rules telemetry the altimate-code CLI sends.
+**November 10, 2026:** added [Workspace rules](#workspace-rules) (the workspace-rules hooks and `/altimate-code:rules` in plugin 1.5.0), and the rules telemetry the altimate-code CLI sends.
 
 ## Contact
 

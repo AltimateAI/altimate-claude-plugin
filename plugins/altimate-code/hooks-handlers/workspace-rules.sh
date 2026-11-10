@@ -47,20 +47,32 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # repository root. This mirrors the CLI, which looks there and never below the directory it runs in. Keys are native
 # paths written as JSON strings, so each folder is converted (`cygpath -w` on Windows), JSON-escaped, then escaped for
 # the regular expression. It is matched with both quotes and the colon after them: `/x/app` never matches `/x/app-old`,
-# and a folder that appears only as a value (a row's `projectPath`) is not a key.
+# and a folder that appears only as a value (a row's `projectPath`) is not a key. The physical path is tried first, then
+# the path as the host reached it (through a symlink, or `/tmp` for `/private/tmp`): an older CLI wrote that form, and
+# rewrites it only when it reads the cache itself.
 linked() {
   local cache="${XDG_STATE_HOME:-$HOME/.local/state}/altimate-code/altimate-workspace-bindings.json"
-  local top dir key
+  local top
   [ -f "$cache" ] || return 1
   top="$(cd "$ROOT" 2>/dev/null && pwd -P)"
-  dir="$(pwd -P)"
-  [ -n "$top" ] && [ -n "$dir" ] || return 1
+  [ -n "$top" ] || return 1
+  linked_from "$cache" "$top" "$(pwd -P)" && return 0
+  [ -n "${PWD:-}" ] && [ "$PWD" != "$(pwd -P)" ] && linked_from "$cache" "$top" "$PWD"
+}
+
+# linked_from CACHE TOP DIR: the walk up from DIR, ending at the folder whose physical path is TOP.
+linked_from() {
+  local cache="$1" top="$2" dir="$3" key
+  [ -n "$dir" ] || return 1
   while :; do
     key="$dir"
-    command -v cygpath >/dev/null 2>&1 && key="$(cygpath -w "$dir")"
+    command -v cygpath >/dev/null 2>&1 && key="$(cygpath -w "$dir" 2>/dev/null)"
+    # An empty key would match any empty string in the cache.
+    [ -n "$key" ] || return 1
     key="$(printf '%s' "$key" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/[][\.*^$+?(){}|]/\\&/g')"
     grep -qE "\"$key\"[[:space:]]*:" "$cache" 2>/dev/null && return 0
     case "$dir" in "$top"|/) return 1 ;; esac
+    [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$top" ] && return 1
     dir="$(dirname "$dir")"
   done
 }

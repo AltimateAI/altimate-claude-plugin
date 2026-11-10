@@ -145,6 +145,24 @@ reset
 [ "$(hook "$WORK/project" session-start "$WORK/winbin:$BIN:$SYS")" = "0|" ] && ! started \
   || fail "session start at the repository root ran the CLI with only a child folder linked (Windows paths)"
 
+# A `cygpath` that prints nothing gives no key, which must not match an empty string in the cache.
+printf '#!/bin/sh\nexit 1\n' > "$WORK/winbin/cygpath"
+python3 -c 'import json; print(json.dumps({"bindings": {"": {"datamateId": 1}}}))' > "$CACHE"
+reset
+[ "$(hook "$WORK/project" session-start "$WORK/winbin:$BIN:$SYS")" = "0|" ] && ! started \
+  || fail "an empty key from cygpath matched an empty string in the link cache"
+# A folder reached through a symlink, linked by that path (as an older CLI wrote it): found by the path the host used.
+ln -s "$WORK/project" "$WORK/via-link"
+link "$WORK/via-link/dbt"
+reset
+[ "$(hook "$WORK/via-link/dbt/models" session-start "$BIN:$SYS")" = "$JSON" ] \
+  || fail "a link keyed by the symlinked path was not found"
+# The walk by that path still ends at the repository root.
+link "$WORK"
+reset
+[ "$(hook "$WORK/via-link/dbt" session-start "$BIN:$SYS")" = "0|" ] && ! started \
+  || fail "the walk by the symlinked path went above the repository root"
+
 link "$WORK/project"
 [ "$(hook "$WORK/project" session-start "$BIN:$SYS" help)" = "0|" ] || fail "a CLI without \`learn hook\` leaks its output"
 [ "$(hook "$WORK/project" session-start "$BIN:$SYS" fail)" = "0|" ] || fail "a failing CLI fails the hook or leaks its error"
