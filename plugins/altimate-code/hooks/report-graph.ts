@@ -10,6 +10,8 @@
  * - A layer with more than 12 models is one box ("+N models") unless expanded.
  * - Each layer is ordered by where its edges meet the layer before it (toward the changed column),
  *   then by name, so edges cross less and the order never depends on the data's order.
+ * - An edge's `label` is its derivation when the engine told it (same, renamed, calculated,
+ *   aggregated), else null: an unknown one is drawn without a label.
  *
  * The page runs this function's own source (`graphLayout.toString()`), so it uses nothing from
  * outside its body but the language's built-ins.
@@ -79,7 +81,8 @@ export function graphLayout(f: any, levels: { up: number; down: number }, expand
     var id = a.box + '>' + b.box + '|' + (a.folded ? '' : e[0]) + '|' + (b.folded ? '' : e[1])
     if (seen[id]) { seen[id].keys.push([e[0], e[1]]); return }
     var x1 = a.x2, x2 = b.x1, dx = x2 > x1 ? (x2 - x1) / 2 : G.gapX
-    var edge = { from: e[0], to: e[1], keys: [[e[0], e[1]]], glyph: e[2], d: 'M' + x1 + ' ' + a.y + 'C' + r1(x1 + dx) + ' ' + a.y + ' ' + r1(x2 - dx) + ' ' + b.y + ' ' + x2 + ' ' + b.y, mx: r1((x1 + x2) / 2), my: r1((a.y + b.y) / 2) }
+    var known = e[2] === '=' || e[2] === '~' || e[2] === '\u0192' || e[2] === '\u03a3'
+    var edge = { from: e[0], to: e[1], keys: [[e[0], e[1]]], glyph: e[2], label: known ? e[2] : null, d: 'M' + x1 + ' ' + a.y + 'C' + r1(x1 + dx) + ' ' + a.y + ' ' + r1(x2 - dx) + ' ' + b.y + ' ' + x2 + ' ' + b.y, mx: r1((x1 + x2) / 2), my: r1((a.y + b.y) / 2) }
     seen[id] = edge
     edges.push(edge)
   })
@@ -114,7 +117,7 @@ function graphPanel(f,i){
   var svg=sv('svg',{'class':'g-svg',tabindex:0,role:'group','aria-label':'Column graph: drag or use the arrow keys to move, the wheel or + and - to zoom, 0 to fit'});
   var vp=sv('g',{'class':'g-vp'}),gE=sv('g',{'class':'g-edges'}),gB=sv('g',{'class':'g-boxes'});vp.appendChild(gE);vp.appendChild(gB);svg.appendChild(vp);
   lay.edges.forEach(function(e){var g=sv('g',{'class':'g-edge '+(GLYPH[e.glyph]||'unk'),'data-keys':e.keys.map(function(k){return k[0]+'>'+k[1]}).join(' ')});
-    g.appendChild(sv('path',{d:e.d}));var t=sv('text',{x:e.mx,y:e.my-4,'class':'g-elabel','text-anchor':'middle'},e.glyph||'?');g.appendChild(t);gE.appendChild(g)});
+    g.appendChild(sv('path',{d:e.d}));if(e.label)g.appendChild(sv('text',{x:e.mx,y:e.my-4,'class':'g-elabel','text-anchor':'middle'},e.label));gE.appendChild(g)});
   lay.boxes.forEach(function(b){
     var g=sv('g',{'class':'g-box'+(b.focus?' focus':'')+(b.collapsed?' collapsed':''),transform:'translate('+b.x+','+b.y+')','data-box':b.id});
     g.appendChild(sv('title',{},b.title));
@@ -136,6 +139,7 @@ function graphPanel(f,i){
       g.appendChild(row)});
     gB.appendChild(g)});
   p.appendChild(svg);
+  if(lay.edges.some(function(e){return!e.label}))p.appendChild(el('div','g-note','Dashed, unlabelled: the engine couldn\u2019t tell how the value changes.'));
   var hint=el('div','g-hint','Drag to move \\u00b7 wheel or pinch to zoom \\u00b7 click a column to light up its path');p.appendChild(hint);
   // Zoom and pan: one transform, kept per focus while levels change.
   var v=state.views[i],moved=false;
@@ -201,6 +205,7 @@ export const GRAPH_CSS = `
 .g-edge path{fill:none;stroke:var(--line-strong);stroke-width:1.4}
 .g-edge.same path{stroke:var(--same)}.g-edge.ren path{stroke:var(--ren)}.g-edge.calc path{stroke:var(--calc)}.g-edge.agg path{stroke:var(--agg)}.g-edge.unk path{stroke:var(--unk);stroke-dasharray:4 3}
 .g-edge path{stroke-opacity:.55}
+.g-note{font-size:12px;color:var(--muted);padding:6px 12px 8px}
 .g-elabel{font:700 11px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:var(--muted);paint-order:stroke;stroke:var(--bg);stroke-width:3px}
 body.hl .g-edge{opacity:.12}body.hl .g-edge.on{opacity:1}body.hl .g-edge.on path{stroke-opacity:1;stroke-width:2.2}
 body.hl .g-row{opacity:.3}body.hl .g-row.on{opacity:1}body.hl .g-row.on .g-hit{fill:var(--accent-soft)}body.hl .g-row.sel .g-hit{fill:var(--focus)}

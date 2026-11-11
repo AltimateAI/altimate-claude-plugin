@@ -4,7 +4,7 @@ import { type ColumnAnswer, type ModelChange, reportData, reportHtml } from './i
 
 type Layout = {
   boxes: { id: string; layer: number; x: number; y: number; h: number; name: string; title: string; collapsed?: boolean; count?: number; rows: { key: string }[] }[]
-  edges: { from: string; to: string; keys: string[][] }[]
+  edges: { from: string; to: string; keys: string[][]; label: string | null }[]
 }
 const graphLayout = layoutOf as (focus: unknown, levels: { up: number; down: number }, expanded: Record<number, boolean>) => Layout
 
@@ -96,6 +96,17 @@ describe('report graph layout', () => {
     expect(graphLayout(focusOf(shuffled as ColumnAnswer), { up: 2, down: 2 }, {})).toEqual(lay)
   })
 
+  test("labels an edge with how the value changes, and leaves one the engine couldn't tell unlabelled", () => {
+    const down = answer(['a', 'b'], { a: 'x' })
+    down.edges = down.edges!.map((edge, i) => (i === 1 ? [edge[0], edge[1], '?'] : i === 2 ? [edge[0], edge[1]] : edge))
+    const up = { ...UP, edges: [[1, 0, '~'], [2, 1, 'ƒ']] } as ColumnAnswer
+    const labels = Object.fromEntries(graphLayout(focusOf(down, up), { up: 2, down: 2 }, {}).edges.map(edge => [`${edge.from.split('|')[0]!.split('.').pop()}>${edge.to.split('|')[0]!.split('.').pop()}`, edge.label]))
+    // a: same; b: unknown; x: no derivation given; upstream: renamed and calculated.
+    expect(labels).toEqual({ 'fct>a': '=', 'fct>b': null, 'a>x': null, 'stg_orders>fct': '~', 'orders>stg_orders': 'ƒ' })
+    const agg = answer(['a'], { a: 'x' })
+    expect(graphLayout(focusOf(agg), { up: 2, down: 2 }, {}).edges.find(edge => edge.to.startsWith('model.shop.x'))!.label).toBe('Σ')
+  })
+
   test('cuts a long model name and keeps the whole name in its title', () => {
     const long = 'int_query_cost_attribution_by_warehouse_and_hour'
     const box = layer(graphLayout(focusOf(answer([long])), { up: 0, down: 1 }, {}), 1)[0]!
@@ -111,5 +122,11 @@ describe('report page', () => {
     expect(html).toContain('function graphLayout(')
     expect(html).toContain('function graphPanel(')
     expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+stylesheet|@import|url\(http/)
+  })
+
+  test('says what an unlabelled edge means, and draws a label only for an edge that has one', () => {
+    const html = reportHtml(reportData([CHANGE], [{ model: 'fct', column: 'revenue', down: answer(['a']), up: UP, modelLevel: null, failed: false }], TASK))
+    expect(html).toContain('Dashed, unlabelled: the engine couldn\u2019t tell how the value changes.')
+    expect(html).toContain("if(e.label)g.appendChild(sv('text'")
   })
 })
