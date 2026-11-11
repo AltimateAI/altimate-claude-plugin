@@ -3,6 +3,7 @@ import { describe, expect, test } from 'claude-code/testing'
 import {
   answerOf,
   changedColumns,
+  columnReportData,
   type ColumnAnswer,
   type ColumnTrace,
   consumersOf,
@@ -20,6 +21,7 @@ import {
   sectionOf,
   summaryLines,
   summaryOf,
+  upstreamWords,
   WINDOWS_EXPLORER,
 } from './impact-report'
 
@@ -254,6 +256,47 @@ describe('a plan', () => {
 
   test('while it looks them up, says so', () => {
     expect(planLines({ state: 'tracing', models: [{ ...model, modelLevel: null, tests: null, exposures: null, declared: null }], more: 0 })[1]).toBe('mrt_usage · tracing…')
+  })
+})
+
+describe('a column looked up by name', () => {
+  test('says what it is made from one hop up, how far back it goes, where it starts and how sure that is', () => {
+    expect(plain(upstreamWords('fct_orders', 'revenue', UP))).toEqual([
+      '`revenue` in `fct_orders` is aggregated from 1 column one hop up: `int_orders.amount`.',
+      'Followed all the way back, it draws on 2 columns in 2 models, up to 2 hops away.',
+      'Where it starts: `orders`.',
+      'Every upstream model was read.',
+    ])
+    expect(plain(upstreamWords('fct_orders', 'revenue', { ...UP, unresolved: [{ model: 1, reason: 'unparsed' }], truncated: true })).pop()).toBe(
+      "1 model upstream couldn't be read and the trace hit its limit, so more may feed it.",
+    )
+    expect(plain(upstreamWords('fct_orders', 'revenue', null))).toEqual(['Where `fct_orders.revenue` comes from could not be traced.'])
+    expect(plain(upstreamWords('fct_orders', 'revenue', { ...UP, columns: [UP.columns[0]!], edges: [] }))).toEqual([
+      "`revenue` in `fct_orders` reads no column the trace could follow: a constant, say, or SQL the engine couldn't read.",
+    ])
+  })
+
+  test('says where its value goes without talk of a change or a contract', () => {
+    const words = plain(impactWords('fct_orders', 'revenue', TRACE, true))
+    expect(words[0]).toBe(
+      '`fct_orders` has 6 models downstream. The value of `revenue` flows into 3 of them, in 4 columns. A wrong value here shows up there too: `fct_revenue_daily`, `rpt_finance` and `rpt_board`.',
+    )
+    expect(words.some(line => /contract|Expect those|shouldn't change|may change/.test(line))).toBe(false)
+    expect(words).toContain("2 don't carry it: they're downstream of the model, but the value doesn't reach them.")
+  })
+
+  test('its report has no task: it leads with where the column comes from, then where it goes', () => {
+    const data = columnReportData('fct_orders', 'revenue', TRACE, { builtAt: TASK.builtAt, manifest: 'target/manifest.json as it is now' })
+    expect(data).toMatchObject({ title: 'Column lineage · fct_orders.revenue', lookup: { model: 'fct_orders', column: 'revenue' }, changes: [], finishedAt: '' })
+    expect(data.focuses[0]!.upstream).toEqual(upstreamWords('fct_orders', 'revenue', UP))
+    expect(data.focuses[0]!.before).toBeNull()
+    const html = reportHtml(data)
+    const at = (one: string) => html.indexOf(one, html.indexOf('function render(){'))
+    expect(html).toContain("side.appendChild(DATA.lookup?upstreamPanel():ch)")
+    expect(at("if(DATA.lookup){var uc=0")).toBeLessThan(at("if(r){stats.appendChild(stat(r.columns,'columns downstream'))"))
+    expect(html).toContain("'Where it comes from'")
+    expect(html).toContain("DATA.lookup?'Where it goes':'What to expect downstream'")
+    expect(reportData([CHANGE], [TRACE], TASK).lookup).toBeNull()
   })
 })
 

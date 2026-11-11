@@ -40,6 +40,8 @@ type Options = {
   cliFails?: boolean
   /** What impact_analysis adds to its answer. */
   impact?: (args: Record<string, any>) => Record<string, unknown>
+  /** The CLI's whole answer for a call, in place of the usual one. */
+  answer?: (args: Record<string, any>) => { status: string; output: string; metadata: Record<string, unknown> } | undefined
 }
 
 /**
@@ -136,6 +138,11 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin === 'altimate') {
       const args = JSON.parse(String(argv[argv.indexOf('--args') + 1] ?? '{}'))
       if (options.cliFails) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'no', metadata: {} }), stderr: '' } }
+      const own = options.answer?.(args)
+      if (own) {
+        tools.push(args)
+        return ok(JSON.stringify(own))
+      }
       return ok(JSON.stringify({ status: 'ok', output: 'Impact', metadata: impactBody(args) }))
     }
     if (bin === 'mkdir') return ok()
@@ -526,4 +533,60 @@ test('macOS opens with open; /lineage-report before any report says so', async (
   })
   await $.command.run({ command: 'lineage-report', args: '' } as any)
   expect(runs).toContainEqual(['open', REPORT])
+})
+
+const COLUMN_REPORT = `${ROOT}/target/.altimate-lineage/column-report.html`
+
+test('/lineage-report model.column opens that column\'s report, upstream first, with no task behind it, and leaves the task\'s report alone', async ($, on) => {
+  const { tools, writes, runs, toasts, clock } = await start($, on, { openers: { 'xdg-open': 0 } })
+  const out: any = await $.command.run({ command: 'lineage-report', args: ' fct_orders.revenue ' } as any)
+  await clock.settle()
+  expect(out.text).toBe(`Opened the column lineage report for fct_orders.revenue: ${COLUMN_REPORT}`)
+  expect(toasts).toContain('Tracing fct_orders.revenue both ways…')
+  expect(directional(tools).map(one => [one.direction, one.model, one.column, one.manifest_path]).sort()).toEqual([
+    ['downstream', 'fct_orders', 'revenue', MANIFEST],
+    ['upstream', 'fct_orders', 'revenue', MANIFEST],
+  ])
+  expect(runs).toContainEqual(['xdg-open', COLUMN_REPORT])
+  const report = embedded(writes.get(COLUMN_REPORT)!)
+  expect(report.lookup).toEqual({ model: 'fct_orders', column: 'revenue' })
+  expect(report.title).toBe('Column lineage · fct_orders.revenue')
+  expect(report.changes).toEqual([])
+  expect(report.focuses[0].upstream.length).toBeGreaterThan(0)
+  expect(writes.has(REPORT)).toBe(false)
+  // Without an argument it is still the last task's report, and there is none.
+  const none: any = await $.command.run({ command: 'lineage-report', args: '' } as any)
+  expect(none.text).toBe('No column impact report yet: one can be built after a task changes a dbt model.')
+})
+
+test('/lineage-report with a model the manifest lacks, a column the model lacks, or no model.column says so plainly and opens nothing', async ($, on) => {
+  const { runs, writes, tools } = await start($, on, {
+    openers: { 'xdg-open': 0 },
+    answer: args =>
+      args.model === 'nope'
+        ? { status: 'ok', output: 'Model "nope" not found in manifest. Available models: fct_orders, int_orders', metadata: { success: false } }
+        : args.column === 'nothing'
+          ? { status: 'ok', output: 'Impact', metadata: { success: true, model: 'fct_orders', column_answer_error: 'fct_orders has no column nothing; its columns are order_id, revenue' } }
+          : undefined,
+  })
+  const model: any = await $.command.run({ command: 'lineage-report', args: 'nope.revenue' } as any)
+  expect(model.text).toBe('Model "nope" not found in manifest. Available models: fct_orders, int_orders')
+  const column: any = await $.command.run({ command: 'lineage-report', args: 'fct_orders.nothing' } as any)
+  expect(column.text).toBe('fct_orders has no column nothing; its columns are order_id, revenue')
+  const asked = tools.length
+  for (const args of ['revenue', 'fct_orders.', '.revenue', 'fct orders.revenue']) {
+    const usage: any = await $.command.run({ command: 'lineage-report', args } as any)
+    expect(usage.text).toMatch(/^Usage: \/lineage-report for the last task's report, or \/lineage-report <model>\.<column>/)
+  }
+  expect(tools.length).toBe(asked)
+  expect(runs.some(argv => argv[0] === 'xdg-open')).toBe(false)
+  expect(writes.has(COLUMN_REPORT)).toBe(false)
+})
+
+test('/lineage-report takes a unique id as the model, the column after the last dot, and names the model as the CLI does', async ($, on) => {
+  const { tools, writes } = await start($, on, { openers: { 'xdg-open': 0 }, impact: () => ({ model: 'fct_orders' }) })
+  const out: any = await $.command.run({ command: 'lineage-report', args: 'model.shop.fct_orders.revenue' } as any)
+  expect(out.text).toBe(`Opened the column lineage report for fct_orders.revenue: ${COLUMN_REPORT}`)
+  expect(directional(tools).every(one => one.model === 'model.shop.fct_orders' && one.column === 'revenue')).toBe(true)
+  expect(embedded(writes.get(COLUMN_REPORT)!).lookup).toEqual({ model: 'fct_orders', column: 'revenue' })
 })

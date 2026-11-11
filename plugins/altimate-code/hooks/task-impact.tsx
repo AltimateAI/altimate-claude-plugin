@@ -9,6 +9,7 @@ import { later, runAltimate } from './altimate-cli'
 import {
   answerOf,
   changedColumns,
+  columnReportData,
   type ColumnTrace,
   consumersOf,
   fingerprint,
@@ -34,6 +35,9 @@ const RUNNING_MANIFEST = 'manifest-before.json'
 const TASK_MANIFEST = 'task-manifest.json'
 // What a report needs of the last finished task, so one can be built after a restart too.
 const TASK_FILE = 'last-task.json'
+// A report on one column, asked for by name; apart from the task's, which it never replaces.
+const COLUMN_REPORT = 'column-report.html'
+const REPORT_USAGE = 'Usage: /lineage-report for the last task\'s report, or /lineage-report <model>.<column> (say int_orders.amount) for where one column comes from and where it goes.'
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
 // The most changed models one task traces; the rest are named in the log.
 const MAX_MODELS = 5
@@ -438,6 +442,61 @@ async function buildAndOpen($: EngineInterface): Promise<string> {
   return opened ? `Opened the column impact report for the task that finished at ${stamp(done.finishedAt)}: ${built.path}` : `No browser could be opened. The report is at ${built.path}`
 }
 
+/** What /lineage-report was asked for: the last task's report, one column's, or something it can't read. */
+export function reportRequest(args: string): { kind: 'task' } | { kind: 'column'; model: string; column: string } | { kind: 'usage' } {
+  const text = args.trim()
+  if (!text) return { kind: 'task' }
+  // The column is what follows the last dot, so the model can be a name or a unique id (model.shop.int_orders).
+  const dot = text.lastIndexOf('.')
+  if (/\s/.test(text) || dot <= 0 || dot === text.length - 1) return { kind: 'usage' }
+  return { kind: 'column', model: text.slice(0, dot), column: text.slice(dot + 1) }
+}
+
+/** Traces one column both ways in the project's manifest as it is now and writes its report; a plain error when it can't. */
+async function buildColumnReport($: EngineInterface, model: string, column: string): Promise<{ path: string; name: string } | { error: string }> {
+  const root = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
+  if (!root) return { error: 'No dbt project here: /lineage-report <model>.<column> reads the target/manifest.json of the dbt project this session runs in.' }
+  const manifest = `${root}/target/manifest.json`
+  if (!(await $.fs.exists(manifest).catch(() => false))) return { error: 'This project has no target/manifest.json yet. Run `dbt parse` or `dbt compile`, then ask again.' }
+  const args = { manifest_path: manifest, model, column, change_type: 'modify' }
+  // Through the CLI, as for a task: nobody asked for these calls by name.
+  const [down, up] = await Promise.all((['downstream', 'upstream'] as const).map(direction => runTool($, 'impact_analysis', { ...args, direction }, true).catch(() => null)))
+  for (const result of [down, up]) {
+    const meta = result?.metadata as any
+    // The model isn't in the manifest: the CLI's own words, which name some that are.
+    if (meta?.success === false && result?.text) return { error: result.text.split('\n')[0]! }
+    if (typeof meta?.column_answer_error === 'string') return { error: meta.column_answer_error }
+  }
+  if (!down?.ok || !up?.ok) return { error: `The lineage of ${model}.${column} could not be traced${down?.text || up?.text ? `: ${(down?.text || up?.text)!.split('\n')[0]}` : ''}.` }
+  const downAnswer = answerOf(down.metadata)
+  const upAnswer = answerOf(up.metadata)
+  if (!downAnswer && !upAnswer) return { error: 'This altimate-code traces no single column. Update it to use /lineage-report <model>.<column>.' }
+  const name = typeof (down.metadata as any)?.model === 'string' ? String((down.metadata as any).model) : model
+  const trace: ColumnTrace = { model: name, column, down: downAnswer, up: upAnswer, modelLevel: modelLevelOf(down.metadata), failed: false, consumers: consumersOf(down.metadata) }
+  const data = columnReportData(name, column, trace, { builtAt: stamp(await $.clock.now()), manifest: 'target/manifest.json as it is now' })
+  const path = `${root}/${LINEAGE_DIR}/${COLUMN_REPORT}`
+  try {
+    await $.process.run(['mkdir', '-p', `${root}/${LINEAGE_DIR}`], { timeoutMs: 5_000 }).catch(() => null)
+    await $.fs.write(path, reportHtml(data))
+    return { path, name: `${name}.${column}` }
+  } catch (error) {
+    return { error: `The report could not be written: ${String(error)}` }
+  }
+}
+
+/** /lineage-report <model>.<column>: builds that column's report and opens it; what to say about it. Leaves the band alone. */
+async function openColumnReport($: EngineInterface, model: string, column: string): Promise<string> {
+  $.ui.toast(`Tracing ${model}.${column} both ways…`)
+  const built = await buildColumnReport($, model, column)
+  if ('error' in built) {
+    reportEvent($, 'build_failed')
+    return built.error
+  }
+  const opened = await openReport($, built.path)
+  reportEvent($, opened ? 'built' : 'no_browser')
+  return opened ? `Opened the column lineage report for ${built.name}: ${built.path}` : `No browser could be opened. The report is at ${built.path}`
+}
+
 /** Registers /lineage-report; called from the plugin's one session.start hook. */
 export async function startTaskImpact($: EngineInterface) {
   task = null
@@ -446,7 +505,8 @@ export async function startTaskImpact($: EngineInterface) {
   await update($, planAtom, () => null)
   await $.command.register({
     name: REPORT_COMMAND,
-    description: 'Build and open the column impact report of the last task that changed a dbt model: what changed and what it reaches',
+    description: 'Open the column impact report of the last task that changed a dbt model, or with model.column, where that column comes from and where it goes',
+    argumentHint: '[model.column]',
   })
 }
 
@@ -525,10 +585,12 @@ export function taskTurnComplete($: EngineInterface, e: { agentId?: string }) {
   later($, () => finishTask($, done).catch(error => $.ui.log(`lineage-summary · failed: ${String(error)}`)))
 }
 
-/** /lineage-report: builds the last finished task's report and opens it. */
+/** /lineage-report: builds the last finished task's report and opens it; with model.column, that column's. */
 export function registerTaskImpact(on: On) {
-  on('command.run', { command: REPORT_COMMAND }, async $ => {
+  on('command.run', { command: REPORT_COMMAND }, async ($, e) => {
+    const asked = reportRequest(String(e.args ?? ''))
+    if (asked.kind === 'usage') return { text: REPORT_USAGE }
     reportEvent($, 'command_run')
-    return { text: await buildAndOpen($) }
+    return { text: asked.kind === 'column' ? await openColumnReport($, asked.model, asked.column) : await buildAndOpen($) }
   })
 }
