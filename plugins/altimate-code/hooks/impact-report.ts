@@ -2,7 +2,7 @@
 // and a self-contained HTML report. Pure functions only; the hooks live in task-impact.tsx.
 
 import type { PlanImpactView, Reach, TaskSummaryView } from '../types'
-import { GRAPH_CSS, GRAPH_VIEW_JS, graphLayout } from './report-graph'
+import { GRAPH_CSS, GRAPH_VIEW_JS, graphLayout, pressIsClick } from './report-graph'
 import { selectItems, touchedColumns } from './lineage-graph'
 
 export type { PlanImpactView, Reach, TaskSummaryView }
@@ -749,6 +749,7 @@ function applyHighlight(){var f=DATA.focuses[state.focus],bar=document.getElemen
   var shown={};cols.forEach(function(c){shown[c.dataset.key]=1});var hidden=Object.keys(p.all).filter(function(k){return!shown[k]}).length;
   bar.textContent='';bar.appendChild(el('span',null,'Path of '+state.selected.split('|')[0].split('.').pop()+'.'+state.selected.split('|').pop()+': '+plural(p.up,'column')+' upstream, '+plural(p.down,'column')+' downstream'+(hidden?' \\u00b7 '+hidden+' more on hidden levels or folded models':'')));var clr=el('button',null,'Clear');clr.type='button';clr.addEventListener('click',function(){select(state.selected)});bar.appendChild(clr)}
 ${graphLayout.toString()}
+${pressIsClick.toString()}
 ${GRAPH_VIEW_JS}
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&state.selected)select(state.selected)});
 render();

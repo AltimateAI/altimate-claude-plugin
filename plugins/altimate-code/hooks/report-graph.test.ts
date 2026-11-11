@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { graphLayout as layoutOf } from './report-graph'
+import { graphLayout as layoutOf, pressIsClick } from './report-graph'
 import { type ColumnAnswer, type ModelChange, reportData, reportHtml } from './impact-report'
 
 type Layout = {
@@ -112,6 +112,31 @@ describe('report graph layout', () => {
     const box = layer(graphLayout(focusOf(answer([long])), { up: 0, down: 1 }, {}), 1)[0]!
     expect(box.name).toBe(`${long.slice(0, 27)}…`)
     expect(box.title.startsWith(long)).toBe(true)
+  })
+})
+
+describe('a press on the graph', () => {
+  const row = 'row:model.shop.fct|revenue'
+  test('on a column, released on it a few pixels away, is a click: a hand drifts while clicking', () => {
+    expect(pressIsClick({ x: 100, y: 50, target: row }, { x: 100, y: 50, target: row })).toBe(true)
+    expect(pressIsClick({ x: 100, y: 50, target: row }, { x: 103, y: 52, target: row })).toBe(true)
+    expect(pressIsClick({ x: 100, y: 50, target: row }, { x: 93, y: 42, target: row })).toBe(true)
+    expect(pressIsClick({ x: 100, y: 50, target: 'box:2' }, { x: 106, y: 46, target: 'box:2' })).toBe(true)
+  })
+
+  test('that moves further, ends on something else, or starts on the canvas is a drag', () => {
+    expect(pressIsClick({ x: 100, y: 50, target: row }, { x: 113, y: 50, target: row })).toBe(false)
+    expect(pressIsClick({ x: 100, y: 50, target: row }, { x: 102, y: 51, target: 'row:model.shop.a|revenue' })).toBe(false)
+    expect(pressIsClick({ x: 100, y: 50, target: row }, { x: 101, y: 50, target: null })).toBe(false)
+    expect(pressIsClick({ x: 100, y: 50, target: null }, { x: 100, y: 50, target: null })).toBe(false)
+  })
+
+  test('the page decides a pointer click at its release, and a column\'s own click event only serves the keyboard and scripts', () => {
+    const html = reportHtml(reportData([CHANGE], [{ model: 'fct', column: 'revenue', down: answer(['a']), up: UP, modelLevel: null, failed: false }], TASK))
+    expect(html).toContain('function pressIsClick(')
+    expect(html).toContain('ok=pressIsClick(press,{x:ev.clientX,y:ev.clientY,target:targetOf(document.elementFromPoint(ev.clientX,ev.clientY))})')
+    expect(html).toContain("row.addEventListener('click',function(ev){ev.stopPropagation();if(tookPress)return;select(r.key)})")
+    expect(html).not.toContain('if(moved)return;ev.stopPropagation()')
   })
 })
 

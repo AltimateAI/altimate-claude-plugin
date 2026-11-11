@@ -93,15 +93,25 @@ export function graphLayout(f: any, levels: { up: number; down: number }, expand
 }
 
 /**
+ * `pressIsClick(press, release)`: whether a press and release on the graph is a click on what was pressed, a column or a
+ * folded level. It is when both are on the same thing and the pointer moved at most 12 px between them, as a hand drifts
+ * while clicking; a press anywhere else, or one that moved further, is a drag and pans. The page runs this function's own
+ * source, like graphLayout's.
+ */
+export function pressIsClick(press: { x: number; y: number; target: string | null }, release: { x: number; y: number; target: string | null }): boolean {
+  return press.target !== null && press.target === release.target && Math.hypot(release.x - press.x, release.y - press.y) <= 12
+}
+
+/**
  * The graph panel: draws `graphLayout` as SVG, and handles zoom (wheel, pinch, buttons, + and -),
  * pan (drag, arrow keys), fit (0, or the Fit button) and column clicks, which call the page's
- * `select(key)`. Uses the page's `el`, `state`, `render` and `GLYPH`.
+ * `select(key)`. Uses the page's `el`, `state`, `render` and `GLYPH`, and `pressIsClick`.
  */
 export const GRAPH_VIEW_JS = `
 var SVG='http://www.w3.org/2000/svg';
 function sv(tag,attrs,text){var n=document.createElementNS(SVG,tag);for(var k in attrs)if(attrs[k]!=null)n.setAttribute(k,String(attrs[k]));if(text!=null)n.textContent=String(text);return n}
 function graphPanel(f,i){
-  var lv=state.levels[i],ex=state.expanded[i],lay=graphLayout(f,lv,ex);
+  var lv=state.levels[i],ex=state.expanded[i],lay=graphLayout(f,lv,ex),opens={},tookPress=false,press=null;
   var p=el('div','panel graph'),bar=el('div','g-bar');
   function btn(label,title,fn){var b=el('button','g-btn',label);b.type='button';b.title=title;b.setAttribute('aria-label',title);b.addEventListener('click',fn);bar.appendChild(b);return b}
   var hiddenUp=f.up.hops.filter(function(h){return h.hop>lv.up}).length,hiddenDown=f.down.hops.filter(function(h){return h.hop>lv.down}).length;
@@ -126,7 +136,7 @@ function graphPanel(f,i){
     var badge=[];if(b.contract)badge.push('C');if(b.exposures)badge.push('\\u25a3'+b.exposures);if(b.flags)badge.push('!');
     if(badge.length)g.appendChild(sv('text',{x:b.w-10,y:19,'class':'g-badge','text-anchor':'end'},badge.join(' ')));
     if(b.collapsed){g.appendChild(sv('text',{x:10,y:48,'class':'g-more'},b.sub+' \\u00b7 click to show them'));g.setAttribute('tabindex','0');g.setAttribute('role','button');
-      var open=function(){state.expanded[i][b.layer]=true;state.views[i]=null;render()};g.addEventListener('click',function(ev){if(moved)return;ev.stopPropagation();open()});g.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();open()}})}
+      var open=function(){state.expanded[i][b.layer]=true;state.views[i]=null;render()};opens[b.id]=open;g.addEventListener('click',function(ev){ev.stopPropagation();if(tookPress)return;open()});g.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();open()}})}
     b.rows.forEach(function(r){
       var row=sv('g',{'class':'g-row','data-key':r.key,tabindex:0,role:'button','aria-label':r.title+': light up its path',transform:'translate(0,'+(r.y-b.y-10)+')'});
       row.appendChild(sv('title',{},r.title));
@@ -134,7 +144,8 @@ function graphPanel(f,i){
       row.appendChild(sv('text',{x:12,y:14,'class':'g-glyph '+(GLYPH[r.glyph]||'unk')+(r.byName?' byname':'')},r.glyph||'?'));
       row.appendChild(sv('text',{x:28,y:14,'class':'g-col'},r.column));
       if(r.end)row.appendChild(sv('text',{x:b.w-10,y:14,'class':'g-end','text-anchor':'end'},'end'));
-      row.addEventListener('click',function(ev){if(moved)return;ev.stopPropagation();select(r.key)});
+      // A pointer press is decided at its release (pressIsClick); this click is the keyboard's or a script's.
+      row.addEventListener('click',function(ev){ev.stopPropagation();if(tookPress)return;select(r.key)});
       row.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();select(r.key)}});
       g.appendChild(row)});
     gB.appendChild(g)});
@@ -153,12 +164,19 @@ function graphPanel(f,i){
   function zoomBy(m){var s=size();zoomAt(v.k*m,s.w/2,s.h/2)}
   svg.addEventListener('wheel',function(ev){ev.preventDefault();var r=svg.getBoundingClientRect();zoomAt(v.k*Math.exp(-ev.deltaY*0.0015),ev.clientX-r.left,ev.clientY-r.top)},{passive:false});
   var ptrs={},start=null;
-  svg.addEventListener('pointerdown',function(ev){ptrs[ev.pointerId]={x:ev.clientX,y:ev.clientY};moved=false;start={x:ev.clientX,y:ev.clientY,vx:v.x,vy:v.y};var ids=Object.keys(ptrs);if(ids.length===2){var a=ptrs[ids[0]],b=ptrs[ids[1]];start.d=Math.hypot(a.x-b.x,a.y-b.y);start.k=v.k}});
+  function targetOf(n){var r=n&&n.closest?n.closest('.g-row'):null;if(r)return 'row:'+r.getAttribute('data-key');var b=n&&n.closest?n.closest('.g-box.collapsed'):null;return b?'box:'+b.getAttribute('data-box'):null}
+  svg.addEventListener('pointerdown',function(ev){ptrs[ev.pointerId]={x:ev.clientX,y:ev.clientY};moved=false;press=Object.keys(ptrs).length===1?{x:ev.clientX,y:ev.clientY,target:targetOf(ev.target)}:null;start={x:ev.clientX,y:ev.clientY,vx:v.x,vy:v.y};var ids=Object.keys(ptrs);if(ids.length===2){var a=ptrs[ids[0]],b=ptrs[ids[1]];start.d=Math.hypot(a.x-b.x,a.y-b.y);start.k=v.k}});
   svg.addEventListener('pointermove',function(ev){if(!ptrs[ev.pointerId]||!start)return;ptrs[ev.pointerId]={x:ev.clientX,y:ev.clientY};var ids=Object.keys(ptrs);
     if(ids.length===2&&start.d){var a=ptrs[ids[0]],b=ptrs[ids[1]],r=svg.getBoundingClientRect();moved=true;zoomAt(start.k*Math.hypot(a.x-b.x,a.y-b.y)/start.d,(a.x+b.x)/2-r.left,(a.y+b.y)/2-r.top);return}
     var dx=ev.clientX-start.x,dy=ev.clientY-start.y;if(!moved&&Math.abs(dx)+Math.abs(dy)<5)return;
     if(!moved){moved=true;try{svg.setPointerCapture(ev.pointerId)}catch(e){}}v.x=start.vx+dx;v.y=start.vy+dy;apply()});
-  function up(ev){delete ptrs[ev.pointerId];if(!Object.keys(ptrs).length)start=null;setTimeout(function(){moved=false},0)}
+  // A press on a column or a folded level that ends on it, having moved a little, is a click: any small pan it made is
+  // undone. The click event that follows is then ignored, as is one after a drag.
+  function up(ev){var was=start;delete ptrs[ev.pointerId];
+    if(ev.type==='pointerup'&&press&&!Object.keys(ptrs).length){var t=press.target,ok=pressIsClick(press,{x:ev.clientX,y:ev.clientY,target:targetOf(document.elementFromPoint(ev.clientX,ev.clientY))});
+      tookPress=true;setTimeout(function(){tookPress=false},0);
+      if(ok){if(moved&&was){v.x=was.vx;v.y=was.vy;apply()}if(t.indexOf('row:')===0)select(t.slice(4));else if(opens[t.slice(4)])opens[t.slice(4)]()}}
+    if(!Object.keys(ptrs).length){start=null;press=null}setTimeout(function(){moved=false},0)}
   svg.addEventListener('pointerup',up);svg.addEventListener('pointercancel',up);
   svg.addEventListener('keydown',function(ev){var step=48;
     if(ev.key==='ArrowLeft'){v.x+=step}else if(ev.key==='ArrowRight'){v.x-=step}else if(ev.key==='ArrowUp'){v.y+=step}else if(ev.key==='ArrowDown'){v.y-=step}
