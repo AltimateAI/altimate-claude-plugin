@@ -5,7 +5,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { PlanImpactView, TaskSummaryView } from '../types'
-import { later } from './altimate-cli'
+import { later, runAltimate } from './altimate-cli'
 import {
   answerOf,
   changedColumns,
@@ -271,8 +271,23 @@ async function finishTask($: EngineInterface, t: Task) {
   if (seq !== finishSeq) return
   const view = summaryOf(changes, traces, null)
   await update($, summaryAtom, () => view)
+  reportEvent($, 'summary_shown')
   // One line: a log line draws a newline as a replacement glyph.
   $.ui.log(summaryLines(view).map(line => line.trim()).join(' · '))
+}
+
+export type ReportAction = 'summary_shown' | 'open_pressed' | 'command_run' | 'built' | 'build_failed' | 'no_browser'
+
+/**
+ * One usage event about the report, through altimate-code's telemetry (`tool report-event`), in the
+ * background. It carries the action and this session's id only, and the CLI drops it under the telemetry
+ * opt-out; an altimate-code without the command refuses it, and nothing else happens.
+ */
+export function reportEvent($: EngineInterface, action: ReportAction) {
+  later($, async () => {
+    const id = await $.session.id()
+    await runAltimate($, ['tool', 'report-event', action, '--session', `claude:${id}`], 15_000).catch(() => null)
+  })
 }
 
 /** The last task that changed a model: this session's, else the one a project's saved file names. */
@@ -412,11 +427,13 @@ async function buildAndOpen($: EngineInterface): Promise<string> {
   await update($, summaryAtom, view => (view ? { ...view, building: true, openFailed: false } : view))
   const built = await buildReport($, done)
   if ('error' in built) {
+    reportEvent($, 'build_failed')
     await update($, summaryAtom, view => (view ? { ...view, building: false } : view))
     $.ui.toast(built.error)
     return built.error
   }
   const opened = await openReport($, built.path)
+  reportEvent($, opened ? 'built' : 'no_browser')
   await update($, summaryAtom, view => (view ? { ...view, building: false, report: built.path, openFailed: !opened } : view))
   return opened ? `Opened the column impact report for the task that finished at ${stamp(done.finishedAt)}: ${built.path}` : `No browser could be opened. The report is at ${built.path}`
 }
@@ -464,7 +481,7 @@ export async function taskBand($: EngineInterface, ui: Ui): Promise<RenderElemen
         </Text>
       ) : null}
       <Box>
-        {view?.state === 'ready' ? <Button key="lineage-report-open" label="Open report" onPress={() => later($, async () => void (await buildAndOpen($)))} /> : null}
+        {view?.state === 'ready' ? <Button key="lineage-report-open" label="Open report" onPress={() => (reportEvent($, 'open_pressed'), later($, async () => void (await buildAndOpen($))))} /> : null}
         <Button key="lineage-open" label="Open lineage" onPress={() => later($, () => openPane($))} />
         <Button key="lineage-summary-dismiss" label="Dismiss" onPress={() => update($, hiddenAtom, () => true)} />
       </Box>
@@ -510,5 +527,8 @@ export function taskTurnComplete($: EngineInterface, e: { agentId?: string }) {
 
 /** /lineage-report: builds the last finished task's report and opens it. */
 export function registerTaskImpact(on: On) {
-  on('command.run', { command: REPORT_COMMAND }, async $ => ({ text: await buildAndOpen($) }))
+  on('command.run', { command: REPORT_COMMAND }, async $ => {
+    reportEvent($, 'command_run')
+    return { text: await buildAndOpen($) }
+  })
 }

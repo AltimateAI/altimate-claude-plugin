@@ -126,11 +126,13 @@ async function start($: any, on: any, options: Options = {}) {
     if (e.args.direction) mcpAsked.push(e.args)
     return { value: { content: [{ type: 'text', text: JSON.stringify({ ...impactBody(e.args), report: 'Impact' }) }], isError: false } }
   })
+  on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const argv = [...e.argv]
     runs.push(argv)
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '' } })
     const [bin] = argv
+    if (bin === 'altimate' && argv[2] === 'report-event') return ok()
     if (bin === 'altimate') {
       const args = JSON.parse(String(argv[argv.indexOf('--args') + 1] ?? '{}'))
       if (options.cliFails) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'no', metadata: {} }), stderr: '' } }
@@ -491,6 +493,28 @@ test('when no browser opens, the band shows the report path as a link', async ($
   expect(await band.find({ type: 'Text', text: /No browser opened/ })).toBeDefined()
   expect(await band.find({ type: 'Link' })).toBeDefined()
   await band.unmount()
+})
+
+test('each step of the report sends one usage event through the CLI, with the action and the session only', async ($, on) => {
+  const { runs, turn, clock } = await start($, on, { uname: 'Linux', openers: { 'xdg-open': 3 } })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  await $.command.run({ command: 'lineage-report', args: '' } as any)
+  await clock.settle()
+  await band.unmount()
+  const events = runs.filter(argv => argv[2] === 'report-event')
+  expect(events.map(argv => argv[3]).sort()).toEqual(['command_run', 'no_browser', 'no_browser', 'open_pressed', 'summary_shown'])
+  for (const argv of events) {
+    expect(argv.slice(0, 3)).toEqual(['altimate', 'tool', 'report-event'])
+    expect(argv).toHaveLength(6)
+    expect(argv[4]).toBe('--session')
+    expect(argv[5]).toMatch(/^claude:[A-Za-z0-9_-]+$/)
+  }
 })
 
 test('macOS opens with open; /lineage-report before any report says so', async ($, on) => {
