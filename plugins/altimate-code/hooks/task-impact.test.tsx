@@ -16,7 +16,7 @@ const SNAPSHOT_SQL = `${ROOT}/snapshots/orders_snap.sql`
 const BAND = {
   plugin: 'altimate-code',
   component: 'AbovePrompt',
-  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
 } as const
 
 const ORDERS_SQL = 'select\n  order_id,\n  sum(amount) as revenue\nfrom {{ ref("int_orders") }}\ngroup by 1\n'

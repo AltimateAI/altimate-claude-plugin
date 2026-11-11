@@ -8,9 +8,11 @@ All notable changes to this plugin will be documented in this file.
 - End-of-task column impact: after a task that changed a dbt model, a band sums up each changed column's downstream reach from `impact_analysis`. The task's start copies `target/manifest.json` aside, so the answer reflects the SQL before the task.
 - An offline HTML report, built when **Open report** or `/lineage-report` asks for it: what changed and what to expect downstream in plain words, who consumes it from dbt exposures, then upstream and downstream lineage, two levels by default, and click-to-highlight paths.
 - When a plan goes up for approval, a line above the dialog gives the downstream models, tests and exposures of each model the plan names.
+- The report draws the column lineage as a graph beside the summary: upstream on the left, downstream on the right, opened to fit, with zoom and pan. A click lights a column's path, "more levels" adds one, and a level of more than 12 models folds into one box. The page allows only its own inline script and style.
 
 ### Changed
 - The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result. A lookup that missed its time or failed still shows a toast.
+- The per-edit column lookup goes through the altimate CLI instead of the MCP server, so it raises no permission prompt in accept-edits mode and a large column answer arrives whole.
 
 ## [1.5.0] — 2026-11-10
 

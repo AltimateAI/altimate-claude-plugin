@@ -18,7 +18,7 @@ const PANE = {
 const BAND = {
   plugin: 'altimate-code',
   component: 'AbovePrompt',
-  props: { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
 } as const
 
 const LINEAGE = {
@@ -195,7 +195,13 @@ async function start($: any, on: any, options: Options = {}) {
     // The integrations half of the plugin asks the CLI for its status at session start.
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
-    calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}`)
+    calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}${args.column ? `:${args.column}` : ''}`)
+    // A column that fails, or answers late, as the MCP server does in the tests below.
+    if (tool === 'impact_analysis' && args.column === options.failColumn) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'boom', metadata: {} }), stderr: '' } }
+    if (tool === 'impact_analysis' && options.holdReach && args.column === options.holdReach.column) {
+      await options.holdReach.until
+      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'x', metadata: { severity: 'LOW', column_reach: { models: [{ name: 'stale_reader', columns: [] }], exposures: [] } } }), stderr: '' } }
+    }
     if (options.cliFailure) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'the dbt project could not start', metadata: {} }), stderr: '' } }
     if (options.cliTooLarge) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '', isStdoutTruncated: true } }
     if (options.cliCutOff?.(tool)) return { value: { exitCode: options.cliCutOffExit ?? 0, stdout: '{"status":"ok","out', stderr: '' } }
@@ -269,7 +275,8 @@ test('an edit naming a column is held until its reach is known, then the reach g
   await clock.settle()
 
   // The reach is looked up before the edit runs.
-  expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('tool:Edit'))
+  expect(calls.indexOf('cli:impact_analysis:revenue')).toBeGreaterThan(-1)
+  expect(calls.indexOf('cli:impact_analysis:revenue')).toBeLessThan(calls.indexOf('tool:Edit'))
   expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
   expect(toasts).toEqual([])
   expect(result.context?.[0]).toContain('read by 2 downstream models: fct_revenue_daily (revenue), rpt_finance_weekly (revenue)')
@@ -583,7 +590,7 @@ test("an edit of a column the project doesn't declare is traced from the model's
   await clock.settle()
   // Its columns come through the CLI (no permission dialog), before the reach.
   expect(calls.indexOf('cli:dbt_lineage')).toBeGreaterThan(-1)
-  expect(calls.indexOf('cli:dbt_lineage')).toBeLessThan(calls.indexOf('mcp:impact_analysis:net_revenue'))
+  expect(calls.indexOf('cli:dbt_lineage')).toBeLessThan(calls.indexOf('cli:impact_analysis:net_revenue'))
   expect(notes.at(-1)).toMatch(/^◆ impact-first · fct_orders\.net_revenue is read by 2 models/)
   expect(result.context?.[0]).toContain('Altimate lineage for fct_orders.net_revenue')
   // The next edit of the same model uses the columns it already has.
@@ -597,26 +604,37 @@ test('an edit whose declared columns already show what it touches does not wait 
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
   await clock.settle()
   // revenue is declared: traced at once, while the model's columns are fetched for later edits.
-  expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('tool:Edit'))
+  expect(calls.indexOf('cli:impact_analysis:revenue')).toBeGreaterThan(-1)
+  expect(calls.indexOf('cli:impact_analysis:revenue')).toBeLessThan(calls.indexOf('tool:Edit'))
   expect(notes[0]).toMatch(/^◆ impact-first · fct_orders\.revenue is read by 2 models/)
 })
 
-test("a column reach Claude Code saved to a file is read from it, with no CLI call", async ($, on) => {
+test("the pane's column reach Claude Code saved to a file is read from it, with no CLI call", async ($, on) => {
+  const { clock, calls, logs } = await start($, on, { persisted: { readable: true } })
+  await $.command.run({ command: 'lineage', args: 'fct_orders.revenue', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
+  await clock.settle()
+  expect(calls).toContain('mcp:impact_analysis:revenue')
+  expect(calls).not.toContain('cli:impact_analysis:revenue')
+  expect(logs.some(line => line.includes('impact_analysis(fct_orders, column: revenue) · read by 2 models'))).toBe(true)
+})
+
+test("the pane's saved long answer the plugin cannot read is asked of the CLI, not taken as no answer", async ($, on) => {
+  const { clock, calls, logs } = await start($, on, { persisted: { readable: false } })
+  await $.command.run({ command: 'lineage', args: 'fct_orders.revenue', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
+  await clock.settle()
+  expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('cli:impact_analysis:revenue'))
+  expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeGreaterThan(-1)
+  expect(logs.some(line => line.includes('impact_analysis(fct_orders, column: revenue) · read by 2 models'))).toBe(true)
+})
+
+test('an edit asks the CLI for its column trace, never MCP, even with the MCP server up', async ($, on) => {
   const { clock, calls, notes } = await start($, on, { persisted: { readable: true } })
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
   await clock.settle()
-  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
-  expect(calls).not.toContain('cli:impact_analysis')
-})
-
-test('a saved long answer the plugin cannot read is asked of the CLI, not taken as no answer', async ($, on) => {
-  const { clock, calls, notes } = await start($, on, { persisted: { readable: false } })
-  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
-  await clock.settle()
-  expect(calls).toContain('cli:impact_analysis')
+  expect(calls).toContain('cli:impact_analysis:revenue')
+  expect(calls.filter(call => call.startsWith('mcp:impact_analysis'))).toEqual([])
   expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
 })
-
 test("a model's columns the CLI could not give are not asked again for the same manifest", async ($, on) => {
   // Denied edits: the pane follows no model, so nothing but the CLI could give the columns.
   const { clock, calls } = await start($, on, { cliFailure: true, toolResult: e => (e.tool === 'Edit' ? { deny: 'not now' } : undefined) })
@@ -644,7 +662,7 @@ test("a CLI column answer that fails late never replaces the columns the pane re
   // An edit of net_revenue (undeclared, known from the pane's read) is still traced.
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as net_revenue', new_string: 'sum(amount) - 1 as net_revenue' })
   await clock.settle()
-  expect(calls).toContain('mcp:impact_analysis:net_revenue')
+  expect(calls).toContain('cli:impact_analysis:net_revenue')
 })
 
 test('a graph found too big is not drawn again when the pane goes back to a width it had', async ($, on) => {
@@ -756,7 +774,7 @@ test('a result the MCP server left out for size is fetched again through the CLI
   await run('fct_orders.revenue')
   await clock.settle()
   expect(calls).toContain('mcp:impact_analysis:revenue')
-  expect(calls).toContain('cli:impact_analysis')
+  expect(calls).toContain('cli:impact_analysis:revenue')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboard(?!s)/ })).toBeDefined()
   await ui.unmount()
@@ -818,8 +836,9 @@ test('an edit touching two columns traces both and reports their combined reach'
   const { clock, calls, notes } = await start($, on)
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
-  expect(calls).toContain('mcp:impact_analysis:revenue')
-  expect(calls).toContain('mcp:impact_analysis:order_id')
+  expect(calls).toContain('cli:impact_analysis:revenue')
+  expect(calls).toContain('cli:impact_analysis:order_id')
+  expect(calls.filter(call => call.startsWith('mcp:impact_analysis'))).toEqual([])
   expect(notes[0]).toContain('fct_orders.')
   expect(notes[0]).toContain('is read by 2 models and 1 dashboard')
 })
@@ -850,7 +869,7 @@ test('columns beyond the cap are named as unchecked and make the count a lower b
     new_string: 'select order_id + 0 as order_id, revenue + 0 as revenue, gross_revenue + 0 as gross_revenue, status + 0 as status',
   })
   await clock.settle()
-  expect(calls.filter(call => call.startsWith('mcp:impact_analysis'))).toHaveLength(3)
+  expect(calls.filter(call => call.startsWith('cli:impact_analysis'))).toHaveLength(3)
   expect(notes[0]).toContain('is read by at least 2 models')
   expect(edit.context?.[0]).toMatch(/columns not checked \(over the limit or no answer in time\): \w+;/)
 })
@@ -1604,7 +1623,7 @@ test('no column trace starts once the hold has run out', async ($, on) => {
   await late
   release()
   await clock.settle()
-  expect(calls.filter(one => one.startsWith('mcp:impact_analysis'))).toEqual([])
+  expect(calls.filter(one => one.includes('impact_analysis'))).toEqual([])
 })
 
 test('two edits of one column while its trace runs share that trace', async ($, on) => {
@@ -1616,7 +1635,7 @@ test('two edits of one column while its trace runs share that trace', async ($, 
   answer()
   await Promise.all([first, second])
   await both.clock.settle()
-  expect(both.calls.filter(one => one === 'mcp:impact_analysis:revenue')).toEqual(['mcp:impact_analysis:revenue'])
+  expect(both.calls.filter(one => one === 'cli:impact_analysis:revenue')).toEqual(['cli:impact_analysis:revenue'])
 })
 
 test('a model folder outside the project (`../..`) is never walked', async ($, on) => {
@@ -1693,15 +1712,13 @@ test('bare /lineage asks for warehouse lineage on the model shown', async ($, on
   expect(calls).toContain('mcp:table_lineage')
 })
 
-test('an MCP trace that never answers is given up on, so the next edit of that column traces again', async ($, on) => {
-  const { clock, calls } = await start($, on, { mcpHang: 'impact_analysis' })
-  const first = $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
-  await clock.advance(9_000)
-  await first
+test("the pane's MCP column trace that never answers is given up on, and the CLI answers instead", async ($, on) => {
+  const { clock, calls, logs } = await start($, on, { mcpHang: 'impact_analysis' })
+  const asked = $.command.run({ command: 'lineage', args: 'fct_orders.revenue', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
+  await clock.advance(61_000)
+  await asked
   await clock.settle()
-  const second = $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'y as revenue', new_string: 'z as revenue' })
-  await clock.advance(9_000)
-  await second
-  await clock.settle()
-  expect(calls.filter(one => one === 'mcp:impact_analysis:revenue')).toEqual(['mcp:impact_analysis:revenue', 'mcp:impact_analysis:revenue'])
+  expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeGreaterThan(-1)
+  expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('cli:impact_analysis:revenue'))
+  expect(logs.some(line => line.includes('impact_analysis(fct_orders, column: revenue) · read by 2 models'))).toBe(true)
 })
