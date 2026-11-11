@@ -10,11 +10,42 @@ All notable changes to this plugin will be documented in this file.
 - When a plan goes up for approval, a line above the dialog gives the downstream models, tests and exposures of each model the plan names.
 
 ### Changed
-- The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result.
-- The lineage pane no longer opens by itself at any width. `/lineage` and **Open lineage** open it, on the model it has been following.
+- The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result. A lookup that missed its time or failed still shows a toast.
+
+## [1.5.0] — 2026-11-10
+
+### Added
+- Team rules from a linked Altimate workspace apply in Claude Code sessions. At session start the plugin gives Claude the workspace's approved rules for the repository, the number of proposed rules waiting for you, and the owner's reviews of your proposals since your last session.
+- Corrections you make to Claude are recorded locally (UserPromptSubmit, no model call). After a turn, altimate-code checks them in the background (Stop) and keeps a proposed rule when you corrected the same topic in two sessions or corrected a team rule Claude was given.
+- "Remember this as a team rule: …" said to Claude waits as a proposal (no model call).
+- `/altimate-code:rules`: answer proposed rules (send for review, approve as owner, edit, save as memory, or "Not a rule"), and see the team rules and the review status of your proposals.
+- The hooks run altimate-code only where the session's folder (or a folder above it in the repository) is in altimate-code's workspace link cache, which is in your own state directory: nothing in the repository turns them on. Team rules arrive in a linked project when you are signed in; recording corrections and drafting proposals also need learning on. `ALTIMATE_LEARN=0` turns all of it off and the hooks start nothing.
+- Start the session in the linked folder or below it: with only a subfolder linked (a dbt project), a session started at the repository root gets no team rules.
+- The hooks need an altimate-code release with `learn hook`; with an older one they do nothing.
+
+## [1.4.2] — 2026-11-09
 
 ### Fixed
-- An altimate-code answer that arrives cut off is a failure that gets asked again, not "no such model" remembered for the session.
+- Lineage counts read right. "No model for certain (2 may)" replaces "at least 0 models", a dashboard that only may read a column is called a maybe, and one dashboard is "1 dashboard".
+- `/lineage` replies with what it found, so a model that doesn't exist says so. It also says where the pane is: beside the chat when docked, above the prompt otherwise.
+- In a terminal under 144 columns, Claude Code holds back a pane the plugin opens on its own. A toast now says so once, and that `/lineage` opens it.
+- The pane says when the shown model's `.sql` changed after the manifest was written, by an edit or a shell command, until `dbt compile` and `r`. The edit note and toast say it too.
+- A graph too big for Claude Code to draw in a pane is shown as folders, with a line saying why. Before, the pane was blank or cut off.
+- An edit's column check uses the edited model's own columns: the pane's, an earlier read's, or `dbt_lineage` through the CLI. A column that `schema.yml` leaves out is traced, whatever model the pane shows.
+- Claude Code hands over a column reach of about 49 KB or more as a preview of a saved file. That file is now read, so a widely read column keeps its column detail.
+- Work the plugin schedules no longer fails a session that has ended, such as after a reload or `/clear`.
+
+## [1.4.1] — 2026-11-06
+
+### Added
+- Lineage beside the chat (`hooks/lineage.tsx`, a Claude Code mod): a pane follows the dbt model Claude reads or edits and draws its upstream and downstream models, dashboards and column lineage from `target/manifest.json`, with no model calls. `/lineage <model>[.column]` opens it on a model. A column the engine can't classify shows no derivation label, rather than "Not sure" on every column. See the README's "Lineage beside the chat".
+- Impact first: before an edit to a model's SQL lands, the plugin checks what reads the model and the columns the edit touches. It adds the result to Claude's context and leaves a band above the prompt with the severity and counts.
+
+### Fixed
+- A manifest over 4 MiB is read through altimate-code. When the answer arrives cut off, the pane now reports that the answer could not be read, and asking again tries again. An edit that hits this goes ahead with a toast saying the lookup failed, and Claude is told that what reads the model is unknown. Before, the pane said "No dbt model matches" for a model that exists and kept saying so until the manifest changed, and the edit got no note and no message. altimate-code releases up to 0.12.9 can cut off a large answer on a pipe.
+
+### Upgrading
+- A 1.4.0 install from this marketplace made before lineage merged has no lineage, and `plugin update` calls it current, because it compares versions. In a terminal, run `claude plugin marketplace update altimate-claude-plugin`, then `claude plugin update altimate-code@altimate-claude-plugin`, then restart Claude Code.
 
 ## [1.4.0] — 2026-10-28
 

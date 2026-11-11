@@ -1,5 +1,5 @@
 {
-  "description": "SessionStart context describing altimate-code's data tools (with the CLI routing guidance when the MCP server is unavailable or disallowed) that also copies the linked Altimate workspace's skills into `.claude/skills/`; a Stop hook that refreshes those skills in the background once they are an hour old; and an opt-in PreToolUse guard (active only when ALTIMATE_ROUTE_GUARD=1) that points direct warehouse client commands at `altimate tool run`.",
+  "description": "SessionStart context describing altimate-code's data tools (with the CLI routing guidance when the MCP server is unavailable or disallowed) that also copies the linked Altimate workspace's skills into `.claude/skills/`; the team rules hooks for a project linked to an Altimate workspace (the team rules at session start, corrections recorded on prompt submit with no model call, and the post-turn check at Stop, the last two in the background); a Stop hook that refreshes those skills in the background once they are an hour old; and an opt-in PreToolUse guard (active only when ALTIMATE_ROUTE_GUARD=1) that points direct warehouse client commands at `altimate tool run`.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,6 +7,37 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/session-start.sh\""
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/workspace-rules.sh\" session-start",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/workspace-rules.sh\" user-prompt-submit",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/workspace-rules.sh\" stop",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/refresh-skills.sh\" --if-stale"
           }
         ]
       }
@@ -18,16 +49,6 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/warehouse-guard.sh\""
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks-handlers/refresh-skills.sh\" --if-stale"
           }
         ]
       }

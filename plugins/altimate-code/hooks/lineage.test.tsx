@@ -5,6 +5,7 @@ import { MANIFEST } from './lineage-graph.test'
 
 const ROOT = '/repo'
 const MANIFEST_PATH = `${ROOT}/target/manifest.json`
+const PERSISTED_PATH = '/home/me/.claude/projects/repo/session/tool-results/toolu_plugin_1.txt'
 const FILE = `${ROOT}/models/fct_orders.sql`
 
 const PANE = {
@@ -55,7 +56,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: () => boolean; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string }
+type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void> }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -79,9 +80,10 @@ async function start($: any, on: any, options: Options = {}) {
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
-  on('ui.open', (_: unknown, e: { id: string }) => {
+  // A narrow terminal: Claude Code leaves a pane the plugin opens on its own undrawn, and says why.
+  on('ui.open', (_: unknown, e: { id: string; focus?: boolean }) => {
     opens.push(e.id)
-    return { value: {} }
+    return { value: options.narrow && !e.focus ? { isPlaced: false, reason: options.narrow } : {} }
   })
   on('ui.toast', (_: unknown, e: { text: string }) => {
     toasts.push(e.text)
@@ -106,7 +108,9 @@ async function start($: any, on: any, options: Options = {}) {
   on('fs.stat', async (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
     if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
-    return { value: { kind: 'file', size, mtimeMs: mtime(), isLink: false } }
+    // A model's own file can be newer than the manifest (edited after the last compile).
+    const fileMtime = e.path === MANIFEST_PATH ? undefined : options.fileMtime?.(e.path)
+    return { value: { kind: 'file', size, mtimeMs: fileMtime ?? mtime(), isLink: false } }
   })
   on('fs.list', (_: unknown, e: { path: string }) => {
     lists.push(e.path)
@@ -134,7 +138,12 @@ async function start($: any, on: any, options: Options = {}) {
       await options.holdFirstSqlRead
     }
     if (sql) return { value: e.path === `${ROOT}/dbt_project.yml` ? (sql['dbt_project.yml'] ?? "name: 'shop'\n") : (sql[e.path.slice(ROOT.length + 1)] ?? '') }
-    return { value: e.path === MANIFEST_PATH ? JSON.stringify(MANIFEST) : 'select 1' }
+    // The file Claude Code saved a long MCP answer to.
+    if (e.path === PERSISTED_PATH) {
+      if (!options.persisted?.readable) throw new Error('EACCES')
+      return { value: JSON.stringify({ ...reach, report: 'Impact' }) }
+    }
+    return { value: e.path === MANIFEST_PATH ? JSON.stringify(options.manifest ?? MANIFEST) : 'select 1' }
   })
   on('tool.list', () => ({
     value: warehouse ? [{ name: 'mcp__altimate_saas__table_lineage', description: 'Snowflake table lineage', mcp: true }] : [],
@@ -159,6 +168,11 @@ async function start($: any, on: any, options: Options = {}) {
         value: { content: [{ type: 'text', text: JSON.stringify({ severity: 'LOW', column_reach: { models: [{ name: 'stale_reader', columns: [] }], exposures: [] }, report: 'x' }) }], isError: false },
       }))
     }
+    // Claude Code 2.1.319 hands a mod a preview of an answer over about 49 KB, naming the file with the rest.
+    if (e.tool === 'impact_analysis' && options.persisted) {
+      const text = `<persisted-output>\nOutput too large (51.9KB). Full output saved to: ${PERSISTED_PATH}\n\nPreview (first 2KB):\n{"model":"fct_orders","column":"revenue"\n</persisted-output>`
+      return { value: { content: [{ type: 'text', text }], isError: false } }
+    }
     if (e.tool === 'impact_analysis') {
       const body = capped ? { report: 'Impact', truncated: true } : { ...reach, report: 'Impact' }
       return { value: { content: [{ type: 'text', text: JSON.stringify(body) }], isError: false } }
@@ -174,27 +188,33 @@ async function start($: any, on: any, options: Options = {}) {
     }
     return { value: { content: [], isError: true } }
   })
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
+    // A slow CLI dbt_lineage: it answers once the test lets it.
+    if (command === 'tool' && tool === 'dbt_lineage' && options.holdCliLineage) await options.holdCliLineage
     // The integrations half of the plugin asks the CLI for its status at session start.
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}`)
     if (options.cliFailure) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'the dbt project could not start', metadata: {} }), stderr: '' } }
     if (options.cliTooLarge) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '', isStdoutTruncated: true } }
-    if (options.cliCutOff?.()) return { value: { exitCode: 0, stdout: '{"status":"ok","out', stderr: '' } }
+    if (options.cliCutOff?.(tool)) return { value: { exitCode: options.cliCutOffExit ?? 0, stdout: '{"status":"ok","out', stderr: '' } }
+    if (options.cliStdout !== undefined) return { value: { exitCode: 0, stdout: options.cliStdout, stderr: '' } }
     // altimate-code's dbt_lineage with include_graph returns the subgraph the pane would build itself.
     const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
     const body =
       tool === 'dbt_lineage'
-        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...graph } : { model_name: 'fct_orders', confidence: 'high' } }
+        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...graph } : (options.cliLineage ?? { model_name: 'fct_orders', confidence: 'high' }) }
         : { status: 'ok', output: '', metadata: reach }
     return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '' } }
   })
   // The tool itself, beneath the plugin.
   on('tool.call', (_: unknown, e: { tool: string }) => {
     calls.push(`tool:${e.tool}`)
-    return { result: options.toolResult?.(e) ?? { ok: true } }
+    const result = options.toolResult?.(e)
+    // A denial is the hook's own answer, not a result.
+    if (result && typeof result === 'object' && 'deny' in result) return result
+    return { result: result ?? { ok: true } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
@@ -219,10 +239,11 @@ test('reading a model points the pane at it: the manifest graph, then its column
   await ui.unmount()
 })
 
-test('the pane never opens by itself: reads, edits, shell commands and answers only move what it shows', async ($, on) => {
+test('the pane opens by itself once a conversation; later reads, edits, shell commands and answers only move what it shows', async ($, on) => {
   const { clock, opens } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
+  expect(opens).toEqual(['altimate-lineage'])
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
   await clock.settle()
   await $.tool.call({ tool: 'Bash', command: `cat ${FILE}` })
@@ -230,12 +251,12 @@ test('the pane never opens by itself: reads, edits, shell commands and answers o
   await $.turn.start({ text: 'which model?', turnId: 't2' })
   await $.turn.complete({ answer: 'Look at `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't2' } as any)
   await clock.settle()
-  expect(opens).toEqual([])
+  expect(opens).toEqual(['altimate-lineage'])
 
-  // It stays one command away, on the model it followed.
+  // /lineage opens it again, on the model it followed.
   await $.command.run({ command: 'lineage', args: '' } as any)
   await clock.settle()
-  expect(opens).toEqual(['altimate-lineage'])
+  expect(opens).toEqual(['altimate-lineage', 'altimate-lineage'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()
@@ -326,7 +347,7 @@ test('[c] picks a column and shows its reach; [d] unfolds downstream; a model in
   await clock.settle()
   expect(calls).toContain('mcp:impact_analysis:revenue')
   expect(await ui.find({ type: 'Text', text: 'COLUMN · revenue' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboards/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboard(?!s)/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Exec Revenue' })).toBeDefined()
 
   await ui.press({ key: 'up-1-model.shop.int_orders' })
@@ -386,6 +407,34 @@ test('a connected SaaS table_lineage tool adds what the warehouse has observed, 
   await ui.unmount()
 })
 
+test("a column the engine could not classify prints no label, in the pane and on Claude's own call, and a real label still prints", async ($, on) => {
+  const answer = JSON.stringify({
+    ...LINEAGE,
+    edges: [
+      { source: '"int_orders"."order_id"', target: 'order_id', lineage_type: 'direct', lens_type: 'Not sure', lens_code: [] },
+      { source: '"int_orders"."revenue"', target: 'revenue', lineage_type: 'direct', lens_type: 'Transformation', lens_code: [] },
+    ],
+  })
+  const { clock } = await start($, on, { lineageText: answer })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /← int_orders\.order_id/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /Not sure/ })).toBeUndefined()
+  await pane.unmount()
+  const row = await $.ui.mount({
+    plugin: 'altimate-code',
+    component: 'ToolResult',
+    requestId: 'tu-1',
+    props: { tool_use_id: 'tu-1', tool: 'mcp__plugin_altimate-code_altimate-code__dbt_lineage', output: [{ type: 'text', text: answer }], isErrored: false, isExpanded: false },
+    surface: 'terminal',
+  } as any)
+  expect(await row.find({ type: 'Text', text: 'Transformation' })).toBeDefined()
+  expect(await row.find({ type: 'Text', text: /Not sure/ })).toBeUndefined()
+  await row.unmount()
+})
+
 test("Claude's own dbt_lineage result is drawn as a colored edge list, with the original under it on ctrl+o", async ($, on) => {
   await start($, on)
   const row = {
@@ -413,11 +462,238 @@ test('/lineage names a model and column; an unknown model says so', async ($, on
   await clock.settle()
   expect(calls).toContain('mcp:impact_analysis:revenue')
 
-  await run('nope')
+  // The reply says what the lookup found, not that a pane opened on a model that isn't there.
+  const missing = await run('nope')
+  expect(missing.text).toBe('No dbt model matches "nope" in the manifest.')
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /No dbt model matches "nope"/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('a pane left undrawn on a narrow terminal is said once, with the width it needs, and /lineage still opens it', async ($, on) => {
+  const narrow = 'unasked below 144 columns (100 now): placed when the person opens it, or when the terminal is widened to 144 columns'
+  const { clock, toasts } = await start($, on, { narrow })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  // The action comes first, and the whole toast fits a 100-column terminal with Claude Code's prefix.
+  expect(toasts).toEqual(['◆ lineage · /lineage opens the pane (it opens by itself from 144 columns)'])
+  expect(`altimate-code: ${toasts[0]}`.length).toBeLessThanOrEqual(100)
+  // A second read in the same conversation says nothing more.
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/int_orders.sql` })
+  await clock.settle()
+  expect(toasts).toHaveLength(1)
+  expect((await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 100 } })).text).toBe(
+    'Altimate lineage for fct_orders is open above the prompt.',
+  )
+  await clock.settle()
+  expect(toasts).toHaveLength(1)
+})
+
+test('a run with no surface to draw on gets no narrow-terminal hint', async ($, on) => {
+  const { clock, toasts } = await start($, on, { narrow: 'no-surface: this is a -p run' })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(toasts).toEqual([])
+})
+
+test('a model whose SQL changed after the manifest was written says so; r keeps saying it until a compile', async ($, on) => {
+  let manifestMtime = 1
+  const { clock } = await start($, on, { mtime: () => manifestMtime, fileMtime: path => (path === FILE ? 5 : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const warning = /⚠ fct_orders\.sql changed after the manifest was written: run `dbt compile`, then r/
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  // r reads the same manifest again: still out of date.
+  await ui.press({ key: 'lineage-refresh' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  // dbt compile writes a newer manifest: r reads it and the warning goes.
+  manifestMtime = 10
+  await ui.press({ key: 'lineage-refresh' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a shell command that changes the shown model\'s file brings the warning up, and the edit note says the manifest is older', async ($, on) => {
+  let fileMtime = 1
+  const { clock, notes } = await start($, on, { fileMtime: path => (path === FILE ? fileMtime : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /changed after the manifest was written/ })).toBeUndefined()
+  // sed -i through Bash: no Edit, but the file is newer now.
+  fileMtime = 5
+  await $.tool.call({ tool: 'Bash', command: "sed -i 's/x/y/' models/fct_orders.sql" } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /⚠ fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
+  await ui.unmount()
+  // An edit on top of it: Claude is told the lineage may be out of date.
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  expect(notes.at(-1)).toMatch(/ · the manifest is older than this file$/)
+  expect(result.context?.[0]).toContain('- the manifest is older than this file (it changed after the last `dbt compile`)')
+})
+
+test('a graph too big for Claude Code to draw is shown as folders, saying why, not as a blank pane', async ($, on) => {
+  // 600 models read fct_orders: drawn whole, the graph passes what Claude Code draws in a pane.
+  const nodes: Record<string, unknown> = { ...MANIFEST.nodes }
+  for (let i = 1; i <= 600; i++) {
+    const name = `order_slice_${String(i).padStart(4, '0')}`
+    nodes[`model.shop.${name}`] = {
+      resource_type: 'model',
+      name,
+      original_file_path: `models/fan/${name}.sql`,
+      relation_name: `"shop"."main"."${name}"`,
+      depends_on: { nodes: ['model.shop.fct_orders'] },
+      config: { materialized: 'view' },
+    }
+  }
+  const { clock } = await start($, on, { manifest: { ...MANIFEST, nodes } })
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^FOLDERS · manifest/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /the whole graph is more than Claude Code can draw in a pane, so it is shown as folders/ })).toBeDefined()
+  // A small graph (upstream of a report, away from the 600) is still drawn whole.
+  await $.command.run({ command: 'lineage', args: 'rpt_finance_weekly', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^GRAPH · manifest/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /shown as folders/ })).toBeUndefined()
+  // Back on the big one, v moves on from the graph the person chose: ends only next.
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^FOLDERS · manifest/ })).toBeDefined()
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^ENDS ONLY · manifest/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /shown as folders/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("an edit of a column the project doesn't declare is traced from the model's own columns, wherever the pane is", async ($, on) => {
+  // net_revenue is in fct_orders' SQL but not in its schema.yml, and the pane shows another model.
+  const cliLineage = { model_name: 'fct_orders', confidence: 'high', columns: { order_id: ['"int_orders"."order_id"'], net_revenue: ['"int_orders"."revenue"'] }, edges: [] }
+  const { clock, calls, notes } = await start($, on, { cliLineage })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/int_orders.sql` })
+  await clock.settle()
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as net_revenue', new_string: 'sum(amount) - sum(fees) as net_revenue' })
+  await clock.settle()
+  // Its columns come through the CLI (no permission dialog), before the reach.
+  expect(calls.indexOf('cli:dbt_lineage')).toBeGreaterThan(-1)
+  expect(calls.indexOf('cli:dbt_lineage')).toBeLessThan(calls.indexOf('mcp:impact_analysis:net_revenue'))
+  expect(notes.at(-1)).toMatch(/^◆ impact-first · fct_orders\.net_revenue is read by 2 models/)
+  expect(result.context?.[0]).toContain('Altimate lineage for fct_orders.net_revenue')
+  // The next edit of the same model uses the columns it already has.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(fees) as net_revenue', new_string: 'sum(fees) + 1 as net_revenue' })
+  await clock.settle()
+  expect(calls.filter(one => one === 'cli:dbt_lineage')).toHaveLength(1)
+})
+
+test('an edit whose declared columns already show what it touches does not wait for the CLI', async ($, on) => {
+  const { clock, calls, notes } = await start($, on)
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  // revenue is declared: traced at once, while the model's columns are fetched for later edits.
+  expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('tool:Edit'))
+  expect(notes[0]).toMatch(/^◆ impact-first · fct_orders\.revenue is read by 2 models/)
+})
+
+test("a column reach Claude Code saved to a file is read from it, with no CLI call", async ($, on) => {
+  const { clock, calls, notes } = await start($, on, { persisted: { readable: true } })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+  expect(calls).not.toContain('cli:impact_analysis')
+})
+
+test('a saved long answer the plugin cannot read is asked of the CLI, not taken as no answer', async ($, on) => {
+  const { clock, calls, notes } = await start($, on, { persisted: { readable: false } })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  expect(calls).toContain('cli:impact_analysis')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+})
+
+test("a model's columns the CLI could not give are not asked again for the same manifest", async ($, on) => {
+  // Denied edits: the pane follows no model, so nothing but the CLI could give the columns.
+  const { clock, calls } = await start($, on, { cliFailure: true, toolResult: e => (e.tool === 'Edit' ? { deny: 'not now' } : undefined) })
+  // net_revenue is undeclared, so each edit would want the model's own columns.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as net_revenue', new_string: 'sum(amount) - 1 as net_revenue' })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) - 1 as net_revenue', new_string: 'sum(amount) - 2 as net_revenue' })
+  await clock.settle()
+  expect(calls.filter(one => one === 'cli:dbt_lineage')).toHaveLength(1)
+})
+
+test("a CLI column answer that fails late never replaces the columns the pane read meanwhile", async ($, on) => {
+  let release!: () => void
+  // The pane's read (MCP) knows net_revenue; the edit check's own CLI fetch fails, and only after the pane's read.
+  const lineageText = JSON.stringify({ ...LINEAGE, columns: { ...LINEAGE.columns, net_revenue: ['"int_orders"."revenue"'] }, report: LINEAGE_TEXT })
+  const { clock, calls } = await start($, on, { cliFailure: true, lineageText, holdCliLineage: new Promise<void>(resolve => (release = resolve)) })
+  // revenue is declared: the edit goes ahead at once while the CLI fetch for fct_orders' columns is held.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  // The pane followed the edit and read fct_orders' columns; then it moves to another model.
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/int_orders.sql` })
+  await clock.settle()
+  release()
+  await clock.settle()
+  // An edit of net_revenue (undeclared, known from the pane's read) is still traced.
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as net_revenue', new_string: 'sum(amount) - 1 as net_revenue' })
+  await clock.settle()
+  expect(calls).toContain('mcp:impact_analysis:net_revenue')
+})
+
+test('a graph found too big is not drawn again when the pane goes back to a width it had', async ($, on) => {
+  const nodes: Record<string, unknown> = { ...MANIFEST.nodes }
+  for (let i = 1; i <= 600; i++) {
+    const name = `order_slice_${String(i).padStart(4, '0')}`
+    nodes[`model.shop.${name}`] = { resource_type: 'model', name, original_file_path: `models/fan/${name}.sql`, depends_on: { nodes: ['model.shop.fct_orders'] }, config: { materialized: 'view' } }
+  }
+  const { clock, debug } = await start($, on, { manifest: { ...MANIFEST, nodes } })
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  const measured = () => debug.filter(line => line.includes('too big to draw')).length
+  for (const bodyColumns of [90, 91, 90, 91]) {
+    const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns }, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^FOLDERS · manifest/ })).toBeDefined()
+    await ui.unmount()
+  }
+  // Each width was measured once.
+  expect(measured()).toBe(2)
+})
+
+test('/lineage says where the pane is: beside the chat when docked, above the prompt otherwise', async ($, on) => {
+  const { clock } = await start($, on)
+  const run = (presentation: { isFullscreen: boolean; columns: number }) =>
+    $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation })
+  expect((await run({ isFullscreen: true, columns: 200 })).text).toBe('Altimate lineage for fct_orders is open beside the chat.')
+  // Fullscreen below 110 columns and the main screen at any width draw the pane above the prompt.
+  expect((await run({ isFullscreen: true, columns: 100 })).text).toBe('Altimate lineage for fct_orders is open above the prompt.')
+  expect((await run({ isFullscreen: false, columns: 200 })).text).toBe('Altimate lineage for fct_orders is open above the prompt.')
+  await clock.settle()
+})
+
+test('an edit whose column no model reads for certain never says "at least 0", and a dashboard that may read it says so', async ($, on) => {
+  const reach = {
+    severity: 'LOW',
+    column_reach: {
+      models: [],
+      uncertain: [{ name: 'rpt_finance_weekly', reason: 'reads it through select *' }],
+      exposures: [],
+      uncertain_exposures: [{ name: 'exec_revenue', label: 'Exec Revenue', type: 'dashboard' }],
+      truncated: false,
+    },
+  }
+  const { clock, notes } = await start($, on, { reach })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) / 100 as revenue' })
+  await clock.settle()
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by no model for certain (1 may); 1 dashboard may read it · Exec Revenue')
+  expect(result.context?.[0]).toContain('- read by no downstream model for certain (1 may)')
+  expect(`${notes[0]}\n${result.context?.[0]}`).not.toMatch(/at least 0/)
 })
 
 test('a manifest over 4 MiB is read through altimate-code: the graph comes from dbt_lineage with include_graph', async ($, on) => {
@@ -458,9 +734,9 @@ test('a subagent gets the lineage context the main agent already got, and an unt
   const main: any = await $.tool.call(edit)
   const sub: any = await $.tool.call({ ...edit, agentId: 'sub-1' } as any)
   await clock.settle()
-  expect(notes[0]).toContain('is read by at least 2 models')
+  expect(notes[0]).toContain('is read by 2 models (1 more may)')
   expect(main.context?.[0]).toContain('could not be traced: mart_cohort_ltv ("No compiled SQL found")')
-  expect(sub.context?.[0]).toContain('read by at least 2 downstream models')
+  expect(sub.context?.[0]).toContain('read by 2 downstream models (1 more may)')
 })
 
 test('a read Claude makes outside a dbt project stays quiet', async ($, on) => {
@@ -482,7 +758,7 @@ test('a result the MCP server left out for size is fetched again through the CLI
   expect(calls).toContain('mcp:impact_analysis:revenue')
   expect(calls).toContain('cli:impact_analysis')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboards/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboard(?!s)/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -513,7 +789,7 @@ test('dashboards on models that may read the column are counted and named', asyn
   const { clock, notes } = await start($, on, { reach })
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
-  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by at least 2 models and 2 dashboards · Exec Revenue · Ops Board')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models (1 more may) and 1 dashboard; 1 dashboard may read it · Exec Revenue · Ops Board')
   expect(edit.context?.[0]).toContain('dashboards on models that may read it: "Ops Board"')
 })
 
@@ -642,7 +918,7 @@ test('an answer cut off on its way is a failure, not "no such model": it is not 
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /altimate-code failed: dbt_lineage's answer could not be read/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /altimate-code failed: the answer could not be read/ })).toBeDefined()
   await ui.unmount()
   cut = false
   const before = calls.filter(one => one === 'cli:dbt_lineage:graph').length
@@ -653,6 +929,77 @@ test('an answer cut off on its way is a failure, not "no such model": it is not 
   expect(await again.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await again.unmount()
 })
+
+test('an edit whose graph read is cut off goes ahead, says so in a toast and tells Claude what reads it is unknown', async ($, on) => {
+  let cut = true
+  const { clock, calls, toasts } = await start($, on, { size: 6 * 1024 * 1024, cliCutOff: () => cut })
+  const edit = { tool: 'Edit' as const, file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' }
+  const result: any = await $.tool.call(edit)
+  await clock.settle()
+  expect(calls).toContain('tool:Edit')
+  expect(toasts).toContain('◆ impact-first · the lineage lookup failed; the edit went ahead without it')
+  expect(toasts).not.toContain('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
+  expect(result.context?.[0]).toContain('Altimate lineage could not be read before this edit of fct_orders, so what reads it downstream is unknown')
+  // Not remembered: once the answer comes through, the next edit gets its note.
+  cut = false
+  const again: any = await $.tool.call(edit)
+  await clock.settle()
+  expect(again.context?.[0]).toContain('read by 2 downstream models')
+})
+
+test('an edit of a file the manifest does not know stays silent: nothing failed', async ($, on) => {
+  const { clock, toasts } = await start($, on, { size: 6 * 1024 * 1024 })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/not_in_the_manifest.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(toasts.filter((one: string) => one.includes('lineage lookup'))).toEqual([])
+  expect(result.context ?? []).toEqual([])
+})
+
+test('a cut-off impact_analysis leaves its column not checked, and the note still goes to Claude', async ($, on) => {
+  const { clock } = await start($, on, { mcp: false, cliCutOff: tool => tool === 'impact_analysis' })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(result.context?.[0]).toContain('columns not checked (over the limit or no answer in time): revenue; what they reach is unknown')
+})
+
+test('a cut-off plain dbt_lineage shows a failure in the pane, naming the tool once', async ($, on) => {
+  const { clock } = await start($, on, { mcp: false, cliCutOff: tool => tool === 'dbt_lineage' })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /dbt_lineage failed: the answer could not be read/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a non-zero exit with cut-off stdout on a large manifest is a failure, and is asked again', async ($, on) => {
+  const { clock, calls } = await start($, on, { size: 6 * 1024 * 1024, cliCutOff: () => true, cliCutOffExit: 1 })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /reading it through altimate-code failed/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
+  await ui.unmount()
+  const before = calls.filter(one => one === 'cli:dbt_lineage:graph').length
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls.filter(one => one === 'cli:dbt_lineage:graph').length).toBe(before + 1)
+})
+
+for (const stdout of ['{"status":"ok"}', '{}', '[]', '"x"', '12', 'null', '0', '']) {
+  test(`exit 0 with ${stdout || 'no output'} on a large manifest is a failure, and is asked again`, async ($, on) => {
+    const { clock, calls } = await start($, on, { size: 6 * 1024 * 1024, cliStdout: stdout })
+    await $.tool.call({ tool: 'Read', file_path: FILE })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /reading it through altimate-code failed/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
+    await ui.unmount()
+    const before = calls.filter(one => one === 'cli:dbt_lineage:graph').length
+    await $.tool.call({ tool: 'Read', file_path: FILE })
+    await clock.settle()
+    expect(calls.filter(one => one === 'cli:dbt_lineage:graph').length).toBe(before + 1)
+  })
+}
 
 test("altimate-code's own failure on a large manifest is shown as a failure, not as no such model", async ($, on) => {
   const { clock } = await start($, on, { size: 6 * 1024 * 1024, cliFailure: true })
@@ -978,14 +1325,15 @@ test("the person's press still loading when the answer ends wins over the answer
   let release!: () => void
   const { clock } = await start($, on, { holdManifestStat: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
   await $.turn.start({ text: 'q', turnId: 't10' } as any)
-  // The person's /lineage, still loading...
-  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  // The person's /lineage, still loading (its reply waits for the lookup)...
+  const reply = $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
   // ...when an answer naming another model ends the turn.
   await $.turn.complete({ answer: 'See `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't10' } as any)
   await clock.advance(100)
   release()
   await clock.advance(6000)
   await clock.settle()
+  await reply
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()
@@ -1087,15 +1435,31 @@ test('an older follow that resolves after a newer one does not overwrite it', as
   const { clock } = await start($, on, { holdFirstManifestRead: new Promise<void>(resolve => (release = resolve)) })
   // fct_orders by name first, then int_orders: the second claims the pane; the first, landing later, yields.
   const run = (args: string) => $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
-  await run('fct_orders')
+  // The first reply waits for its held lookup, so neither is awaited until the hold is released.
+  const first = run('fct_orders')
   await clock.settle()
-  await run('int_orders')
+  const second = run('int_orders')
   await clock.settle()
   release()
   await clock.settle()
+  const [firstReply] = await Promise.all([first, second])
+  // The first lookup lost the pane to the second: its reply says so, never that fct_orders is open.
+  expect(firstReply.text).not.toMatch(/for fct_orders is open/)
+  const firstText = firstReply.text ?? ''
+  if (!/looking up/.test(firstText)) expect(firstText).toBe('Altimate lineage did not open fct_orders: a newer lookup took the pane.')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('/lineage on a slow lookup says it is looking, and where the pane is', async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, { holdFirstManifestRead: new Promise<void>(resolve => (release = resolve)) })
+  const reply = $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
+  await clock.advance(2_100)
+  expect((await reply).text).toBe('Altimate lineage is looking up fct_orders; the pane is above the prompt.')
+  release()
+  await clock.settle()
 })
 
 test('/lineage <model> with no column clears the selected column', async ($, on) => {
@@ -1126,22 +1490,23 @@ test('an older column-reach answer does not replace the newer one', async ($, on
   await ui.unmount()
 })
 
-test('when the whole lookup runs out of time, the log says the edit went ahead without lineage', async ($, on) => {
-  const { clock, notes } = await start($, on, { holdFirstManifestRead: new Promise<void>(() => {}) })
+test('when the whole lookup runs out of time, a toast says the edit went ahead without lineage', async ($, on) => {
+  const { clock, toasts } = await start($, on, { holdFirstManifestRead: new Promise<void>(() => {}) })
   const call = $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.advance(9_000)
   await call
   await clock.settle()
-  expect(notes).toContain('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
+  expect(toasts).toContain('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it')
 })
 
 test('a .sql file outside any dbt project gets no timeout note', async ($, on) => {
-  const { clock, notes } = await start($, on)
+  const { clock, notes, toasts } = await start($, on)
   const call = $.tool.call({ tool: 'Edit', file_path: '/elsewhere/migrations/001.sql', old_string: 'a', new_string: 'b' })
   await clock.advance(9_000)
   await call
   await clock.settle()
   expect(notes).toEqual([])
+  expect(toasts).toEqual([])
 })
 
 test("the pane reads the dbt integration's model lineage from altimate-code", async ($, on) => {

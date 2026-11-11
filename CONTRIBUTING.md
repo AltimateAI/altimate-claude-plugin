@@ -15,7 +15,11 @@ Thanks for taking the time to contribute. This plugin lives in one repo (`Altima
    ```
    Both must exit clean. **Validating the repo root alone is not sufficient** — the marketplace-level validator does not descend into skills, so skill-frontmatter parse errors go undetected unless you also validate the plugin path.
 
-   If you touch the CLI resolver block in a skill or command, run `./tests/resolve-cli.sh` — it checks every copy is identical and resolves correctly in bash and zsh.
+   Run the shell tests (CI runs them too, on Linux and macOS):
+   ```bash
+   bash tests/resolve-cli.sh         # the CLI resolver block: every copy identical, resolves in bash and zsh
+   bash tests/workspace-rules-hook.sh # the workspace-rules hook against a stub CLI (needs python3 and git)
+   ```
 4. Open a PR against `AltimateAI/altimate-claude-plugin:main`.
 
 ## Repo layout
@@ -24,6 +28,8 @@ Thanks for taking the time to contribute. This plugin lives in one repo (`Altima
 altimate-claude-plugin/
 ├── .claude-plugin/
 │   └── marketplace.json     # marketplace descriptor (source: ./plugins/altimate-code)
+├── .github/workflows/
+│   └── tests.yml            # runs tests/*.sh on Linux and macOS
 ├── plugins/
 │   └── altimate-code/
 │       ├── .claude-plugin/
@@ -35,7 +41,7 @@ altimate-claude-plugin/
 │       ├── agents/
 │       │   └── analyst.md       # read-only data analyst for the MCP tools
 │       ├── hooks/
-│       │   ├── hooks.json       # SessionStart, Stop and PreToolUse hook config
+│       │   ├── hooks.json       # SessionStart, UserPromptSubmit, Stop and PreToolUse hook config
 │       │   ├── integrations.tsx # one-click integrations band and /integrations pane (mod)
 │       │   └── integrations.test.tsx # its tests (claude plugin test .)
 │       ├── types/
@@ -45,14 +51,21 @@ altimate-claude-plugin/
 │       │   ├── data-mode.sh     # MCP or CLI mode, from PATH and MCP settings
 │       │   ├── sync-workspace-skills.py # copies workspace skills into .claude/skills
 │       │   ├── refresh-skills.sh # background / on-demand workspace skill refresh
+│       │   ├── workspace-rules.sh # team rules hooks (session-start, user-prompt-submit, stop)
 │       │   ├── warehouse-guard.sh # opt-in PreToolUse warehouse-client guard
 │       │   └── warehouse-guard.py # its command parser
 │       ├── commands/
 │       │   ├── altimate.md      # /altimate-code:altimate slash command
-│       │   └── refresh-skills.md # /altimate-code:refresh-skills
+│       │   ├── refresh-skills.md # /altimate-code:refresh-skills
+│       │   └── rules.md         # /altimate-code:rules slash command
 │       ├── README.md            # plugin-specific docs
 │       └── CHANGELOG.md         # plugin-specific changelog
+├── tests/
+│   ├── resolve-cli.sh           # CLI resolver block check
+│   └── workspace-rules-hook.sh  # workspace-rules hook check
 ├── README.md                # repo overview
+├── PRIVACY.md
+├── TERMS.md
 ├── SECURITY.md
 ├── CODE_OF_CONDUCT.md
 ├── CONTRIBUTING.md
@@ -100,6 +113,7 @@ claude plugin install altimate-code@altimate-claude-plugin
 - **Hooks** — `plugins/altimate-code/hooks/hooks.json`:
   - SessionStart (`hooks-handlers/session-start.sh`) describes the plugin's capabilities so Claude can route to it, adds the CLI guidance when `data-mode.sh` picks the CLI mode, and copies the linked workspace's skills (`sync-workspace-skills.py`).
   - Stop (`refresh-skills.sh --if-stale`) refreshes those skills in the background at most hourly.
+  - SessionStart, UserPromptSubmit and Stop (`hooks-handlers/workspace-rules.sh`) are the team rules hooks: they call `altimate learn hook <event>` only in a folder altimate-code's link cache names, and never fail the session.
   - PreToolUse (`warehouse-guard.sh`) points direct warehouse clients at `tool run`, only with `ALTIMATE_ROUTE_GUARD=1`.
 - **Tests** — `tests/*.sh` and `python3 -m pytest tests/`; run them all before a PR.
 - **Command** — `plugins/altimate-code/commands/altimate.md` — `/altimate-code:altimate` slash command follows the same routing with agent-persona selection for delegation.
