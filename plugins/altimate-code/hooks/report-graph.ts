@@ -180,7 +180,7 @@ export const GRAPH_CSS = `
 .g-btn{appearance:none;border:1px solid var(--line-strong);background:var(--panel);color:var(--ink);border-radius:6px;padding:3px 9px;font:inherit;font-size:12.5px;cursor:pointer;min-width:30px}
 .g-btn:hover{border-color:var(--accent)}
 .g-btn:focus-visible,.g-svg:focus-visible,.g-row:focus-visible,.g-box.collapsed:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
-.g-svg{flex:1;width:100%;min-height:0;display:block;cursor:grab;touch-action:none;background:var(--bg)}
+.g-svg{flex:1;width:100%;min-height:0;display:block;cursor:grab;touch-action:none;background:var(--bg);-webkit-user-select:none;user-select:none}
 .g-svg:active{cursor:grabbing}
 .g-hint{font-size:12px;color:var(--faint);padding:6px 10px;border-top:1px solid var(--line)}
 .g-rect{fill:var(--panel);stroke:var(--line-strong);stroke-width:1}
