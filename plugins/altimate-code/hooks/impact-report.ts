@@ -2,6 +2,7 @@
 // and a self-contained HTML report. Pure functions only; the hooks live in task-impact.tsx.
 
 import type { PlanImpactView, Reach, TaskSummaryView } from '../types'
+import { GRAPH_CSS, GRAPH_VIEW_JS, graphLayout } from './report-graph'
 import { selectItems, touchedColumns } from './lineage-graph'
 
 export type { PlanImpactView, Reach, TaskSummaryView }
@@ -494,9 +495,10 @@ export function reportHtml(data: ReportData): string {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:">
 <link rel="icon" href="data:,">
 <title>${escapeHtml(data.title)}</title>
-<style>${REPORT_CSS}</style>
+<style>${REPORT_CSS}${GRAPH_CSS}</style>
 </head>
 <body>
 <div id="app" data-levels="${data.defaultLevels}"></div>
@@ -636,8 +638,8 @@ var DATA=JSON.parse(document.getElementById('report-data').textContent);
 var app=document.getElementById('app');
 var GLYPH={'=':'same','~':'ren','\\u0192':'calc','\\u03a3':'agg','?':'unk'};
 var HOW={'=':'same value','~':'renamed','\\u0192':'calculated','\\u03a3':'aggregated','?':'unknown'};
-var state={focus:0,levels:[],selected:null};
-DATA.focuses.forEach(function(){state.levels.push({up:DATA.defaultLevels,down:DATA.defaultLevels})});
+var state={focus:0,levels:[],expanded:[],views:[],list:false,selected:null};
+DATA.focuses.forEach(function(){state.levels.push({up:DATA.defaultLevels,down:DATA.defaultLevels});state.expanded.push({});state.views.push(null)});
 function el(tag,cls,text){var n=document.createElement(tag);if(cls)n.className=cls;if(text!=null)n.textContent=String(text);return n}
 function plural(n,w){return n+' '+w+(n===1?'':'s')}
 function glyph(g,byName){var s=el('span','g '+(GLYPH[g]||'unk')+(byName?' byname':''),g||'?');s.title=(HOW[g]||'unknown')+(byName?' (matched by name, not traced through SQL)':'');return s}
@@ -667,31 +669,37 @@ function render(){
   var bar=el('div','pathbar');bar.id='pathbar';var wrap=el('div','wrap');wrap.appendChild(bar);
   var top=el('header','top');top.appendChild(el('h1',null,DATA.title));top.appendChild(el('span','when','Task finished '+DATA.finishedAt+' \\u00b7 report built '+DATA.builtAt+' \\u00b7 read from '+DATA.manifest));wrap.appendChild(top);
   if(DATA.movedOn.length)wrap.appendChild(el('div','note warn','\\u26a0 Since this task ended, '+DATA.movedOn.join(', ')+(DATA.movedOn.length===1?' has':' have')+' changed. This report describes the task, not the files as they are now.'));
-  var ch=el('div','panel changes');ch.appendChild(el('h2',null,'What this task changed'));DATA.changes.forEach(function(c){var m=el('div','change-model mono',c.model);m.appendChild(el('span','file',c.file));ch.appendChild(m);if(!c.columns.length){ch.appendChild(el('div','empty','No output column changed (a filter or a join): only the model-level count applies.'));return}var d=el('div','diff');c.columns.forEach(function(col){d.appendChild(el('div','col-name mono',col.name));var was=el('div','was mono'+(col.before?'':' none'),col.before||'(not in the model before)');var now=el('div','now mono'+(col.after?'':' none'),col.after||'(removed)');if(col.before&&col.after&&col.before===col.after){d.appendChild(el('div','same','Expression unchanged; the column is named on a changed line.'));d.appendChild(el('div'))}else{d.appendChild(was);d.appendChild(now)}});ch.appendChild(d)});wrap.appendChild(ch);
-  wrap.appendChild(impactPanel());wrap.appendChild(consumersPanel());
-  var deep=el('div','deep');deep.appendChild(el('h2',null,'Column by column'));deep.appendChild(el('p',null,'Two levels up and down, with more on request. Click any column to light up its path; the rest dims and stays on the page.'));wrap.appendChild(deep);
-  if(DATA.focuses.length>1){var tabs=el('div','tabs');tabs.setAttribute('role','tablist');DATA.focuses.forEach(function(g,j){var t=el('button','tab',g.column?g.model+'.'+g.column:g.model+' (model)');t.type='button';t.setAttribute('role','tab');t.setAttribute('aria-selected',j===i?'true':'false');t.addEventListener('click',function(){state.focus=j;state.selected=null;render()});tabs.appendChild(t)});wrap.appendChild(tabs)}
+  var ch=el('div','panel changes');ch.appendChild(el('h2',null,'What this task changed'));DATA.changes.forEach(function(c){var m=el('div','change-model mono',c.model);m.appendChild(el('span','file',c.file));ch.appendChild(m);if(!c.columns.length){ch.appendChild(el('div','empty','No output column changed (a filter or a join): only the model-level count applies.'));return}var d=el('div','diff');c.columns.forEach(function(col){d.appendChild(el('div','col-name mono',col.name));var was=el('div','was mono'+(col.before?'':' none'),col.before||'(not in the model before)');var now=el('div','now mono'+(col.after?'':' none'),col.after||'(removed)');if(col.before&&col.after&&col.before===col.after){d.appendChild(el('div','same','Expression unchanged; the column is named on a changed line.'));d.appendChild(el('div'))}else{d.appendChild(was);d.appendChild(now)}});ch.appendChild(d)});
+  var page=el('div','page'),side=el('div','side'),main=el('div','main');page.appendChild(side);page.appendChild(main);
+  side.appendChild(ch);side.appendChild(impactPanel());side.appendChild(consumersPanel());
+  var deep=el('div','deep');deep.appendChild(el('h2',null,'Column by column'));deep.appendChild(el('p',null,'Two levels up and down, with more on request. Click any column to light up its path; the rest dims and stays on the page.'));main.appendChild(deep);
+  if(DATA.focuses.length>1){var tabs=el('div','tabs');tabs.setAttribute('role','tablist');DATA.focuses.forEach(function(g,j){var t=el('button','tab',g.column?g.model+'.'+g.column:g.model+' (model)');t.type='button';t.setAttribute('role','tab');t.setAttribute('aria-selected',j===i?'true':'false');t.addEventListener('click',function(){state.focus=j;state.selected=null;render()});tabs.appendChild(t)});main.appendChild(tabs)}
   var r=f.reach,stats=el('div','stats');
   if(r){stats.appendChild(stat(r.columns,'columns downstream'));stats.appendChild(stat(r.models,'models carry it'));stats.appendChild(stat(r.ends,'end columns'));stats.appendChild(stat(r.mayCarry,'may carry it',!r.mayCarry));stats.appendChild(stat(r.cleared,'cleared',r.cleared==null))}
-  stats.appendChild(stat(f.modelLevel,'downstream at model level',true));wrap.appendChild(stats);
-  if(r&&(r.unresolved||r.truncated))wrap.appendChild(el('div','note warn','\\u26a0 Lower bound: '+[r.unresolved?plural(r.unresolved,'model')+' could not be read':'',r.truncated?'the trace hit its limit':''].filter(Boolean).join('; ')+'. See \\u201cNot resolved\\u201d below.'));
-  else if(r)wrap.appendChild(el('div','note ok','\\u2713 Every downstream model was read.'));
-  var inp=[];if(f.inputs.engine)inp.push('engine '+f.inputs.engine);inp.push(f.inputs.catalog?'with catalog types':'no catalog: types from the manifest');if(f.inputs.olderThanSql)inp.push('the manifest is older than the SQL');wrap.appendChild(el('div','inputs',inp.join(' \\u00b7 ')));
-  var lg=el('div','legend');['=','~','\\u0192','\\u03a3','?'].forEach(function(g){var s=el('span');s.appendChild(glyph(g,false));s.appendChild(document.createTextNode(HOW[g]));lg.appendChild(s)});var bn=el('span');bn.appendChild(glyph('=',true));bn.appendChild(document.createTextNode('matched by name'));lg.appendChild(bn);var cb=el('span');cb.appendChild(el('span','badge c','C'));cb.appendChild(document.createTextNode(' contract enforced'));lg.appendChild(cb);wrap.appendChild(lg);
-  wrap.appendChild(section(f,i,'up'));
-  var fc=el('div','panel focus');fc.appendChild(el('div','label','The changed column'));var ti=el('div','title');if(f.key){ti.appendChild(colButton({key:f.key,column:f.model+'.'+(f.column||''),glyph:f.glyph||'?',byName:f.byName,end:false,type:null}))}else ti.appendChild(el('span','mono',f.column?f.model+'.'+f.column:f.model));fc.appendChild(ti);var hw=f.glyph?HOW[f.glyph]||'unknown':'';fc.appendChild(el('div','empty',(hw?hw.charAt(0).toUpperCase()+hw.slice(1)+' from what it reads'+(f.byName?' (matched by name)':'')+'. ':'')+(f.key?'Click any column to light up its path.':'')));wrap.appendChild(fc);
-  wrap.appendChild(section(f,i,'down'));
+  stats.appendChild(stat(f.modelLevel,'downstream at model level',true));main.appendChild(stats);
+  if(r&&(r.unresolved||r.truncated))main.appendChild(el('div','note warn','\\u26a0 Lower bound: '+[r.unresolved?plural(r.unresolved,'model')+' could not be read':'',r.truncated?'the trace hit its limit':''].filter(Boolean).join('; ')+'. See \\u201cNot resolved\\u201d below.'));
+  else if(r)main.appendChild(el('div','note ok','\\u2713 Every downstream model was read.'));
+  var inp=[];if(f.inputs.engine)inp.push('engine '+f.inputs.engine);inp.push(f.inputs.catalog?'with catalog types':'no catalog: types from the manifest');if(f.inputs.olderThanSql)inp.push('the manifest is older than the SQL');main.appendChild(el('div','inputs',inp.join(' \\u00b7 ')));
+  var lg=el('div','legend');['=','~','\\u0192','\\u03a3','?'].forEach(function(g){var s=el('span');s.appendChild(glyph(g,false));s.appendChild(document.createTextNode(HOW[g]));lg.appendChild(s)});var bn=el('span');bn.appendChild(glyph('=',true));bn.appendChild(document.createTextNode('matched by name'));lg.appendChild(bn);var cb=el('span');cb.appendChild(el('span','badge c','C'));cb.appendChild(document.createTextNode(' contract enforced'));lg.appendChild(cb);main.appendChild(lg);
+  var graph=null;if(!state.list){graph=graphPanel(f,i);main.appendChild(graph)}else{var lb=el('div','g-bar list-bar');lb.appendChild(el('span','g-title','Column list'));var gb=el('button','g-btn','Graph');gb.type='button';gb.addEventListener('click',function(){state.list=false;render()});lb.appendChild(gb);main.appendChild(lb);
+  main.appendChild(section(f,i,'up'));
+  var fc=el('div','panel focus');fc.appendChild(el('div','label','The changed column'));var ti=el('div','title');if(f.key){ti.appendChild(colButton({key:f.key,column:f.model+'.'+(f.column||''),glyph:f.glyph||'?',byName:f.byName,end:false,type:null}))}else ti.appendChild(el('span','mono',f.column?f.model+'.'+f.column:f.model));fc.appendChild(ti);var hw=f.glyph?HOW[f.glyph]||'unknown':'';fc.appendChild(el('div','empty',(hw?hw.charAt(0).toUpperCase()+hw.slice(1)+' from what it reads'+(f.byName?' (matched by name)':'')+'. ':'')+(f.key?'Click any column to light up its path.':'')));main.appendChild(fc);
+  main.appendChild(section(f,i,'down'))}
+  wrap.appendChild(page);
   wrap.appendChild(fold('Also reads it, outside the select',f.alsoReads.length,f.alsoReads.map(function(a){return li(a.name,'reads '+a.columns.join(', ')+(a.downstream!=null?' \\u00b7 '+plural(a.downstream,'model')+' downstream of it':''))})));
   wrap.appendChild(fold('Not resolved',f.unresolved.length,f.unresolved.map(function(u){return li(u.name,u.reason+(u.downstream!=null?' \\u00b7 '+plural(u.downstream,'model')+' downstream of it':''))})));
   wrap.appendChild(fold('Cleared: downstream, but does not carry it',f.cleared.count,f.cleared.names.map(function(n){return li(n,'')})));
   if(f.inputs.workarounds.length)wrap.appendChild(fold('How the engine read the SQL',f.inputs.workarounds.length,f.inputs.workarounds.map(function(w){var l=el('li','why',w);return l})));
-  app.appendChild(wrap);applyHighlight();
+  app.appendChild(wrap);if(graph)graph.afterMount();applyHighlight();
 }
 function select(key){state.selected=state.selected===key?null:key;applyHighlight()}
-function applyHighlight(){var f=DATA.focuses[state.focus],bar=document.getElementById('pathbar');var cols=document.querySelectorAll('.col');if(!state.selected){document.body.classList.remove('hl');cols.forEach(function(c){c.classList.remove('on','sel')});document.querySelectorAll('.model').forEach(function(m){m.classList.remove('has-on')});return}
-  var p=pathOf(f,state.selected);document.body.classList.add('hl');cols.forEach(function(c){var on=!!p.all[c.dataset.key];c.classList.toggle('on',on);c.classList.toggle('sel',c.dataset.key===state.selected)});document.querySelectorAll('.model').forEach(function(m){m.classList.toggle('has-on',!!m.querySelector('.col.on'))});
+function applyHighlight(){var f=DATA.focuses[state.focus],bar=document.getElementById('pathbar');var cols=document.querySelectorAll('.col,.g-row');var edges=document.querySelectorAll('.g-edge');if(!state.selected){document.body.classList.remove('hl');cols.forEach(function(c){c.classList.remove('on','sel')});edges.forEach(function(e){e.classList.remove('on')});document.querySelectorAll('.model,.g-box').forEach(function(m){m.classList.remove('has-on')});bar.textContent='';return}
+  var p=pathOf(f,state.selected);document.body.classList.add('hl');cols.forEach(function(c){var on=!!p.all[c.dataset.key];c.classList.toggle('on',on);c.classList.toggle('sel',c.dataset.key===state.selected)});document.querySelectorAll('.model,.g-box').forEach(function(m){m.classList.toggle('has-on',!!m.querySelector('.col.on,.g-row.on'))});
+  edges.forEach(function(e){var on=(e.getAttribute('data-keys')||'').split(' ').some(function(k){var ab=k.split('>');return !!(p.all[ab[0]]&&p.all[ab[1]])});e.classList.toggle('on',on)});
   var shown={};cols.forEach(function(c){shown[c.dataset.key]=1});var hidden=Object.keys(p.all).filter(function(k){return!shown[k]}).length;
-  bar.textContent='';bar.appendChild(el('span',null,'Path of '+state.selected.split('|')[0].split('.').pop()+'.'+state.selected.split('|').pop()+': '+plural(p.up,'column')+' upstream, '+plural(p.down,'column')+' downstream'+(hidden?' \\u00b7 '+hidden+' more on hidden levels':'')));var clr=el('button',null,'Clear');clr.type='button';clr.addEventListener('click',function(){select(state.selected)});bar.appendChild(clr)}
+  bar.textContent='';bar.appendChild(el('span',null,'Path of '+state.selected.split('|')[0].split('.').pop()+'.'+state.selected.split('|').pop()+': '+plural(p.up,'column')+' upstream, '+plural(p.down,'column')+' downstream'+(hidden?' \\u00b7 '+hidden+' more on hidden levels or folded models':'')));var clr=el('button',null,'Clear');clr.type='button';clr.addEventListener('click',function(){select(state.selected)});bar.appendChild(clr)}
+${graphLayout.toString()}
+${GRAPH_VIEW_JS}
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&state.selected)select(state.selected)});
 render();
 })();

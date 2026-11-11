@@ -260,7 +260,7 @@ describe('a plan', () => {
 describe('the report', () => {
   test('leads with what changed and what to expect, and keeps the levels and paths underneath', () => {
     const html = reportHtml(reportData([{ ...CHANGE, ended: fingerprint('x') }], [TRACE], { ...TASK, movedOn: ['models/fct_orders.sql'] }))
-    const order = ['What this task changed', 'wrap.appendChild(impactPanel())', 'wrap.appendChild(consumersPanel())', 'Column by column', "section(f,i,'up')", "section(f,i,'down')"].map(one => html.indexOf(one, html.indexOf('function render(){')))
+    const order = ['What this task changed', 'side.appendChild(impactPanel())', 'side.appendChild(consumersPanel())', 'Column by column', 'graph=graphPanel(f,i)', "section(f,i,'up')", "section(f,i,'down')"].map(one => html.indexOf(one, html.indexOf('function render(){')))
     expect(order.every(one => one >= 0)).toBe(true)
     expect([...order].sort((a, b) => a - b)).toEqual(order)
     const data = embedded(html)

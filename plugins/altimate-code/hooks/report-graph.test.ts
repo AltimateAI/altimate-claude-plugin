@@ -1,0 +1,115 @@
+import { describe, expect, test } from 'claude-code/testing'
+import { graphLayout as layoutOf } from './report-graph'
+import { type ColumnAnswer, type ModelChange, reportData, reportHtml } from './impact-report'
+
+type Layout = {
+  boxes: { id: string; layer: number; x: number; y: number; h: number; name: string; title: string; collapsed?: boolean; count?: number; rows: { key: string }[] }[]
+  edges: { from: string; to: string; keys: string[][] }[]
+}
+const graphLayout = layoutOf as (focus: unknown, levels: { up: number; down: number }, expanded: Record<number, boolean>) => Layout
+
+const node = (name: string) => ({ id: `model.shop.${name}`, name, folder: 'marts', materialized: 'table', contract: false, tests: 0, exposures: [] })
+
+/** fct.revenue read by `first` models one hop down, each read by the model `second` names, if any. */
+function answer(first: string[], second: Record<string, string> = {}): ColumnAnswer {
+  const names = ['fct', ...first, ...Object.values(second)]
+  const nodes = names.map(node)
+  const columns: any[] = [{ model: 0, column: 'revenue', hop: 0 }]
+  const edges: any[] = []
+  first.forEach(name => {
+    columns.push({ model: names.indexOf(name), column: 'revenue', hop: 1 })
+    edges.push([0, columns.length - 1, '='])
+  })
+  for (const [from, to] of Object.entries(second)) {
+    columns.push({ model: names.indexOf(to), column: 'total', hop: 2, end: true })
+    edges.push([1 + first.indexOf(from), columns.length - 1, 'Σ'])
+  }
+  return {
+    version: 1,
+    focus: { model: 'model.shop.fct', column: 'revenue' },
+    direction: 'downstream',
+    counts: { columns: columns.length - 1, models: names.length - 1, hops: 2, contracts: 0, ends: 1, may_carry_models: 0, cleared_models: 0, model_level: names.length - 1 },
+    nodes,
+    columns,
+    edges,
+  } as ColumnAnswer
+}
+const UP = {
+  version: 1,
+  focus: { model: 'model.shop.fct', column: 'revenue' },
+  direction: 'upstream',
+  nodes: [node('fct'), node('stg_orders'), { ...node('orders'), id: 'source.shop.raw.orders' }],
+  columns: [
+    { model: 0, column: 'revenue', hop: 0 },
+    { model: 1, column: 'amount', hop: 1 },
+    { model: 2, column: 'amount_cents', hop: 2, end: true },
+  ],
+  edges: [
+    [1, 0, '~'],
+    [2, 1, 'ƒ'],
+  ],
+} as ColumnAnswer
+const CHANGE: ModelChange = { model: 'fct', file: 'models/fct.sql', root: '/repo', columns: [{ name: 'revenue', before: 'amount as revenue', after: 'amount * 1.1 as revenue' }] }
+const TASK = { finishedAt: '2026-01-01 00:00 UTC', builtAt: '2026-01-01 00:05 UTC', manifest: 'the manifest', movedOn: [] as string[] }
+const focusOf = (down: ColumnAnswer, up: ColumnAnswer | null = UP) =>
+  reportData([CHANGE], [{ model: 'fct', column: 'revenue', down, up, modelLevel: null, failed: false }], TASK).focuses[0]
+const layer = (lay: Layout, n: number) => lay.boxes.filter(box => box.layer === n)
+
+describe('report graph layout', () => {
+  test('upstream sits left of the changed column and downstream right, one layer per hop shown', () => {
+    const lay = graphLayout(focusOf(answer(['a', 'b'], { a: 'x' })), { up: 2, down: 2 }, {})
+    expect(layer(lay, 0).map(box => box.name)).toEqual(['fct'])
+    expect(layer(lay, 0)[0]!.x).toBe(0)
+    expect(layer(lay, 1).every(box => box.x > 0)).toBe(true)
+    expect(layer(lay, 2).every(box => box.x > layer(lay, 1)[0]!.x)).toBe(true)
+    expect(layer(lay, -1).map(box => box.name)).toEqual(['stg_orders'])
+    expect(layer(lay, -2).every(box => box.x < layer(lay, -1)[0]!.x)).toBe(true)
+    const fewer = graphLayout(focusOf(answer(['a', 'b'], { a: 'x' })), { up: 1, down: 1 }, {})
+    expect([...new Set(fewer.boxes.map(box => box.layer))].sort()).toEqual([-1, 0, 1])
+    expect(fewer.edges.map(edge => `${edge.from}>${edge.to}`).sort()).toEqual([
+      'model.shop.fct|revenue>model.shop.a|revenue',
+      'model.shop.fct|revenue>model.shop.b|revenue',
+      'model.shop.stg_orders|amount>model.shop.fct|revenue',
+    ])
+  })
+
+  test('a level of more than 12 models is one box, with one edge into it, until it is expanded', () => {
+    const many = Array.from({ length: 20 }, (_, i) => `m${String(i).padStart(2, '0')}`)
+    const focus = focusOf(answer(many))
+    const folded = graphLayout(focus, { up: 2, down: 2 }, {})
+    expect(layer(folded, 1).map(box => [box.name, box.collapsed, box.count])).toEqual([['+20 models', true, 20]])
+    const into = folded.edges.filter(edge => edge.from === 'model.shop.fct|revenue')
+    expect(into.length).toBe(1)
+    expect(into[0]!.keys.length).toBe(20)
+    const open = graphLayout(focus, { up: 2, down: 2 }, { 1: true })
+    expect(layer(open, 1).length).toBe(20)
+    expect(open.edges.filter(edge => edge.from === 'model.shop.fct|revenue').length).toBe(20)
+  })
+
+  test("orders a layer by where its edges come from, whatever the data's order", () => {
+    // a above b by name; z reads a and y reads b, so z sits above y although y comes first by name.
+    const down = answer(['a', 'b'], { a: 'z', b: 'y' })
+    const lay = graphLayout(focusOf(down), { up: 2, down: 2 }, {})
+    expect(layer(lay, 1).map(box => box.name)).toEqual(['a', 'b'])
+    expect(layer(lay, 2).map(box => box.name)).toEqual(['z', 'y'])
+    const shuffled = { ...down, nodes: [...down.nodes!].reverse(), columns: down.columns!.map(c => ({ ...c, model: down.nodes!.length - 1 - c.model })) }
+    expect(graphLayout(focusOf(shuffled as ColumnAnswer), { up: 2, down: 2 }, {})).toEqual(lay)
+  })
+
+  test('cuts a long model name and keeps the whole name in its title', () => {
+    const long = 'int_query_cost_attribution_by_warehouse_and_hour'
+    const box = layer(graphLayout(focusOf(answer([long])), { up: 0, down: 1 }, {}), 1)[0]!
+    expect(box.name).toBe(`${long.slice(0, 27)}…`)
+    expect(box.title.startsWith(long)).toBe(true)
+  })
+})
+
+describe('report page', () => {
+  test('allows only its own inline script and style, and carries the graph', () => {
+    const html = reportHtml(reportData([CHANGE], [{ model: 'fct', column: 'revenue', down: answer(['a']), up: UP, modelLevel: null, failed: false }], TASK))
+    expect(html).toContain(`<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:">`)
+    expect(html).toContain('function graphLayout(')
+    expect(html).toContain('function graphPanel(')
+    expect(html).not.toMatch(/<script[^>]+src=|<link[^>]+stylesheet|@import|url\(http/)
+  })
+})
