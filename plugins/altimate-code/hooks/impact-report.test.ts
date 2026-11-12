@@ -11,6 +11,8 @@ import {
   fingerprint,
   focusOf,
   impactWords,
+  MAY_CARRY_REASONS,
+  mayCarryGroups,
   mergeConsumers,
   type ModelChange,
   openersFor,
@@ -378,6 +380,81 @@ describe('the report', () => {
     expect(html.match(/<\/script>/g)!.length).toBe(2)
     expect(embedded(html).changes[0].model).toBe(hostile.model)
     expect(html).toContain('prefers-color-scheme:dark')
+  })
+})
+
+// The same answer from an altimate-code that clears a model only when it proves it: every may-carry
+// model once, with its reason.
+const PROVEN: ColumnAnswer = {
+  ...DOWN,
+  counts: { ...DOWN.counts, may_carry_models: 6 },
+  unresolved: [{ model: 5, reason: 'parse error', code: 'unresolved' }],
+  may_carry: [
+    { id: 'model.shop.rpt_after_broken', name: 'rpt_after_broken', reason: 'below', via: 'rpt_broken' },
+    { id: 'model.shop.rpt_misc', name: 'rpt_misc', reason: 'names_column' },
+    { id: 'model.shop.rpt_broken', name: 'rpt_broken', reason: 'unresolved' },
+    { id: 'model.shop.rpt_star', name: 'rpt_star', reason: 'star' },
+    { id: 'model.shop.rpt_daily_extra', name: 'rpt_daily_extra', reason: 'reads_value_model', via: 'fct_revenue_daily' },
+    { id: 'model.shop.rpt_new', name: 'rpt_new', reason: 'some_future_reason' },
+  ],
+}
+
+describe('may carry it, by reason', () => {
+  test("groups the models by reason in the contract's order, an unknown reason last, with via where it applies", () => {
+    const groups = mayCarryGroups(PROVEN)!
+    expect(groups.map(one => one.reason)).toEqual(['unresolved', 'star', 'names_column', 'reads_value_model', 'below', 'some_future_reason'])
+    expect(groups.map(one => plain([one.heading])[0])).toEqual([
+      "Its SQL couldn't be read",
+      'It selects `*`, so it may read the column without naming it',
+      'It uses the column in a filter, join or grouping',
+      'It reads a model the value reaches, whose other columns may change',
+      'It sits past one of these',
+      'The engine gave the reason "some_future_reason"',
+    ])
+    // via for below and reads_value_model; what a names_column model reads, and why an unresolved one wasn't read.
+    expect(groups.map(one => one.models)).toEqual([
+      [{ name: 'rpt_broken', note: 'parse error' }],
+      [{ name: 'rpt_star', note: null }],
+      [{ name: 'rpt_misc', note: 'reads revenue' }],
+      [{ name: 'rpt_daily_extra', note: 'reads fct_revenue_daily' }],
+      [{ name: 'rpt_after_broken', note: 'past rpt_broken' }],
+      [{ name: 'rpt_new', note: null }],
+    ])
+    // Every reason the contract names has the report's words.
+    expect(MAY_CARRY_REASONS.map(one => one[0])).toEqual(['unresolved', 'read_in_part', 'read_columns_unknown', 'star', 'natural_join', 'dynamic_name', 'row_reference', 'ephemeral', 'names_column', 'reads_value_model', 'below', 'capped'])
+    expect(mayCarryGroups({ ...PROVEN, may_carry: [] })).toEqual([])
+  })
+
+  test('says what may change and what is proven unaffected, and points to the reasons', () => {
+    const words = plain(impactWords('fct_orders', 'revenue', { ...TRACE, down: PROVEN }))
+    expect(words[1]).toBe("6 more may change: the engine couldn't prove the value doesn't reach them. \u201cMay carry it\u201d below says why, model by model.")
+    expect(words[2]).toBe('2 are proven unaffected: every path from the column to them passes a model proven not to read the value.')
+    expect(plain(impactWords('fct_orders', 'revenue', { ...TRACE, down: PROVEN }, true))).toContain(
+      '2 are proven not to carry it: every path from the column to them passes a model proven not to read the value.',
+    )
+  })
+
+  test('the report draws the groups in place of the older sections; an older answer keeps those sections', () => {
+    const proven = embedded(reportHtml(reportData([CHANGE], [{ ...TRACE, down: PROVEN }], TASK))).focuses[0]
+    expect(proven.mayCarry.map((one: any) => [one.reason, one.models.length])).toEqual([
+      ['unresolved', 1],
+      ['star', 1],
+      ['names_column', 1],
+      ['reads_value_model', 1],
+      ['below', 1],
+      ['some_future_reason', 1],
+    ])
+    const older = embedded(reportHtml(reportData([CHANGE], [TRACE], TASK))).focuses[0]
+    expect(older.mayCarry).toBeNull()
+    expect(older.alsoReads).toEqual([{ name: 'rpt_misc', columns: ['revenue'], downstream: 2 }])
+    expect(plain(older.impact)[1]).toStartWith('1 more may change: it uses the value in a way the trace can')
+    // The page picks the sections from the data: grouped when it has reasons, else the older folds.
+    const html = reportHtml(reportData([CHANGE], [TRACE], TASK))
+    expect(html).toContain("if(f.mayCarry)wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));else{")
+    expect(html).toContain("fold(f.mayCarry?'Proven unaffected: every path to it passes a model proven not to read the value':'Cleared: downstream, but does not carry it'")
+    expect(html).toContain("f.mayCarry?stat(r.cleared,'proven unaffected'")
+    // Without counts, the list's length is the may-carry count.
+    expect(reachOf({ ...PROVEN, counts: undefined }).mayCarry).toBe(6)
   })
 })
 
