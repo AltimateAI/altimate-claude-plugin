@@ -43,6 +43,9 @@ type Options = {
   cliFails?: boolean
   /** What impact_analysis adds to its answer. */
   impact?: (args: Record<string, any>) => Record<string, unknown>
+  /** The conversation's first launch (`usage().startedAt`) and its prompts so far. */
+  conversation?: () => number
+  turns?: () => number
   /** The CLI's whole answer for a call, in place of the usual one. */
   answer?: (args: Record<string, any>) => { status: string; output: string; metadata: Record<string, unknown> } | undefined
 }
@@ -132,6 +135,8 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { content: [{ type: 'text', text: JSON.stringify({ ...impactBody(e.args), report: 'Impact' }) }], isError: false } }
   })
   on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
+  on('session.usage', () => ({ value: { startedAt: options.conversation?.() ?? 1_000 } }))
+  on('session.turns', () => ({ value: options.turns?.() ?? 1 }))
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const argv = [...e.argv]
     runs.push(argv)
@@ -314,6 +319,51 @@ test('a later task that changes a model takes over: its report, its manifest', a
   await $.command.run({ command: 'lineage-report', args: '' } as any)
   expect(embedded(writes.get(REPORT)!).changes.map((one: any) => one.model)).toEqual(['stg_payments'])
   expect(directional(tools).filter(one => one.model === 'stg_payments').every(one => one.manifest_path === frozen())).toBe(true)
+})
+
+test("the band comes back with its conversation from Claude Code's session list, unless a prompt came since, it was dismissed, or the conversation is another", async ($, on) => {
+  let conversation = 1_000
+  let turns = 1
+  const { writes, turn, clock } = await start($, on, { conversation: () => conversation, turns: () => turns })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const saved = JSON.parse(writes.get(TASK_FILE)!)
+  expect(saved).toMatchObject({ conversation: 1_000, turns: 1, view: { state: 'ready' } })
+  const lines = async () => {
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    const found = await band.find({ type: 'Text', text: '◆ Lineage after this task · 1 model changed' })
+    const open = await band.find({ key: 'lineage-report-open' })
+    await band.unmount()
+    return !!found && !!open
+  }
+  expect(await lines()).toBe(true)
+  // The session list moves the conversation to a new process: the plugin starts over under a new session id.
+  const back = async () => {
+    await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+    await clock.settle()
+  }
+  await back()
+  expect(await lines()).toBe(true)
+  // Another conversation in the same project, or this one after another prompt: no band.
+  conversation = 2_000
+  await back()
+  expect(await lines()).toBe(false)
+  conversation = 1_000
+  turns = 2
+  await back()
+  expect(await lines()).toBe(false)
+  // Dismissed, it stays gone; the task itself stays saved for /lineage-report.
+  turns = 1
+  await back()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-summary-dismiss' })
+  await clock.settle()
+  await band.unmount()
+  await back()
+  expect(await lines()).toBe(false)
+  expect(JSON.parse(writes.get(TASK_FILE)!)).toMatchObject({ version: 1, changes: [{ model: 'fct_orders' }] })
+  expect(JSON.parse(writes.get(TASK_FILE)!).view).toBeUndefined()
 })
 
 test('after a restart, /lineage-report rebuilds the last task from what was saved, both ways', async ($, on) => {

@@ -281,14 +281,15 @@ async function finishTask($: EngineInterface, t: Task) {
   // The last task's report is no longer the last task's.
   await $.process.run(['rm', '-f', reportPathOf(done)], { timeoutMs: 5_000 }).catch(() => null)
   finished = done
-  await $.fs
-    .write(`${root}/${LINEAGE_DIR}/${TASK_FILE}`, JSON.stringify({ version: 1, finishedAt: done.finishedAt, changes, manifests: done.manifests }))
-    .catch(error => $.ui.log(`lineage-summary · the task could not be saved: ${String(error)}`, { to: 'debug' }))
+  const saved: SavedTask = { version: 1, finishedAt: done.finishedAt, changes, manifests: done.manifests }
+  await saveTask($, root, saved)
   const traces = await (done.downs = traceDown($, done))
   // A newer task finished first: its summary stays.
   if (seq !== finishSeq) return
   const view = summaryOf(changes, traces, null)
   await update($, summaryAtom, () => view)
+  // The band too, with which conversation it belongs to, so it can come back when the conversation does.
+  await saveTask($, root, { ...saved, view, ...(await conversationMark($)) })
   reportEvent($, 'summary_shown')
   // One line: a log line draws a newline as a replacement glyph.
   $.ui.log(summaryLines(view).map(line => line.trim()).join(' · '))
@@ -308,20 +309,69 @@ export function reportEvent($: EngineInterface, action: ReportAction) {
   })
 }
 
-/** The last task that changed a model: this session's, else the one a project's saved file names. */
-async function lastTask($: EngineInterface): Promise<Finished | null> {
-  if (finished) return finished
+/** What last-task.json holds: the task, and the band it ended with while that band still stands. */
+type SavedTask = {
+  version: 1
+  finishedAt: number
+  changes: ModelChange[]
+  manifests: Record<string, string | null>
+  view?: TaskSummaryView
+  conversation?: number | null
+  turns?: number | null
+}
+
+async function saveTask($: EngineInterface, root: string, saved: SavedTask) {
+  await $.fs
+    .write(`${root}/${LINEAGE_DIR}/${TASK_FILE}`, JSON.stringify(saved))
+    .catch(error => $.ui.log(`lineage-summary · the task could not be saved: ${String(error)}`, { to: 'debug' }))
+}
+
+async function readSaved($: EngineInterface): Promise<{ root: string; saved: SavedTask } | null> {
   const own = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
   if (!own) return null
   const text = await $.fs.read(`${own}/${LINEAGE_DIR}/${TASK_FILE}`).catch(() => null)
   if (!text) return null
   try {
     const saved = JSON.parse(text)
-    if (saved?.version !== 1 || !Array.isArray(saved.changes) || saved.changes.length === 0) return null
-    return (finished = { finishedAt: Number(saved.finishedAt), changes: saved.changes, manifests: saved.manifests ?? {}, downs: null, full: null })
+    return saved?.version === 1 && Array.isArray(saved.changes) && saved.changes.length > 0 ? { root: own, saved } : null
   } catch {
     return null
   }
+}
+
+/**
+ * Which conversation this is, and how many prompts it has had. Claude Code's session list moves a
+ * conversation to a background process under a new session id, where the plugin starts over; its
+ * first launch (`usage().startedAt`) stays the same, so that names the conversation.
+ */
+export async function conversationMark($: EngineInterface): Promise<{ conversation: number | null; turns: number | null }> {
+  const usage = await $.session.usage().catch(() => null)
+  const turns = await $.session.turns().catch(() => null)
+  return { conversation: typeof usage?.startedAt === 'number' ? usage.startedAt : null, turns: typeof turns === 'number' ? turns : null }
+}
+
+/** The band of the last task, back where it stood: the same conversation, with no prompt since and not dismissed. */
+async function restoreBand($: EngineInterface) {
+  const found = await readSaved($)
+  const view = found?.saved.view
+  if (!view || view.state !== 'ready' || !Array.isArray(view.models) || typeof found!.saved.conversation !== 'number') return
+  const mark = await conversationMark($)
+  if (mark.conversation !== found!.saved.conversation || mark.turns !== found!.saved.turns) return
+  await update($, summaryAtom, () => ({ ...view, building: false, openFailed: false }))
+}
+
+/** Dismissed, the band stays gone when the conversation comes back. */
+async function forgetBand($: EngineInterface) {
+  const found = await readSaved($)
+  if (found?.saved.view) await saveTask($, found.root, { version: 1, finishedAt: found.saved.finishedAt, changes: found.saved.changes, manifests: found.saved.manifests })
+}
+
+/** The last task that changed a model: this session's, else the one a project's saved file names. */
+async function lastTask($: EngineInterface): Promise<Finished | null> {
+  if (finished) return finished
+  const saved = (await readSaved($))?.saved
+  if (!saved) return null
+  return (finished = { finishedAt: Number(saved.finishedAt), changes: saved.changes, manifests: saved.manifests ?? {}, downs: null, full: null })
 }
 
 /** The files a task changed that differ now from how it left them. */
@@ -517,6 +567,7 @@ export async function startTaskImpact($: EngineInterface) {
   finished = null
   await update($, summaryAtom, () => null)
   await update($, planAtom, () => null)
+  await restoreBand($).catch(() => null)
   await $.command.register({
     name: REPORT_COMMAND,
     description: 'Open the column impact report of the last task that changed a dbt model, or with model.column, where that column comes from and where it goes',
@@ -557,7 +608,7 @@ export async function taskBand($: EngineInterface, ui: Ui): Promise<RenderElemen
       <Box>
         {view?.state === 'ready' ? <Button key="lineage-report-open" label="Open report" onPress={() => (reportEvent($, 'open_pressed'), later($, async () => void (await buildAndOpen($))))} /> : null}
         <Button key="lineage-open" label="Open lineage" onPress={() => later($, () => openPane($))} />
-        <Button key="lineage-summary-dismiss" label="Dismiss" onPress={() => update($, hiddenAtom, () => true)} />
+        <Button key="lineage-summary-dismiss" label="Dismiss" onPress={() => (later($, () => forgetBand($)), update($, hiddenAtom, () => true))} />
       </Box>
     </Box>
   )
