@@ -452,7 +452,7 @@ export const MAY_CARRY_REASONS: [string, string][] = [
   ['not_traced', "the value wasn't traced to it, but nothing rules it out"],
 ]
 /** Upstream, the reasons whose words name a direction: an ancestor sits above, and the value is traced from it. */
-const UPSTREAM_WORDS: Record<string, string> = { below: 'it sits above one of these', not_traced: "the value wasn't traced from it, but nothing rules it out" }
+const UPSTREAM_WORDS = new Map<string, string>([['below', 'it sits above one of these'], ['not_traced', "the value wasn't traced from it, but nothing rules it out"]])
 export type MayCarryGroup = { reason: string; heading: Words; models: { name: string; note: string | null }[] }
 
 /** Words with names in backticks set apart as code. */
@@ -482,7 +482,7 @@ export function mayCarryGroups(answer: ColumnAnswer | null, up = false): MayCarr
   }
   const order = [...MAY_CARRY_REASONS.map(one => one[0]).filter(one => byReason.has(one)), ...[...byReason.keys()].filter(one => !known.has(one)).sort()]
   return order.map(reason => {
-    const text = (up ? UPSTREAM_WORDS[reason] : undefined) ?? known.get(reason) ?? `the engine gave the reason "${reason}"`
+    const text = (up ? UPSTREAM_WORDS.get(reason) : undefined) ?? known.get(reason) ?? `the engine gave the reason "${reason}"`
     return { reason, heading: wordsOf(text.charAt(0).toUpperCase() + text.slice(1)), models: byReason.get(reason)!.sort((a, b) => a.name.localeCompare(b.name)) }
   })
 }

@@ -494,6 +494,9 @@ describe('where else a column may come from', () => {
       ['not_traced', "The value wasn't traced from it, but nothing rules it out", [{ name: 'stg_quiet', note: null }]],
     ])
     expect(mayCarryGroups(UP, true)).toEqual([])
+    // A reason the plugin doesn't know, even one named like an object member, gets the engine's word for it.
+    const odd = { ...UP_MAY, may_carry: [{ id: 'model.shop.x', name: 'x', reason: 'constructor' }] } as ColumnAnswer
+    expect(mayCarryGroups(odd, true)!.map(one => plain([one.heading])[0])).toEqual(['The engine gave the reason "constructor"'])
     // Downstream, the same reason reads the other way.
     expect(plain([mayCarryGroups(UP_MAY)!.find(one => one.reason === 'not_traced')!.heading])[0]).toBe("The value wasn't traced to it, but nothing rules it out")
   })
