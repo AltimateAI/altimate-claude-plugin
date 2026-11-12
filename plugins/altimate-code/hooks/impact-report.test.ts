@@ -350,6 +350,17 @@ describe('the report', () => {
     expect(data.changes[0].columns[0].after).toBe('sum(amount) - sum(refunds) as revenue')
   })
 
+  test('a click shows the path bar over the page, so nothing under the pointer moves', () => {
+    const html = reportHtml(reportData([CHANGE], [TRACE], TASK))
+    const rule = /\.pathbar\{[^}]*\}/.exec(html)![0]
+    expect(rule).toContain('position:fixed')
+    expect(rule).not.toContain('sticky')
+    expect(rule).not.toMatch(/margin:-/)
+    // The bar lets the pointer through to the column under it; its Clear button still takes clicks.
+    expect(rule).toContain('pointer-events:none')
+    expect(html).toMatch(/\.pathbar button\{[^}]*pointer-events:auto/)
+  })
+
   test('is one offline file: no external resource, and project text cannot close its script', () => {
     const hostile = { ...CHANGE, model: 'x</script><script>alert(1)</script>' }
     const html = reportHtml(reportData([hostile], [{ ...TRACE, model: hostile.model }], TASK))

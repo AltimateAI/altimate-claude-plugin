@@ -668,9 +668,10 @@ details.fold summary span{color:var(--muted);font-weight:400}
 details.fold ul{margin:0 0 10px;padding-left:18px}
 details.fold li{margin:3px 0}
 details.fold .why{color:var(--muted)}
-.pathbar{position:sticky;top:0;z-index:5;display:none;align-items:center;gap:10px;flex-wrap:wrap;background:var(--accent);color:#fff;padding:8px 14px;border-radius:0 0 10px 10px;margin:-20px 0 12px;font-size:13px}
+/* The path bar floats over the page: shown in the flow, it would push the page down under the pointer that clicked. */
+.pathbar{position:fixed;top:8px;left:16px;right:16px;max-width:1648px;margin:0 auto;z-index:20;display:none;align-items:center;gap:10px;flex-wrap:wrap;background:var(--accent);color:#fff;padding:8px 14px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.2);font-size:13px;pointer-events:none}
 @media (prefers-color-scheme:dark){.pathbar{color:#111}}
-.pathbar button{appearance:none;border:1px solid currentColor;background:transparent;color:inherit;border-radius:6px;padding:2px 8px;font:inherit;cursor:pointer}
+.pathbar button{appearance:none;border:1px solid currentColor;background:transparent;color:inherit;border-radius:6px;padding:2px 8px;font:inherit;cursor:pointer;pointer-events:auto}
 body.hl .pathbar{display:flex}
 body.hl .col:not(.on){opacity:.28}
 body.hl .model:not(.has-on){opacity:.45}
