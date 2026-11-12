@@ -253,9 +253,11 @@ export function summaryLines(view: TaskSummaryView): string[] {
       else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : 'no column answer: update altimate-code'}`)
       else {
         const r = col.reach
-        const parts = [`reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'model')} (${plural(r.ends, 'end')})`]
-        parts.push(`${r.mayCarry} may carry it`)
-        if (r.cleared !== null) parts.push(`${r.cleared} cleared`)
+        // What may change, and what the engine proved unaffected (`cleared`: every path to it passes a reader
+        // proven not to read the value).
+        const parts = [`reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'model')} (${plural(r.ends, 'end column')})`]
+        parts.push(`${r.mayCarry} more may change`)
+        if (r.cleared !== null) parts.push(`${r.cleared} proven unaffected`)
         lines.push(`  ${col.name}  ${parts.join(' · ')}`)
       }
     }

@@ -142,7 +142,7 @@ describe('the summary', () => {
     expect(lines).toEqual([
       '◆ Lineage after this task · 1 model changed',
       'fct_orders · 6 downstream models at model level',
-      '  revenue  reaches 4 columns in 3 models (2 ends) · 1 may carry it · 2 cleared',
+      '  revenue  reaches 4 columns in 3 models (2 end columns) · 1 more may change · 2 proven unaffected',
       '⚠ Lower bound: 1 model could not be read',
     ])
   })
