@@ -216,6 +216,8 @@ export type ColumnTrace = {
   up: ColumnAnswer | null
   modelLevel: number | null
   failed: boolean
+  /** The altimate-code answered without a column answer: one from before it. */
+  stale?: boolean
   consumers?: ReportConsumers
 }
 
@@ -248,7 +250,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
     if (model.columns.length === 0) lines.push('  no output column changed: the model-level count stands')
     for (const col of model.columns) {
       if (view.state === 'tracing' && !col.reach) lines.push(`  ${col.name}  tracing…`)
-      else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : 'no column answer'}`)
+      else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : 'no column answer: update altimate-code'}`)
       else {
         const r = col.reach
         const parts = [`reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'model')} (${plural(r.ends, 'end')})`]
@@ -352,9 +354,12 @@ const nameOf = (answer: ColumnAnswer, index: number | undefined) => {
   return String(node?.name ?? node?.id ?? index ?? '?')
 }
 
+/** What the report says for a column when the altimate-code predates the column answer. */
+const STALE = 'This altimate-code gives no column answer: update it to trace the column.'
+
 /** One direction's columns beyond the focus, grouped by hop and then by model. */
-export function sectionOf(answer: ColumnAnswer | null, failed = false): ReportSection {
-  if (!answer) return { hops: [], truncated: false, error: failed ? 'This direction could not be traced.' : null }
+export function sectionOf(answer: ColumnAnswer | null, failed = false, stale = false): ReportSection {
+  if (!answer) return { hops: [], truncated: false, error: stale ? STALE : failed ? 'This direction could not be traced.' : null }
   const byHop = new Map<number, Map<number, ReportModel>>()
   answer.columns.forEach((col, i) => {
     if (!(col.hop > 0)) return
@@ -407,7 +412,7 @@ export function impactWords(model: string, column: string | null, trace: ColumnT
     if (level === null) return [['The downstream count could not be read for ', { code: model }, '.']]
     return [[...downstream, ...(level > 0 ? ["No output column changed (a filter or a join, say), so this can't say which of them are affected."] : [])]]
   }
-  if (!down) return [[...downstream, 'The column ', { code: column }, ' could not be traced.']]
+  if (!down) return [[...downstream, ...(trace?.stale ? [STALE] : ['The column ', { code: column }, ' could not be traced.'])]]
   const r = reachOf(down)
   const lines: Words[] = []
   const value = [...new Set(down.columns.filter(one => one.hop > 0).map(one => one.model))].map(index => down.nodes[index]).filter(Boolean)
@@ -478,9 +483,9 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
     reach,
     modelLevel: trace?.modelLevel ?? reach?.modelLevel ?? null,
     impact: impactWords(change.model, column?.name ?? null, trace, lookup),
-    upstream: column ? upstreamWords(change.model, column.name, up) : [],
-    up: sectionOf(up, !up && !!column),
-    down: sectionOf(down, !down && !!column),
+    upstream: column ? (trace?.stale ? [[STALE]] : upstreamWords(change.model, column.name, up)) : [],
+    up: sectionOf(up, !up && !!column, !!trace?.stale),
+    down: sectionOf(down, !down && !!column, !!trace?.stale),
     edges,
     alsoReads: (down?.also_reads ?? []).map(one => ({ name: nameOf(down!, one.model), columns: (one.columns ?? []).map(String), downstream: num(one.downstream) })),
     unresolved: (down?.unresolved ?? []).map(one => ({ name: nameOf(down!, one.model), reason: String(one.reason ?? 'not read'), downstream: num(one.downstream) })),

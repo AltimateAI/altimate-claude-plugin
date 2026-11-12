@@ -377,6 +377,23 @@ test('a failed upstream trace is asked again next time, and the band keeps its n
   expect(directional(tools).map(one => one.direction)).toEqual(['downstream', 'upstream', 'downstream', 'upstream'])
 })
 
+test('with an altimate-code from before the column answer, the band and the report say to update it, not that the trace failed', async ($, on) => {
+  const reachOnly = { column_answer: undefined, column_reach: { models: [{ name: 'rpt_orders', columns: ['revenue'] }], exposures: [] } }
+  const { writes, turn } = await start($, on, { openers: { 'xdg-open': 0 }, impact: () => reachOnly })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /no column answer: update altimate-code/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /could not be traced/ })).toBeUndefined()
+  await band.unmount()
+  await $.command.run({ command: 'lineage-report', args: '' } as any)
+  const focus = embedded(writes.get(REPORT)!).focuses[0]
+  const update = 'This altimate-code gives no column answer: update it to trace the column.'
+  expect([focus.down.error, focus.up.error]).toEqual([update, update])
+  expect(focus.modelLevel).toBe(6)
+})
+
 test('a plan that names no model, or a subagent\'s, shows nothing; a new turn clears a plan\'s band; a plan file is the fallback', async ($, on) => {
   const { tools, logs, clock, files } = await start($, on)
   await $.turn.start({ text: 'plan it', turnId: 'p1' })

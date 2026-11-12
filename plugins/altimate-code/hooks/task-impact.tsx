@@ -208,7 +208,9 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
       jobs.push(async () => {
         const meta = await ask($, done, change, col.name, 'downstream')
         const down = answerOf(meta)
-        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down, consumers: consumersOf(meta) }
+        // An altimate-code from before the column answer gives neither the answer nor its error.
+        const stale = !!meta && !down && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
+        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, consumers: consumersOf(meta) }
       })
     }
   }
