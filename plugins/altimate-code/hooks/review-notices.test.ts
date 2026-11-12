@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { POLL_MS, decisionText, toastsFor, type ReviewDecision } from './review-notices'
+import { MAX_NAME, MAX_REASON, POLL_MS, decisionText, toastsFor, type ReviewDecision } from './review-notices'
 
 const decision = (over: Partial<ReviewDecision> = {}): ReviewDecision => ({
   kind: 'skill',
@@ -55,12 +55,33 @@ test('many decisions toast the first ones and count the rest', () => {
 })
 
 test('an interactive session asks for decisions not toasted yet, for its folder, and toasts each', async ($, on) => {
-  const { calls, toasts } = await session($, on, [{ body: { ok: true, decisions: [decision(), decision({ public_id: 'c-2', status: 'rejected', reason: 'No' })] } }])
-  expect(calls[0]).toEqual(['workspace', 'review', 'decisions', '--json', '--unseen', '--mark-seen', '--host', 'claude-ui', '--directory', '/repo'])
+  const { calls, toasts } = await session($, on, [
+    {
+      body: {
+        ok: true,
+        decisions: [decision({ key: 'skill:c-1:active' }), decision({ key: 'skill:c-2:rejected', public_id: 'c-2', status: 'rejected', reason: 'No' })],
+      },
+    },
+  ])
+  expect(calls[0]).toEqual(['workspace', 'review', 'decisions', '--json', '--unseen', '--claim', '--host', 'claude-ui', '--directory', '/repo'])
   expect(toasts).toEqual([
     '◆ altimate · Your skill "deploy" was approved by Olive. It now reaches the workspace.',
     '◆ altimate · Your skill "deploy" was rejected by Olive — No',
   ])
+  // Acknowledged once toasted, so they are not handed out again.
+  expect(calls[1]).toEqual(['workspace', 'review', 'decisions', '--json', '--host', 'claude-ui', '--directory', '/repo', '--ack', 'skill:c-1:active', 'skill:c-2:rejected'])
+})
+
+test('nothing toasted, nothing acknowledged', async ($, on) => {
+  const { calls } = await session($, on, [{ body: { ok: true, decisions: [] } }])
+  expect(calls).toHaveLength(1)
+})
+
+test('long names and reasons are cut', () => {
+  const text = decisionText(decision({ name: 'n'.repeat(300), status: 'rejected', reason: 'r'.repeat(500) }))
+  expect(text).toContain(`"${'n'.repeat(MAX_NAME - 1)}…"`)
+  expect(text).toContain(` — ${'r'.repeat(MAX_REASON - 1)}…`)
+  expect(text.length).toBeLessThan(MAX_NAME + MAX_REASON + 80)
 })
 
 test('a running session asks again later', async ($, on) => {
@@ -68,6 +89,7 @@ test('a running session asks again later', async ($, on) => {
   expect(calls).toHaveLength(1)
   await clock.advance(POLL_MS)
   await clock.settle()
+  // Asked again; the decision had no key (an older CLI), so there is nothing to acknowledge.
   expect(calls).toHaveLength(2)
   expect(toasts).toHaveLength(1)
 })

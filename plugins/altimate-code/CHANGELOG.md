@@ -6,7 +6,7 @@ All notable changes to this plugin will be documented in this file.
 
 ### Added
 - `/altimate-code:rules` also lists your skill and knowledge requests to the linked workspace: waiting, approved, rejected with the reviewer's reason, withdrawn or removed (replaced requests are counted, not listed). It is read-only: withdraw or remove in the Altimate web app, altimate-code's TUI or its VS Code extension.
-- Decisions on your skill and knowledge requests appear as a toast, once each, at session start and every 15 minutes in an interactive session (`hooks/review-notices.ts`). Claude is also told of them at session start by altimate-code. Needs an altimate-code release with `workspace review decisions`; with an older one the plugin asks once per session and shows nothing.
+- Decisions on your skill and knowledge requests appear as a toast, once each, at session start and every 15 minutes in an interactive session (`hooks/review-notices.ts`). A decision is held for the session that shows it and marked shown only after its toast, so two sessions never both toast it and one whose session ended first is shown again later. The first check in a project records decisions already kept without a toast. Claude is also told of them at session start by altimate-code, whether or not team rules apply in the project. Needs an altimate-code release with `workspace review decisions`; with an older one the plugin asks once per session and shows nothing.
 - `skill publish` from a session uses `--json` and relays the review outcome: sent for review to the owner, already waiting, or already approved.
 
 ## [1.5.0] — 2026-11-10
