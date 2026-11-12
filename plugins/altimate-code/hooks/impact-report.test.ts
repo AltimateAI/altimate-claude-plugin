@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'claude-code/testing'
 
+import { MIN_ALTIMATE_CODE } from './altimate-cli'
 import {
   answerOf,
   changedColumns,
@@ -455,6 +456,20 @@ describe('may carry it, by reason', () => {
     expect(html).toContain("f.mayCarry?stat(r.cleared,'proven unaffected'")
     // Without counts, the list's length is the may-carry count.
     expect(reachOf({ ...PROVEN, counts: undefined }).mayCarry).toBe(6)
+  })
+})
+
+describe('the altimate-code floor', () => {
+  test('is one constant, a version, and the report names it where an answer shows an older altimate-code', () => {
+    expect(MIN_ALTIMATE_CODE).toMatch(/^\d+\.\d+\.\d+$/)
+    const older = reportHtml(reportData([CHANGE], [TRACE], TASK))
+    expect(embedded(older).minCli).toBe(MIN_ALTIMATE_CODE)
+    expect(older).toContain("if(r&&r.mayCarry)wrap.appendChild(el('p','older','altimate-code '+DATA.minCli+' or later says why each model may carry it")
+    // Only in the older sections: an answer with reasons is one from that release or later.
+    const at = (one: string) => older.indexOf(one, older.indexOf('function render(){'))
+    expect(at("if(r&&r.mayCarry)wrap.appendChild(el('p','older'")).toBeGreaterThan(at('if(f.mayCarry)wrap.appendChild(mayCarryFold('))
+    expect(at("if(r&&r.mayCarry)wrap.appendChild(el('p','older'")).toBeLessThan(at("wrap.appendChild(fold(f.mayCarry?'Proven unaffected"))
+    expect(embedded(reportHtml(columnReportData('fct_orders', 'revenue', TRACE, { builtAt: TASK.builtAt, manifest: 'm' }))).minCli).toBe(MIN_ALTIMATE_CODE)
   })
 })
 

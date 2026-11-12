@@ -1,6 +1,12 @@
 // The altimate CLI as both halves of the plugin call it.
 import type { EngineInterface } from 'claude-code'
 
+/**
+ * The oldest altimate-code release the plugin is made for: the first with "cleared only when proven"
+ * (`may_carry` in the column answer). Stated in README.md and CHANGELOG.md too.
+ */
+export const MIN_ALTIMATE_CODE = '0.12.11' // placeholder until the release with altimate-code#1710 is tagged
+
 // `altimate` is the name the standalone installer and npm v0.7.1+ put on PATH;
 // older npm installs only have `altimate-code`.
 const CLI_NAMES = ['altimate', 'altimate-code'] as const

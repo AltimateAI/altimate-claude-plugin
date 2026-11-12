@@ -13,6 +13,7 @@ All notable changes to this plugin will be documented in this file.
 - The report draws the column lineage as a graph beside the summary: upstream on the left, downstream on the right, opened to fit, with zoom and pan. A click lights a column's path, "more levels" adds one, and a level of more than 12 models folds into one box. The page allows only its own inline script and style. An edge carries a label only when the engine told how the value changes (same, renamed, calculated, aggregated); the rest are dashed and unlabelled, and a note under the graph says so. A click on a column counts even when the hand drifts a few pixels (up to 12) before letting go; a longer drag still pans.
 
 ### Changed
+- Needs altimate-code 0.12.11 or later<!-- placeholder: MIN_ALTIMATE_CODE in hooks/altimate-cli.ts, until the release with altimate-code#1710 is tagged -->, which clears a downstream model only when it proves the value can't reach it and says why each other one may. With an older release the report names the release that adds the reasons, and one that gives no column answer at all is told to update in the band and the report.
 - The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result. A lookup that missed its time or failed still shows a toast.
 - The per-edit column lookup goes through the altimate CLI instead of the MCP server, so it raises no permission prompt in accept-edits mode and a large column answer arrives whole.
 

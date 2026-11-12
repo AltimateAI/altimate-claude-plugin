@@ -4,6 +4,7 @@
 import type { PlanImpactView, Reach, TaskSummaryView } from '../types'
 import { GRAPH_CSS, GRAPH_VIEW_JS, graphLayout, graphView, pressIsClick } from './report-graph'
 import { selectItems, touchedColumns } from './lineage-graph'
+import { MIN_ALTIMATE_CODE } from './altimate-cli'
 
 export type { PlanImpactView, Reach, TaskSummaryView }
 
@@ -252,7 +253,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
     if (model.columns.length === 0) lines.push('  no output column changed: the model-level count stands')
     for (const col of model.columns) {
       if (view.state === 'tracing' && !col.reach) lines.push(`  ${col.name}  tracing…`)
-      else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : 'no column answer: update altimate-code'}`)
+      else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : `no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later`}`)
       else {
         const r = col.reach
         // What may change, and what the engine proved unaffected (`cleared`: every path to it passes a reader
@@ -343,6 +344,8 @@ export type ReportData = {
   /** Files that changed after the task ended. */
   movedOn: string[]
   defaultLevels: number
+  /** The oldest altimate-code the plugin is made for, named where an answer shows an older one. */
+  minCli: string
   changes: { model: string; file: string; columns: ModelChange['columns'] }[]
   focuses: ReportFocus[]
   consumers: ReportConsumers
@@ -361,7 +364,7 @@ const nameOf = (answer: ColumnAnswer, index: number | undefined) => {
 }
 
 /** What the report says for a column when the altimate-code predates the column answer. */
-const STALE = 'This altimate-code gives no column answer: update it to trace the column.'
+const STALE = `This altimate-code gives no column answer: update it to ${MIN_ALTIMATE_CODE} or later to trace the column.`
 
 /** One direction's columns beyond the focus, grouped by hop and then by model. */
 export function sectionOf(answer: ColumnAnswer | null, failed = false, stale = false): ReportSection {
@@ -572,6 +575,7 @@ export function reportData(changes: ModelChange[], traces: ColumnTrace[], task: 
     lookup: null,
     ...task,
     defaultLevels: DEFAULT_LEVELS,
+    minCli: MIN_ALTIMATE_CODE,
     changes: changes.map(one => ({ model: one.model, file: one.file, columns: one.columns })),
     focuses,
     consumers: mergeConsumers(traces),
@@ -589,6 +593,7 @@ export function columnReportData(model: string, column: string, trace: ColumnTra
     manifest: built.manifest,
     movedOn: [],
     defaultLevels: DEFAULT_LEVELS,
+    minCli: MIN_ALTIMATE_CODE,
     changes: [],
     focuses: [focusOf(change, { name: column, before: null, after: null }, trace, true)],
     consumers: mergeConsumers([trace]),
@@ -731,6 +736,7 @@ details.fold li{margin:3px 0}
 details.fold .why{color:var(--muted)}
 details.fold .reason{font-size:12.5px;font-weight:600;margin:8px 0 2px}
 details.fold .reason code{font-weight:400}
+.older{color:var(--muted);font-size:12.5px;margin:4px 2px 8px}
 /* The path bar floats over the page: shown in the flow, it would push the page down under the pointer that clicked. */
 .pathbar{position:fixed;top:8px;left:16px;right:16px;max-width:1648px;margin:0 auto;z-index:20;display:none;align-items:center;gap:10px;flex-wrap:wrap;background:var(--accent);color:#fff;padding:8px 14px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.2);font-size:13px;pointer-events:none}
 @media (prefers-color-scheme:dark){.pathbar{color:#111}}
@@ -811,7 +817,8 @@ function render(){
   wrap.appendChild(page);
   if(f.mayCarry)wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));else{
   wrap.appendChild(fold('Also reads it, outside the select',f.alsoReads.length,f.alsoReads.map(function(a){return li(a.name,'reads '+a.columns.join(', ')+(a.downstream!=null?' \\u00b7 '+plural(a.downstream,'model')+' downstream of it':''))})));
-  wrap.appendChild(fold('Not resolved',f.unresolved.length,f.unresolved.map(function(u){return li(u.name,u.reason+(u.downstream!=null?' \\u00b7 '+plural(u.downstream,'model')+' downstream of it':''))})))}
+  wrap.appendChild(fold('Not resolved',f.unresolved.length,f.unresolved.map(function(u){return li(u.name,u.reason+(u.downstream!=null?' \\u00b7 '+plural(u.downstream,'model')+' downstream of it':''))})));
+  if(r&&r.mayCarry)wrap.appendChild(el('p','older','altimate-code '+DATA.minCli+' or later says why each model may carry it, and clears a model only when it proves the value can\\u2019t reach it.'))}
   wrap.appendChild(fold(f.mayCarry?'Proven unaffected: every path to it passes a model proven not to read the value':'Cleared: downstream, but does not carry it',f.cleared.count,f.cleared.names.map(function(n){return li(n,'')})));
   if(f.inputs.workarounds.length)wrap.appendChild(fold('How the engine read the SQL',f.inputs.workarounds.length,f.inputs.workarounds.map(function(w){var l=el('li','why',w);return l})));
   app.appendChild(wrap);if(graph)graph.afterMount();applyHighlight();

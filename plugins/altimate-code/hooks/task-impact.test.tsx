@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { MIN_ALTIMATE_CODE } from './altimate-cli'
 import { DOWN, UP, embedded } from './impact-report.test'
 
 const ROOT = '/repo'
@@ -456,12 +457,12 @@ test('with an altimate-code from before the column answer, the band and the repo
     await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
   })
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /no column answer: update altimate-code/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: `  revenue  no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later` })).toBeDefined()
   expect(await band.find({ type: 'Text', text: /could not be traced/ })).toBeUndefined()
   await band.unmount()
   await $.command.run({ command: 'lineage-report', args: '' } as any)
   const focus = embedded(writes.get(REPORT)!).focuses[0]
-  const update = 'This altimate-code gives no column answer: update it to trace the column.'
+  const update = `This altimate-code gives no column answer: update it to ${MIN_ALTIMATE_CODE} or later to trace the column.`
   expect([focus.down.error, focus.up.error]).toEqual([update, update])
   expect(focus.modelLevel).toBe(6)
 })
