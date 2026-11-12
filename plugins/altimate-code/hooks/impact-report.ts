@@ -454,6 +454,7 @@ export const MAY_CARRY_REASONS: [string, string][] = [
   ['unresolved', "its SQL couldn't be read"],
   ['read_in_part', 'its SQL was read only in part'],
   ['read_columns_unknown', "the columns its SQL reads couldn't be listed"],
+  ['unclear_sql', "its SQL has quoting or a FROM item the check can't read for certain"],
   ['star', 'it selects `*`, so it may read the column without naming it'],
   ['natural_join', 'a NATURAL JOIN may join on it'],
   ['dynamic_name', 'it names columns at run time (IDENTIFIER, COLUMNS or $n)'],

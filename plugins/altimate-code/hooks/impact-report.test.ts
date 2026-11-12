@@ -422,7 +422,7 @@ describe('may carry it, by reason', () => {
       [{ name: 'rpt_new', note: null }],
     ])
     // Every reason the contract names has the report's words.
-    expect(MAY_CARRY_REASONS.map(one => one[0])).toEqual(['unresolved', 'read_in_part', 'read_columns_unknown', 'star', 'natural_join', 'dynamic_name', 'row_reference', 'ephemeral', 'names_column', 'reads_value_model', 'below', 'capped'])
+    expect(MAY_CARRY_REASONS.map(one => one[0])).toEqual(['unresolved', 'read_in_part', 'read_columns_unknown', 'unclear_sql', 'star', 'natural_join', 'dynamic_name', 'row_reference', 'ephemeral', 'names_column', 'reads_value_model', 'below', 'capped'])
     expect(mayCarryGroups({ ...PROVEN, may_carry: [] })).toEqual([])
   })
 
