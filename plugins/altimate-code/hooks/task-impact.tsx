@@ -30,9 +30,15 @@ import { modelsNamed, openPane, projectRoot, runTool, within } from './lineage'
 export const REPORT_COMMAND = 'lineage-report'
 // Under the project's target/, which dbt already keeps out of git.
 const LINEAGE_DIR = 'target/.altimate-lineage'
-// A task's copy of the manifest while it runs, and the last finished task's, kept for its report.
-const RUNNING_MANIFEST = 'manifest-before.json'
-const TASK_MANIFEST = 'task-manifest.json'
+// A task's copy of the manifest while it runs, and the last finished task's, kept for its report. Each
+// session has its own, so two sessions in one project never read each other's; a day on, they go.
+export const runningManifest = (tag: string) => `manifest-before.${tag}.json`
+export const taskManifest = (tag: string) => `task-manifest.${tag}.json`
+const MANIFEST_COPIES_KEPT_MINUTES = '+1440'
+/** This session's id as a file-name part. */
+export async function sessionTag($: EngineInterface): Promise<string> {
+  return String(await $.session.id().catch(() => 'session')).replace(/[^A-Za-z0-9_-]/g, '_')
+}
 // What a report needs of the last finished task, so one can be built after a restart too.
 const TASK_FILE = 'last-task.json'
 // A report on one column, asked for by name; apart from the task's, which it never replaces.
@@ -119,8 +125,9 @@ function prepareRoot($: EngineInterface, t: Task, root: string): Promise<RootSta
       // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read.
       const dir = `${root}/${LINEAGE_DIR}`
       const made = await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5_000 }).catch(() => null)
-      const copied = made?.exitCode === 0 ? await $.process.run(['cp', manifest, `${dir}/${RUNNING_MANIFEST}`], { timeoutMs: 20_000 }).catch(() => null) : null
-      if (copied?.exitCode === 0) snapshot = `${dir}/${RUNNING_MANIFEST}`
+      const copy = `${dir}/${runningManifest(await sessionTag($))}`
+      const copied = made?.exitCode === 0 ? await $.process.run(['cp', manifest, copy], { timeoutMs: 20_000 }).catch(() => null) : null
+      if (copied?.exitCode === 0) snapshot = copy
     }
     const top = (await git($, ['-C', root, 'rev-parse', '--show-toplevel']))?.trim()
     let gitStart: GitStart | null = null
@@ -230,16 +237,21 @@ async function traceFull($: EngineInterface, done: Finished): Promise<ColumnTrac
 
 const stamp = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
 
-/** Moves each project's copy of the manifest out of the next task's way. */
+/** Moves each project's copy of the manifest out of the next task's way, and clears copies a day old. */
 async function freezeManifests($: EngineInterface, t: Task, changes: ModelChange[]): Promise<Record<string, string | null>> {
   const out: Record<string, string | null> = {}
+  const tag = await sessionTag($)
   for (const root of new Set(changes.map(one => one.root))) {
+    const dir = `${root}/${LINEAGE_DIR}`
+    await $.process
+      .run(['find', dir, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
+      .catch(() => null)
     const state = await t.roots.get(root)?.catch(() => null)
     if (!state?.snapshot) {
       out[root] = null
       continue
     }
-    const frozen = `${root}/${LINEAGE_DIR}/${TASK_MANIFEST}`
+    const frozen = `${dir}/${taskManifest(tag)}`
     const moved = await $.process.run(['mv', '-f', state.snapshot, frozen], { timeoutMs: 5_000 }).catch(() => null)
     out[root] = moved?.exitCode === 0 ? frozen : state.snapshot
   }

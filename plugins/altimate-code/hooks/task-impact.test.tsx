@@ -4,8 +4,11 @@ import { DOWN, UP, embedded } from './impact-report.test'
 
 const ROOT = '/repo'
 const MANIFEST = `${ROOT}/target/manifest.json`
-const SNAPSHOT = `${ROOT}/target/.altimate-lineage/manifest-before.json`
-const FROZEN = `${ROOT}/target/.altimate-lineage/task-manifest.json`
+// The manifest copies carry the session's id: read from the copy the task start made.
+let RUNS: string[][] = []
+const tag = () => RUNS.map(one => (one[0] === 'cp' ? /\/manifest-before\.([^/]+)\.json$/.exec(one[2] ?? '')?.[1] : undefined)).find(Boolean) ?? ''
+const snapshot = () => `${ROOT}/target/.altimate-lineage/manifest-before.${tag()}.json`
+const frozen = () => `${ROOT}/target/.altimate-lineage/task-manifest.${tag()}.json`
 const TASK_FILE = `${ROOT}/target/.altimate-lineage/last-task.json`
 const REPORT = `${ROOT}/target/.altimate-lineage/report.html`
 const MODEL = `${ROOT}/models/fct_orders.sql`
@@ -195,6 +198,7 @@ async function start($: any, on: any, options: Options = {}) {
     await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, reason: 'answer', turnId: id } as any)
     await clock.settle()
   }
+  RUNS = runs
   return { clock, files, runs, tools, writes, logs, toasts, copies, dialogs, mcpAsked, turn }
 }
 
@@ -204,8 +208,26 @@ test('a task start copies the manifest aside, never reading it', async ($, on) =
   const { runs, turn } = await start($, on)
   await turn('t1', async () => {})
   expect(runs).toContainEqual(['mkdir', '-p', `${ROOT}/target/.altimate-lineage`])
-  expect(runs).toContainEqual(['cp', MANIFEST, SNAPSHOT])
+  expect(runs).toContainEqual(['cp', MANIFEST, snapshot()])
   expect(runs.findIndex(one => one[0] === 'mkdir')).toBeLessThan(runs.findIndex(one => one[0] === 'cp'))
+})
+
+test("each session's manifest copies carry its id, so another session's task never replaces them; a task's end clears copies a day old", async ($, on) => {
+  const { runs, turn, tools, clock } = await start($, on)
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  await clock.settle()
+  // The id in the copies' names is the one the usage events carry.
+  const event = runs.find(one => one.includes('report-event'))!
+  const id = event[event.indexOf('--session') + 1]!.replace(/^claude:/, '')
+  expect(tag()).toBe(id.replace(/[^A-Za-z0-9_-]/g, '_'))
+  expect(tag().length).toBeGreaterThan(0)
+  expect(runs).toContainEqual(['mv', '-f', snapshot(), frozen()])
+  expect(directional(tools).every(one => one.manifest_path === frozen())).toBe(true)
+  const clear = runs.findIndex(one => one[0] === 'find')
+  expect(runs[clear]).toEqual(['find', `${ROOT}/target/.altimate-lineage`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', '+1440', '-delete'])
+  expect(clear).toBeLessThan(runs.findIndex(one => one[0] === 'mv'))
 })
 
 test('an edited model is traced downstream at the task end for the band; the report waits until it is asked for', async ($, on) => {
@@ -215,7 +237,7 @@ test('an edited model is traced downstream at the task end for the band; the rep
     // A second edit of the same file: the original stays the one from before the first.
     await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'order_id,', new_string: 'order_id ,' })
   })
-  expect(directional(tools)).toEqual([{ manifest_path: FROZEN, model: 'fct_orders', column: 'revenue', change_type: 'modify', direction: 'downstream' }])
+  expect(directional(tools)).toEqual([{ manifest_path: frozen(), model: 'fct_orders', column: 'revenue', change_type: 'modify', direction: 'downstream' }])
   expect(writes.has(REPORT)).toBe(false)
   // One log line: the transcript draws a newline in a log as a replacement glyph.
   expect(logs).toContain('◆ Lineage after this task · 1 model changed · fct_orders · 6 downstream models at model level · revenue  reaches 4 columns in 3 models (2 ends) · 1 may carry it · 2 cleared · ⚠ Lower bound: 1 model could not be read')
@@ -231,7 +253,7 @@ test('an edited model is traced downstream at the task end for the band; the rep
   await band.press({ key: 'lineage-report-open' })
   await clock.settle()
   expect(directional(tools).map(one => one.direction)).toEqual(['downstream', 'upstream'])
-  expect(directional(tools)[1]!.manifest_path).toBe(FROZEN)
+  expect(directional(tools)[1]!.manifest_path).toBe(frozen())
   const report = embedded(writes.get(REPORT)!)
   expect(report.changes).toEqual([
     { model: 'fct_orders', file: 'models/fct_orders.sql', columns: [{ name: 'revenue', before: 'sum(amount) as revenue', after: 'sum(amount) - sum(refunds) as revenue' }] },
@@ -262,8 +284,8 @@ test('once the session has moved on, /lineage-report still builds that task, fro
   await turn('t2', async () => {
     files[MODEL] = files[MODEL]!.replace('order_id,', 'order_id as id,')
   })
-  expect(copies.has(SNAPSHOT)).toBe(true)
-  expect(copies.has(FROZEN)).toBe(true)
+  expect(copies.has(snapshot())).toBe(true)
+  expect(copies.has(frozen())).toBe(true)
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ key: 'lineage-report-open' })).toBeUndefined()
   await band.unmount()
@@ -271,7 +293,7 @@ test('once the session has moved on, /lineage-report still builds that task, fro
   const out: any = await $.command.run({ command: 'lineage-report', args: '' } as any)
   await clock.settle()
   expect(out.text).toMatch(/^Opened the column impact report for the task that finished at .* UTC: /)
-  expect(directional(tools).slice(before).map(one => [one.direction, one.manifest_path])).toEqual([['upstream', FROZEN]])
+  expect(directional(tools).slice(before).map(one => [one.direction, one.manifest_path])).toEqual([['upstream', frozen()]])
   const report = embedded(writes.get(REPORT)!)
   expect(report.changes[0].columns[0].after).toBe('sum(amount) * 2 as revenue')
   expect(report.movedOn).toEqual(['models/fct_orders.sql'])
@@ -291,7 +313,7 @@ test('a later task that changes a model takes over: its report, its manifest', a
   expect(writes.has(REPORT)).toBe(false)
   await $.command.run({ command: 'lineage-report', args: '' } as any)
   expect(embedded(writes.get(REPORT)!).changes.map((one: any) => one.model)).toEqual(['stg_payments'])
-  expect(directional(tools).filter(one => one.model === 'stg_payments').every(one => one.manifest_path === FROZEN)).toBe(true)
+  expect(directional(tools).filter(one => one.model === 'stg_payments').every(one => one.manifest_path === frozen())).toBe(true)
 })
 
 test('after a restart, /lineage-report rebuilds the last task from what was saved, both ways', async ($, on) => {
@@ -301,13 +323,13 @@ test('after a restart, /lineage-report rebuilds the last task from what was save
   })
   const saved = JSON.parse(writes.get(TASK_FILE)!)
   expect(saved.changes[0]).toMatchObject({ model: 'fct_orders', file: 'models/fct_orders.sql' })
-  expect(saved.manifests).toEqual({ [ROOT]: FROZEN })
+  expect(saved.manifests).toEqual({ [ROOT]: frozen() })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const before = directional(tools).length
   // A commit in between moves HEAD but not the task, and the file is as the task left it.
   const out: any = await $.command.run({ command: 'lineage-report', args: '' } as any)
-  expect(directional(tools).slice(before).map(one => `${one.direction}:${one.manifest_path === FROZEN}`).sort()).toEqual(['downstream:true', 'upstream:true'])
+  expect(directional(tools).slice(before).map(one => `${one.direction}:${one.manifest_path === frozen()}`).sort()).toEqual(['downstream:true', 'upstream:true'])
   expect(out.text).toContain(`: ${REPORT}`)
   expect(embedded(writes.get(REPORT)!).movedOn).toEqual([])
   expect(files[MODEL]).toContain('* 2 as revenue')
@@ -319,7 +341,7 @@ test("when the task's copy of the manifest is gone it reads the project's and sa
   await turn('t1', async () => {
     await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
   })
-  copies.delete(FROZEN)
+  copies.delete(frozen())
   await $.command.run({ command: 'lineage-report', args: '' } as any)
   expect(embedded(writes.get(REPORT)!).manifest).toBe("target/manifest.json as it is now, as the copy from the task's start is gone")
   gone = true
@@ -436,7 +458,7 @@ test('a change to no output column falls back to the model-level count', async (
   await turn('t1', async () => {
     await $.tool.call({ tool: 'Edit', file_path: STAGING, old_string: "status = 'ok'", new_string: "status in ('ok', 'settled')" })
   })
-  expect(directional(tools)).toEqual([{ manifest_path: FROZEN, model: 'stg_payments', change_type: 'modify', direction: 'downstream' }])
+  expect(directional(tools)).toEqual([{ manifest_path: frozen(), model: 'stg_payments', change_type: 'modify', direction: 'downstream' }])
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: 'stg_payments · 6 downstream models at model level' })).toBeDefined()
   expect(await band.find({ type: 'Text', text: '  no output column changed: the model-level count stands' })).toBeDefined()
