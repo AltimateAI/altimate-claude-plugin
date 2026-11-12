@@ -140,7 +140,7 @@ export function reachOf(answer: ColumnAnswer): Reach {
     models: num(counts.models) ?? new Set(beyond.map(one => one.model)).size,
     ends: num(counts.ends) ?? beyond.filter(one => one.end).length,
     hops: num(counts.hops) ?? Math.max(0, ...answer.columns.map(one => one.hop)),
-    mayCarry: num(counts.may_carry_models) ?? answer.may_carry?.length ?? 0,
+    mayCarry: num(counts.may_carry_models) ?? (Array.isArray(answer.may_carry) ? answer.may_carry.length : 0),
     unresolved: num(counts.unresolved_models) ?? answer.unresolved?.length ?? 0,
     modelLevel: num(counts.model_level),
     truncated: answer.truncated === true,
@@ -420,7 +420,9 @@ export function impactWords(model: string, column: string | null, trace: ColumnT
   else if (level !== 0) lines.push([...downstream, 'The value of ', { code: column }, " doesn't flow into any column of theirs."])
   else lines.push(downstream)
   const them = r.mayCarry === 1 ? 'it' : 'them'
-  if (r.mayCarry > 0) lines.push([`${r.mayCarry} more may ${lookup ? 'carry it' : 'change'}: the value wasn't traced to ${them}, and nothing rules ${them} out. \u201cMay carry it\u201d below says why, model by model.`])
+  // "Says why" only when the answer names the models: the fold then lists them by reason.
+  const listed = Array.isArray(down.may_carry) && down.may_carry.length > 0
+  if (r.mayCarry > 0) lines.push([`${r.mayCarry} more may ${lookup ? 'carry it' : 'change'}: the value wasn't traced to ${them}, and nothing rules ${them} out.${listed ? ' \u201cMay carry it\u201d below says why, model by model.' : ''}`])
   const self = down.nodes[down.columns.find(one => one.hop === 0)?.model ?? -1]
   if (self?.contract && !lookup) lines.push([{ code: model }, ' enforces a contract, so a type change can fail its build.'])
   const contracts = value.filter(one => one!.contract).map(one => String(one!.name ?? one!.id))
@@ -449,6 +451,8 @@ export const MAY_CARRY_REASONS: [string, string][] = [
   ['capped', 'the trace stopped at its limit here'],
   ['not_traced', "the value wasn't traced to it, but nothing rules it out"],
 ]
+/** Upstream, the reasons whose words name a direction: an ancestor sits above, and the value is traced from it. */
+const UPSTREAM_WORDS: Record<string, string> = { below: 'it sits above one of these', not_traced: "the value wasn't traced from it, but nothing rules it out" }
 export type MayCarryGroup = { reason: string; heading: Words; models: { name: string; note: string | null }[] }
 
 /** Words with names in backticks set apart as code. */
@@ -466,7 +470,7 @@ export function mayCarryGroups(answer: ColumnAnswer | null, up = false): MayCarr
   const byReason = new Map<string, MayCarryGroup['models']>()
   const readsOf = new Map((answer.also_reads ?? []).map(one => [nameOf(answer, one.model), one]))
   const unreadOf = new Map((answer.unresolved ?? []).map(one => [nameOf(answer, one.model), one]))
-  for (const one of answer.may_carry ?? []) {
+  for (const one of Array.isArray(answer.may_carry) ? answer.may_carry : []) {
     const reason = String(one?.reason ?? 'unknown')
     const name = String(one?.name ?? one?.id ?? '?')
     const via = typeof one?.via === 'string' && one.via ? (reason === 'below' ? `${up ? 'above' : 'past'} ${one.via}` : reason === 'reads_value_model' ? `reads ${one.via}` : null) : null
@@ -478,7 +482,7 @@ export function mayCarryGroups(answer: ColumnAnswer | null, up = false): MayCarr
   }
   const order = [...MAY_CARRY_REASONS.map(one => one[0]).filter(one => byReason.has(one)), ...[...byReason.keys()].filter(one => !known.has(one)).sort()]
   return order.map(reason => {
-    const text = (up && reason === 'below' ? 'it sits above one of these' : known.get(reason)) ?? `the engine gave the reason "${reason}"`
+    const text = (up ? UPSTREAM_WORDS[reason] : undefined) ?? known.get(reason) ?? `the engine gave the reason "${reason}"`
     return { reason, heading: wordsOf(text.charAt(0).toUpperCase() + text.slice(1)), models: byReason.get(reason)!.sort((a, b) => a.name.localeCompare(b.name)) }
   })
 }
@@ -491,7 +495,7 @@ export function upstreamWords(model: string, column: string, up: ColumnAnswer | 
   const read = up.columns.filter(one => one.hop > 0)
   const name = (index: number) => nameOf(up, index)
   // The ancestors the traced edges don't reach may still be a source: nothing is reported as not one.
-  const maybe = up.may_carry?.length ?? 0
+  const maybe = Array.isArray(up.may_carry) ? up.may_carry.length : 0
   const others: Words[] = maybe ? [[`${maybe} more ${maybe === 1 ? 'model' : 'models'} upstream may also be a source: the value wasn't traced from ${maybe === 1 ? 'it' : 'them'}, and nothing rules ${maybe === 1 ? 'it' : 'them'} out. \u201cWhere else it may come from\u201d below says why.`]] : []
   if (read.length === 0) return [[{ code: column }, ' in ', { code: model }, " reads no column the trace could follow: a constant, say, or SQL the engine couldn't read."], ...others]
   const direct = read.filter(one => one.hop === 1)
@@ -793,7 +797,8 @@ function render(){
   if(DATA.lookup){var uc=0,um={},uh=0,ue=!!f.up.error;f.up.hops.forEach(function(h){uh=Math.max(uh,h.hop);h.models.forEach(function(m){um[m.id]=1;uc+=m.columns.length})});stats.appendChild(stat(ue?null:uc,'columns upstream',false,'Columns the value is made from, followed all the way back'));stats.appendChild(stat(ue?null:Object.keys(um).length,'models upstream',false,'Models those columns sit in'));stats.appendChild(stat(ue?null:uh,'hops up',false,'How many models back the trace goes'))}
   if(r){stats.appendChild(stat(r.columns,'columns downstream',false,'Columns the value flows into, at every level'));stats.appendChild(stat(r.models,'models carry it',false,'Downstream models with a column the value flows into'));stats.appendChild(stat(r.ends,'end columns',false,'Columns the value reaches that nothing further downstream reads'));stats.appendChild(stat(r.mayCarry,'models may carry it',!r.mayCarry,'Downstream models the value wasn\\u2019t traced to, which nothing rules out: \\u201cMay carry it\\u201d below says why'))}
   stats.appendChild(stat(f.modelLevel,'models downstream (model level)',true,'Every model downstream of this one, whether or not the value reaches it'));main.appendChild(stats);
-  if(r&&(r.unresolved||r.truncated))main.appendChild(el('div','note warn','\\u26a0 Lower bound: '+[r.unresolved?plural(r.unresolved,'model')+' could not be read':'',r.truncated?'the trace hit its limit':''].filter(Boolean).join('; ')+'. See \\u201cMay carry it\\u201d below.'));
+  var mayShown=!!(f.mayCarry&&(f.mayCarry.length||(r&&r.mayCarry)));
+  if(r&&(r.unresolved||r.truncated))main.appendChild(el('div','note warn','\\u26a0 Lower bound: '+[r.unresolved?plural(r.unresolved,'model')+' could not be read':'',r.truncated?'the trace hit its limit':''].filter(Boolean).join('; ')+'.'+(mayShown?' See \\u201cMay carry it\\u201d below.':'')));
   else if(r)main.appendChild(el('div','note ok','\\u2713 Every downstream model was read.'));
   var inp=[];if(f.inputs.engine)inp.push('engine '+f.inputs.engine);inp.push(f.inputs.catalog?'with catalog types':'no catalog: types from the manifest');if(f.inputs.olderThanSql)inp.push('the manifest is older than the SQL');main.appendChild(el('div','inputs',inp.join(' \\u00b7 ')));
   var lg=el('div','legend');['=','~','\\u0192','\\u03a3','?'].forEach(function(g){var s=el('span');s.appendChild(glyph(g,false));s.appendChild(document.createTextNode(HOW[g]));lg.appendChild(s)});var bn=el('span');bn.appendChild(glyph('=',true));bn.appendChild(document.createTextNode('matched by name'));lg.appendChild(bn);var cb=el('span');cb.appendChild(el('span','badge c','C'));cb.appendChild(document.createTextNode(' contract enforced'));lg.appendChild(cb);
@@ -803,7 +808,7 @@ function render(){
   var fc=el('div','panel focus');fc.appendChild(el('div','label',DATA.lookup?'The column':'The changed column'));var ti=el('div','title');if(f.key){ti.appendChild(colButton({key:f.key,column:f.model+'.'+(f.column||''),glyph:f.glyph||'?',byName:f.byName,end:false,type:null}))}else ti.appendChild(el('span','mono',f.column?f.model+'.'+f.column:f.model));fc.appendChild(ti);var hw=f.glyph?HOW[f.glyph]||'unknown':'';fc.appendChild(el('div','empty',(hw?hw.charAt(0).toUpperCase()+hw.slice(1)+' from what it reads'+(f.byName?' (matched by name)':'')+'. ':'')+(f.key?'Click any column to light up its path.':'')));main.appendChild(fc);
   main.appendChild(section(f,i,'down'))}
   wrap.appendChild(page);
-  if(f.mayCarry&&(f.mayCarry.length||(r&&r.mayCarry)))wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));
+  if(mayShown)wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));
   if(f.inputs.workarounds.length)wrap.appendChild(fold('How the engine read the SQL',f.inputs.workarounds.length,f.inputs.workarounds.map(function(w){var l=el('li','why',w);return l})));
   app.appendChild(wrap);if(graph)graph.afterMount();applyHighlight();
 }

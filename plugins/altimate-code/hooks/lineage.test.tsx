@@ -296,9 +296,8 @@ test('an edit naming a column is held until its reach is known, then the reach g
   expect(again.context ?? []).toEqual([])
 })
 
-test('with a column answer, the note Claude gets has the numbers the end-of-task summary shows', async ($, on) => {
-  // The same call carries the older column reach too: the column answer wins.
-  const answer = {
+// A column answer for the edit note: three traced columns and four models that may carry the value.
+const NOTE_ANSWER = {
     version: 1,
     focus: { model: 'model.shop.fct_orders', column: 'revenue' },
     direction: 'downstream',
@@ -325,7 +324,11 @@ test('with a column answer, the note Claude gets has the numbers the end-of-task
       { id: 'model.shop.dim_dates', name: 'dim_dates', reason: 'not_traced' },
     ],
     truncated: false,
-  }
+}
+
+test('with a column answer, the note Claude gets has the numbers the end-of-task summary shows', async ($, on) => {
+  // The same call carries the older column reach too: the column answer wins.
+  const answer = NOTE_ANSWER
   const { clock, notes } = await start($, on, { reach: { ...REACH, column_answer: answer } })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
@@ -339,6 +342,15 @@ test('with a column answer, the note Claude gets has the numbers the end-of-task
   // The older reach numbers are not given alongside.
   expect(note).not.toContain('read by 2 downstream models')
   expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue reaches 3 columns in 2 models, 4 may carry it · exec_revenue')
+})
+
+test('a may_carry that is not a list gives a note without reasons, and nothing throws', async ($, on) => {
+  const { clock } = await start($, on, { reach: { ...REACH, column_answer: { ...NOTE_ANSWER, may_carry: { rpt_broken: 'unresolved' } } } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  const note = result.context?.[0] as string
+  expect(note).toContain('  4 more models may carry it: the value was not traced to them, and nothing rules them out; 6 downstream models at model level')
+  expect(note).not.toContain('by reason')
 })
 
 test('[c] picks a column and shows its reach; [d] unfolds downstream; a model in the graph is followed on press', async ($, on) => {

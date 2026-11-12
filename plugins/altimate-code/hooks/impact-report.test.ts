@@ -427,6 +427,30 @@ describe('may carry it, by reason', () => {
     expect(mayCarryGroups(null)).toBeNull()
   })
 
+  test('a may_carry that is not a list names no reasons, and the report still draws', () => {
+    const odd = { ...DOWN, may_carry: { rpt_broken: 'unresolved' } } as unknown as ColumnAnswer
+    expect(mayCarryGroups(odd)).toEqual([])
+    expect(reachOf({ ...odd, counts: undefined }).mayCarry).toBe(0)
+    expect(plain(upstreamWords('fct_orders', 'revenue', { ...UP, may_carry: { x: 1 } } as unknown as ColumnAnswer))).toHaveLength(4)
+    const focus = embedded(reportHtml(reportData([CHANGE], [{ ...TRACE, down: odd }], TASK))).focuses[0]
+    expect(focus.mayCarry).toEqual([])
+    // With the count but no list, the words promise no reasons.
+    expect(plain(focus.impact)[1]).toBe("3 more may change: the value wasn't traced to them, and nothing rules them out.")
+  })
+
+  test('the lower-bound note points to "May carry it" only when that fold is drawn', () => {
+    const html = reportHtml(reportData([CHANGE], [TRACE], TASK))
+    expect(html).toContain("var mayShown=!!(f.mayCarry&&(f.mayCarry.length||(r&&r.mayCarry)));")
+    expect(html).toContain("+'.'+(mayShown?' See \\u201cMay carry it\\u201d below.':'')));")
+    expect(html).toContain('if(mayShown)wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));')
+    // A value model read in part with nothing that may carry it: no fold, and no words that point to one.
+    const none: ColumnAnswer = { ...DOWN, counts: { ...DOWN.counts, may_carry_models: 0, model_level: 3 }, may_carry: [], truncated: true }
+    const focus = embedded(reportHtml(reportData([CHANGE], [{ ...TRACE, down: none, modelLevel: 3 }], TASK))).focuses[0]
+    expect(focus.mayCarry).toEqual([])
+    expect(focus.reach).toMatchObject({ mayCarry: 0, unresolved: 1, truncated: true })
+    expect(plain(focus.impact).some(line => line.includes('May carry it'))).toBe(false)
+  })
+
   test('the band says what the value reaches and how many more may change, and never that a model is unaffected', () => {
     const band = summaryLines(summaryOf([CHANGE], [{ ...TRACE, down: MANY, up: null }], null))[2]
     expect(band).toBe('  revenue  reaches 4 columns in 3 models (2 end columns) · 7 more may change')
@@ -444,8 +468,7 @@ describe('may carry it, by reason', () => {
       ['some_future_reason', 1],
     ])
     const html = reportHtml(reportData([CHANGE], [TRACE], TASK))
-    expect(html).toContain('if(f.mayCarry&&(f.mayCarry.length||(r&&r.mayCarry)))wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));\n')
-    for (const gone of ['Also reads it, outside the select', "fold('Not resolved'", 'Proven unaffected', 'Cleared:', "doesn't reach'],[null", 'minCli']) expect(html).not.toContain(gone)
+    for (const gone of ['Also reads it, outside the select', "fold('Not resolved'", 'Proven unaffected', 'Cleared:', '"Read only models the value doesn\'t reach"', "['cleared',", 'minCli']) expect(html).not.toContain(gone)
     expect(html).toContain("var TIERS=[['carries','Read a model the value reaches'],['may_carry','Read a model that may carry it'],[null,'Read this model or one downstream of it']];")
   })
 })
@@ -468,9 +491,11 @@ describe('where else a column may come from', () => {
       ['unresolved', "Its SQL couldn't be read", [{ name: 'stg_unread', note: null }]],
       ['star', 'It selects `*`, so it may read the column without naming it', [{ name: 'stg_mystery', note: null }]],
       ['below', 'It sits above one of these', [{ name: 'orders_v2', note: 'above int_orders' }]],
-      ['not_traced', "The value wasn't traced to it, but nothing rules it out", [{ name: 'stg_quiet', note: null }]],
+      ['not_traced', "The value wasn't traced from it, but nothing rules it out", [{ name: 'stg_quiet', note: null }]],
     ])
     expect(mayCarryGroups(UP, true)).toEqual([])
+    // Downstream, the same reason reads the other way.
+    expect(plain([mayCarryGroups(UP_MAY)!.find(one => one.reason === 'not_traced')!.heading])[0]).toBe("The value wasn't traced to it, but nothing rules it out")
   })
 
   test('says how many more may be a source, and never that a model is not one', () => {

@@ -36,7 +36,7 @@ import {
   upstreamArt,
   warehouseEdges,
 } from './lineage-graph'
-import { answerOf, carriersOf, type ColumnAnswer, MAY_CARRY_REASONS, reachOf } from './impact-report'
+import { answerOf, carriersOf, type ColumnAnswer, mayCarryGroups, reachOf } from './impact-report'
 import { taskBeforeTool, taskTurnComplete, taskTurnStart } from './task-impact'
 
 const PANE = 'altimate-lineage'
@@ -1179,10 +1179,8 @@ function parsedLineage(text: string | undefined): ColumnLineage | null {
 
 /** How many may-carry models each reason covers, in the report's order: " (by reason: below 11, unresolved 6)". */
 function mayCarryWhy(answer: ColumnAnswer): string {
-  const counts = new Map<string, number>()
-  for (const one of answer.may_carry ?? []) counts.set(String(one?.reason ?? 'unknown'), (counts.get(String(one?.reason ?? 'unknown')) ?? 0) + 1)
-  const order = [...MAY_CARRY_REASONS.map(one => one[0]).filter(one => counts.has(one)), ...[...counts.keys()].filter(one => !MAY_CARRY_REASONS.some(known => known[0] === one)).sort()]
-  return order.length ? ` (by reason: ${order.map(one => `${one} ${counts.get(one)}`).join(', ')})` : ''
+  const counts = (mayCarryGroups(answer) ?? []).map(group => `${group.reason} ${group.models.length}`)
+  return counts.length ? ` (by reason: ${counts.join(', ')})` : ''
 }
 
 /** Registers /lineage; called from the plugin's one session.start hook. */
