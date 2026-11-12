@@ -2,6 +2,26 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- End-of-task column impact: after a task that changed a dbt model, a band sums up each changed column's downstream reach from `impact_analysis`. The task's start copies `target/manifest.json` aside, so the answer reflects the SQL before the task.
+- An offline HTML report, built when **Open report** or `/lineage-report` asks for it: what changed and what to expect downstream in plain words, who consumes it from dbt exposures, then upstream and downstream lineage, two levels by default, and click-to-highlight paths.
+- `/lineage-report <model>.<column>` opens the same report for any column, with no task behind it: where the column comes from first, then where its value goes. It reads the project's manifest as it is now, writes its own file beside the task's report, and an unknown model or column gets a plain error.
+- When a plan goes up for approval, a line above the dialog gives the downstream models, tests and exposures of each model the plan names.
+- Usage events for the report, through altimate-code's telemetry (`tool report-event`): the summary shown, **Open report** pressed, `/lineage-report` run, and the report built, failed or with no browser. The step and the session id only, off under the telemetry opt-out. See PRIVACY.md.
+- The report draws the column lineage as a graph beside the summary: upstream on the left, downstream on the right, opened to fit, with zoom and pan. A click lights a column's path, "more levels" adds one, and a level of more than 12 models folds into one box. The page allows only its own inline script and style. An edge carries a label only when the engine told how the value changes (same, renamed, calculated, aggregated); the rest are dashed and unlabelled, and a note under the graph says so. A click on a column counts even when the hand drifts a few pixels (up to 12) before letting go; a longer drag still pans.
+- The report lists every downstream model the value wasn't traced to under "May carry it", grouped by reason: SQL that couldn't be read, an ephemeral model, `*`, a NATURAL JOIN, a name given at run time, a model the value reaches, and so on, with "not traced" last. No model is reported unaffected. On the column report, "Where it comes from" also says how many models upstream may also be a source, with the same reasons.
+
+### Changed
+- The band says how many columns and models the value reaches and how many more models may change: "reaches 24 columns in 11 models (11 end columns) · 28 more may change".
+- Needs altimate-code 0.12.11 or later<!-- placeholder: MIN_ALTIMATE_CODE in hooks/altimate-cli.ts, until the release with altimate-code#1710 is tagged -->, whose column answer says why each model it couldn't trace to may carry the value. An altimate-code that gives no column answer is told to update in the band and the report.
+- The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result. A lookup that missed its time or failed still shows a toast.
+- The per-edit column lookup goes through the altimate CLI instead of the MCP server, so it raises no permission prompt in accept-edits mode and a large column answer arrives whole.
+
+### Fixed
+- The end-of-task band comes back after Claude Code's session list (Left arrow at an empty prompt, then back), unless a prompt came since or it was dismissed.
+
 ## [1.5.0] — 2026-11-10
 
 ### Added
