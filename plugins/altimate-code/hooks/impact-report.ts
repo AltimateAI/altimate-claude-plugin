@@ -2,7 +2,7 @@
 // and a self-contained HTML report. Pure functions only; the hooks live in task-impact.tsx.
 
 import type { PlanImpactView, Reach, TaskSummaryView } from '../types'
-import { GRAPH_CSS, GRAPH_VIEW_JS, graphLayout, pressIsClick } from './report-graph'
+import { GRAPH_CSS, GRAPH_VIEW_JS, graphLayout, graphView, pressIsClick } from './report-graph'
 import { selectItems, touchedColumns } from './lineage-graph'
 
 export type { PlanImpactView, Reach, TaskSummaryView }
@@ -626,6 +626,7 @@ header.top .when{color:var(--muted);font-size:12.5px}
 .inputs{color:var(--muted);font-size:12px;margin:-4px 0 14px}
 .legend{display:flex;flex-wrap:wrap;gap:4px 12px;color:var(--muted);font-size:12px;margin:0 0 14px}
 .legend .g{margin-right:4px}
+.legend .sw{display:inline-block;width:16px;height:12px;border-radius:3px;background:var(--focus);border:1.5px solid var(--focus-line);vertical-align:-2px}
 .section{margin:0 0 12px}
 .section-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin:18px 0 8px}
 .section-head h2{flex:1}
@@ -648,7 +649,7 @@ header.top .when{color:var(--muted);font-size:12.5px}
 .col:hover{background:var(--accent-soft)}
 .col .name{overflow-wrap:anywhere;flex:1}
 .col .type{color:var(--faint);font-size:11.5px}
-.col .end{font-size:10.5px;color:var(--muted);border:1px solid var(--line-strong);border-radius:4px;padding:0 4px}
+.col .end,.legend .end{font-size:10.5px;color:var(--muted);border:1px solid var(--line-strong);border-radius:4px;padding:0 4px}
 .g{display:inline-flex;align-items:center;justify-content:center;min-width:20px;height:20px;border-radius:5px;font-weight:700;font-size:12.5px;flex:none}
 .g.same{color:var(--same);background:var(--same-bg)}
 .g.ren{color:var(--ren);background:var(--ren-bg)}
@@ -682,7 +683,7 @@ body.hl .col.sel{outline:2px solid var(--accent)}
   .wrap{padding:14px 12px 48px}
   header.top h1{font-size:17px}
   .models{grid-template-columns:1fr}
-  .stat{min-width:0;flex:1 1 40%}
+  .stat{min-width:0;flex:1 1 28%;padding:5px 8px}
 }
 `
 
@@ -704,7 +705,7 @@ function colButton(c){var b=el('button','col');b.type='button';b.dataset.key=c.k
 function modelCard(m){var card=el('div','panel model');var head=el('div','model-head');head.appendChild(el('span','model-name mono',m.name));if(m.contract){var c=el('span','badge c','C');c.title='Contract enforced: a change to this column can fail its build';head.appendChild(c)}if(m.tests){head.appendChild(el('span','badge',plural(m.tests,'test')))}m.exposures.forEach(function(x){var b=el('span','badge x','\\u25a3 '+x);b.title='Exposure (dashboard or app) on this model';head.appendChild(b)});(m.flags||[]).forEach(function(x){var b=el('span','badge f',x);b.title='Noted by the engine: the trace through this model is less certain';head.appendChild(b)});card.appendChild(head);var meta=[m.folder,m.materialized].filter(Boolean).join(' \\u00b7 ');if(meta)card.appendChild(el('div','model-meta',meta));m.columns.forEach(function(c){card.appendChild(colButton(c))});return card}
 function hopBlock(h,dir){var d=el('div','hop');var cols=h.models.reduce(function(n,m){return n+m.columns.length},0);d.appendChild(el('div','hop-label',(dir==='up'?'Reads from \\u00b7 ':'')+plural(h.hop,'hop')+' '+(dir==='up'?'up':'down')+' \\u00b7 '+plural(h.models.length,'model')+' \\u00b7 '+plural(cols,'column')));var grid=el('div','models');h.models.forEach(function(m){grid.appendChild(modelCard(m))});d.appendChild(grid);return d}
 function section(f,i,dir){var sec=f[dir],lv=state.levels[i][dir],s=el('section','section');var head=el('div','section-head');head.appendChild(el('h2',null,dir==='up'?'Upstream: where it comes from':'Downstream: where it goes'));var total=sec.hops.length,hidden=sec.hops.filter(function(h){return h.hop>lv}).length;if(hidden>0){var more=el('button','more',hidden===1?'Show 1 more level':'Show more levels ('+hidden+' hidden)');more.type='button';more.addEventListener('click',function(){state.levels[i][dir]=lv+1;render()});head.appendChild(more);if(hidden>1){var all=el('button','more','Show all');all.type='button';all.addEventListener('click',function(){state.levels[i][dir]=Infinity;render()});head.appendChild(all)}}else if(total>DATA.defaultLevels&&lv>DATA.defaultLevels){var less=el('button','more','Back to '+DATA.defaultLevels+' levels');less.type='button';less.addEventListener('click',function(){state.levels[i][dir]=DATA.defaultLevels;render()});head.appendChild(less)}s.appendChild(head);if(sec.error){s.appendChild(el('div','empty',sec.error));return s}var shown=sec.hops.filter(function(h){return h.hop<=lv});if(!shown.length)s.appendChild(el('div','empty',dir==='up'?'Nothing upstream was traced for this column.':'No downstream model carries this column\\u2019s value.'));if(dir==='up')shown=shown.slice().reverse();shown.forEach(function(h){s.appendChild(hopBlock(h,dir))});if(sec.truncated)s.appendChild(el('div','note warn','The trace stopped at its limit: more may sit beyond the last level.'));return s}
-function stat(n,label,dim){var d=el('div','stat'+(dim?' dim':''));d.appendChild(el('b',null,n==null?'\\u2013':n));d.appendChild(el('span',null,label));return d}
+function stat(n,label,dim,tip){var d=el('div','stat'+(dim?' dim':''));if(tip)d.title=tip;d.appendChild(el('b',null,n==null?'\\u2013':n));d.appendChild(el('span',null,label));return d}
 function fold(title,count,items){var d=el('details','panel fold');var s=el('summary',null,title+' ');s.appendChild(el('span',null,'('+(count==null?'not reported':count)+')'));d.appendChild(s);var ul=el('ul');items.forEach(function(it){ul.appendChild(it)});if(!items.length)ul.appendChild(el('li','why',count==null?'Not reported by this altimate-code build.':count?'Only the count is known.':'None.'));d.appendChild(ul);return d}
 function li(name,rest){var l=el('li');l.appendChild(el('span','mono',name));if(rest){l.appendChild(document.createTextNode(' '));l.appendChild(el('span','why',rest))}return l}
 function words(parent,line){line.forEach(function(w){if(typeof w==='string')parent.appendChild(document.createTextNode(w));else parent.appendChild(el('code',null,w.code))});return parent}
@@ -730,13 +731,14 @@ function render(){
   var deep=el('div','deep');deep.appendChild(el('h2',null,'Column by column'));deep.appendChild(el('p',null,'Two levels up and down, with more on request. Click any column to light up its path; the rest dims and stays on the page.'));main.appendChild(deep);
   if(DATA.focuses.length>1){var tabs=el('div','tabs');tabs.setAttribute('role','tablist');DATA.focuses.forEach(function(g,j){var t=el('button','tab',g.column?g.model+'.'+g.column:g.model+' (model)');t.type='button';t.setAttribute('role','tab');t.setAttribute('aria-selected',j===i?'true':'false');t.addEventListener('click',function(){state.focus=j;state.selected=null;render()});tabs.appendChild(t)});main.appendChild(tabs)}
   var r=f.reach,stats=el('div','stats');
-  if(DATA.lookup){var uc=0,um={},uh=0,ue=!!f.up.error;f.up.hops.forEach(function(h){uh=Math.max(uh,h.hop);h.models.forEach(function(m){um[m.id]=1;uc+=m.columns.length})});stats.appendChild(stat(ue?null:uc,'columns upstream'));stats.appendChild(stat(ue?null:Object.keys(um).length,'models upstream'));stats.appendChild(stat(ue?null:uh,'hops up'))}
-  if(r){stats.appendChild(stat(r.columns,'columns downstream'));stats.appendChild(stat(r.models,'models carry it'));stats.appendChild(stat(r.ends,'end columns'));stats.appendChild(stat(r.mayCarry,'may carry it',!r.mayCarry));stats.appendChild(stat(r.cleared,'cleared',r.cleared==null))}
-  stats.appendChild(stat(f.modelLevel,'downstream at model level',true));main.appendChild(stats);
+  if(DATA.lookup){var uc=0,um={},uh=0,ue=!!f.up.error;f.up.hops.forEach(function(h){uh=Math.max(uh,h.hop);h.models.forEach(function(m){um[m.id]=1;uc+=m.columns.length})});stats.appendChild(stat(ue?null:uc,'columns upstream',false,'Columns the value is made from, followed all the way back'));stats.appendChild(stat(ue?null:Object.keys(um).length,'models upstream',false,'Models those columns sit in'));stats.appendChild(stat(ue?null:uh,'hops up',false,'How many models back the trace goes'))}
+  if(r){stats.appendChild(stat(r.columns,'columns downstream',false,'Columns the value flows into, at every level'));stats.appendChild(stat(r.models,'models carry it',false,'Downstream models with a column the value flows into'));stats.appendChild(stat(r.ends,'end columns',false,'Columns the value reaches that nothing further downstream reads'));stats.appendChild(stat(r.mayCarry,'models may carry it',!r.mayCarry,'Models that use the value in a way the trace can\\u2019t follow (a filter or a join, say), whose SQL couldn\\u2019t be read, or that read from a model like that'));stats.appendChild(stat(r.cleared,'models cleared',r.cleared==null,'Downstream of the model, but the value doesn\\u2019t reach them'))}
+  stats.appendChild(stat(f.modelLevel,'models downstream (model level)',true,'Every model downstream of this one, whether or not the value reaches it'));main.appendChild(stats);
   if(r&&(r.unresolved||r.truncated))main.appendChild(el('div','note warn','\\u26a0 Lower bound: '+[r.unresolved?plural(r.unresolved,'model')+' could not be read':'',r.truncated?'the trace hit its limit':''].filter(Boolean).join('; ')+'. See \\u201cNot resolved\\u201d below.'));
   else if(r)main.appendChild(el('div','note ok','\\u2713 Every downstream model was read.'));
   var inp=[];if(f.inputs.engine)inp.push('engine '+f.inputs.engine);inp.push(f.inputs.catalog?'with catalog types':'no catalog: types from the manifest');if(f.inputs.olderThanSql)inp.push('the manifest is older than the SQL');main.appendChild(el('div','inputs',inp.join(' \\u00b7 ')));
-  var lg=el('div','legend');['=','~','\\u0192','\\u03a3','?'].forEach(function(g){var s=el('span');s.appendChild(glyph(g,false));s.appendChild(document.createTextNode(HOW[g]));lg.appendChild(s)});var bn=el('span');bn.appendChild(glyph('=',true));bn.appendChild(document.createTextNode('matched by name'));lg.appendChild(bn);var cb=el('span');cb.appendChild(el('span','badge c','C'));cb.appendChild(document.createTextNode(' contract enforced'));lg.appendChild(cb);main.appendChild(lg);
+  var lg=el('div','legend');['=','~','\\u0192','\\u03a3','?'].forEach(function(g){var s=el('span');s.appendChild(glyph(g,false));s.appendChild(document.createTextNode(HOW[g]));lg.appendChild(s)});var bn=el('span');bn.appendChild(glyph('=',true));bn.appendChild(document.createTextNode('matched by name'));lg.appendChild(bn);var cb=el('span');cb.appendChild(el('span','badge c','C'));cb.appendChild(document.createTextNode(' contract enforced'));lg.appendChild(cb);
+  [['badge x','\u25a3','exposures on the model'],['badge f','!','noted by the engine'],['end','end','nothing further downstream reads it'],['sw','',DATA.lookup?'the column':'the changed column']].forEach(function(k){var s=el('span');s.appendChild(el('span',k[0],k[1]));s.appendChild(document.createTextNode(' '+k[2]));lg.appendChild(s)});main.appendChild(lg);
   var graph=null;if(!state.list){graph=graphPanel(f,i);main.appendChild(graph)}else{var lb=el('div','g-bar list-bar');lb.appendChild(el('span','g-title','Column list'));var gb=el('button','g-btn','Graph');gb.type='button';gb.addEventListener('click',function(){state.list=false;render()});lb.appendChild(gb);main.appendChild(lb);
   main.appendChild(section(f,i,'up'));
   var fc=el('div','panel focus');fc.appendChild(el('div','label',DATA.lookup?'The column':'The changed column'));var ti=el('div','title');if(f.key){ti.appendChild(colButton({key:f.key,column:f.model+'.'+(f.column||''),glyph:f.glyph||'?',byName:f.byName,end:false,type:null}))}else ti.appendChild(el('span','mono',f.column?f.model+'.'+f.column:f.model));fc.appendChild(ti);var hw=f.glyph?HOW[f.glyph]||'unknown':'';fc.appendChild(el('div','empty',(hw?hw.charAt(0).toUpperCase()+hw.slice(1)+' from what it reads'+(f.byName?' (matched by name)':'')+'. ':'')+(f.key?'Click any column to light up its path.':'')));main.appendChild(fc);
@@ -755,6 +757,7 @@ function applyHighlight(){var f=DATA.focuses[state.focus],bar=document.getElemen
   var shown={};cols.forEach(function(c){shown[c.dataset.key]=1});var hidden=Object.keys(p.all).filter(function(k){return!shown[k]}).length;
   bar.textContent='';bar.appendChild(el('span',null,'Path of '+state.selected.split('|')[0].split('.').pop()+'.'+state.selected.split('|').pop()+': '+plural(p.up,'column')+' upstream, '+plural(p.down,'column')+' downstream'+(hidden?' \\u00b7 '+hidden+' more on hidden levels or folded models':'')));var clr=el('button',null,'Clear');clr.type='button';clr.addEventListener('click',function(){select(state.selected)});bar.appendChild(clr)}
 ${graphLayout.toString()}
+${graphView.toString()}
 ${pressIsClick.toString()}
 ${GRAPH_VIEW_JS}
 document.addEventListener('keydown',function(e){if(e.key==='Escape'&&state.selected)select(state.selected)});

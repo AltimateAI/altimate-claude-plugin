@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'claude-code/testing'
-import { graphLayout as layoutOf, pressIsClick } from './report-graph'
+import { graphLayout as layoutOf, graphView, pressIsClick } from './report-graph'
 import { type ColumnAnswer, type ModelChange, reportData, reportHtml } from './impact-report'
 
 type Layout = {
-  boxes: { id: string; layer: number; x: number; y: number; h: number; name: string; title: string; collapsed?: boolean; count?: number; rows: { key: string }[] }[]
+  boxes: { id: string; layer: number; x: number; y: number; h: number; name: string; title: string; badge?: string; model?: string; collapsed?: boolean; count?: number; rows: { key: string }[] }[]
   edges: { from: string; to: string; keys: string[][]; label: string | null }[]
 }
 const graphLayout = layoutOf as (focus: unknown, levels: { up: number; down: number }, expanded: Record<number, boolean>) => Layout
@@ -112,6 +112,53 @@ describe('report graph layout', () => {
     const box = layer(graphLayout(focusOf(answer([long])), { up: 0, down: 1 }, {}), 1)[0]!
     expect(box.name).toBe(`${long.slice(0, 27)}…`)
     expect(box.title.startsWith(long)).toBe(true)
+  })
+
+  test("cuts a name shorter when the box carries a badge, so the two don't run into each other", () => {
+    const long = 'mrt_tableau_dashboard_cost_attribution'
+    const down = answer([long, 'plain'])
+    down.nodes[1] = { ...down.nodes[1]!, contract: true, exposures: ['exec', 'ops'] }
+    down.flags = [{ model: 1, flag: 'filter_rewritten' }]
+    const boxes = layer(graphLayout(focusOf(down), { up: 0, down: 1 }, {}), 1)
+    const marked = boxes.find(box => box.title.startsWith(long))!
+    expect(marked.badge).toBe('C \u25a32 !')
+    // 28 characters less the badge and a space.
+    expect(marked.name).toBe(`${long.slice(0, 20)}…`)
+    expect(boxes.find(box => box.title.startsWith('plain'))!.badge).toBe('')
+  })
+
+  test('lists its boxes in reading order, left to right then top to bottom, which is the order Tab takes', () => {
+    const lay = graphLayout(focusOf(answer(['a', 'b'], { a: 'x', b: 'y' })), { up: 2, down: 2 }, {})
+    expect(lay.boxes.map(box => box.name)).toEqual(['orders', 'stg_orders', 'fct', 'a', 'b', 'x', 'y'])
+    // A column read out to the keyboard names its model too: many models share a column name.
+    expect(lay.boxes.map(box => box.model)).toEqual(['orders', 'stg_orders', 'fct', 'a', 'b', 'x', 'y'])
+    expect(lay.boxes.every((box, i) => i === 0 || lay.boxes[i - 1]!.layer < box.layer || (lay.boxes[i - 1]!.layer === box.layer && lay.boxes[i - 1]!.y < box.y))).toBe(true)
+  })
+})
+
+describe('the first view of the graph', () => {
+  const bounds = { x: -656, y: -100, w: 1640, h: 200 }
+  const focus = { x: 118, y: 0 }
+  test('shows the whole graph when it fits at a readable zoom, and never zooms past 1', () => {
+    expect(graphView({ w: 990, h: 600 }, bounds, focus, false)).toEqual({ k: (990 - 32) / 1640, x: 495 - (bounds.x + 820) * ((990 - 32) / 1640), y: 300 })
+    expect(graphView({ w: 990, h: 600 }, { x: 0, y: 0, w: 236, h: 50 }, focus, false).k).toBe(1)
+  })
+
+  test('in a narrow panel, starts on the changed column at 0.7, where the whole graph would be unreadable', () => {
+    const narrow = graphView({ w: 398, h: 600 }, bounds, focus, false)
+    expect(narrow).toEqual({ k: 0.7, x: 199 - focus.x * 0.7, y: 300 })
+    // A wide panel only steps in below 0.35.
+    expect(graphView({ w: 990, h: 600 }, { ...bounds, w: 4000 }, focus, false).k).toBe(0.35)
+    // Fit always shows the whole graph.
+    expect(graphView({ w: 398, h: 600 }, bounds, focus, true).k).toBe((398 - 32) / 1640)
+  })
+
+  test('the page runs the same function, and a column reached by Tab is brought into the panel', () => {
+    const html = reportHtml(reportData([CHANGE], [{ model: 'fct', column: 'revenue', down: answer(['a']), up: UP, modelLevel: null, failed: false }], TASK))
+    expect(html).toContain('function graphView(')
+    expect(html).toContain('v=graphView(size(),lay.bounds,lay.focus,force)')
+    expect(html).toContain("row.addEventListener('focus',function(){if(!row.matches(':focus-visible'))return;")
+    expect(html).toContain("'aria-label':r.title+' in '+b.model+': light up its path'")
   })
 })
 

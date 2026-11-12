@@ -293,7 +293,7 @@ describe('a column looked up by name', () => {
     const html = reportHtml(data)
     const at = (one: string) => html.indexOf(one, html.indexOf('function render(){'))
     expect(html).toContain("side.appendChild(DATA.lookup?upstreamPanel():ch)")
-    expect(at("if(DATA.lookup){var uc=0")).toBeLessThan(at("if(r){stats.appendChild(stat(r.columns,'columns downstream'))"))
+    expect(at("if(DATA.lookup){var uc=0")).toBeLessThan(at("if(r){stats.appendChild(stat(r.columns,'columns downstream',"))
     expect(html).toContain("'Where it comes from'")
     expect(html).toContain("DATA.lookup?'Where it goes':'What to expect downstream'")
     expect(reportData([CHANGE], [TRACE], TASK).lookup).toBeNull()
@@ -359,6 +359,15 @@ describe('the report', () => {
     // The bar lets the pointer through to the column under it; its Clear button still takes clicks.
     expect(rule).toContain('pointer-events:none')
     expect(html).toMatch(/\.pathbar button\{[^}]*pointer-events:auto/)
+  })
+
+  test('its key names every mark the graph draws, and each count says what it counts', () => {
+    const html = reportHtml(reportData([CHANGE], [TRACE], TASK))
+    for (const key of ['exposures on the model', 'noted by the engine', 'nothing further downstream reads it', "DATA.lookup?'the column':'the changed column'", 'Upstream on the left, downstream on the right'])
+      expect(html).toContain(key)
+    for (const tip of ['Columns the value reaches that nothing further downstream reads', 'Downstream of the model, but the value doesn\\u2019t reach them', 'Every model downstream of this one, whether or not the value reaches it'])
+      expect(html).toContain(tip)
+    expect(html).toContain("stat(r.cleared,'models cleared',r.cleared==null,")
   })
 
   test('is one offline file: no external resource, and project text cannot close its script', () => {

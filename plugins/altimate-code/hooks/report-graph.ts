@@ -12,6 +12,10 @@
  *   then by name, so edges cross less and the order never depends on the data's order.
  * - An edge's `label` is its derivation when the engine told it (same, renamed, calculated,
  *   aggregated), else null: an unknown one is drawn without a label.
+ * - A box's `badge` says what the model carries (C a contract, ▣N exposures, ! an engine note); its
+ *   name is cut shorter to leave the badge room.
+ * - Boxes come in reading order, left to right and then top to bottom, which is the order Tab
+ *   visits their columns.
  *
  * The page runs this function's own source (`graphLayout.toString()`), so it uses nothing from
  * outside its body but the language's built-ins.
@@ -61,8 +65,14 @@ export function graphLayout(f: any, levels: { up: number; down: number }, expand
         it.keys.forEach(function (k: string) { at[k] = { x1: r1(x), x2: r1(x + G.boxW), y: r1(y + h / 2), box: box.id, folded: true } })
       } else {
         var m = it.model
-        box.name = cut(m.name, G.maxName)
+        var badge: string[] = []
+        if (m.contract) badge.push('C')
+        if ((m.exposures || []).length) badge.push('\u25a3' + m.exposures.length)
+        if ((m.flags || []).length) badge.push('!')
+        box.badge = badge.join(' ')
+        box.name = cut(m.name, G.maxName - (box.badge ? box.badge.length + 1 : 0))
         box.title = String(m.name) + (m.folder ? ' · ' + m.folder : '') + (m.materialized ? ' · ' + m.materialized : '')
+        box.model = String(m.name)
         box.focus = !!m.focus; box.contract = !!m.contract; box.tests = m.tests || 0; box.exposures = (m.exposures || []).length; box.flags = (m.flags || []).length
         box.rows = it.rows.map(function (r: any, i: number) {
           var ry = r1(y + G.headH + i * G.rowH + G.rowH / 2)
@@ -88,8 +98,24 @@ export function graphLayout(f: any, levels: { up: number; down: number }, expand
   })
   var minX = 0, minY = 0, maxX = 0, maxY = 0
   boxes.forEach(function (b) { minX = Math.min(minX, b.x); minY = Math.min(minY, b.y); maxX = Math.max(maxX, b.x + b.w); maxY = Math.max(maxY, b.y + b.h) })
-  var fb = boxes[0]
+  boxes.sort(function (a, b) { return a.layer - b.layer || a.y - b.y })
+  var fb = boxes.filter(function (b) { return b.layer === 0 })[0]
   return { boxes: boxes, edges: edges, bounds: { x: minX, y: minY, w: maxX - minX, h: maxY - minY }, focus: fb ? { x: fb.x + fb.w / 2, y: fb.y + fb.h / 2 } : { x: 0, y: 0 } }
+}
+
+/**
+ * `graphView(size, bounds, focus, whole)`: the zoom and pan that first show a graph of `bounds` in a
+ * panel of `size`. The whole graph when it fits at a readable zoom, else the changed column at that
+ * zoom, centred: 0.35 in a wide panel, 0.7 in a narrow one (under 640 px), where less is unreadable.
+ * `whole` (the Fit button) always shows the whole graph. Never above 1. The page runs this
+ * function's own source, like graphLayout's.
+ */
+export function graphView(size: { w: number; h: number }, bounds: { x: number; y: number; w: number; h: number }, focus: { x: number; y: number }, whole: boolean): { k: number; x: number; y: number } {
+  var k = Math.min(1, (size.w - 32) / Math.max(1, bounds.w), (size.h - 32) / Math.max(1, bounds.h))
+  var floor = size.w < 640 ? 0.7 : 0.35
+  if (k < floor && !whole) return { k: floor, x: size.w / 2 - focus.x * floor, y: size.h / 2 - focus.y * floor }
+  k = Math.max(0.05, k)
+  return { k: k, x: size.w / 2 - (bounds.x + bounds.w / 2) * k, y: size.h / 2 - (bounds.y + bounds.h / 2) * k }
 }
 
 /**
@@ -105,7 +131,7 @@ export function pressIsClick(press: { x: number; y: number; target: string | nul
 /**
  * The graph panel: draws `graphLayout` as SVG, and handles zoom (wheel, pinch, buttons, + and -),
  * pan (drag, arrow keys), fit (0, or the Fit button) and column clicks, which call the page's
- * `select(key)`. Uses the page's `el`, `state`, `render` and `GLYPH`, and `pressIsClick`.
+ * `select(key)`. Uses the page's `el`, `state`, `render` and `GLYPH`, `graphView` and `pressIsClick`.
  */
 export const GRAPH_VIEW_JS = `
 var SVG='http://www.w3.org/2000/svg';
@@ -133,12 +159,11 @@ function graphPanel(f,i){
     g.appendChild(sv('title',{},b.title));
     g.appendChild(sv('rect',{width:b.w,height:b.h,rx:8,'class':'g-rect'}));
     g.appendChild(sv('text',{x:10,y:19,'class':'g-name'},b.name));
-    var badge=[];if(b.contract)badge.push('C');if(b.exposures)badge.push('\\u25a3'+b.exposures);if(b.flags)badge.push('!');
-    if(badge.length)g.appendChild(sv('text',{x:b.w-10,y:19,'class':'g-badge','text-anchor':'end'},badge.join(' ')));
+    if(b.badge)g.appendChild(sv('text',{x:b.w-10,y:19,'class':'g-badge','text-anchor':'end'},b.badge));
     if(b.collapsed){g.appendChild(sv('text',{x:10,y:48,'class':'g-more'},b.sub+' \\u00b7 click to show them'));g.setAttribute('tabindex','0');g.setAttribute('role','button');
       var open=function(){state.expanded[i][b.layer]=true;state.views[i]=null;render()};opens[b.id]=open;g.addEventListener('click',function(ev){ev.stopPropagation();if(tookPress)return;open()});g.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();open()}})}
     b.rows.forEach(function(r){
-      var row=sv('g',{'class':'g-row','data-key':r.key,tabindex:0,role:'button','aria-label':r.title+': light up its path',transform:'translate(0,'+(r.y-b.y-10)+')'});
+      var row=sv('g',{'class':'g-row','data-key':r.key,tabindex:0,role:'button','aria-label':r.title+' in '+b.model+': light up its path',transform:'translate(0,'+(r.y-b.y-10)+')'});
       row.appendChild(sv('title',{},r.title));
       row.appendChild(sv('rect',{x:4,y:0,width:b.w-8,height:20,rx:4,'class':'g-hit'}));
       row.appendChild(sv('text',{x:12,y:14,'class':'g-glyph '+(GLYPH[r.glyph]||'unk')+(r.byName?' byname':'')},r.glyph||'?'));
@@ -147,19 +172,20 @@ function graphPanel(f,i){
       // A pointer press is decided at its release (pressIsClick); this click is the keyboard's or a script's.
       row.addEventListener('click',function(ev){ev.stopPropagation();if(tookPress)return;select(r.key)});
       row.addEventListener('keydown',function(ev){if(ev.key==='Enter'||ev.key===' '){ev.preventDefault();select(r.key)}});
+      // Tab to a column outside the panel brings it in; a pointer's focus leaves the graph where it is.
+      row.addEventListener('focus',function(){if(!row.matches(':focus-visible'))return;var a=row.getBoundingClientRect(),s=svg.getBoundingClientRect(),dx=0,dy=0;
+        if(a.left<s.left+8)dx=s.left+8-a.left;else if(a.right>s.right-8)dx=s.right-8-a.right;if(a.top<s.top+8)dy=s.top+8-a.top;else if(a.bottom>s.bottom-8)dy=s.bottom-8-a.bottom;
+        if(dx||dy){v.x+=dx;v.y+=dy;apply()}});
       g.appendChild(row)});
     gB.appendChild(g)});
   p.appendChild(svg);
   if(lay.edges.some(function(e){return!e.label}))p.appendChild(el('div','g-note','Dashed, unlabelled: the engine couldn\u2019t tell how the value changes.'));
-  var hint=el('div','g-hint','Drag to move \\u00b7 wheel or pinch to zoom \\u00b7 click a column to light up its path');p.appendChild(hint);
+  var hint=el('div','g-hint','Upstream on the left, downstream on the right \\u00b7 drag to move \\u00b7 wheel or pinch to zoom \\u00b7 click a column to light up its path');p.appendChild(hint);
   // Zoom and pan: one transform, kept per focus while levels change.
   var v=state.views[i],moved=false;
   function apply(){vp.setAttribute('transform','translate('+Math.round(v.x)+','+Math.round(v.y)+') scale('+Math.round(v.k*1000)/1000+')')}
   function size(){var r=svg.getBoundingClientRect();return {w:r.width||800,h:r.height||500}}
-  function fit(force){var s=size(),bb=lay.bounds,k=Math.min(1,(s.w-32)/Math.max(1,bb.w),(s.h-32)/Math.max(1,bb.h));
-    if(k<0.35&&!force){k=0.35;v={k:k,x:s.w/2-lay.focus.x*k,y:s.h/2-lay.focus.y*k}}
-    else{k=Math.max(0.05,k);v={k:k,x:s.w/2-(bb.x+bb.w/2)*k,y:s.h/2-(bb.y+bb.h/2)*k}}
-    state.views[i]=v;apply()}
+  function fit(force){v=graphView(size(),lay.bounds,lay.focus,force);state.views[i]=v;apply()}
   function zoomAt(k2,px,py){k2=Math.min(3,Math.max(0.05,k2));v.x=px-(px-v.x)*k2/v.k;v.y=py-(py-v.y)*k2/v.k;v.k=k2;apply()}
   function zoomBy(m){var s=size();zoomAt(v.k*m,s.w/2,s.h/2)}
   svg.addEventListener('wheel',function(ev){ev.preventDefault();var r=svg.getBoundingClientRect();zoomAt(v.k*Math.exp(-ev.deltaY*0.0015),ev.clientX-r.left,ev.clientY-r.top)},{passive:false});
@@ -228,4 +254,5 @@ export const GRAPH_CSS = `
 body.hl .g-edge{opacity:.12}body.hl .g-edge.on{opacity:1}body.hl .g-edge.on path{stroke-opacity:1;stroke-width:2.2}
 body.hl .g-row{opacity:.3}body.hl .g-row.on{opacity:1}body.hl .g-row.on .g-hit{fill:var(--accent-soft)}body.hl .g-row.sel .g-hit{fill:var(--focus)}
 body.hl .g-box{opacity:.55}body.hl .g-box.has-on,body.hl .g-box.focus{opacity:1}
+@media (max-width:560px){.graph{height:min(68vh,640px);min-height:380px}}
 `
