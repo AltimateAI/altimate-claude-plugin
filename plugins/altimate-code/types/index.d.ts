@@ -187,6 +187,8 @@ export type Reach = {
   unresolved: number
   modelLevel: number | null
   truncated: boolean
+  /** The answer clears a model only when it proves the value can't reach it (it lists \`may_carry\`). */
+  proven?: boolean
 }
 
 export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean }

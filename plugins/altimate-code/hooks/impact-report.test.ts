@@ -145,7 +145,7 @@ describe('the summary', () => {
     expect(lines).toEqual([
       '◆ Lineage after this task · 1 model changed',
       'fct_orders · 6 downstream models at model level',
-      '  revenue  reaches 4 columns in 3 models (2 end columns) · 1 more may change · 2 proven unaffected',
+      '  revenue  reaches 4 columns in 3 models (2 end columns) · 1 more may change · 2 shouldn\'t change',
       '⚠ Lower bound: 1 model could not be read',
     ])
   })
@@ -424,6 +424,15 @@ describe('may carry it, by reason', () => {
     // Every reason the contract names has the report's words.
     expect(MAY_CARRY_REASONS.map(one => one[0])).toEqual(['unresolved', 'read_in_part', 'read_columns_unknown', 'star', 'natural_join', 'dynamic_name', 'row_reference', 'ephemeral', 'names_column', 'reads_value_model', 'below', 'capped'])
     expect(mayCarryGroups({ ...PROVEN, may_carry: [] })).toEqual([])
+  })
+
+  test('the band calls the cleared models proven unaffected only for an answer that gives reasons', () => {
+    const band = (down: ColumnAnswer) => summaryLines(summaryOf([CHANGE], [{ ...TRACE, down, up: null }], null))[2]
+    expect(band(PROVEN)).toBe('  revenue  reaches 4 columns in 3 models (2 end columns) · 6 more may change · 2 proven unaffected')
+    // An older altimate-code's cleared count is not proven.
+    expect(band(DOWN)).toBe("  revenue  reaches 4 columns in 3 models (2 end columns) · 1 more may change · 2 shouldn't change")
+    expect(reachOf(PROVEN).proven).toBe(true)
+    expect(reachOf(DOWN).proven).toBeUndefined()
   })
 
   test('says what may change and what is proven unaffected, and points to the reasons', () => {

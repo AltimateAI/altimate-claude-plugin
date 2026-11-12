@@ -148,6 +148,7 @@ export function reachOf(answer: ColumnAnswer): Reach {
     unresolved: num(counts.unresolved_models) ?? answer.unresolved?.length ?? 0,
     modelLevel: num(counts.model_level),
     truncated: answer.truncated === true,
+    ...(Array.isArray(answer.may_carry) ? { proven: true } : {}),
   }
 }
 
@@ -256,11 +257,11 @@ export function summaryLines(view: TaskSummaryView): string[] {
       else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : `no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later`}`)
       else {
         const r = col.reach
-        // What may change, and what the engine proved unaffected (`cleared`: every path to it passes a reader
-        // proven not to read the value).
+        // What may change, and what the engine cleared: proven unaffected when the answer says why each other
+        // model may carry the value (every path to a cleared one passes a reader proven not to read it).
         const parts = [`reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'model')} (${plural(r.ends, 'end column')})`]
         parts.push(`${r.mayCarry} more may change`)
-        if (r.cleared !== null) parts.push(`${r.cleared} proven unaffected`)
+        if (r.cleared !== null) parts.push(`${r.cleared} ${r.proven ? 'proven unaffected' : "shouldn't change"}`)
         lines.push(`  ${col.name}  ${parts.join(' · ')}`)
       }
     }
