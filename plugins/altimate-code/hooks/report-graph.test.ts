@@ -28,7 +28,7 @@ function answer(first: string[], second: Record<string, string> = {}): ColumnAns
     version: 1,
     focus: { model: 'model.shop.fct', column: 'revenue' },
     direction: 'downstream',
-    counts: { columns: columns.length - 1, models: names.length - 1, hops: 2, contracts: 0, ends: 1, may_carry_models: 0, cleared_models: 0, model_level: names.length - 1 },
+    counts: { columns: columns.length - 1, models: names.length - 1, hops: 2, contracts: 0, ends: 1, may_carry_models: 0, model_level: names.length - 1 },
     nodes,
     columns,
     edges,

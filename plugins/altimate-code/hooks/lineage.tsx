@@ -36,7 +36,7 @@ import {
   upstreamArt,
   warehouseEdges,
 } from './lineage-graph'
-import { answerOf, carriersOf, type ColumnAnswer, reachOf } from './impact-report'
+import { answerOf, carriersOf, type ColumnAnswer, MAY_CARRY_REASONS, reachOf } from './impact-report'
 import { taskBeforeTool, taskTurnComplete, taskTurnStart } from './task-impact'
 
 const PANE = 'altimate-lineage'
@@ -1083,7 +1083,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
     const exposures = [...new Set(one.carriers.flatMap(model => model.exposures))]
     if (exposures.length) lines.push(`  dashboards on them: ${listed(exposures)}`)
     lines.push(
-      `  ${plural(r.mayCarry, 'more model')} may carry it (they read it outside the select, or sit below a model that could not be read); ${r.cleared === null ? 'the other downstream models do' : `${plural(r.cleared, 'other downstream model')} ${r.cleared === 1 ? 'does' : 'do'}`} not carry it${r.modelLevel === null ? '' : `; ${plural(r.modelLevel, 'downstream model')} at model level`}`,
+      `  ${plural(r.mayCarry, 'more model')} may carry it: the value was not traced to them, and nothing rules them out${mayCarryWhy(one.answer)}${r.modelLevel === null ? '' : `; ${plural(r.modelLevel, 'downstream model')} at model level`}`,
     )
     const unresolved = one.answer.unresolved ?? []
     if (unresolved.length || r.truncated) {
@@ -1175,6 +1175,14 @@ function parsedLineage(text: string | undefined): ColumnLineage | null {
   if (!text) return null
   const parsed = parseDbtLineage(text)
   return parsed.columns.length > 0 || parsed.edges.length > 0 ? parsed : null
+}
+
+/** How many may-carry models each reason covers, in the report's order: " (by reason: below 11, unresolved 6)". */
+function mayCarryWhy(answer: ColumnAnswer): string {
+  const counts = new Map<string, number>()
+  for (const one of answer.may_carry ?? []) counts.set(String(one?.reason ?? 'unknown'), (counts.get(String(one?.reason ?? 'unknown')) ?? 0) + 1)
+  const order = [...MAY_CARRY_REASONS.map(one => one[0]).filter(one => counts.has(one)), ...[...counts.keys()].filter(one => !MAY_CARRY_REASONS.some(known => known[0] === one)).sort()]
+  return order.length ? ` (by reason: ${order.map(one => `${one} ${counts.get(one)}`).join(', ')})` : ''
 }
 
 /** Registers /lineage; called from the plugin's one session.start hook. */

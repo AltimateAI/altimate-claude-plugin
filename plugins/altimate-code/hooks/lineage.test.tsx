@@ -302,7 +302,7 @@ test('with a column answer, the note Claude gets has the numbers the end-of-task
     version: 1,
     focus: { model: 'model.shop.fct_orders', column: 'revenue' },
     direction: 'downstream',
-    counts: { columns: 3, models: 2, hops: 2, contracts: 0, ends: 2, may_carry_models: 4, cleared_models: 1, model_level: 6 },
+    counts: { columns: 3, models: 2, hops: 2, contracts: 0, ends: 2, may_carry_models: 4, model_level: 6 },
     nodes: [
       { id: 'model.shop.fct_orders', name: 'fct_orders', exposures: [] },
       { id: 'model.shop.fct_revenue_daily', name: 'fct_revenue_daily', exposures: ['exec_revenue'] },
@@ -317,8 +317,13 @@ test('with a column answer, the note Claude gets has the numbers the end-of-task
     ],
     edges: [[0, 1, '='], [0, 2, '\u03a3'], [1, 3, '\u03a3']],
     also_reads: [],
-    unresolved: [{ model: 3, reason: 'parse error' }],
-    cleared: [{ id: 'model.shop.dim_dates', name: 'dim_dates' }],
+    unresolved: [{ model: 3, reason: 'parse error', code: 'unresolved' }],
+    may_carry: [
+      { id: 'model.shop.rpt_broken', name: 'rpt_broken', reason: 'unresolved' },
+      { id: 'model.shop.rpt_after_broken', name: 'rpt_after_broken', reason: 'below', via: 'rpt_broken' },
+      { id: 'model.shop.rpt_wide', name: 'rpt_wide', reason: 'star' },
+      { id: 'model.shop.dim_dates', name: 'dim_dates', reason: 'not_traced' },
+    ],
     truncated: false,
   }
   const { clock, notes } = await start($, on, { reach: { ...REACH, column_answer: answer } })
@@ -327,7 +332,9 @@ test('with a column answer, the note Claude gets has the numbers the end-of-task
   const note = result.context?.[0] as string
   expect(note).toContain('- revenue: its value reaches 3 columns in 2 downstream models (2 end columns): fct_revenue_daily (revenue, daily_revenue), rpt_finance_weekly (weekly_revenue)')
   expect(note).toContain('  dashboards on them: exec_revenue')
-  expect(note).toContain('  4 more models may carry it (they read it outside the select, or sit below a model that could not be read); 1 other downstream model does not carry it; 6 downstream models at model level')
+  expect(note).toContain('  4 more models may carry it: the value was not traced to them, and nothing rules them out (by reason: unresolved 1, star 1, below 1, not_traced 1); 6 downstream models at model level')
+  // Never that the other models do not carry it.
+  expect(note).not.toMatch(/not carry it|cleared|unaffected/)
   expect(note).toContain('  lower bound: 1 model could not be read: rpt_broken ("parse error")')
   // The older reach numbers are not given alongside.
   expect(note).not.toContain('read by 2 downstream models')

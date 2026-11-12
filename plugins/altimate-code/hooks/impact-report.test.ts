@@ -34,7 +34,7 @@ export const DOWN: ColumnAnswer = {
   focus: { model: 'model.shop.fct_orders', column: 'revenue' },
   direction: 'downstream',
   inputs: { manifest: { generated_at: '2026-01-01', older_than_sql: false }, sql: 'compiled_code', catalog: null, engine: 'core 1.0', workarounds: [] },
-  counts: { columns: 4, models: 3, hops: 3, contracts: 1, ends: 2, may_carry_models: 1, cleared_models: 2, model_level: 6 },
+  counts: { columns: 4, models: 3, hops: 3, contracts: 1, ends: 2, may_carry_models: 3, model_level: 6 },
   nodes: [
     { id: 'model.shop.fct_orders', name: 'fct_orders', folder: 'marts', materialized: 'table', contract: false, tests: 1, exposures: [] },
     { id: 'model.shop.fct_revenue_daily', name: 'fct_revenue_daily', folder: 'marts', materialized: 'table', contract: true, tests: 2, exposures: ['exec_revenue'] },
@@ -57,11 +57,13 @@ export const DOWN: ColumnAnswer = {
     [3, 4, '~', 'name'],
   ],
   also_reads: [{ model: 4, columns: ['revenue'], downstream: 2 }],
-  unresolved: [{ model: 5, reason: 'parse error' }],
+  unresolved: [{ model: 5, reason: 'parse error', code: 'unresolved' }],
   flags: [{ model: 2, flag: 'filter_rewritten' }],
-  cleared: [
-    { id: 'model.shop.dim_dates', name: 'dim_dates' },
-    { id: 'model.shop.rpt_ops', name: 'rpt_ops' },
+  // Every other model at the model level, with the first reason found: nothing is reported unaffected.
+  may_carry: [
+    { id: 'model.shop.rpt_misc', name: 'rpt_misc', reason: 'names_column' },
+    { id: 'model.shop.rpt_broken', name: 'rpt_broken', reason: 'unresolved' },
+    { id: 'model.shop.rpt_after_broken', name: 'rpt_after_broken', reason: 'below', via: 'rpt_broken' },
   ],
   truncated: false,
 }
@@ -131,11 +133,9 @@ describe('the answer', () => {
   })
 
   test('reach takes the contract counts, and counts for itself where they are absent', () => {
-    expect(reachOf(DOWN)).toEqual({ columns: 4, models: 3, ends: 2, hops: 3, mayCarry: 1, cleared: 2, unresolved: 1, modelLevel: 6, truncated: false })
-    const bare = { ...DOWN, counts: undefined, cleared: undefined }
-    expect(reachOf(bare)).toEqual({ columns: 4, models: 3, ends: 2, hops: 3, mayCarry: 1, cleared: null, unresolved: 1, modelLevel: null, truncated: false })
-    // With the cleared list but no counts, the list gives the cleared count.
-    expect(reachOf({ ...DOWN, counts: undefined }).cleared).toBe(2)
+    expect(reachOf(DOWN)).toEqual({ columns: 4, models: 3, ends: 2, hops: 3, mayCarry: 3, unresolved: 1, modelLevel: 6, truncated: false })
+    // Without counts, the may-carry list gives its count.
+    expect(reachOf({ ...DOWN, counts: undefined })).toEqual({ columns: 4, models: 3, ends: 2, hops: 3, mayCarry: 3, unresolved: 1, modelLevel: null, truncated: false })
   })
 })
 
@@ -145,7 +145,7 @@ describe('the summary', () => {
     expect(lines).toEqual([
       '◆ Lineage after this task · 1 model changed',
       'fct_orders · 6 downstream models at model level',
-      '  revenue  reaches 4 columns in 3 models (2 end columns) · 1 more may change · 2 shouldn\'t change',
+      '  revenue  reaches 4 columns in 3 models (2 end columns) · 3 more may change',
       '⚠ Lower bound: 1 model could not be read',
     ])
   })
@@ -161,8 +161,7 @@ describe('what to expect downstream, in plain words', () => {
   test('says what the value reaches, what may change, what should not, what to watch and how sure it is', () => {
     expect(plain(impactWords('fct_orders', 'revenue', TRACE))).toEqual([
       '`fct_orders` has 6 models downstream. The value of `revenue` flows into 3 of them, in 4 columns. Expect those to change with it: `fct_revenue_daily`, `rpt_finance` and `rpt_board`.',
-      "1 more may change: it uses the value in a way the trace can't follow (a filter or a join, say), its SQL couldn't be read, or it reads from a model like that.",
-      "2 shouldn't change: they're downstream of the model, but the value doesn't reach them.",
+      "3 more may change: the value wasn't traced to them, and nothing rules them out. \u201cMay carry it\u201d below says why, model by model.",
       'One model it reaches enforces a contract, so a type change can fail the build there: `fct_revenue_daily`.',
       'Tests on the models it reaches: 2.',
       "1 model couldn't be read, so the real numbers can only be higher.",
@@ -175,9 +174,10 @@ describe('what to expect downstream, in plain words', () => {
       ...DOWN,
       nodes,
       columns: [{ model: 0, column: 'x', hop: 0 }, ...nodes.slice(1).map((_, i) => ({ model: i + 1, column: 'x', hop: 1 }))],
-      counts: { columns: 6, models: 6, ends: 6, may_carry_models: 0, cleared_models: 0, model_level: 6 },
+      counts: { columns: 6, models: 6, ends: 6, may_carry_models: 0, model_level: 6 },
       also_reads: [],
       unresolved: [],
+      may_carry: [],
     }
     expect(plain(impactWords('m0', 'x', { ...TRACE, model: 'm0', column: 'x', down, modelLevel: 6 }))).toEqual([
       '`m0` has 6 models downstream. The value of `x` flows into 6 of them, in 6 columns. Expect those to change with it: `m1`, `m2`, `m3`, `m4`, `m5` and 1 more.',
@@ -228,11 +228,11 @@ describe('consumers', () => {
       column,
       consumers: consumersOf(answerWith({ declared: 3, exposures: [exposure(name, tier, ['m'])] })),
     })
-    const merged = mergeConsumers([trace('a', 'may_carry'), trace('b', 'carries'), trace('c', 'cleared'), trace('d', 'cleared', 'other')])
+    const merged = mergeConsumers([trace('a', 'may_carry'), trace('b', 'carries'), trace('c', 'may_carry'), trace('d', 'may_carry', 'other')])
     expect(merged.declared).toBe(3)
     expect(merged.list.map(one => [one.label, one.tier, one.columns])).toEqual([
       ['board', 'carries', ['fct_orders.a', 'fct_orders.b', 'fct_orders.c']],
-      ['other', 'cleared', ['fct_orders.d']],
+      ['other', 'may_carry', ['fct_orders.d']],
     ])
   })
 
@@ -284,8 +284,8 @@ describe('a column looked up by name', () => {
     expect(words[0]).toBe(
       '`fct_orders` has 6 models downstream. The value of `revenue` flows into 3 of them, in 4 columns. A wrong value here shows up there too: `fct_revenue_daily`, `rpt_finance` and `rpt_board`.',
     )
-    expect(words.some(line => /contract|Expect those|shouldn't change|may change/.test(line))).toBe(false)
-    expect(words).toContain("2 don't carry it: they're downstream of the model, but the value doesn't reach them.")
+    expect(words.some(line => /contract|Expect those|may change/.test(line))).toBe(false)
+    expect(words).toContain("3 more may carry it: the value wasn't traced to them, and nothing rules them out. \u201cMay carry it\u201d below says why, model by model.")
   })
 
   test('its report has no task: it leads with where the column comes from, then where it goes', () => {
@@ -345,11 +345,10 @@ describe('the report', () => {
     // The highlight walks these edges both ways from the clicked column.
     expect(focus.edges).toContainEqual(['model.shop.int_orders|amount', 'model.shop.fct_orders|revenue', 'Σ'])
     expect(focus.edges).toContainEqual(['model.shop.rpt_finance|weekly_revenue', 'model.shop.rpt_board|board_revenue', '~'])
-    expect(focus.alsoReads).toEqual([{ name: 'rpt_misc', columns: ['revenue'], downstream: 2 }])
-    expect(focus.unresolved).toEqual([{ name: 'rpt_broken', reason: 'parse error', downstream: null }])
-    expect(focus.cleared).toEqual({ names: ['dim_dates', 'rpt_ops'], count: 2 })
-    // An answer without the list keeps the count alone.
-    expect(focusOf(CHANGE, CHANGE.columns[0]!, { ...TRACE, down: { ...DOWN, cleared: undefined } }).cleared).toEqual({ names: [], count: 2 })
+    expect(focus.mayCarry.map((one: any) => one.reason)).toEqual(['unresolved', 'names_column', 'below'])
+    // No tier says a model is unaffected.
+    expect(Object.keys(focus)).not.toContain('cleared')
+    expect(focusOf(CHANGE, CHANGE.columns[0]!, { ...TRACE, down: null }).mayCarry).toBeNull()
     expect(data.changes[0].columns[0].after).toBe('sum(amount) - sum(refunds) as revenue')
   })
 
@@ -368,9 +367,9 @@ describe('the report', () => {
     const html = reportHtml(reportData([CHANGE], [TRACE], TASK))
     for (const key of ['exposures on the model', 'noted by the engine', 'nothing further downstream reads it', "DATA.lookup?'the column':'the changed column'", 'Upstream on the left, downstream on the right'])
       expect(html).toContain(key)
-    for (const tip of ['Columns the value reaches that nothing further downstream reads', 'Downstream of the model, but the value doesn\\u2019t reach them', 'Every model downstream of this one, whether or not the value reaches it'])
+    for (const tip of ['Columns the value reaches that nothing further downstream reads', 'Downstream models the value wasn\\u2019t traced to, which nothing rules out', 'Every model downstream of this one, whether or not the value reaches it'])
       expect(html).toContain(tip)
-    expect(html).toContain("stat(r.cleared,'models cleared',r.cleared==null,")
+    expect(html).toContain("stat(r.mayCarry,'models may carry it',!r.mayCarry,")
   })
 
   test('is one offline file: no external resource, and project text cannot close its script', () => {
@@ -384,15 +383,14 @@ describe('the report', () => {
   })
 })
 
-// The same answer from an altimate-code that clears a model only when it proves it: every may-carry
-// model once, with its reason.
-const PROVEN: ColumnAnswer = {
+// An answer with a model for every reason the report has to place, and one this build doesn't know.
+const MANY: ColumnAnswer = {
   ...DOWN,
-  counts: { ...DOWN.counts, may_carry_models: 6 },
-  unresolved: [{ model: 5, reason: 'parse error', code: 'unresolved' }],
+  counts: { ...DOWN.counts, may_carry_models: 7, model_level: 10 },
   may_carry: [
     { id: 'model.shop.rpt_after_broken', name: 'rpt_after_broken', reason: 'below', via: 'rpt_broken' },
     { id: 'model.shop.rpt_misc', name: 'rpt_misc', reason: 'names_column' },
+    { id: 'model.shop.rpt_quiet', name: 'rpt_quiet', reason: 'not_traced' },
     { id: 'model.shop.rpt_broken', name: 'rpt_broken', reason: 'unresolved' },
     { id: 'model.shop.rpt_star', name: 'rpt_star', reason: 'star' },
     { id: 'model.shop.rpt_daily_extra', name: 'rpt_daily_extra', reason: 'reads_value_model', via: 'fct_revenue_daily' },
@@ -401,15 +399,16 @@ const PROVEN: ColumnAnswer = {
 }
 
 describe('may carry it, by reason', () => {
-  test("groups the models by reason in the contract's order, an unknown reason last, with via where it applies", () => {
-    const groups = mayCarryGroups(PROVEN)!
-    expect(groups.map(one => one.reason)).toEqual(['unresolved', 'star', 'names_column', 'reads_value_model', 'below', 'some_future_reason'])
+  test("groups the models by reason in the contract's order, not_traced last of those, an unknown reason after, with via where it applies", () => {
+    const groups = mayCarryGroups(MANY)!
+    expect(groups.map(one => one.reason)).toEqual(['unresolved', 'star', 'names_column', 'reads_value_model', 'below', 'not_traced', 'some_future_reason'])
     expect(groups.map(one => plain([one.heading])[0])).toEqual([
       "Its SQL couldn't be read",
       'It selects `*`, so it may read the column without naming it',
       'It uses the column in a filter, join or grouping',
       'It reads a model the value reaches, whose other columns may change',
       'It sits past one of these',
+      "The value wasn't traced to it, but nothing rules it out",
       'The engine gave the reason "some_future_reason"',
     ])
     // via for below and reads_value_model; what a names_column model reads, and why an unresolved one wasn't read.
@@ -419,113 +418,89 @@ describe('may carry it, by reason', () => {
       [{ name: 'rpt_misc', note: 'reads revenue' }],
       [{ name: 'rpt_daily_extra', note: 'reads fct_revenue_daily' }],
       [{ name: 'rpt_after_broken', note: 'past rpt_broken' }],
+      [{ name: 'rpt_quiet', note: null }],
       [{ name: 'rpt_new', note: null }],
     ])
-    // Every reason the contract names has the report's words.
-    expect(MAY_CARRY_REASONS.map(one => one[0])).toEqual(['unresolved', 'read_in_part', 'read_columns_unknown', 'unclear_sql', 'star', 'natural_join', 'dynamic_name', 'row_reference', 'ephemeral', 'names_column', 'reads_value_model', 'below', 'capped'])
-    expect(mayCarryGroups({ ...PROVEN, may_carry: [] })).toEqual([])
+    // Every reason the contract names has the report's words, in the contract's order.
+    expect(MAY_CARRY_REASONS.map(one => one[0])).toEqual(['unresolved', 'read_in_part', 'read_columns_unknown', 'ephemeral', 'unclear_sql', 'star', 'natural_join', 'dynamic_name', 'row_reference', 'names_column', 'reads_value_model', 'below', 'capped', 'not_traced'])
+    expect(mayCarryGroups({ ...MANY, may_carry: [] })).toEqual([])
+    expect(mayCarryGroups(null)).toBeNull()
   })
 
-  test('the band calls the cleared models proven unaffected only for an answer that gives reasons', () => {
-    const band = (down: ColumnAnswer) => summaryLines(summaryOf([CHANGE], [{ ...TRACE, down, up: null }], null))[2]
-    expect(band(PROVEN)).toBe('  revenue  reaches 4 columns in 3 models (2 end columns) · 6 more may change · 2 proven unaffected')
-    // An older altimate-code's cleared count is not proven.
-    expect(band(DOWN)).toBe("  revenue  reaches 4 columns in 3 models (2 end columns) · 1 more may change · 2 shouldn't change")
-    expect(reachOf(PROVEN).proven).toBe(true)
-    expect(reachOf(DOWN).proven).toBeUndefined()
+  test('the band says what the value reaches and how many more may change, and never that a model is unaffected', () => {
+    const band = summaryLines(summaryOf([CHANGE], [{ ...TRACE, down: MANY, up: null }], null))[2]
+    expect(band).toBe('  revenue  reaches 4 columns in 3 models (2 end columns) · 7 more may change')
   })
 
-  test('says what may change and what is proven unaffected, and points to the reasons', () => {
-    const words = plain(impactWords('fct_orders', 'revenue', { ...TRACE, down: PROVEN }))
-    expect(words[1]).toBe("6 more may change: the engine couldn't prove the value doesn't reach them. \u201cMay carry it\u201d below says why, model by model.")
-    expect(words[2]).toBe('2 are proven unaffected: every path from the column to them passes a model proven not to read the value.')
-    expect(plain(impactWords('fct_orders', 'revenue', { ...TRACE, down: PROVEN }, true))).toContain(
-      '2 are proven not to carry it: every path from the column to them passes a model proven not to read the value.',
-    )
-  })
-
-  test('the report draws the groups in place of the older sections; an older answer keeps those sections', () => {
-    const proven = embedded(reportHtml(reportData([CHANGE], [{ ...TRACE, down: PROVEN }], TASK))).focuses[0]
-    expect(proven.mayCarry.map((one: any) => [one.reason, one.models.length])).toEqual([
+  test('the report draws the groups, and no section for an older answer or for models said to be unaffected', () => {
+    const focus = embedded(reportHtml(reportData([CHANGE], [{ ...TRACE, down: MANY }], TASK))).focuses[0]
+    expect(focus.mayCarry.map((one: any) => [one.reason, one.models.length])).toEqual([
       ['unresolved', 1],
       ['star', 1],
       ['names_column', 1],
       ['reads_value_model', 1],
       ['below', 1],
+      ['not_traced', 1],
       ['some_future_reason', 1],
     ])
-    const older = embedded(reportHtml(reportData([CHANGE], [TRACE], TASK))).focuses[0]
-    expect(older.mayCarry).toBeNull()
-    expect(older.alsoReads).toEqual([{ name: 'rpt_misc', columns: ['revenue'], downstream: 2 }])
-    expect(plain(older.impact)[1]).toStartWith('1 more may change: it uses the value in a way the trace can')
-    // The page picks the sections from the data: grouped when it has reasons, else the older folds.
     const html = reportHtml(reportData([CHANGE], [TRACE], TASK))
-    expect(html).toContain("if(f.mayCarry)wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));else{")
-    expect(html).toContain("fold(f.mayCarry?'Proven unaffected: every path to it passes a model proven not to read the value':'Cleared: downstream, but does not carry it'")
-    expect(html).toContain("f.mayCarry?stat(r.cleared,'proven unaffected'")
-    // Without counts, the list's length is the may-carry count.
-    expect(reachOf({ ...PROVEN, counts: undefined }).mayCarry).toBe(6)
+    expect(html).toContain('if(f.mayCarry&&(f.mayCarry.length||(r&&r.mayCarry)))wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));\n')
+    for (const gone of ['Also reads it, outside the select', "fold('Not resolved'", 'Proven unaffected', 'Cleared:', "doesn't reach'],[null", 'minCli']) expect(html).not.toContain(gone)
+    expect(html).toContain("var TIERS=[['carries','Read a model the value reaches'],['may_carry','Read a model that may carry it'],[null,'Read this model or one downstream of it']];")
   })
 })
 
-// The same upstream answer from an altimate-code that proves what is not a source: the ancestors that may be one, with reasons.
-const UP_PROVEN: ColumnAnswer = {
+// An upstream answer naming the ancestors that may also be a source, with reasons.
+const UP_MAY: ColumnAnswer = {
   ...UP,
-  counts: { cleared_models: 1 },
-  cleared: [{ id: 'model.shop.dim_regions', name: 'dim_regions' }],
   may_carry: [
     { id: 'source.shop.raw.orders_v2', name: 'orders_v2', reason: 'below', via: 'int_orders' },
     { id: 'model.shop.stg_mystery', name: 'stg_mystery', reason: 'star' },
     { id: 'model.shop.stg_unread', name: 'stg_unread', reason: 'unresolved' },
+    { id: 'model.shop.stg_quiet', name: 'stg_quiet', reason: 'not_traced' },
   ],
 }
 
 describe('where else a column may come from', () => {
   test('groups the ancestors that may also be a source by reason, one below a traced model reading as above it', () => {
-    const groups = mayCarryGroups(UP_PROVEN, true)!
+    const groups = mayCarryGroups(UP_MAY, true)!
     expect(groups.map(one => [one.reason, plain([one.heading])[0], one.models])).toEqual([
       ['unresolved', "Its SQL couldn't be read", [{ name: 'stg_unread', note: null }]],
       ['star', 'It selects `*`, so it may read the column without naming it', [{ name: 'stg_mystery', note: null }]],
       ['below', 'It sits above one of these', [{ name: 'orders_v2', note: 'above int_orders' }]],
+      ['not_traced', "The value wasn't traced to it, but nothing rules it out", [{ name: 'stg_quiet', note: null }]],
     ])
-    expect(mayCarryGroups(UP, true)).toBeNull()
+    expect(mayCarryGroups(UP, true)).toEqual([])
   })
 
-  test('says how many more may be a source and how many are proven not to be; an older answer reads as before', () => {
-    expect(plain(upstreamWords('fct_orders', 'revenue', UP_PROVEN))).toEqual([
+  test('says how many more may be a source, and never that a model is not one', () => {
+    expect(plain(upstreamWords('fct_orders', 'revenue', UP_MAY))).toEqual([
       '`revenue` in `fct_orders` is aggregated from 1 column one hop up: `int_orders.amount`.',
       'Followed all the way back, it draws on 2 columns in 2 models, up to 2 hops away.',
       'Where it starts: `orders`.',
-      "3 more models upstream may also be a source: the engine couldn't prove they aren't. \u201cWhere else it may come from\u201d below says why.",
-      '1 other model upstream is proven not to be a source: no traced edge leads from it, and every model between was read in full.',
+      "4 more models upstream may also be a source: the value wasn't traced from them, and nothing rules them out. “Where else it may come from” below says why.",
       'Every upstream model was read.',
     ])
     // A constant still names the ancestors that may feed it.
-    expect(plain(upstreamWords('fct_orders', 'revenue', { ...UP_PROVEN, columns: [UP.columns[0]!], edges: [] })).length).toBe(3)
+    expect(plain(upstreamWords('fct_orders', 'revenue', { ...UP_MAY, columns: [UP.columns[0]!], edges: [] })).length).toBe(2)
     expect(plain(upstreamWords('fct_orders', 'revenue', UP))).toHaveLength(4)
   })
 
-  test('the column report shows them under where it comes from; an older answer keeps the page as it was', () => {
+  test('the column report shows them under where it comes from', () => {
     const page = (up: ColumnAnswer) => columnReportData('fct_orders', 'revenue', { ...TRACE, up }, { builtAt: TASK.builtAt, manifest: 'm' })
-    expect(page(UP_PROVEN).focuses[0]!.upMayCarry!.map(one => one.reason)).toEqual(['unresolved', 'star', 'below'])
-    expect(page(UP).focuses[0]!.upMayCarry).toBeNull()
-    const html = reportHtml(page(UP_PROVEN))
-    expect(embedded(html).focuses[0].upMayCarry).toHaveLength(3)
-    expect(html).toContain("if(f.upMayCarry)p.appendChild(mayCarryFold(f.upMayCarry,null,'Where else it may come from, by reason ','fold inner'))")
+    expect(page(UP_MAY).focuses[0]!.upMayCarry!.map(one => one.reason)).toEqual(['unresolved', 'star', 'below', 'not_traced'])
+    expect(page(UP).focuses[0]!.upMayCarry).toEqual([])
+    const html = reportHtml(page(UP_MAY))
+    expect(embedded(html).focuses[0].upMayCarry).toHaveLength(4)
+    expect(html).toContain("if(f.upMayCarry&&f.upMayCarry.length)p.appendChild(mayCarryFold(f.upMayCarry,null,'Where else it may come from, by reason ','fold inner'))")
   })
 })
 
 describe('the altimate-code floor', () => {
-  test('is one constant, a version, and the report names it where an answer shows an older altimate-code', () => {
+  test('is one constant, a version, named where an altimate-code gives no column answer', () => {
     expect(MIN_ALTIMATE_CODE).toMatch(/^\d+\.\d+\.\d+$/)
-    const older = reportHtml(reportData([CHANGE], [TRACE], TASK))
-    expect(embedded(older).minCli).toBe(MIN_ALTIMATE_CODE)
-    expect(older).toContain("if(r&&r.mayCarry)wrap.appendChild(el('p','older','altimate-code '+DATA.minCli+' or later says why each model may carry it")
-    // Only in the older sections: an answer with reasons is one from that release or later.
-    const at = (one: string) => older.indexOf(one, older.indexOf('function render(){'))
-    expect(at("if(r&&r.mayCarry)wrap.appendChild(el('p','older'")).toBeGreaterThan(at('if(f.mayCarry)wrap.appendChild(mayCarryFold('))
-    expect(at("if(r&&r.mayCarry)wrap.appendChild(el('p','older'")).toBeLessThan(at("wrap.appendChild(fold(f.mayCarry?'Proven unaffected"))
-    expect(embedded(reportHtml(columnReportData('fct_orders', 'revenue', TRACE, { builtAt: TASK.builtAt, manifest: 'm' }))).minCli).toBe(MIN_ALTIMATE_CODE)
+    const view = summaryOf([CHANGE], [{ ...TRACE, down: null, up: null, stale: true }], null)
+    expect(summaryLines(view)[2]).toBe(`  revenue  no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later`)
   })
 })
 

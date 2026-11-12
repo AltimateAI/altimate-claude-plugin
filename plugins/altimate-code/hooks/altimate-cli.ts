@@ -2,8 +2,8 @@
 import type { EngineInterface } from 'claude-code'
 
 /**
- * The oldest altimate-code release the plugin is made for: the first with "cleared only when proven"
- * (`may_carry` in the column answer). Stated in README.md and CHANGELOG.md too.
+ * The oldest altimate-code release the plugin is made for: the first whose column answer reports what
+ * may carry the value, with a reason for each model (`may_carry`). Stated in README.md and CHANGELOG.md too.
  */
 export const MIN_ALTIMATE_CODE = '0.12.11' // placeholder until the release with altimate-code#1710 is tagged
 

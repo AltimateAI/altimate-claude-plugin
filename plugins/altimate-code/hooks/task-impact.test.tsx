@@ -246,12 +246,12 @@ test('an edited model is traced downstream at the task end for the band; the rep
   expect(directional(tools)).toEqual([{ manifest_path: frozen(), model: 'fct_orders', column: 'revenue', change_type: 'modify', direction: 'downstream' }])
   expect(writes.has(REPORT)).toBe(false)
   // One log line: the transcript draws a newline in a log as a replacement glyph.
-  expect(logs).toContain('◆ Lineage after this task · 1 model changed · fct_orders · 6 downstream models at model level · revenue  reaches 4 columns in 3 models (2 end columns) · 1 more may change · 2 shouldn\'t change · ⚠ Lower bound: 1 model could not be read')
+  expect(logs).toContain('◆ Lineage after this task · 1 model changed · fct_orders · 6 downstream models at model level · revenue  reaches 4 columns in 3 models (2 end columns) · 3 more may change · ⚠ Lower bound: 1 model could not be read')
 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: '◆ Lineage after this task · 1 model changed' })).toBeDefined()
   expect(await band.find({ type: 'Text', text: 'fct_orders · 6 downstream models at model level' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: '  revenue  reaches 4 columns in 3 models (2 end columns) · 1 more may change · 2 shouldn\'t change' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '  revenue  reaches 4 columns in 3 models (2 end columns) · 3 more may change' })).toBeDefined()
   expect(await band.find({ type: 'Text', text: '⚠ Lower bound: 1 model could not be read' })).toBeDefined()
   expect(await band.find({ key: 'lineage-open' })).toBeDefined()
 

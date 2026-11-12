@@ -21,10 +21,8 @@ export type ColumnAnswer = {
   edges?: [number, number, string?, string?][]
   also_reads?: { model: number; columns?: string[]; downstream?: number }[]
   unresolved?: { model: number; reason?: string; code?: string; downstream?: number }[]
-  /** Every model that may carry the value, once, with why it couldn't be proven unaffected (altimate-code with "cleared only when proven"). */
+  /** Every model at the model level the traced edges don't reach, once, with the first reason found: nothing is reported unaffected. */
   may_carry?: { id?: string; name?: string; reason?: string; via?: string }[]
-  /** Models at the model level that do not carry the value: off the path, so not in `nodes`. */
-  cleared?: { id?: string; name?: string }[]
   /** Exposures on the model or downstream, by what they read; `declared` counts the whole project's. */
   consumers?: { declared?: number; exposures?: RawExposure[] }
   flags?: { model: number; flag: string }[]
@@ -44,7 +42,7 @@ export type ModelChange = {
   ended?: string
 }
 
-export type ConsumerTier = 'carries' | 'may_carry' | 'cleared'
+export type ConsumerTier = 'carries' | 'may_carry'
 /** An exposure: `tier` says how the models it reads relate to the value; null when only a model was traced. */
 export type Consumer = { id: string; label: string; type: string; url: string | null; owner: string | null; tier: ConsumerTier | null; via: string[]; columns: string[] }
 /** `declared` is what the whole project declares; null when the answer did not say. */
@@ -137,18 +135,15 @@ export function focusHow(upstream: ColumnAnswer | null): How | null {
 export function reachOf(answer: ColumnAnswer): Reach {
   const counts = answer.counts ?? {}
   const beyond = answer.columns.filter(one => one.hop > 0)
-  const cleared = num(counts.cleared_models) ?? (Array.isArray(answer.cleared) ? answer.cleared.length : null)
   return {
     columns: num(counts.columns) ?? beyond.length,
     models: num(counts.models) ?? new Set(beyond.map(one => one.model)).size,
     ends: num(counts.ends) ?? beyond.filter(one => one.end).length,
     hops: num(counts.hops) ?? Math.max(0, ...answer.columns.map(one => one.hop)),
-    mayCarry: num(counts.may_carry_models) ?? answer.may_carry?.length ?? answer.also_reads?.length ?? 0,
-    cleared,
+    mayCarry: num(counts.may_carry_models) ?? answer.may_carry?.length ?? 0,
     unresolved: num(counts.unresolved_models) ?? answer.unresolved?.length ?? 0,
     modelLevel: num(counts.model_level),
     truncated: answer.truncated === true,
-    ...(Array.isArray(answer.may_carry) ? { proven: true } : {}),
   }
 }
 
@@ -181,14 +176,14 @@ export function consumersOf(metadata: unknown): ReportConsumers {
       type: String(one.type ?? 'exposure'),
       url: typeof one.url === 'string' && /^https?:\/\//i.test(one.url) ? one.url : null,
       owner: typeof one.owner === 'string' ? one.owner : null,
-      tier: one.tier === 'carries' || one.tier === 'may_carry' || one.tier === 'cleared' ? one.tier : null,
+      tier: one.tier === 'carries' || one.tier === 'may_carry' ? one.tier : null,
       via: Array.isArray(one.via) ? one.via.map(String) : [],
       columns: [],
     })),
   }
 }
 
-const TIER_ORDER: (ConsumerTier | null)[] = ['carries', 'may_carry', 'cleared', null]
+const TIER_ORDER: (ConsumerTier | null)[] = ['carries', 'may_carry', null]
 
 /** One list across every traced column: an exposure once, in its closest tier, naming the columns behind it. */
 export function mergeConsumers(traces: ColumnTrace[]): ReportConsumers {
@@ -257,11 +252,9 @@ export function summaryLines(view: TaskSummaryView): string[] {
       else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : `no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later`}`)
       else {
         const r = col.reach
-        // What may change, and what the engine cleared: proven unaffected when the answer says why each other
-        // model may carry the value (every path to a cleared one passes a reader proven not to read it).
+        // What the value reaches, and how many more it may reach: nothing is reported unaffected.
         const parts = [`reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'model')} (${plural(r.ends, 'end column')})`]
         parts.push(`${r.mayCarry} more may change`)
-        if (r.cleared !== null) parts.push(`${r.cleared} ${r.proven ? 'proven unaffected' : "shouldn't change"}`)
         lines.push(`  ${col.name}  ${parts.join(' · ')}`)
       }
     }
@@ -328,12 +321,9 @@ export type ReportFocus = {
   up: ReportSection
   down: ReportSection
   edges: [string, string, string][]
-  alsoReads: { name: string; columns: string[]; downstream: number | null }[]
-  unresolved: { name: string; reason: string; downstream: number | null }[]
-  cleared: { names: string[]; count: number | null }
-  /** The may-carry models grouped by why, in MAY_CARRY_REASONS order; null when the answer gives no reasons (an older altimate-code). */
+  /** The may-carry models grouped by why, in MAY_CARRY_REASONS order; null when there is no downstream answer. */
   mayCarry: MayCarryGroup[] | null
-  /** Upstream, the ancestors that may also be a source, grouped the same way; null for an older answer. */
+  /** Upstream, the ancestors that may also be a source, grouped the same way; null when there is no upstream answer. */
   upMayCarry: MayCarryGroup[] | null
   inputs: { engine: string | null; workarounds: string[]; catalog: boolean; olderThanSql: boolean }
 }
@@ -347,8 +337,6 @@ export type ReportData = {
   /** Files that changed after the task ended. */
   movedOn: string[]
   defaultLevels: number
-  /** The oldest altimate-code the plugin is made for, named where an answer shows an older one. */
-  minCli: string
   changes: { model: string; file: string; columns: ModelChange['columns'] }[]
   focuses: ReportFocus[]
   consumers: ReportConsumers
@@ -431,13 +419,8 @@ export function impactWords(model: string, column: string | null, trace: ColumnT
   if (r.models > 0) lines.push([...downstream, 'The value of ', { code: column }, ` flows into ${r.models} of them, in ${count(r.columns, 'column')}. ${lookup ? 'A wrong value here shows up there too' : 'Expect those to change with it'}: `, ...namesList(carriersOf(down).map(one => one.name)), '.'])
   else if (level !== 0) lines.push([...downstream, 'The value of ', { code: column }, " doesn't flow into any column of theirs."])
   else lines.push(downstream)
-  // An answer that gives reasons comes from an altimate-code that clears a model only when it proves it.
-  const proven = Array.isArray(down.may_carry)
   const them = r.mayCarry === 1 ? 'it' : 'them'
-  if (r.mayCarry > 0 && proven) lines.push([`${r.mayCarry} more may ${lookup ? 'carry it' : 'change'}: the engine couldn't prove the value doesn't reach ${them}. \u201cMay carry it\u201d below says why, model by model.`])
-  else if (r.mayCarry > 0) lines.push([`${r.mayCarry} more may ${lookup ? 'carry it' : 'change'}: ${r.mayCarry === 1 ? 'it uses' : 'they use'} the value in a way the trace can't follow (a filter or a join, say), ${r.mayCarry === 1 ? 'its' : 'their'} SQL couldn't be read, or ${r.mayCarry === 1 ? 'it reads' : 'they read'} from a model like that.`])
-  if (r.cleared && proven) lines.push([`${r.cleared} ${r.cleared === 1 ? 'is' : 'are'} proven ${lookup ? 'not to carry it' : 'unaffected'}: every path from the column to ${r.cleared === 1 ? 'it' : 'them'} passes a model proven not to read the value.`])
-  else if (r.cleared) lines.push([`${r.cleared} ${lookup ? "don't carry it" : "shouldn't change"}: ${r.cleared === 1 ? "it's" : "they're"} downstream of the model, but the value doesn't reach ${r.cleared === 1 ? 'it' : 'them'}.`])
+  if (r.mayCarry > 0) lines.push([`${r.mayCarry} more may ${lookup ? 'carry it' : 'change'}: the value wasn't traced to ${them}, and nothing rules ${them} out. \u201cMay carry it\u201d below says why, model by model.`])
   const self = down.nodes[down.columns.find(one => one.hop === 0)?.model ?? -1]
   if (self?.contract && !lookup) lines.push([{ code: model }, ' enforces a contract, so a type change can fail its build.'])
   const contracts = value.filter(one => one!.contract).map(one => String(one!.name ?? one!.id))
@@ -454,16 +437,17 @@ export const MAY_CARRY_REASONS: [string, string][] = [
   ['unresolved', "its SQL couldn't be read"],
   ['read_in_part', 'its SQL was read only in part'],
   ['read_columns_unknown', "the columns its SQL reads couldn't be listed"],
+  ['ephemeral', 'an ephemeral model is inlined into it'],
   ['unclear_sql', "its SQL has quoting or a FROM item the check can't read for certain"],
   ['star', 'it selects `*`, so it may read the column without naming it'],
   ['natural_join', 'a NATURAL JOIN may join on it'],
   ['dynamic_name', 'it names columns at run time (IDENTIFIER, COLUMNS or $n)'],
   ['row_reference', 'it uses a whole row as a value'],
-  ['ephemeral', 'an ephemeral model is inlined into it'],
   ['names_column', 'it uses the column in a filter, join or grouping'],
   ['reads_value_model', 'it reads a model the value reaches, whose other columns may change'],
   ['below', 'it sits past one of these'],
   ['capped', 'the trace stopped at its limit here'],
+  ['not_traced', "the value wasn't traced to it, but nothing rules it out"],
 ]
 export type MayCarryGroup = { reason: string; heading: Words; models: { name: string; note: string | null }[] }
 
@@ -472,17 +456,17 @@ const wordsOf = (text: string): Words => text.split('`').map((part, i) => (i % 2
 
 /**
  * The answer's may-carry models grouped by reason, in MAY_CARRY_REASONS order and then any reason this
- * build doesn't know; null when the answer has no `may_carry`. A model's note names `via` (for `below`
+ * build doesn't know; null when there is no answer, and none listed when an answer has no `may_carry`. A model's note names `via` (for `below`
  * and `reads_value_model`), what it reads outside the select, or why it couldn't be read. Upstream
  * (`up`), the models are ancestors that may also be a source, and one `below` sits above `via`.
  */
 export function mayCarryGroups(answer: ColumnAnswer | null, up = false): MayCarryGroup[] | null {
-  if (!answer || !Array.isArray(answer.may_carry)) return null
+  if (!answer) return null
   const known = new Map(MAY_CARRY_REASONS)
   const byReason = new Map<string, MayCarryGroup['models']>()
   const readsOf = new Map((answer.also_reads ?? []).map(one => [nameOf(answer, one.model), one]))
   const unreadOf = new Map((answer.unresolved ?? []).map(one => [nameOf(answer, one.model), one]))
-  for (const one of answer.may_carry) {
+  for (const one of answer.may_carry ?? []) {
     const reason = String(one?.reason ?? 'unknown')
     const name = String(one?.name ?? one?.id ?? '?')
     const via = typeof one?.via === 'string' && one.via ? (reason === 'below' ? `${up ? 'above' : 'past'} ${one.via}` : reason === 'reads_value_model' ? `reads ${one.via}` : null) : null
@@ -506,13 +490,9 @@ export function upstreamWords(model: string, column: string, up: ColumnAnswer | 
   if (!up) return [['Where ', { code: `${model}.${column}` }, ' comes from could not be traced.']]
   const read = up.columns.filter(one => one.hop > 0)
   const name = (index: number) => nameOf(up, index)
-  // An answer that gives reasons also names the ancestors that may be a source, and proves the cleared ones are not.
-  const maybe = Array.isArray(up.may_carry) ? up.may_carry.length : 0
-  const notSource = Array.isArray(up.may_carry) ? (num(up.counts?.cleared_models) ?? up.cleared?.length ?? 0) : 0
-  const others: Words[] = [
-    ...(maybe ? [[`${maybe} more ${maybe === 1 ? 'model' : 'models'} upstream may also be a source: the engine couldn't prove ${maybe === 1 ? "it isn't" : "they aren't"}. \u201cWhere else it may come from\u201d below says why.`]] : []),
-    ...(notSource ? [[`${count(notSource, 'other model')} upstream ${notSource === 1 ? 'is' : 'are'} proven not to be a source: no traced edge leads from ${notSource === 1 ? 'it' : 'them'}, and every model between was read in full.`]] : []),
-  ]
+  // The ancestors the traced edges don't reach may still be a source: nothing is reported as not one.
+  const maybe = up.may_carry?.length ?? 0
+  const others: Words[] = maybe ? [[`${maybe} more ${maybe === 1 ? 'model' : 'models'} upstream may also be a source: the value wasn't traced from ${maybe === 1 ? 'it' : 'them'}, and nothing rules ${maybe === 1 ? 'it' : 'them'} out. \u201cWhere else it may come from\u201d below says why.`]] : []
   if (read.length === 0) return [[{ code: column }, ' in ', { code: model }, " reads no column the trace could follow: a constant, say, or SQL the engine couldn't read."], ...others]
   const direct = read.filter(one => one.hop === 1)
   const made = DERIVED[focusHow(up)?.glyph ?? ''] ?? 'made from'
@@ -544,7 +524,6 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
       edges.push([keyOf(answer, edge[0]), keyOf(answer, edge[1]), String(edge[2] ?? '?')])
     }
   }
-  const clearedNames = (Array.isArray(down?.cleared) ? down!.cleared : []).map(one => String(one?.name ?? one?.id ?? '?'))
   const reach = down ? reachOf(down) : null
   const manifestInput = (down?.inputs ?? up?.inputs)?.manifest as any
   return {
@@ -562,9 +541,6 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
     up: sectionOf(up, !up && !!column, !!trace?.stale),
     down: sectionOf(down, !down && !!column, !!trace?.stale),
     edges,
-    alsoReads: (down?.also_reads ?? []).map(one => ({ name: nameOf(down!, one.model), columns: (one.columns ?? []).map(String), downstream: num(one.downstream) })),
-    unresolved: (down?.unresolved ?? []).map(one => ({ name: nameOf(down!, one.model), reason: String(one.reason ?? 'not read'), downstream: num(one.downstream) })),
-    cleared: { names: clearedNames, count: reach?.cleared ?? (clearedNames.length || null) },
     mayCarry: mayCarryGroups(down),
     upMayCarry: mayCarryGroups(up, true),
     inputs: {
@@ -589,7 +565,6 @@ export function reportData(changes: ModelChange[], traces: ColumnTrace[], task: 
     lookup: null,
     ...task,
     defaultLevels: DEFAULT_LEVELS,
-    minCli: MIN_ALTIMATE_CODE,
     changes: changes.map(one => ({ model: one.model, file: one.file, columns: one.columns })),
     focuses,
     consumers: mergeConsumers(traces),
@@ -607,7 +582,6 @@ export function columnReportData(model: string, column: string, trace: ColumnTra
     manifest: built.manifest,
     movedOn: [],
     defaultLevels: DEFAULT_LEVELS,
-    minCli: MIN_ALTIMATE_CODE,
     changes: [],
     focuses: [focusOf(change, { name: column, before: null, after: null }, trace, true)],
     consumers: mergeConsumers([trace]),
@@ -751,7 +725,6 @@ details.fold .why{color:var(--muted)}
 details.fold .reason{font-size:12.5px;font-weight:600;margin:8px 0 2px}
 details.fold .reason code{font-weight:400}
 details.fold.inner{margin:6px 0 0;padding:0;border-top:1px solid var(--line)}
-.older{color:var(--muted);font-size:12.5px;margin:4px 2px 8px}
 /* The path bar floats over the page: shown in the flow, it would push the page down under the pointer that clicked. */
 .pathbar{position:fixed;top:8px;left:16px;right:16px;max-width:1648px;margin:0 auto;z-index:20;display:none;align-items:center;gap:10px;flex-wrap:wrap;background:var(--accent);color:#fff;padding:8px 14px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.2);font-size:13px;pointer-events:none}
 @media (prefers-color-scheme:dark){.pathbar{color:#111}}
@@ -795,10 +768,10 @@ function mayCarryFold(groups,total,title,cls){var n=groups.reduce(function(s,g){
   if(total!=null&&total>n)d.appendChild(el('p','why',plural(total-n,'more model')+' without a reason in this answer.'));return d}
 function li(name,rest){var l=el('li');l.appendChild(el('span','mono',name));if(rest){l.appendChild(document.createTextNode(' '));l.appendChild(el('span','why',rest))}return l}
 function words(parent,line){line.forEach(function(w){if(typeof w==='string')parent.appendChild(document.createTextNode(w));else parent.appendChild(el('code',null,w.code))});return parent}
-function upstreamPanel(){var f=DATA.focuses[state.focus],p=el('div','panel impact upstream');p.appendChild(el('h2',null,'Where it comes from'));var ul=el('ul');f.upstream.forEach(function(line){ul.appendChild(words(el('li'),line))});p.appendChild(ul);if(f.upMayCarry)p.appendChild(mayCarryFold(f.upMayCarry,null,'Where else it may come from, by reason ','fold inner'));return p}
+function upstreamPanel(){var f=DATA.focuses[state.focus],p=el('div','panel impact upstream');p.appendChild(el('h2',null,'Where it comes from'));var ul=el('ul');f.upstream.forEach(function(line){ul.appendChild(words(el('li'),line))});p.appendChild(ul);if(f.upMayCarry&&f.upMayCarry.length)p.appendChild(mayCarryFold(f.upMayCarry,null,'Where else it may come from, by reason ','fold inner'));return p}
 function impactPanel(){var p=el('div','panel impact');p.appendChild(el('h2',null,DATA.lookup?'Where it goes':'What to expect downstream'));DATA.focuses.forEach(function(g){if(DATA.focuses.length>1)p.appendChild(el('h3','mono',g.column?g.model+'.'+g.column:g.model));var ul=el('ul');g.impact.forEach(function(line){ul.appendChild(words(el('li'),line))});p.appendChild(ul)});return p}
 function consumerItem(c){var l=el('li');if(c.url){var a=el('a',null,c.label);a.href=c.url;a.rel='noopener noreferrer';a.target='_blank';l.appendChild(a)}else l.appendChild(document.createTextNode(c.label));var bits=[c.type];if(c.via.length)bits.push('reads '+c.via.join(', '));if(c.owner)bits.push('owner: '+c.owner);if(DATA.focuses.length>1&&c.columns.length)bits.push('for '+c.columns.join(', '));l.appendChild(el('span','why',' \\u00b7 '+bits.join(' \\u00b7 ')));return l}
-var TIERS=[['carries','Read a model the value reaches'],['may_carry','Read a model that may carry it'],['cleared',"Read only models the value doesn't reach"],[null,'Read this model or one downstream of it']];
+var TIERS=[['carries','Read a model the value reaches'],['may_carry','Read a model that may carry it'],[null,'Read this model or one downstream of it']];
 function consumersPanel(){var c=DATA.consumers,p=el('div','panel consumers');p.appendChild(el('h2',null,'Who consumes it'));
   if(c.error)p.appendChild(el('div','empty','The project\\u2019s exposures could not be read: '+c.error));
   else if(c.declared===null)p.appendChild(el('div','empty','This version of altimate-code does not report exposures, so consumers are unknown.'));
@@ -818,9 +791,9 @@ function render(){
   if(DATA.focuses.length>1){var tabs=el('div','tabs');tabs.setAttribute('role','tablist');DATA.focuses.forEach(function(g,j){var t=el('button','tab',g.column?g.model+'.'+g.column:g.model+' (model)');t.type='button';t.setAttribute('role','tab');t.setAttribute('aria-selected',j===i?'true':'false');t.addEventListener('click',function(){state.focus=j;state.selected=null;render()});tabs.appendChild(t)});main.appendChild(tabs)}
   var r=f.reach,stats=el('div','stats');
   if(DATA.lookup){var uc=0,um={},uh=0,ue=!!f.up.error;f.up.hops.forEach(function(h){uh=Math.max(uh,h.hop);h.models.forEach(function(m){um[m.id]=1;uc+=m.columns.length})});stats.appendChild(stat(ue?null:uc,'columns upstream',false,'Columns the value is made from, followed all the way back'));stats.appendChild(stat(ue?null:Object.keys(um).length,'models upstream',false,'Models those columns sit in'));stats.appendChild(stat(ue?null:uh,'hops up',false,'How many models back the trace goes'))}
-  if(r){stats.appendChild(stat(r.columns,'columns downstream',false,'Columns the value flows into, at every level'));stats.appendChild(stat(r.models,'models carry it',false,'Downstream models with a column the value flows into'));stats.appendChild(stat(r.ends,'end columns',false,'Columns the value reaches that nothing further downstream reads'));stats.appendChild(stat(r.mayCarry,'models may carry it',!r.mayCarry,f.mayCarry?'Models the engine couldn\\u2019t prove the value doesn\\u2019t reach: \\u201cMay carry it\\u201d below says why':'Models that use the value in a way the trace can\\u2019t follow (a filter or a join, say), whose SQL couldn\\u2019t be read, or that read from a model like that'));stats.appendChild(f.mayCarry?stat(r.cleared,'proven unaffected',r.cleared==null,'Every path from the column to them passes a model proven not to read the value'):stat(r.cleared,'models cleared',r.cleared==null,'Downstream of the model, but the value doesn\\u2019t reach them'))}
+  if(r){stats.appendChild(stat(r.columns,'columns downstream',false,'Columns the value flows into, at every level'));stats.appendChild(stat(r.models,'models carry it',false,'Downstream models with a column the value flows into'));stats.appendChild(stat(r.ends,'end columns',false,'Columns the value reaches that nothing further downstream reads'));stats.appendChild(stat(r.mayCarry,'models may carry it',!r.mayCarry,'Downstream models the value wasn\\u2019t traced to, which nothing rules out: \\u201cMay carry it\\u201d below says why'))}
   stats.appendChild(stat(f.modelLevel,'models downstream (model level)',true,'Every model downstream of this one, whether or not the value reaches it'));main.appendChild(stats);
-  if(r&&(r.unresolved||r.truncated))main.appendChild(el('div','note warn','\\u26a0 Lower bound: '+[r.unresolved?plural(r.unresolved,'model')+' could not be read':'',r.truncated?'the trace hit its limit':''].filter(Boolean).join('; ')+'. See \\u201c'+(f.mayCarry?'May carry it':'Not resolved')+'\\u201d below.'));
+  if(r&&(r.unresolved||r.truncated))main.appendChild(el('div','note warn','\\u26a0 Lower bound: '+[r.unresolved?plural(r.unresolved,'model')+' could not be read':'',r.truncated?'the trace hit its limit':''].filter(Boolean).join('; ')+'. See \\u201cMay carry it\\u201d below.'));
   else if(r)main.appendChild(el('div','note ok','\\u2713 Every downstream model was read.'));
   var inp=[];if(f.inputs.engine)inp.push('engine '+f.inputs.engine);inp.push(f.inputs.catalog?'with catalog types':'no catalog: types from the manifest');if(f.inputs.olderThanSql)inp.push('the manifest is older than the SQL');main.appendChild(el('div','inputs',inp.join(' \\u00b7 ')));
   var lg=el('div','legend');['=','~','\\u0192','\\u03a3','?'].forEach(function(g){var s=el('span');s.appendChild(glyph(g,false));s.appendChild(document.createTextNode(HOW[g]));lg.appendChild(s)});var bn=el('span');bn.appendChild(glyph('=',true));bn.appendChild(document.createTextNode('matched by name'));lg.appendChild(bn);var cb=el('span');cb.appendChild(el('span','badge c','C'));cb.appendChild(document.createTextNode(' contract enforced'));lg.appendChild(cb);
@@ -830,11 +803,7 @@ function render(){
   var fc=el('div','panel focus');fc.appendChild(el('div','label',DATA.lookup?'The column':'The changed column'));var ti=el('div','title');if(f.key){ti.appendChild(colButton({key:f.key,column:f.model+'.'+(f.column||''),glyph:f.glyph||'?',byName:f.byName,end:false,type:null}))}else ti.appendChild(el('span','mono',f.column?f.model+'.'+f.column:f.model));fc.appendChild(ti);var hw=f.glyph?HOW[f.glyph]||'unknown':'';fc.appendChild(el('div','empty',(hw?hw.charAt(0).toUpperCase()+hw.slice(1)+' from what it reads'+(f.byName?' (matched by name)':'')+'. ':'')+(f.key?'Click any column to light up its path.':'')));main.appendChild(fc);
   main.appendChild(section(f,i,'down'))}
   wrap.appendChild(page);
-  if(f.mayCarry)wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));else{
-  wrap.appendChild(fold('Also reads it, outside the select',f.alsoReads.length,f.alsoReads.map(function(a){return li(a.name,'reads '+a.columns.join(', ')+(a.downstream!=null?' \\u00b7 '+plural(a.downstream,'model')+' downstream of it':''))})));
-  wrap.appendChild(fold('Not resolved',f.unresolved.length,f.unresolved.map(function(u){return li(u.name,u.reason+(u.downstream!=null?' \\u00b7 '+plural(u.downstream,'model')+' downstream of it':''))})));
-  if(r&&r.mayCarry)wrap.appendChild(el('p','older','altimate-code '+DATA.minCli+' or later says why each model may carry it, and clears a model only when it proves the value can\\u2019t reach it.'))}
-  wrap.appendChild(fold(f.mayCarry?'Proven unaffected: every path to it passes a model proven not to read the value':'Cleared: downstream, but does not carry it',f.cleared.count,f.cleared.names.map(function(n){return li(n,'')})));
+  if(f.mayCarry&&(f.mayCarry.length||(r&&r.mayCarry)))wrap.appendChild(mayCarryFold(f.mayCarry,r?r.mayCarry:null));
   if(f.inputs.workarounds.length)wrap.appendChild(fold('How the engine read the SQL',f.inputs.workarounds.length,f.inputs.workarounds.map(function(w){var l=el('li','why',w);return l})));
   app.appendChild(wrap);if(graph)graph.afterMount();applyHighlight();
 }
