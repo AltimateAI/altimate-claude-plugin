@@ -333,6 +333,8 @@ export type ReportFocus = {
   cleared: { names: string[]; count: number | null }
   /** The may-carry models grouped by why, in MAY_CARRY_REASONS order; null when the answer gives no reasons (an older altimate-code). */
   mayCarry: MayCarryGroup[] | null
+  /** Upstream, the ancestors that may also be a source, grouped the same way; null for an older answer. */
+  upMayCarry: MayCarryGroup[] | null
   inputs: { engine: string | null; workarounds: string[]; catalog: boolean; olderThanSql: boolean }
 }
 export type ReportData = {
@@ -470,9 +472,10 @@ const wordsOf = (text: string): Words => text.split('`').map((part, i) => (i % 2
 /**
  * The answer's may-carry models grouped by reason, in MAY_CARRY_REASONS order and then any reason this
  * build doesn't know; null when the answer has no `may_carry`. A model's note names `via` (for `below`
- * and `reads_value_model`), what it reads outside the select, or why it couldn't be read.
+ * and `reads_value_model`), what it reads outside the select, or why it couldn't be read. Upstream
+ * (`up`), the models are ancestors that may also be a source, and one `below` sits above `via`.
  */
-export function mayCarryGroups(answer: ColumnAnswer | null): MayCarryGroup[] | null {
+export function mayCarryGroups(answer: ColumnAnswer | null, up = false): MayCarryGroup[] | null {
   if (!answer || !Array.isArray(answer.may_carry)) return null
   const known = new Map(MAY_CARRY_REASONS)
   const byReason = new Map<string, MayCarryGroup['models']>()
@@ -481,7 +484,7 @@ export function mayCarryGroups(answer: ColumnAnswer | null): MayCarryGroup[] | n
   for (const one of answer.may_carry) {
     const reason = String(one?.reason ?? 'unknown')
     const name = String(one?.name ?? one?.id ?? '?')
-    const via = typeof one?.via === 'string' && one.via ? (reason === 'below' ? `past ${one.via}` : reason === 'reads_value_model' ? `reads ${one.via}` : null) : null
+    const via = typeof one?.via === 'string' && one.via ? (reason === 'below' ? `${up ? 'above' : 'past'} ${one.via}` : reason === 'reads_value_model' ? `reads ${one.via}` : null) : null
     const reads = reason === 'names_column' ? readsOf.get(name) : undefined
     const unread = reason === 'unresolved' ? unreadOf.get(name) : undefined
     const detail = reads?.columns?.length ? `reads ${reads.columns.map(String).join(', ')}` : unread?.reason ? String(unread.reason) : null
@@ -490,7 +493,7 @@ export function mayCarryGroups(answer: ColumnAnswer | null): MayCarryGroup[] | n
   }
   const order = [...MAY_CARRY_REASONS.map(one => one[0]).filter(one => byReason.has(one)), ...[...byReason.keys()].filter(one => !known.has(one)).sort()]
   return order.map(reason => {
-    const text = known.get(reason) ?? `the engine gave the reason "${reason}"`
+    const text = (up && reason === 'below' ? 'it sits above one of these' : known.get(reason)) ?? `the engine gave the reason "${reason}"`
     return { reason, heading: wordsOf(text.charAt(0).toUpperCase() + text.slice(1)), models: byReason.get(reason)!.sort((a, b) => a.name.localeCompare(b.name)) }
   })
 }
@@ -502,7 +505,14 @@ export function upstreamWords(model: string, column: string, up: ColumnAnswer | 
   if (!up) return [['Where ', { code: `${model}.${column}` }, ' comes from could not be traced.']]
   const read = up.columns.filter(one => one.hop > 0)
   const name = (index: number) => nameOf(up, index)
-  if (read.length === 0) return [[{ code: column }, ' in ', { code: model }, " reads no column the trace could follow: a constant, say, or SQL the engine couldn't read."]]
+  // An answer that gives reasons also names the ancestors that may be a source, and proves the cleared ones are not.
+  const maybe = Array.isArray(up.may_carry) ? up.may_carry.length : 0
+  const notSource = Array.isArray(up.may_carry) ? (num(up.counts?.cleared_models) ?? up.cleared?.length ?? 0) : 0
+  const others: Words[] = [
+    ...(maybe ? [[`${maybe} more ${maybe === 1 ? 'model' : 'models'} upstream may also be a source: the engine couldn't prove ${maybe === 1 ? "it isn't" : "they aren't"}. \u201cWhere else it may come from\u201d below says why.`]] : []),
+    ...(notSource ? [[`${count(notSource, 'other model')} upstream ${notSource === 1 ? 'is' : 'are'} proven not to be a source: no traced edge leads from ${notSource === 1 ? 'it' : 'them'}, and every model between was read in full.`]] : []),
+  ]
+  if (read.length === 0) return [[{ code: column }, ' in ', { code: model }, " reads no column the trace could follow: a constant, say, or SQL the engine couldn't read."], ...others]
   const direct = read.filter(one => one.hop === 1)
   const made = DERIVED[focusHow(up)?.glyph ?? ''] ?? 'made from'
   const lines: Words[] = [[{ code: column }, ' in ', { code: model }, ` is ${made} ${count(direct.length, 'column')} one hop up: `, ...namesList(direct.map(one => `${name(one.model)}.${one.column}`)), '.']]
@@ -511,6 +521,7 @@ export function upstreamWords(model: string, column: string, up: ColumnAnswer | 
   if (hops > 1) lines.push([`Followed all the way back, it draws on ${count(read.length, 'column')} in ${count(models, 'model')}, up to ${count(hops, 'hop')} away.`])
   const starts = [...new Set(read.filter(one => one.end).map(one => name(one.model)))]
   if (starts.length > 0) lines.push(['Where it starts: ', ...namesList(starts), '.'])
+  lines.push(...others)
   const unread = (up.unresolved ?? []).length
   const short = [unread ? `${count(unread, 'model')} upstream couldn't be read` : '', up.truncated ? 'the trace hit its limit' : ''].filter(Boolean).join(' and ')
   lines.push([short ? `${short.charAt(0).toUpperCase()}${short.slice(1)}, so more may feed it.` : 'Every upstream model was read.'])
@@ -554,6 +565,7 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
     unresolved: (down?.unresolved ?? []).map(one => ({ name: nameOf(down!, one.model), reason: String(one.reason ?? 'not read'), downstream: num(one.downstream) })),
     cleared: { names: clearedNames, count: reach?.cleared ?? (clearedNames.length || null) },
     mayCarry: mayCarryGroups(down),
+    upMayCarry: mayCarryGroups(up, true),
     inputs: {
       engine: (down?.inputs ?? up?.inputs)?.engine ?? null,
       workarounds: [...new Set([...(down?.inputs?.workarounds ?? []), ...(up?.inputs?.workarounds ?? [])])].map(String),
@@ -737,6 +749,7 @@ details.fold li{margin:3px 0}
 details.fold .why{color:var(--muted)}
 details.fold .reason{font-size:12.5px;font-weight:600;margin:8px 0 2px}
 details.fold .reason code{font-weight:400}
+details.fold.inner{margin:6px 0 0;padding:0;border-top:1px solid var(--line)}
 .older{color:var(--muted);font-size:12.5px;margin:4px 2px 8px}
 /* The path bar floats over the page: shown in the flow, it would push the page down under the pointer that clicked. */
 .pathbar{position:fixed;top:8px;left:16px;right:16px;max-width:1648px;margin:0 auto;z-index:20;display:none;align-items:center;gap:10px;flex-wrap:wrap;background:var(--accent);color:#fff;padding:8px 14px;border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,.2);font-size:13px;pointer-events:none}
@@ -776,12 +789,12 @@ function hopBlock(h,dir){var d=el('div','hop');var cols=h.models.reduce(function
 function section(f,i,dir){var sec=f[dir],lv=state.levels[i][dir],s=el('section','section');var head=el('div','section-head');head.appendChild(el('h2',null,dir==='up'?'Upstream: where it comes from':'Downstream: where it goes'));var total=sec.hops.length,hidden=sec.hops.filter(function(h){return h.hop>lv}).length;if(hidden>0){var more=el('button','more',hidden===1?'Show 1 more level':'Show more levels ('+hidden+' hidden)');more.type='button';more.addEventListener('click',function(){state.levels[i][dir]=lv+1;render()});head.appendChild(more);if(hidden>1){var all=el('button','more','Show all');all.type='button';all.addEventListener('click',function(){state.levels[i][dir]=Infinity;render()});head.appendChild(all)}}else if(total>DATA.defaultLevels&&lv>DATA.defaultLevels){var less=el('button','more','Back to '+DATA.defaultLevels+' levels');less.type='button';less.addEventListener('click',function(){state.levels[i][dir]=DATA.defaultLevels;render()});head.appendChild(less)}s.appendChild(head);if(sec.error){s.appendChild(el('div','empty',sec.error));return s}var shown=sec.hops.filter(function(h){return h.hop<=lv});if(!shown.length)s.appendChild(el('div','empty',dir==='up'?'Nothing upstream was traced for this column.':'No downstream model carries this column\\u2019s value.'));if(dir==='up')shown=shown.slice().reverse();shown.forEach(function(h){s.appendChild(hopBlock(h,dir))});if(sec.truncated)s.appendChild(el('div','note warn','The trace stopped at its limit: more may sit beyond the last level.'));return s}
 function stat(n,label,dim,tip){var d=el('div','stat'+(dim?' dim':''));if(tip)d.title=tip;d.appendChild(el('b',null,n==null?'\\u2013':n));d.appendChild(el('span',null,label));return d}
 function fold(title,count,items){var d=el('details','panel fold');var s=el('summary',null,title+' ');s.appendChild(el('span',null,'('+(count==null?'not reported':count)+')'));d.appendChild(s);var ul=el('ul');items.forEach(function(it){ul.appendChild(it)});if(!items.length)ul.appendChild(el('li','why',count==null?'Not reported by this altimate-code build.':count?'Only the count is known.':'None.'));d.appendChild(ul);return d}
-function mayCarryFold(groups,total){var n=groups.reduce(function(s,g){return s+g.models.length},0),d=el('details','panel fold may');var s=el('summary',null,'May carry it, by reason ');s.appendChild(el('span',null,'('+(total!=null?total:n)+')'));d.appendChild(s);
+function mayCarryFold(groups,total,title,cls){var n=groups.reduce(function(s,g){return s+g.models.length},0),d=el('details',(cls||'panel fold')+' may');var s=el('summary',null,title||'May carry it, by reason ');s.appendChild(el('span',null,'('+(total!=null?total:n)+')'));d.appendChild(s);
   if(!groups.length)d.appendChild(el('p','why','None.'));groups.forEach(function(g){d.appendChild(words(el('div','reason'),g.heading.concat([' ('+g.models.length+')'])));var ul=el('ul');g.models.forEach(function(m){ul.appendChild(li(m.name,m.note||''))});d.appendChild(ul)});
   if(total!=null&&total>n)d.appendChild(el('p','why',plural(total-n,'more model')+' without a reason in this answer.'));return d}
 function li(name,rest){var l=el('li');l.appendChild(el('span','mono',name));if(rest){l.appendChild(document.createTextNode(' '));l.appendChild(el('span','why',rest))}return l}
 function words(parent,line){line.forEach(function(w){if(typeof w==='string')parent.appendChild(document.createTextNode(w));else parent.appendChild(el('code',null,w.code))});return parent}
-function upstreamPanel(){var f=DATA.focuses[state.focus],p=el('div','panel impact upstream');p.appendChild(el('h2',null,'Where it comes from'));var ul=el('ul');f.upstream.forEach(function(line){ul.appendChild(words(el('li'),line))});p.appendChild(ul);return p}
+function upstreamPanel(){var f=DATA.focuses[state.focus],p=el('div','panel impact upstream');p.appendChild(el('h2',null,'Where it comes from'));var ul=el('ul');f.upstream.forEach(function(line){ul.appendChild(words(el('li'),line))});p.appendChild(ul);if(f.upMayCarry)p.appendChild(mayCarryFold(f.upMayCarry,null,'Where else it may come from, by reason ','fold inner'));return p}
 function impactPanel(){var p=el('div','panel impact');p.appendChild(el('h2',null,DATA.lookup?'Where it goes':'What to expect downstream'));DATA.focuses.forEach(function(g){if(DATA.focuses.length>1)p.appendChild(el('h3','mono',g.column?g.model+'.'+g.column:g.model));var ul=el('ul');g.impact.forEach(function(line){ul.appendChild(words(el('li'),line))});p.appendChild(ul)});return p}
 function consumerItem(c){var l=el('li');if(c.url){var a=el('a',null,c.label);a.href=c.url;a.rel='noopener noreferrer';a.target='_blank';l.appendChild(a)}else l.appendChild(document.createTextNode(c.label));var bits=[c.type];if(c.via.length)bits.push('reads '+c.via.join(', '));if(c.owner)bits.push('owner: '+c.owner);if(DATA.focuses.length>1&&c.columns.length)bits.push('for '+c.columns.join(', '));l.appendChild(el('span','why',' \\u00b7 '+bits.join(' \\u00b7 ')));return l}
 var TIERS=[['carries','Read a model the value reaches'],['may_carry','Read a model that may carry it'],['cleared',"Read only models the value doesn't reach"],[null,'Read this model or one downstream of it']];

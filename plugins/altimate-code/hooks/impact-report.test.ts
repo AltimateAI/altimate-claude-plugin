@@ -468,6 +468,53 @@ describe('may carry it, by reason', () => {
   })
 })
 
+// The same upstream answer from an altimate-code that proves what is not a source: the ancestors that may be one, with reasons.
+const UP_PROVEN: ColumnAnswer = {
+  ...UP,
+  counts: { cleared_models: 1 },
+  cleared: [{ id: 'model.shop.dim_regions', name: 'dim_regions' }],
+  may_carry: [
+    { id: 'source.shop.raw.orders_v2', name: 'orders_v2', reason: 'below', via: 'int_orders' },
+    { id: 'model.shop.stg_mystery', name: 'stg_mystery', reason: 'star' },
+    { id: 'model.shop.stg_unread', name: 'stg_unread', reason: 'unresolved' },
+  ],
+}
+
+describe('where else a column may come from', () => {
+  test('groups the ancestors that may also be a source by reason, one below a traced model reading as above it', () => {
+    const groups = mayCarryGroups(UP_PROVEN, true)!
+    expect(groups.map(one => [one.reason, plain([one.heading])[0], one.models])).toEqual([
+      ['unresolved', "Its SQL couldn't be read", [{ name: 'stg_unread', note: null }]],
+      ['star', 'It selects `*`, so it may read the column without naming it', [{ name: 'stg_mystery', note: null }]],
+      ['below', 'It sits above one of these', [{ name: 'orders_v2', note: 'above int_orders' }]],
+    ])
+    expect(mayCarryGroups(UP, true)).toBeNull()
+  })
+
+  test('says how many more may be a source and how many are proven not to be; an older answer reads as before', () => {
+    expect(plain(upstreamWords('fct_orders', 'revenue', UP_PROVEN))).toEqual([
+      '`revenue` in `fct_orders` is aggregated from 1 column one hop up: `int_orders.amount`.',
+      'Followed all the way back, it draws on 2 columns in 2 models, up to 2 hops away.',
+      'Where it starts: `orders`.',
+      "3 more models upstream may also be a source: the engine couldn't prove they aren't. \u201cWhere else it may come from\u201d below says why.",
+      '1 other model upstream is proven not to be a source: no traced edge leads from it, and every model between was read in full.',
+      'Every upstream model was read.',
+    ])
+    // A constant still names the ancestors that may feed it.
+    expect(plain(upstreamWords('fct_orders', 'revenue', { ...UP_PROVEN, columns: [UP.columns[0]!], edges: [] })).length).toBe(3)
+    expect(plain(upstreamWords('fct_orders', 'revenue', UP))).toHaveLength(4)
+  })
+
+  test('the column report shows them under where it comes from; an older answer keeps the page as it was', () => {
+    const page = (up: ColumnAnswer) => columnReportData('fct_orders', 'revenue', { ...TRACE, up }, { builtAt: TASK.builtAt, manifest: 'm' })
+    expect(page(UP_PROVEN).focuses[0]!.upMayCarry!.map(one => one.reason)).toEqual(['unresolved', 'star', 'below'])
+    expect(page(UP).focuses[0]!.upMayCarry).toBeNull()
+    const html = reportHtml(page(UP_PROVEN))
+    expect(embedded(html).focuses[0].upMayCarry).toHaveLength(3)
+    expect(html).toContain("if(f.upMayCarry)p.appendChild(mayCarryFold(f.upMayCarry,null,'Where else it may come from, by reason ','fold inner'))")
+  })
+})
+
 describe('the altimate-code floor', () => {
   test('is one constant, a version, and the report names it where an answer shows an older altimate-code', () => {
     expect(MIN_ALTIMATE_CODE).toMatch(/^\d+\.\d+\.\d+$/)
