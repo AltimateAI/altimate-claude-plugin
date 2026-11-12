@@ -1,5 +1,5 @@
 ---
-description: Review the team rules proposed from your corrections in a project linked to an Altimate workspace, and see the workspace's team rules and the review status of your proposals
+description: Review the team rules proposed from your corrections in a project linked to an Altimate workspace, and see the workspace's team rules, the review status of your proposals, and your skill and knowledge requests
 ---
 
 The user invoked `/altimate-code:rules`. In a project linked to an Altimate workspace, altimate-code proposes a team rule when the user corrects the agent on the same topic in two sessions, corrects a team rule the session was given, or asks to remember something as a team rule. Those proposals wait here for the user's answer. Nothing reaches teammates until the workspace owner approves it.
@@ -18,9 +18,22 @@ Workflow (follow in order):
    - Exit 127 (`altimate-code CLI not found`): tell the user to install it (`npm install -g altimate-code`) and stop.
    - An error saying `proposals` is an unknown command: tell the user to update altimate-code (`npm install -g altimate-code@latest`) and stop.
 
+   Then list the user's own skill and knowledge requests to the workspace (read-only here):
+   ```bash
+   for ALTIMATE_NAME in altimate altimate-code; do
+     ALTIMATE_BIN="$(unalias "$ALTIMATE_NAME" 2>/dev/null; unset -f "$ALTIMATE_NAME" 2>/dev/null; command -v "$ALTIMATE_NAME")"
+     [ -x "$ALTIMATE_BIN" ] && break || ALTIMATE_BIN=
+   done
+   [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
+   "$ALTIMATE_BIN" workspace review status --json < /dev/null
+   ```
+   - Exit 0 answers JSON with `workspace_name`, `items`, `skipped` and `complete`. Each item has `kind` (`skill` or `knowledge`), `name`, `status` (`pending`, `active`, `rejected`, `superseded`, `withdrawn` or `retired`), `change` (`add` or `edit`), `reviewed_by_name`, `review_reason` and `expired`.
+   - Any other exit (not linked, not signed in, a server without review, an older altimate-code that has no `review` command): leave this part out without comment.
+
 2. **Show the state.** The JSON has `workspace` (`name`, `owner_name`, `is_owner`; `null` when the project is not linked), `proposals`, `team_rules` and `mine`. Show, briefly:
    - the number of team rules in the workspace, and their texts when there are 10 or fewer;
    - the user's own proposals in `mine` that are not yet active, with their `status` and, for a rejected one, the `reason`;
+   - the user's skill and knowledge requests, newest first: kind, name, status (`pending` → waiting for review, `active` → approved, `rejected`, `withdrawn`, `retired` → removed from the workspace), "update" for `change: edit`, the reviewer and the reason when given, and "waiting over 14 days" when `expired`. Do not list `superseded` ones (replaced by a newer request); say how many there were instead. Withdrawing a waiting request or removing an approved one happens in the Altimate web app, the altimate-code TUI (`/rules`) or the VS Code extension, not here;
    - then each entry in `proposals`, one at a time, as described in step 3.
 
    If `proposals` is empty, say that no proposed rules are waiting and stop.
