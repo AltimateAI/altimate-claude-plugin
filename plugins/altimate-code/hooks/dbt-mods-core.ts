@@ -86,88 +86,152 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
 /** The dbt command a shell command runs, when it runs one: its verb and its `-s`/`--select`. */
 export type DbtCommand = {
   verb: string
+  /** What it selects, for comparing two runs (never passed to dbt): every --select value and any --exclude or --selector. */
   select: string | null
   inline: string | null
   limit: number | null
-  /** The flags that decide where and how it ran (target, profile, vars, …), as flag and value pairs, for a re-run. */
+  /** The flags that decide where it ran (target, profile, profiles dir, project dir, vars), each occurrence, in order. */
   options: string[]
   /** Where the dbt invocation starts in the command: a `cd` after it does not move where it ran. */
   at: number
+  /** The dbt invocation as the shell passes it: the executable as written, then every argument, quotes decoded, redirections left out. */
+  argv: string[]
+  /** False when the shell gave it more than its words: a `VAR=…` prefix or a `$VAR` the plugin cannot expand. */
+  replayable: boolean
 }
 
-// Flags a re-run of Claude's `dbt show` must keep, so it runs against the same target and profile.
-const KEPT_FLAGS = ['--target', '-t', '--profile', '--profiles-dir', '--project-dir', '--vars', '--threads']
+// Flags that decide where and how a command runs: two runs differing in them are not the same run.
+const CONTEXT_FLAGS: Record<string, string> = { '--target': '--target', '-t': '--target', '--profile': '--profile', '--profiles-dir': '--profiles-dir', '--project-dir': '--project-dir', '--vars': '--vars' }
+const SELECT_FLAGS: Record<string, string> = { '--select': '--select', '-s': '--select', '--models': '--select', '-m': '--select', '--exclude': '--exclude', '--selector': '--selector' }
+// Flags a re-run of Claude's dbt show replaces: the pane reads JSON, and keeps the limit itself.
+const OUTPUT_FLAGS = new Set(['--output', '-o', '--log-format', '--limit', '--log-level'])
+const BARE_OUTPUT_FLAGS = new Set(['--quiet', '-q'])
 
 /**
- * A flag's value in a dbt command's own arguments: `--flag value`, `--flag=value`, quoted or not. The
- * flag is found in `masked` (quoted text blanked, same length), so a `-t prod` inside quoted SQL is not
- * one; its value is read from `rest` at that position.
+ * Splits a shell command segment into words as a POSIX shell does: single quotes literal, double quotes
+ * with backslash escapes, backslashes outside quotes. Variables and globs are left as written.
  */
-function flagValue(rest: string, masked: string, flags: string[]): string | null {
-  for (const flag of flags) {
-    const escaped = flag.replace(/-/g, '\\-')
-    const at = new RegExp(`(?:^|\\s)${escaped}(?:\\s+|=)`).exec(masked)
-    if (!at) continue
-    const found = /^(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s'"]+))/.exec(rest.slice(at.index + at[0].length))
-    if (found) return found[1] ?? found[2] ?? found[3] ?? null
-  }
-  return null
-}
-
-/**
- * What a dbt command selects, as one string: every `--select` value (`-s a b` is two), and any
- * `--exclude` or `--selector`, which make it less than the whole project. Null for the whole project.
- */
-function selection(rest: string, masked: string): string | null {
-  const parts: string[] = []
-  const flag = /(?:^|\s)(--select|-s|--models|-m|--exclude|--selector)(\s+|=)/g
-  for (let found = flag.exec(masked); found; found = flag.exec(masked)) {
-    const values: string[] = []
-    let at = found.index + found[0].length
-    // A flag's values run until the next flag; `--select=a` takes one.
-    for (;;) {
-      const token = /^(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s'"]+))\s*/.exec(rest.slice(at))
-      if (!token || (token[3] ?? '').startsWith('-')) break
-      values.push(token[1] ?? token[2] ?? token[3] ?? '')
-      at += token[0].length
-      if (found[2] === '=') break
+export function shellWords(segment: string): string[] {
+  const words: string[] = []
+  let word = ''
+  let has = false
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i]!
+    if (ch === "'") {
+      const end = segment.indexOf("'", i + 1)
+      word += segment.slice(i + 1, end < 0 ? undefined : end)
+      has = true
+      i = end < 0 ? segment.length : end
+    } else if (ch === '"') {
+      has = true
+      for (i++; i < segment.length && segment[i] !== '"'; i++) {
+        if (segment[i] === '\\' && i + 1 < segment.length && '"\\$`\n'.includes(segment[i + 1]!)) i++
+        word += segment[i]
+      }
+    } else if (ch === '\\' && i + 1 < segment.length) {
+      word += segment[++i]
+      has = true
+    } else if (/\s/.test(ch)) {
+      if (has) words.push(word)
+      word = ''
+      has = false
+    } else {
+      word += ch
+      has = true
     }
-    const name = ['-s', '--models', '-m'].includes(found[1]!) ? '--select' : found[1]!
-    parts.push(name === '--select' ? values.join(' ') : `${name} ${values.join(' ')}`)
   }
-  return parts.length ? parts.join(' ') : null
+  if (has) words.push(word)
+  return words
 }
 
-/** The dbt command a shell command runs, when it runs one: its verb, selection, inline SQL, limit and kept options. */
-export function dbtCommand(command: string): DbtCommand | null {
+/** A flag's values in a word list: `--flag a b` (until the next flag) or `--flag=a`, for every occurrence. */
+function flagValues(words: string[], index: number): { values: string[]; next: number } {
+  const word = words[index]!
+  const equals = word.indexOf('=')
+  if (word.startsWith('--') && equals > 0) return { values: [word.slice(equals + 1)], next: index + 1 }
+  const values: string[] = []
+  let at = index + 1
+  while (at < words.length && !words[at]!.startsWith('-')) values.push(words[at++]!)
+  return { values, next: at }
+}
+
+/** The dbt command a shell command runs, when it runs one: its verb, selection, inline SQL, limit, context and argv. */
+export function dbtCommand(written: string): DbtCommand | null {
+  // A `\` at a line's end continues the command: one space each, so positions stay aligned.
+  const command = written.replace(/\\\r?\n/g, m => ' '.repeat(m.length))
   // Quoted text is an argument, not the command: `altimate run "fix it, then dbt build"` runs no dbt.
   // Each quoted string is masked to the same length, so positions in it match the command's own.
-  const bare = command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, quoted => `${quoted[0]}${'x'.repeat(quoted.length - 2)}${quoted[0]}`)
+  const masked = command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, quoted => `${quoted[0]}${'x'.repeat(quoted.length - 2)}${quoted[0]}`)
+  // Redirections (`2>&1`, `> out.txt`, `&> log`) are the shell's, found outside quotes and blanked in both.
+  let bare = masked
+  let text = command
+  for (const found of masked.matchAll(/(^|\s)((?:\d*|&)>>?&?\d*|\d*<)(?!<)\s*(?:(?<=[<>]\s*)[^\s;&|()<>]+)?/g)) {
+    const at = found.index! + found[1]!.length
+    const span = found[0].length - found[1]!.length
+    bare = bare.slice(0, at) + ' '.repeat(span) + bare.slice(at + span)
+    text = text.slice(0, at) + ' '.repeat(span) + text.slice(at + span)
+  }
   // The dbt invocation itself: after a `cd x &&`, a venv's `bin/dbt`, `uv run dbt`, `python -m dbt`.
   // `run-operation` is not `run`.
   const match = /(?:^|[\s;&|(]|\/)dbt(?:\.exe)?\s+((?:--?[\w-]+(?:[ =](?!-)\S+)?\s+)*)(run|test|build|seed|snapshot|show|compile|parse)(?![\w-])/m.exec(bare)
   if (!match) return null
-  const verbAt = match.index + match[0].length - match[2]!.length
-  // Its own arguments end where the shell starts the next command.
-  const tail = bare.slice(verbAt + match[2]!.length)
-  const stop = tail.search(/;|&&|\|\||\||\n/)
-  const end = stop < 0 ? undefined : verbAt + match[2]!.length + stop
-  const rest = command.slice(verbAt + match[2]!.length, end)
-  const masked = bare.slice(verbAt + match[2]!.length, end)
-  const limit = flagValue(rest, masked, ['--limit'])
+  // The executable's word starts after the last separator before `dbt` (`.venv/bin/dbt` is one word).
+  const dbtAt = match.index + match[0].search(/dbt(?:\.exe)?\s/)
+  const head = bare.slice(0, dbtAt)
+  const start = Math.max(head.search(/[^\s;&|(]*$/), 0)
+  // Its own arguments end where the shell starts the next command, puts this one in the background, or a comment starts.
+  const stop = bare.slice(start).search(/;|&&|\|\||\||&|\n|\)|\s#/)
+  const end = stop < 0 ? undefined : start + stop
+  const words = shellWords(text.slice(start, end))
+  // Re-run repeats only a plain invocation: nothing in it the shell expands (variables and command
+  // substitution, even in double quotes; `~`; globs; here-docs; comments), and nothing before it but plain
+  // `cd`s and activating a `.venv` in the project, or a plain `uv run`/`poetry run`. Anything else may have
+  // changed what ran.
+  const before = command.slice(0, start)
+  const plainBefore = /^\s*(?:(?:cd\s+[^\s;&|$`~*?]+|(?:source|\.)\s+(?:\.\/)?\.?venv\/bin\/activate)\s*(?:&&|;)\s*)*(?:(?:uv|poetry)\s+run\s+)?$/.test(before)
+  const replayable =
+    plainBefore &&
+    !/[$`~]|<</.test(text.slice(start, end)) &&
+    !/[*?]/.test(bare.slice(start, end)) &&
+    !/\s#/.test(bare.slice(start)) &&
+    !/--env-file/.test(text.slice(start, end))
+  const verb = match[2]!
+  let select: string[] = []
+  let inline: string | null = null
+  let limit: number | null = null
   const options: string[] = []
-  for (const flag of KEPT_FLAGS) {
-    const value = flagValue(rest, masked, [flag])
-    if (value !== null) options.push(flag === '-t' ? '--target' : flag, value)
+  for (let i = 1; i < words.length; ) {
+    const word = words[i]!
+    const name = word.includes('=') && word.startsWith('--') ? word.slice(0, word.indexOf('=')) : word
+    if (SELECT_FLAGS[name]) {
+      const { values, next } = flagValues(words, i)
+      select.push(SELECT_FLAGS[name] === '--select' ? values.join(' ') : `${SELECT_FLAGS[name]} ${values.join(' ')}`)
+      i = next
+    } else if (CONTEXT_FLAGS[name] || name === '--inline' || name === '--limit') {
+      const value = word.includes('=') && word.startsWith('--') ? word.slice(word.indexOf('=') + 1) : (words[i + 1] ?? '')
+      if (name === '--inline') inline = value
+      else if (name === '--limit') limit = /^-?\d+$/.test(value) ? Number(value) : null
+      else options.push(CONTEXT_FLAGS[name]!, value)
+      i += word.includes('=') && word.startsWith('--') ? 1 : 2
+    } else i++
   }
-  return {
-    verb: match[2]!,
-    select: selection(rest, masked),
-    inline: flagValue(rest, masked, ['--inline']),
-    limit: limit !== null && /^-?\d+$/.test(limit) ? Number(limit) : null,
-    options,
-    at: match.index,
+  return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, at: start, argv: words, replayable }
+}
+
+/** The argv that runs a captured `dbt show` again with JSON output and `limit` rows, every other argument as it was. */
+export function replayArgv(argv: string[], limit: number): string[] {
+  const kept: string[] = []
+  for (let i = 0; i < argv.length; i++) {
+    const word = argv[i]!
+    const name = word.startsWith('--') && word.includes('=') ? word.slice(0, word.indexOf('=')) : word
+    if (BARE_OUTPUT_FLAGS.has(name)) continue
+    if (OUTPUT_FLAGS.has(name)) {
+      if (!word.includes('=')) i++
+      continue
+    }
+    kept.push(word)
   }
+  return [...kept, '--limit', String(limit), '--output', 'json', '--log-format', 'json']
 }
 
 /** The folders some dbt_project.yml keys name, each key's fallback when absent; inline and block lists. */

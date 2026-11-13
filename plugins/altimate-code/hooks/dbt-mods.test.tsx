@@ -11,7 +11,9 @@ import {
   modelContext,
   modelContextNote,
   projectPaths,
+  replayArgv,
   saysFailed,
+  shellWords,
   showPreview,
   textTable,
   versionInfo,
@@ -134,12 +136,19 @@ type Options = {
   files?: Record<string, string>
   /** No manifest until dbt show writes this one. */
   manifestAfterShow?: unknown
+  /** The first dbt show waits for this. */
+  holdShow?: Promise<void>
+  /** Folders that exist but cannot be listed. */
+  unreadable?: string[]
+  /** Runs while Claude's shell command is running, before its result returns. */
+  duringBash?: () => Promise<void>
 }
 
 /** A dbt project at /proj with its own .venv dbt, and the session beneath the plugin. */
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on, { now: options.now ?? 1_000 })
   const runs: string[][] = []
+  const cwds: string[] = []
   const toasts: string[] = []
   const prompts: string[] = []
   const store = new Map<string, unknown>(Object.entries(options.stored ?? {}))
@@ -206,6 +215,7 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: files[rel] }
   })
   on('fs.list', (_: unknown, e: { path: string }) => {
+    if (options.unreadable?.includes(e.path.slice(ROOT.length + 1))) throw new Error('EACCES')
     const prefix = e.path === ROOT ? '' : `${e.path.slice(ROOT.length + 1)}/`
     const names = new Map<string, 'file' | 'dir'>()
     for (const path of [...Object.keys(files), ...Object.keys(mtimes)]) {
@@ -215,8 +225,15 @@ async function start($: any, on: any, options: Options = {}) {
     }
     return { value: [...names].map(([name, kind]) => ({ name, kind })) }
   })
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  let held = false
+  on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string } }) => {
     runs.push([...e.argv])
+    cwds.push(e.init?.cwd ?? '')
+    // The first dbt show waits until the test lets it go.
+    if (options.holdShow && !held && e.argv.includes('show')) {
+      held = true
+      await options.holdShow
+    }
     const [bin, verb] = e.argv
     if (bin === 'printenv') {
       const value = { HOME: '/home/me', ...options.env }[verb as string]
@@ -248,13 +265,14 @@ async function start($: any, on: any, options: Options = {}) {
   })
   // The tool itself, beneath the plugin: Bash answers what the test gives it.
   let bash: { stdout: string; isError?: boolean } = { stdout: '' }
-  on('tool.call', (_: unknown, e: { tool: string }) => {
+  on('tool.call', async (_: unknown, e: { tool: string }) => {
+    if (e.tool === 'Bash' && options.duringBash) await options.duringBash()
     if (e.tool === 'Bash') return { result: { stdout: bash.stdout, stderr: '', interrupted: false }, ...(bash.isError ? { isError: true, text: bash.stdout } : {}) }
     return { result: { ok: true } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { clock, runs, toasts, prompts, store, mtimes, opened, setBash: (next: typeof bash) => void (bash = next) }
+  return { clock, runs, cwds, toasts, prompts, store, mtimes, opened, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -287,14 +305,43 @@ kitTest('a failed dbt command is read from run_results.json by node name, and fr
 })
 
 kitTest('dbt commands are found behind a cd, a venv path or uv run, with their selection; other text is not one', () => {
-  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], at: 0 })
-  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], at: 17 })
-  expect(dbtCommand('uv run dbt --no-use-colors run --select +orders')).toEqual({ verb: 'run', select: '+orders', inline: null, limit: null, options: [], at: 6 })
-  expect(dbtCommand(`dbt show --inline "select * from {{ ref('orders') }}" --limit 3`)).toEqual({ verb: 'show', select: null, inline: "select * from {{ ref('orders') }}", limit: 3, options: [], at: 0 })
+  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], at: 0, argv: ['dbt', 'build', '-s', 'orders'], replayable: true })
+  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], at: 8, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true })
+  // Redirections are the shell's: they are neither selection nor argv.
+  expect(dbtCommand('dbt show -s orders 2>&1 | tail -20')?.argv).toEqual(['dbt', 'show', '-s', 'orders'])
+  expect(dbtCommand('dbt run -s orders > out.txt 2> err.txt')?.select).toBe('orders')
+  // What the shell expanded cannot be repeated word for word.
+  expect(dbtCommand('DBT_PROFILES_DIR=. dbt show -s x')?.replayable).toBe(false)
+  expect(dbtCommand('dbt show --target $T -s x')?.replayable).toBe(false)
+  // A command split with `\` across lines is one command.
+  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], at: 0, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true })
+  // A redirection inside quoted SQL is SQL.
+  expect(dbtCommand('dbt show --inline "select 1 as \\"2>1\\"" -s x')?.inline).toBe('select 1 as "2>1"')
+  // Comments and background `&` end it; anything the shell would expand or change turns Re-run off.
+  expect(dbtCommand('dbt show -s a # preview')?.select).toBe('a')
+  expect(dbtCommand('dbt run -s a &')?.argv).toEqual(['dbt', 'run', '-s', 'a'])
+  for (const command of ['env DBT_TARGET=prod dbt show -s a', 'export X=1 && dbt show -s a', 'uv run --env-file .env dbt show -s a', 'dbt show -s a --profiles-dir ~/.dbt']) expect(dbtCommand(command)?.replayable).toBe(false)
+  expect(dbtCommand('source .venv/bin/activate && dbt show -s orders')?.replayable).toBe(true)
+  // Expansion inside double quotes counts; so do globs, sourced env files and anything else before dbt.
+  for (const command of ['dbt show -s m --target "$T"', 'dbt show --inline "select * from $TABLE"', 'dbt show --inline "select `date`"', 'dbt show -s stg_*', 'set -a; . ./.env; dbt show -s m', 'source /other/venv/bin/activate && dbt show -s m', 'cd ~/x && dbt show -s m']) expect(dbtCommand(command)?.replayable).toBe(false)
+  // Single-quoted text is literal to the shell, but a $ there is still left to dbt unexpanded: Re-run stays off.
+  expect(dbtCommand("cd sub && dbt show -s m")?.replayable).toBe(true)
+  expect(dbtCommand('uv run dbt show -s m')?.replayable).toBe(true)
+  expect(dbtCommand('uv run --env-file .env dbt show -s m')?.replayable).toBe(false)
+  expect(dbtCommand('uv run dbt --no-use-colors run --select +orders')?.select).toBe('+orders')
+  expect(dbtCommand(`dbt show --inline "select * from {{ ref('orders') }}" --limit 3`)?.inline).toBe("select * from {{ ref('orders') }}")
   // `=` forms, and the flags a re-run keeps; nothing is read past the shell's next command.
-  expect(dbtCommand(`dbt show --select=orders --limit=2 -t prod --vars '{"x": 1}' | tail -3 --limit 9`)).toEqual({ verb: 'show', select: 'orders', inline: null, limit: 2, options: ['--target', 'prod', '--vars', '{"x": 1}'], at: 0 })
+  const piped = dbtCommand(`dbt show --select=orders --limit=2 -t prod --vars '{"x": 1}' | tail -3 --limit 9`)
+  expect([piped?.select, piped?.limit, piped?.options]).toEqual(['orders', 2, ['--target', 'prod', '--vars', '{"x": 1}']])
+  // Flags before the verb and repeated flags keep their order; escapes are decoded as the shell does.
+  const replay = dbtCommand(`dbt --target prod show -t dev --target qa -s orders --inline "select \\"id\\"" --log-format json -q`)!
+  expect(replay.options).toEqual(['--target', 'prod', '--target', 'dev', '--target', 'qa'])
+  expect(replay.inline).toBe('select "id"')
+  expect(replayArgv(replay.argv, 7)).toEqual(['dbt', '--target', 'prod', 'show', '-t', 'dev', '--target', 'qa', '-s', 'orders', '--inline', 'select "id"', '--limit', '7', '--output', 'json', '--log-format', 'json'])
+  expect(shellWords(`a 'b c' "d \\"e\\"" f\\ g`)).toEqual(['a', 'b c', 'd "e"', 'f g'])
   // A flag inside quoted SQL is SQL, not a flag.
-  expect(dbtCommand(`dbt show --inline "select '-t prod' as x, '--limit 1000' as y" --limit 4`)).toEqual({ verb: 'show', select: null, inline: "select '-t prod' as x, '--limit 1000' as y", limit: 4, options: [], at: 0 })
+  const quoted = dbtCommand(`dbt show --inline "select '-t prod' as x, '--limit 1000' as y" --limit 4`)
+  expect([quoted?.options, quoted?.limit]).toEqual([[], 4])
   // Every selection value, and an exclusion or selector, which make it less than the whole project.
   expect(dbtCommand('dbt run -s a b --threads 4')?.select).toBe('a b')
   expect(dbtCommand('dbt run --exclude orders')?.select).toBe('--exclude orders')
@@ -304,7 +351,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommand('echo dbt is great')).toBeNull()
   // A dbt command inside another command's quoted argument is not run.
   expect(dbtCommand('altimate run "Fix the failing test, then re-run `dbt build -s orders`" --agent builder')).toBeNull()
-  expect(dbtCommand(`dbt show --inline 'select 1 as "a b"' --limit 2`)).toEqual({ verb: 'show', select: null, inline: 'select 1 as "a b"', limit: 2, options: [], at: 0 })
+  expect(dbtCommand(`dbt show --inline 'select 1 as "a b"' --limit 2`)?.inline).toBe('select 1 as "a b"')
   expect(projectPaths("model-paths: ['transform']\nmacro-paths:\n  # shared macros\n  - m1\n\n  - m2\nseed-paths: ['../shared']\n")).toEqual(['transform', 'snapshots', 'm1', 'm2', 'tests', 'analyses'])
   expect(projectPaths("model-paths: ['.']\n")).toContain('')
   expect(projectPaths("data-paths: ['data']\n")).toContain('data')
@@ -369,7 +416,7 @@ test('an edit is compiled and run against the warehouse; column drift from schem
   await clock.settle()
 
   // Only the model runs: its tests would fail on the renamed column and be reported as the model's error.
-  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '--select', 'orders', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
+  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '--select', 'path:models/orders.sql', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
   const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(note).toContain('the warehouse returned 2 columns')
   expect(note).toContain('- documented in schema.yml but not returned: amount')
@@ -453,7 +500,7 @@ test('a check never claims agreement it did not test: no row, no node selected',
   show.rows = [{ order_id: 1 }]
   const second: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'b', new_string: 'c' })
   await clock.settle()
-  expect(second.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('dbt show selected no model named orders')
+  expect(second.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('dbt show selected nothing for models/orders.sql (the model orders)')
 })
 
 test('a model another process fixed is checked again after the next shell command, and the band says so', async ($, on) => {
@@ -683,15 +730,16 @@ kitTest('turned off in the plugin settings, the dbt helpers register no command 
   expect(result.context ?? []).toEqual([])
 })
 
-test('Re-run keeps the target, vars and limit Claude ran dbt show with', async ($, on) => {
-  const { clock, runs, setBash } = await start($, on)
+test('Re-run runs Claude\'s own dbt show again: its executable, every flag in order, its folder, its limit', async ($, on) => {
+  const { clock, runs, cwds, setBash } = await start($, on)
   setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
-  await $.tool.call({ tool: 'Bash', command: `.venv/bin/dbt show --select orders --limit 3 -t prod --vars '{"day": 1}' --log-format json` })
+  await $.tool.call({ tool: 'Bash', command: `cd ${ROOT} && .venv/bin/dbt --target prod show --select orders --exclude old --limit 3 -t qa --vars '{"day": 1}' --log-format json` })
   await clock.settle()
   const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
   await ui.press({ key: 'results-rerun' })
   await clock.settle()
-  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '--select', 'orders', '--indirect-selection', 'empty', '--limit', '3', '--target', 'prod', '--vars', '{"day": 1}', '--output', 'json', '--log-format', 'json'])
+  expect(runs.find(argv => argv[1] === '--target')).toEqual([DBT, '--target', 'prod', 'show', '--select', 'orders', '--exclude', 'old', '-t', 'qa', '--vars', '{"day": 1}', '--limit', '3', '--output', 'json', '--log-format', 'json'])
+  expect(cwds.at(-1)).toBe(ROOT)
   await ui.unmount()
 })
 
@@ -834,12 +882,165 @@ test('a run that excludes the failed model does not clear its failure', async ($
   await band.unmount()
 })
 
-test('with no manifest before the edit, a model whose name is not its file name is shown again under its own name', async ($, on) => {
-  const manifest = JSON.parse(JSON.stringify(MANIFEST))
-  manifest.nodes['model.shop.orders'].original_file_path = 'models/orders_v2.sql'
-  const { clock, runs } = await start($, on, { show: { rows: [{ order_id: 1, amount: 2 }], onlyName: 'orders' }, manifestAfterShow: manifest, files: { 'models/orders_v2.sql': 'select 1' } })
-  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/orders_v2.sql`, old_string: 'a', new_string: 'b' })
+
+test('checks a newer edit replaced before their turn run no query and tell Claude nothing; the newest one does', async ($, on) => {
+  let release!: () => void
+  const { clock, runs } = await start($, on, { holdShow: new Promise<void>(go => (release = go)) })
+  // The first check's dbt show is held; two newer edits queue behind it.
+  const first = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  const second = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'b', new_string: 'c' })
+  const third = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'c', new_string: 'd' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['orders_v2', 'orders'])
-  expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('the warehouse returned 2 columns')
+  release()
+  const results: any[] = await Promise.all([first, second, third])
+  await clock.settle()
+  // The first two were replaced before their turn: only the newest edit's query ran.
+  expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
+  const notes = results.map(one => (one.context ?? []).filter((note: string) => note.startsWith('Altimate compile-and-validate')).length)
+  expect(notes).toEqual([0, 0, 1])
+})
+
+test('a check still running at /clear tells the new conversation nothing', async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, { holdShow: new Promise<void>(go => (release = go)) })
+  const edit = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  const result: any = await edit
+  await clock.settle()
+  expect((result.context ?? []).some((note: string) => note.startsWith('Altimate compile-and-validate'))).toBe(false)
+})
+
+test('a slow check\'s note goes to the agent that edited, not to a subagent\'s next tool result', async ($, on) => {
+  let release!: () => void
+  const { clock, setBash } = await start($, on, { holdShow: new Promise<void>(go => (release = go)) })
+  const edit = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  // The edit's result goes back without the check once the hold runs out.
+  await clock.advance(31_000)
+  const edited: any = await edit
+  expect((edited.context ?? []).some((note: string) => note.startsWith('Altimate compile-and-validate'))).toBe(false)
+  release()
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  const sub: any = await $.tool.call({ tool: 'Bash', command: 'ls', agentId: 'a1' })
+  expect((sub.context ?? []).some((note: string) => note.startsWith('Altimate compile-and-validate'))).toBe(false)
+  const main: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect((main.context ?? []).some((note: string) => note.startsWith('Altimate compile-and-validate'))).toBe(true)
+})
+
+test('a file changed while its check ran is checked again afterwards', async ($, on) => {
+  let release!: () => void
+  const { clock, runs, mtimes, setBash } = await start($, on, { holdShow: new Promise<void>(go => (release = go)), now: 1_000 })
+  const edit = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  // Edited again (outside Claude) while dbt ran; the check finishes later.
+  mtimes['models/orders.sql'] = 1_500
+  await clock.advance(1_000)
+  release()
+  await edit
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
+  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+})
+
+test('an Edit of schema.yml checks the model again', async ($, on) => {
+  const { clock, runs, mtimes } = await start($, on)
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  mtimes['models/schema.yml'] = 50_000
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'amount', new_string: 'order_total' })
+  await clock.settle()
+  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+})
+
+test('a passing run against another target leaves a failed run as it is', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders -t prod' })
+  setBash({ stdout: 'Done. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders -t dev' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders -t prod' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('Claude\'s dbt show run with --project-dir from another folder lands in the pane', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: `cd /tmp && dbt show --project-dir ${ROOT} --select orders` })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /1 row · 1 columns/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Clear history is offered for a single query, and the doctor says when a folder could not be read or a file was deleted', async ($, on) => {
+  const { clock, mtimes } = await start($, on, { unreadable: ['seeds'], files: { 'seeds/raw.csv': 'a' } })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await ui.find({ key: 'results-clear' })).toBeDefined()
+  await ui.unmount()
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /not every project file could be checked/ })).toBeDefined()
+  await doctor.unmount()
+  // A model removed after the last parse: its folder is newer than the manifest.
+  mtimes['models'] = 9_000
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const again = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await again.find({ type: 'Text', text: /stale: .*models\// })).toBeDefined()
+  await again.unmount()
+})
+
+test('Re-run of a bare `dbt` (an activated venv, uv run) runs the project\'s own dbt, never one found on the plugin\'s PATH', async ($, on) => {
+  const { clock, runs, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'source .venv/bin/activate && dbt show -s orders 2>&1 | tail -20' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  await ui.press({ key: 'results-rerun' })
+  await clock.settle()
+  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '-s', 'orders', '--limit', '5', '--output', 'json', '--log-format', 'json'])
+  await ui.unmount()
+})
+
+test('a dbt show that used a shell variable is kept, but offers no Re-run', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show --target $TARGET -s orders' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await ui.find({ key: 'results-rerun' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Re-run is off/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a dbt run that fails after /clear puts nothing in the new conversation', async ($, on) => {
+  // The conversation ends while Claude's build runs.
+  const { clock, setBash } = await start($, on, { duringBash: async () => void (await $.session.end({ reason: 'clear' } as any)) })
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a dbt show after `cd ~/x` is not filed under a guessed project', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'cd ~/elsewhere && dbt show -s orders' })
+  await clock.settle()
+  expect(store.get('dbt-results-history')).toBeUndefined()
 })

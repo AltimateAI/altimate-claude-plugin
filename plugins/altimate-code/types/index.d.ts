@@ -196,6 +196,8 @@ export type FailureView = {
   root: string
   /** run, test, build, seed or snapshot. */
   verb: string
+  /** The context flags it ran with (target, profile, vars, …): a passing run in another context clears nothing. */
+  options: string[]
   /** The failed command's --select; null when it ran the whole project. */
   select: string | null
   failures: DbtFailure[]
@@ -241,15 +243,21 @@ export type QueryResult = {
   root: string
   select: string | null
   inline: string | null
-  /** The flags it ran with that a re-run keeps (target, profile, vars, …), as flag and value pairs. */
+  /** The context flags it ran with (target, profile, vars, …), part of its identity. */
   options: string[]
+  /** Claude's own dbt invocation, as the shell ran it: Re-run runs it again. Null for /dbt-show's queries. */
+  argv?: string[] | null
+  /** The folder Claude ran it in. */
+  cwd?: string | null
+  /** False when Claude's command used shell variables or an env prefix: it cannot be run again word for word. */
+  replayable?: boolean
   columns: string[]
   rows: unknown[][]
   limit: number
   ms: number | null
   at: number
   error: string | null
-  /** Who ran it: Claude's own `dbt show`, or the person's /dbt-show or Re-run. */
+  /** Who ran it first: Claude's own `dbt show`, or the person's /dbt-show. A Re-run keeps it. */
   by: 'claude' | 'you'
 }
 
