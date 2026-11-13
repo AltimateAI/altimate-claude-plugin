@@ -12,6 +12,7 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
+import { endDbtMods, newTurnDbtMods } from './dbt-mods'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
@@ -1226,6 +1227,7 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
 export function registerLineage(on: On) {
   // A new user turn gets the lineage note again (its context may have been compacted since), once.
   on('session.end', async ($, e, next) => {
+    endDbtMods()
     paneOpened = false
     narrowHintShown = false
     drawnCache = null
@@ -1239,6 +1241,7 @@ export function registerLineage(on: On) {
     // A subagent's turn starting does not clear the main conversation's context.
     if (!(e as { agentId?: string }).agentId) {
       contextGiven.clear()
+      newTurnDbtMods()
       turnCount++
     }
     return next(e)

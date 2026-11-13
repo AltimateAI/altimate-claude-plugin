@@ -3,6 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
+import { dbtModsBand, registerDbtMods, startDbtMods } from './dbt-mods'
 import { lineageBand, registerLineage, startLineage } from './lineage'
 
 const PANE = 'altimate-integrations'
@@ -551,7 +552,9 @@ function nameOf(id: ProviderId): string {
   return { github: 'GitHub', jira: 'Jira', linear: 'Linear' }[id]
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  // The dbt helpers can be turned off in the plugin's settings; they run the project's own dbt.
+  const dbtMods = (options as { dbt_mods?: boolean } | undefined)?.dbt_mods !== false
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({
@@ -560,6 +563,7 @@ export const register: Register = on => {
     })
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
+    if (dbtMods) await startDbtMods($, !!e.isInteractive).catch(error => $.ui.log(`dbt-mods · could not start: ${String(error)}`))
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
@@ -582,7 +586,17 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     // One band per plugin: the lineage impact line rides under the integrations one, or alone.
     if (e.props.hasSurvey) return next(e)
-    const lineage = await lineageBand($, $.ui.resolve(e))
+    const ownLineage = await lineageBand($, $.ui.resolve(e))
+    const dbt = dbtMods ? await dbtModsBand($, $.ui.resolve(e)) : null
+    const { Box: Rows } = $.ui.resolve(e)
+    // The impact line and the dbt lines ride together under the integrations one, or alone.
+    const lineage =
+      ownLineage && dbt ? (
+        <Rows key="altimate-rows" flexDirection="column">
+          {ownLineage}
+          {dbt}
+        </Rows>
+      ) : (ownLineage ?? dbt)
     const pass = async () => lineage ?? next(e)
     const current = await read($, status)
     if (!current || (await read($, isBandHidden))) return pass()
@@ -796,6 +810,7 @@ export const register: Register = on => {
   })
 
   registerLineage(on)
+  if (dbtMods) registerDbtMods(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added

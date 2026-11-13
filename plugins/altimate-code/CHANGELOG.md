@@ -2,6 +2,17 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.6.0] — 2026-11-13
+
+### Added
+- dbt helpers from dbt Power User, in the Claude Code session. Each runs the project's own dbt (its `.venv/bin/dbt` when there is one) and calls no model:
+  - **Compile and validate.** After Claude edits or writes a model, the plugin runs it with `dbt show` (one row) against the warehouse. dbt's error, or the columns `schema.yml` documents that the query no longer returns and those it returns undocumented, go to Claude with the edit's result and to a line above the prompt.
+  - **Explain and Fix.** A failed `dbt run`, `test`, `build`, `seed` or `snapshot` puts the failed nodes, read from `run_results.json`, above the prompt with **Explain** and **Fix with Altimate Code** (`/altimate-code:altimate`).
+  - **Results pane.** Rows from Claude's `dbt show`, `/dbt-show <model>` and `/dbt-show select …` open as a table beside the chat, with **Re-run**, **Bookmark** and a history kept across sessions.
+  - **Model context.** When Claude reads a model, its materialization, columns (types, descriptions, tests), parents, children and depth upstream and downstream, from `target/manifest.json`, go with the file, once a turn.
+  - **Environment doctor.** At session start the plugin checks dbt, Python, the profile's adapter, installed packages and whether the manifest is older than the project's files, and offers **Run dbt parse** (or **Run dbt deps**). `/dbt-doctor` runs the checks with the warehouse connection test.
+- The `dbt_mods` option turns the dbt helpers off.
+
 ## [1.5.0] — 2026-11-10
 
 ### Added

@@ -176,6 +176,106 @@ export type ImpactView = {
   truncated: boolean
 }
 
+/** A node a dbt run, test or build left failed: from run_results.json, or the command's text. */
+export type DbtFailure = {
+  id: string
+  name: string
+  /** model, test, seed, snapshot, or project for an error before any node ran. */
+  kind: string
+  status: 'error' | 'fail'
+  message: string
+  /** Project-relative file, when known. */
+  path: string | null
+  /** A failed test's failing row count. */
+  failures: number | null
+}
+
+/** The last failed dbt command Claude ran, offered for Explain and Fix. */
+export type FailureView = { command: string; root: string; failures: DbtFailure[]; at: number }
+
+/** What compile-and-validate found after Claude edited a model. */
+export type CheckView = {
+  model: string
+  /** The dbt project the model is in. */
+  root: string
+  /** Project-relative path of the model's file. */
+  file: string
+  status: 'running' | 'ok' | 'warn' | 'error'
+  /** dbt's compile or warehouse errors. */
+  errors: string[]
+  /** Columns schema.yml documents that the warehouse did not return. */
+  missing: string[]
+  /** Columns the warehouse returned that schema.yml does not document. */
+  undocumented: string[]
+  /** Columns the warehouse returned; null when it returned no row to read them from. */
+  columns: number | null
+  /** Their names, in the query's order. */
+  returned: string[]
+  /** The columns schema.yml documents for the model. */
+  documented: string[]
+  ms: number
+  at: number
+}
+
+/** One query's rows, as the results pane shows them. */
+export type QueryResult = {
+  id: string
+  /** The model name, or the start of the inline SQL. */
+  title: string
+  root: string
+  select: string | null
+  inline: string | null
+  columns: string[]
+  rows: unknown[][]
+  limit: number
+  ms: number | null
+  at: number
+  error: string | null
+  /** Who ran it: Claude's own `dbt show`, or the person's /dbt-show or Re-run. */
+  by: 'claude' | 'you'
+}
+
+/** A query kept in the results pane's history or bookmarks, rows included (capped). */
+export type SavedQuery = QueryResult & { bookmarked: boolean }
+
+export type DoctorCheck = {
+  id: 'dbt' | 'python' | 'adapter' | 'manifest' | 'packages' | 'connection'
+  label: string
+  status: 'ok' | 'warn' | 'fail'
+  detail: string
+  fix: string | null
+}
+
+/** The environment doctor's last answer for the session's dbt project. */
+export type DoctorView = {
+  root: string
+  checks: DoctorCheck[]
+  at: number
+  /** Files changed after the manifest was written, newest first, when it is stale. */
+  staleFiles: string[]
+  /** What runs now: a parse, a connection test, the check itself. */
+  busy: string | null
+}
+
+/** A column of a model's manifest entry, as Claude is told about it on Read. */
+export type ModelContextColumn = { name: string; type: string | null; description: string | null; tests: string[] }
+
+export type ModelContext = {
+  id: string
+  name: string
+  path: string | null
+  materialized: string | null
+  description: string | null
+  relation: string | null
+  columns: ModelContextColumn[]
+  tests: string[]
+  parents: string[]
+  children: string[]
+  upstreamDepth: number
+  downstreamDepth: number
+  tags: string[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -217,6 +317,19 @@ declare module 'claude-code' {
       lineageStale: string | null
       lineageLoading: boolean
       isLineageBandHidden: boolean
+      /** Compile-and-validate's answer for the last model Claude edited. */
+      dbtCheck: CheckView | null
+      /** The last failed dbt run, test or build Claude ran; null once one passes or it is dismissed. */
+      dbtFailure: FailureView | null
+      /** The environment doctor's answer for the session's dbt project. */
+      dbtDoctor: DoctorView | null
+      /** The query the results pane shows. */
+      dbtResult: QueryResult | null
+      /** Earlier queries and bookmarks, newest first, for the results pane. */
+      dbtHistory: SavedQuery[]
+      /** A /dbt-show or Re-run in flight: its label. */
+      dbtResultBusy: string | null
+      isDbtBandHidden: boolean
     }
   }
 }
