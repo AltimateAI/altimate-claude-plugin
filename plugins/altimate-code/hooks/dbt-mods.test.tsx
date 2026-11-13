@@ -121,7 +121,7 @@ const DOCTOR = { ...RESULTS, requestId: 'altimate-doctor', props: { ...RESULTS.p
 
 type Options = {
   /** What dbt show answers: rows, or a failure's error lines. */
-  show?: { rows?: Record<string, unknown>[]; error?: string; node?: string | null; onlyName?: string }
+  show?: { rows?: Record<string, unknown>[]; error?: string; node?: string | null; onlyName?: string; mustInclude?: string }
 
   /** File modification times by project-relative path; the manifest's is `target/manifest.json`. */
   mtimes?: Record<string, number>
@@ -294,6 +294,8 @@ async function start($: any, on: any, options: Options = {}) {
       // dbt selects a model by its name: the one the test's manifest gives the file, if it gave one.
       const asked = e.argv[e.argv.indexOf('--select') + 1]
       if (show.onlyName && asked !== show.onlyName) return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
+      // dbt prints a node's preview only when its name is in the selection string.
+      if (show.mustInclude && !asked?.includes(show.mustInclude)) return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
       if (show.error) return { value: { exitCode: 2, stdout: errorLog(show.error), stderr: '' } }
       // A selection that matches no node: dbt exits 0 and previews nothing.
       if (show.node === 'none') return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
@@ -491,7 +493,7 @@ test('an edit is compiled and run against the warehouse; column drift from schem
   await clock.settle()
 
   // Only the model runs: its tests would fail on the renamed column and be reported as the model's error.
-  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '--select', 'path:models/orders.sql,package:shop', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
+  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '--select', 'path:models/orders.sql,package:shop,orders', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
   const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(note).toContain('the warehouse returned 2 columns')
   expect(note).toContain('- documented in schema.yml but not returned: amount')
@@ -1234,7 +1236,7 @@ test('a file path with `..` in it is read as the plain path inside its project',
   const { clock, runs } = await start($, on)
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/../models/orders.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.find(argv => argv[1] === 'show')?.[3]).toBe('path:models/orders.sql,package:shop')
+  expect(runs.find(argv => argv[1] === 'show')?.[3]).toBe('path:models/orders.sql,package:shop,orders')
 })
 
 test('a schema.yml written while the model\'s first check still runs checks it again once that check ends', async ($, on) => {
@@ -1746,4 +1748,62 @@ test('shows of one selection that differ in target are not attributed, even when
 kitTest('a `dbt` at a line end and `source` on the next line are not a dbt subcommand', () => {
   expect(dbtCommands('cd dbt\nsource .venv/bin/activate')).toEqual([])
   expect(dbtCommands('cd dbt\nsource .venv/bin/activate && dbt show -s a').map(one => one.verb)).toEqual(['show'])
+})
+
+// ─── Versioned models, doctor freshness, flags before the verb, profile comments, dependencies.yml ──
+
+test('a versioned model whose file has another name is selected by its name too, and previewed', async ($, on) => {
+  const manifest = { metadata: { project_name: 'shop' }, parent_map: {}, child_map: {}, nodes: { 'model.shop.orders': { name: 'orders', resource_type: 'model', package_name: 'shop', version: 1, original_file_path: 'models/legacy.sql', config: {}, columns: {}, depends_on: { nodes: [] } } } }
+  const { clock, runs, toasts } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(manifest), 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(runs.find(argv => argv[1] === 'show')?.[3]).toBe('path:models/legacy.sql,package:shop,orders')
+  expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
+  expect((result.context ?? []).some((note: string) => note.includes('FAILED'))).toBe(false)
+})
+
+test('a model file the manifest does not list makes it stale, whatever its timestamp', async ($, on) => {
+  const { clock } = await start($, on, { files: { 'models/copied.sql': 'select 1' }, mtimes: { 'models/copied.sql': 100 } })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/copied\.sql\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+kitTest('a flag before the verb never takes a subcommand word as its value', () => {
+  expect(dbtCommand('dbt --debug run --target test')?.verb).toBe('run')
+  expect(dbtCommand('dbt --debug show --target test')?.verb).toBe('show')
+  expect(dbtCommand('dbt --target=test run')?.verb).toBe('run')
+  expect(dbtCommand('dbt --target prod run')?.verb).toBe('run')
+  expect(dbtCommand('dbt --target test run')?.verb).toBe('run')
+  expect(dbtCommand('dbt -t prod --debug show -s x')?.verb).toBe('show')
+  expect(dbtCommand('dbt --unknown-flag run')?.verb).toBe('run')
+})
+
+test('a profile name followed by a YAML comment is found', async ($, on) => {
+  const { clock } = await start($, on, { profiles: 'shop:  # dev\n  target: prod\n  outputs:\n    prod:\n      type: snowflake\n' })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'the profile uses snowflake, but only duckdb is installed' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a dependencies.yml with only projects has no packages to install; one with packages is named in the check', async ($, on) => {
+  const { clock } = await start($, on, { files: { 'dependencies.yml': 'projects:\n  - name: other\n' } })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /is not installed/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a dependencies.yml that declares packages is named when they are not installed', async ($, on) => {
+  const { clock } = await start($, on, { files: { 'dependencies.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n' } })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /dependencies\.yml is not installed/ })).toBeDefined()
+  await ui.unmount()
 })

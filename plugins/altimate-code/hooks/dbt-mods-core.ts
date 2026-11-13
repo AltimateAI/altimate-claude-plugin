@@ -179,6 +179,19 @@ function flagValues(words: string[], index: number): { values: string[]; next: n
   return { values, next: at }
 }
 
+const SUBCOMMANDS = 'run-operation|run|test|build|seed|snapshot|show|compile|parse|retry|deps|ls|list|debug|docs|source|clean|init|clone|environment'
+// dbt's global flags that take a value always consume the next word, even a subcommand word
+// (`dbt --target test run` runs `run`); its boolean flags never do (`dbt --debug run`). Any other flag
+// consumes the next word unless that is a subcommand.
+const VALUE_FLAGS = '-t|--target|--profile|--profiles-dir|--project-dir|--vars|--log-format|--log-format-file|--log-path|--target-path|--log-level|--log-level-file|--printer-width|--state|--defer-state|--threads|--record-timing-info'
+const BOOLEAN_FLAGS = '-d|--debug|--no-partial-parse|--partial-parse|-q|--quiet|--no-print|--use-colors|--no-use-colors|--fail-fast|-x|--warn-error|--no-version-check|--version-check|--write-json|--no-write-json|--use-experimental-parser|--no-send-anonymous-usage-stats|--send-anonymous-usage-stats|--static-parser|--cache-selected-only|--introspect|--no-introspect|--populate-cache|--no-populate-cache|--print|--log-cache-events'
+const DBT_INVOCATION = new RegExp(
+  '(?:^|[\\s;&|(]|\\/)dbt(?:\\.exe)?[ \\t]+' +
+    `((?:(?:(?:${VALUE_FLAGS})(?![\\w-])(?:=\\S+|[ \\t]+(?!-)\\S+)?|(?:${BOOLEAN_FLAGS})(?![\\w-])(?:=\\S+)?|--?[\\w-]+(?:=(?!-)\\S+|[ \\t](?!-)(?!(?:${SUBCOMMANDS})(?![\\w-]))\\S+)?)[ \\t]+)*)` +
+    `(${SUBCOMMANDS})(?![\\w-])`,
+  'm',
+)
+
 /** The dbt command a shell command runs, when it runs one: its verb, selection, inline SQL, limit, context and argv. */
 export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
   // A `\` at a line's end continues the command: one space each, so positions stay aligned.
@@ -200,7 +213,7 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
   // Every dbt subcommand is found, so a command's invocations line up with the output each one printed;
   // `run-operation` is not `run`.
   // The first invocation at or after `searchFrom`; what comes before it (exports, `cd`s) is still read.
-  const found = /(?:^|[\s;&|(]|\/)dbt(?:\.exe)?[ \t]+((?:--?[\w-]+(?:[ =](?!-)\S+)?[ \t]+)*)(run-operation|run|test|build|seed|snapshot|show|compile|parse|retry|deps|ls|list|debug|docs|source|clean|init|clone|environment)(?![\w-])/m.exec(bare.slice(searchFrom))
+  const found = DBT_INVOCATION.exec(bare.slice(searchFrom))
   if (!found) return null
   const match = Object.assign([...found], { index: found.index + searchFrom }) as unknown as RegExpExecArray
   // The executable's word starts after the last separator before `dbt` (`.venv/bin/dbt` is one word).

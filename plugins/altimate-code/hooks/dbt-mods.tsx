@@ -329,9 +329,12 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // The file itself, by path (a name can be a version's or another package's), and only it: dbt's eager
   // indirect selection would also run its tests, and show a test's failure as the model's.
   // `path:` matches an installed package's file at the same path too: the intersection with the project's
-  // package (`a,b`) selects only the project's model.
+  // package (`a,b`) selects only the project's model. dbt prints a preview only for a node whose name is in the
+  // selection string, so the model's name joins the intersection: a versioned model whose file has another
+  // name (`defined_in`) is still previewed, and the path keeps it to that one version.
   const pkg = await projectName($, root)
-  const run = await runDbt($, root, ['show', '--select', pkg ? `path:${rel},package:${pkg}` : `path:${rel}`, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  const selector = [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(typeof known?.node?.name === 'string' ? [known.node.name] : [])].join(',')
+  const run = await runDbt($, root, ['show', '--select', selector, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   // A newer edit replaced this check before its turn: nothing ran, nothing to report.
   if (run === SKIPPED) return { view: { ...blank, status: 'partial', reason: 'a newer check replaced this one', ms: 0, at: started }, note: '', current, newest }
   // dbt show re-parsed the project: the manifest now holds the model and schema.yml as they are.
@@ -603,6 +606,25 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
     const stat = await $.fs.stat(`${root}/${top}`).catch(() => null)
     if (stat && stat.mtimeMs > mtimeMs) changed.push({ path: top, mtimeMs: stat.mtimeMs })
   }
+  // Every file of the project the manifest names: nodes (models, seeds, snapshots, analyses, singular tests),
+  // the schema files that document them, sources' and macros' files and the other YAML-declared objects. A
+  // manifest over 4 MiB is not read here: deletions and unlisted files are then not looked for.
+  const manifest = await readManifest($, root)
+  let listed: string[] = []
+  if (manifest) {
+    // The project's name from the manifest, else dbt_project.yml's (older manifests do not record it).
+    const project = manifest.manifest.metadata?.project_name ?? (await projectName($, root))
+    const own = (one: any) => !project || !one?.package_name || one.package_name === project
+    const files = (group: any) => Object.values<any>(group ?? {}).filter(own)
+    const disabled = Object.values<any>(manifest.manifest.disabled ?? {}).flat().filter(own)
+    listed = [
+      ...files(manifest.manifest.nodes).map(one => (one?.resource_type === 'test' && one?.test_metadata ? null : one?.original_file_path)),
+      ...files(manifest.manifest.nodes).map(one => (typeof one?.patch_path === 'string' ? one.patch_path.replace(/^[^:]*:\/\//, '') : null)),
+      ...disabled.map(one => one?.original_file_path),
+      ...['sources', 'macros', 'exposures', 'metrics', 'groups', 'semantic_models', 'saved_queries', 'unit_tests'].flatMap(group => files(manifest.manifest[group]).map(one => one?.original_file_path)),
+    ].filter((one): one is string => typeof one === 'string' && one.length > 0)
+  }
+  const inventory = manifest ? new Set(listed) : null
   // The folders dbt_project.yml names (model-paths and the rest), not dbt's default names.
   const paths = projectPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
   // A path of '.' is the project folder itself, which holds every other: walk it once.
@@ -629,31 +651,15 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
         if (!/\.(sql|ya?ml|csv|py|md)$/i.test(entry.name)) continue
         const stat = await $.fs.stat(path).catch(() => null)
         if (!stat) complete = false
-        else if (stat.mtimeMs > mtimeMs && !seen.has(relative(root, path))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
+        else if (!seen.has(relative(root, path)) && (stat.mtimeMs > mtimeMs || (!!inventory && /\.(sql|ya?ml)$/i.test(entry.name) && !inventory.has(relative(root, path))))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
       }
     }
     level = next
   }
   // A file of this project the manifest lists that is gone (a deleted model, a whole deleted folder) makes it
   // stale too. Installed packages' files live under dbt_packages, so only the project's own files are looked at.
-  // A manifest over 4 MiB is not read here: deletions are then not looked for (changed files still are).
-  const manifest = await readManifest($, root)
-  if (manifest) {
-    // The project's name from the manifest, else dbt_project.yml's (older manifests do not record it).
-    const project = manifest.manifest.metadata?.project_name ?? (await projectName($, root))
-    // Every file of the project the manifest names: nodes (models, seeds, snapshots, analyses, singular tests),
-    // the schema files that document them, sources' and macros' files.
-    const own = (one: any) => !project || !one?.package_name || one.package_name === project
-    const files = (group: any) => Object.values<any>(group ?? {}).filter(own)
-    const listed = [
-      ...files(manifest.manifest.nodes).map(one => (one?.resource_type === 'test' && one?.test_metadata ? null : one?.original_file_path)),
-      ...files(manifest.manifest.nodes).map(one => (typeof one?.patch_path === 'string' ? one.patch_path.replace(/^[^:]*:\/\//, '') : null)),
-      ...files(manifest.manifest.sources).map(one => one?.original_file_path),
-      ...files(manifest.manifest.macros).map(one => one?.original_file_path),
-    ].filter((one): one is string => typeof one === 'string' && one.length > 0)
-    for (const path of [...new Set(listed)].slice(0, MAX_SCANNED)) {
-      if (!(await $.fs.exists(`${root}/${path}`).catch(() => true))) changed.push({ path: `${path} (deleted)`, mtimeMs: Number.MAX_SAFE_INTEGER })
-    }
+  for (const path of [...new Set(listed)].slice(0, MAX_SCANNED)) {
+    if (!(await $.fs.exists(`${root}/${path}`).catch(() => true))) changed.push({ path: `${path} (deleted)`, mtimeMs: Number.MAX_SAFE_INTEGER })
   }
   return { files: changed.sort((a, b) => b.mtimeMs - a.mtimeMs).map(one => one.path), complete: complete && scanned <= MAX_SCANNED }
 }
@@ -675,7 +681,7 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   if (!path) return null
   const text = await $.fs.read(path).catch(() => null)
   if (!text) return null
-  const at = text.search(new RegExp(`^['"]?${profile}['"]?:\\s*$`, 'm'))
+  const at = text.search(new RegExp(`^['"]?${profile}['"]?:\\s*(?:#.*)?$`, 'm'))
   // The profile is not in the file dbt reads: dbt fails there too.
   if (at < 0) return null
   const body = text.slice(at).split('\n').slice(1)
@@ -733,15 +739,20 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   }
 
   // Packages: packages.yml with nothing installed (at packages-install-path) fails every parse.
-  const wantsPackages = (await $.fs.exists(`${root}/packages.yml`).catch(() => false)) || (await $.fs.exists(`${root}/dependencies.yml`).catch(() => false))
-  if (wantsPackages) {
+  // A dependencies.yml that declares only `projects:` has no packages to install.
+  const packagesFile = (await $.fs.exists(`${root}/packages.yml`).catch(() => false))
+    ? 'packages.yml'
+    : /^packages:/m.test(await $.fs.read(`${root}/dependencies.yml`).catch(() => ''))
+      ? 'dependencies.yml'
+      : null
+  if (packagesFile) {
     // `packages-install-path` in dbt_project.yml, `dbt_packages` when absent.
     const configured = /^packages-install-path:\s*['"]?([^'"#\s]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1]
     // A Jinja value is dbt's to render: dbt's default stands in.
     const installPath = configured && !configured.includes('{{') ? configured : 'dbt_packages'
     const installed = installPath.startsWith('/') ? installPath : `${root}/${installPath}`
     const has = (await $.fs.list(installed).catch(() => [])).length > 0
-    checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail: has ? `${installPath} installed` : 'packages.yml is not installed', fix: has ? null : 'dbt deps' })
+    checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail: has ? `${installPath} installed` : `${packagesFile} is not installed`, fix: has ? null : 'dbt deps' })
   }
 
   // Manifest freshness.
