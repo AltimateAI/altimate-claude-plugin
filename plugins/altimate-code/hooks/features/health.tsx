@@ -54,7 +54,17 @@ const projects = new Map<string, string | null>()
 
 export const pairKey = (i: Pick<HealthInsight, 'uniqueId' | 'name'>) => `${i.uniqueId}\u0000${i.name}`
 
-const norm = (p: string) => p.replace(/\\/g, '/')
+/** A path with `/` separators and no `.`, `..` or empty parts, so two spellings of one file compare equal. */
+const norm = (p: string) => {
+  const absolute = p.startsWith('/') || p.startsWith('\\')
+  const parts: string[] = []
+  for (const part of p.replace(/\\/g, '/').split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..' && parts.length && parts[parts.length - 1] !== '..' && !/^[A-Za-z]:$/.test(parts[parts.length - 1]!)) parts.pop()
+    else if (part !== '..' || !absolute) parts.push(part)
+  }
+  return (absolute ? '/' : '') + parts.join('/')
+}
 
 /** The models whose SQL file or properties file is one of `files`. */
 export function modelsOfFiles(files: readonly string[], insights: readonly HealthInsight[]): Set<string> {
@@ -100,10 +110,34 @@ const LEADER_VALUE_OPTIONS: Record<string, readonly string[]> = {
 const GIT_VALUE_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env'])
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
 
-/** The simple commands of a shell line, each as its words with quotes removed; a quoted word stays one word. */
+/** The inner text of each `$(...)` and backtick substitution in `text`. */
+function substitutionsIn(text: string): string[] {
+  const out: string[] = []
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\\') i++
+    else if (text[i] === '$' && text[i + 1] === '(') {
+      let depth = 0
+      let j = i + 1
+      for (; j < text.length; j++) {
+        if (text[j] === '(') depth++
+        else if (text[j] === ')' && --depth === 0) break
+      }
+      out.push(text.slice(i + 2, j))
+      i = j
+    } else if (text[i] === '`') {
+      const close = text.indexOf('`', i + 1)
+      out.push(text.slice(i + 1, close < 0 ? text.length : close))
+      i = close < 0 ? text.length : close
+    }
+  }
+  return out
+}
+
+/** The simple commands of a shell line, each as its words with quotes removed; a quoted word stays one word. A redirect is its own word (`>`, `>>`, `2>`) before its target; a heredoc body is text, not commands. */
 export function simpleCommands(line: string): string[][] {
   const commands: string[][] = []
   const nested: string[][] = []
+  const heredocs: { delimiter: string; quoted: boolean; strip: boolean }[] = []
   let words: string[] = []
   let word = ''
   let inWord = false
@@ -128,15 +162,21 @@ export function simpleCommands(line: string): string[][] {
       inWord = true
       i++
       for (; i < line.length && line[i] !== '"'; i++) {
-        if (line[i] === '$' && line[i + 1] === '(') {
+        if ((line[i] === '$' && line[i + 1] === '(') || line[i] === '`') {
           // A substitution inside quotes still runs: its commands are commands of the line.
-          let depth = 0
-          let j = i + 1
-          for (; j < line.length; j++) {
-            if (line[j] === '(') depth++
-            else if (line[j] === ')' && --depth === 0) break
+          let j = i
+          if (line[i] === '`') {
+            j = line.indexOf('`', i + 1)
+            if (j < 0) j = line.length
+          } else {
+            let depth = 0
+            j = i + 1
+            for (; j < line.length; j++) {
+              if (line[j] === '(') depth++
+              else if (line[j] === ')' && --depth === 0) break
+            }
           }
-          nested.push(...simpleCommands(line.slice(i + 2, j)))
+          nested.push(...substitutionsIn(line.slice(i, j + 1)).flatMap(simpleCommands))
           word += line.slice(i, j + 1)
           i = j
           continue
@@ -152,6 +192,48 @@ export function simpleCommands(line: string): string[][] {
     } else if (c === '$' && line[i + 1] === '(') {
       endCommand()
       i++
+    } else if (c === '<' && line[i + 1] === '<' && line[i + 2] !== '<') {
+      let j = i + 2
+      const strip = line[j] === '-'
+      if (strip) j++
+      while (line[j] === ' ' || line[j] === '\t') j++
+      let delimiter = ''
+      let quoted = false
+      for (; j < line.length && !/[\s;&|()<>]/.test(line[j]!); j++) {
+        if (line[j] === "'" || line[j] === '"') {
+          quoted = true
+          const close = line.indexOf(line[j]!, j + 1)
+          delimiter += line.slice(j + 1, close < 0 ? line.length : close)
+          j = close < 0 ? line.length : close
+        } else if (line[j] === '\\') {
+          quoted = true
+          delimiter += line[++j] ?? ''
+        } else delimiter += line[j]
+      }
+      heredocs.push({ delimiter, quoted, strip })
+      i = j - 1
+    } else if (c === '\n' && heredocs.length) {
+      endCommand()
+      let at = i + 1
+      for (const doc of heredocs.splice(0)) {
+        let body = ''
+        while (at < line.length) {
+          const eol = line.indexOf('\n', at)
+          const text = line.slice(at, eol < 0 ? line.length : eol)
+          at = eol < 0 ? line.length : eol + 1
+          if ((doc.strip ? text.replace(/^\t+/, '') : text) === doc.delimiter) break
+          body += text + '\n'
+        }
+        // Only an unquoted delimiter lets the body's substitutions run.
+        if (!doc.quoted) nested.push(...substitutionsIn(body).flatMap(simpleCommands))
+      }
+      i = at - 1
+    } else if (c === '>') {
+      if (!(inWord && /^\d+$/.test(word))) endWord()
+      word += '>'
+      if (line[i + 1] === '>' || line[i + 1] === '&' || line[i + 1] === '|') word += line[++i]
+      inWord = true
+      endWord()
     } else if (c === '`' || OPERATORS.has(c)) {
       endCommand()
     } else if (c === ' ' || c === '\t' || c === '\r') {
@@ -203,19 +285,25 @@ const WRITERS = new Set(['mv', 'cp', 'rm', 'tee', 'patch', 'touch', 'truncate', 
 /** git subcommands that change files in the working tree. */
 const GIT_WRITERS = new Set(['checkout', 'restore', 'apply', 'stash', 'reset', 'revert', 'merge', 'pull', 'rebase', 'cherry-pick', 'switch', 'mv', 'rm', 'am'])
 
-/** The model-like file paths a Bash command line writes: redirects, `tee`, `sed -i`, `mv`, `git checkout -- file`. */
+/** The model-like file paths a Bash command line writes: redirects, `tee`, `sed -i`, `mv`, `git checkout -- file`; a relative path is given from the folder a `cd` before it moved to. */
 export function filesWrittenBy(command: string): string[] {
   const out: string[] = []
+  let cwd = ''
+  const from = (w: string) => (w.startsWith('/') || /^[A-Za-z]:/.test(w) || !cwd ? w : `${cwd}/${w}`)
   for (const words of simpleCommands(command)) {
-    const models = (list: readonly string[]) => list.filter(w => MODEL_FILE.test(w) && !w.startsWith('-'))
+    const models = (list: readonly string[]) => list.filter(w => MODEL_FILE.test(w) && !w.startsWith('-')).map(from)
     for (let i = 0; i < words.length; i++) {
-      const redirect = /^\d*>>?(.*)$/.exec(words[i]!)
-      if (redirect) out.push(...models([redirect[1] || words[i + 1] || '']))
+      const redirect = /^\d*>[>|]?$/.exec(words[i]!)
+      if (redirect) out.push(...models([words[i + 1] ?? '']))
     }
     const at = leaderEnd(words)
     const bin = (words[at] ?? '').split('/').pop() ?? ''
     const args = words.slice(at + 1)
-    if (WRITERS.has(bin)) out.push(...models(args))
+    if (bin === 'cd') cwd = args[0] && !args[0].startsWith('-') && args[0] !== '~' ? from(args[0]) : ''
+    else if (SHELLS.has(bin)) {
+      const c = args.findIndex(w => /^-[a-z]*c$/.test(w))
+      if (c >= 0 && c + 1 < args.length) out.push(...filesWrittenBy(args[c + 1]!).map(from))
+    } else if (WRITERS.has(bin)) out.push(...models(args))
     else if ((bin === 'sed' || bin === 'perl') && args.some(w => /^-[a-zA-Z]*i/.test(w) || w === '--in-place' || w.startsWith('--in-place='))) out.push(...models(args))
     else if (bin === 'git' && args.some(w => GIT_WRITERS.has(w))) out.push(...models(args))
   }
@@ -254,8 +342,11 @@ async function projectAbove($: EngineInterface, dir: string): Promise<string | n
 /** Whether a changed file is one a model check can be about: a .sql or .yml in a dbt project, not dbt's own files. */
 async function isModelFile($: EngineInterface, file: string): Promise<boolean> {
   const path = norm(file)
-  if (!/\.(sql|ya?ml)$/i.test(path) || SKIPPED_DIRS.test(path) || ROOT_FILES.has(path.split('/').pop() ?? '')) return false
-  return (await projectAbove($, path.replace(/\/[^/]*$/, ''))) !== null
+  if (!/\.(sql|ya?ml)$/i.test(path) || SKIPPED_DIRS.test(path)) return false
+  const dir = path.replace(/\/[^/]*$/, '')
+  const project = await projectAbove($, dir)
+  // dbt's own files are the ones at the project root; a `profiles.yml` in a model folder is a properties file.
+  return project !== null && !(ROOT_FILES.has(path.split('/').pop() ?? '') && norm(project) === dir)
 }
 
 /** Asks altimate-code's dbt_health for the project's insights. */
@@ -269,7 +360,12 @@ async function check($: EngineInterface): Promise<HealthRun> {
   }
   // A refusal or failure comes back as success false with an empty list: only success true is an answer.
   const insights = result.metadata?.insights
-  if (result.ok && result.metadata?.success === true && Array.isArray(insights)) return { insights: insights as HealthInsight[] }
+  if (result.ok && result.metadata?.success === true && Array.isArray(insights)) {
+    // Insights read from the last good manifest are not a check of the changes just made.
+    const stale = result.metadata?.stale_manifest as { message?: unknown } | undefined
+    if (stale) return { problem: `Project health: ${typeof stale.message === 'string' ? stale.message : 'dbt could not parse the project, so the last good manifest was read.'}` }
+    return { insights: insights as HealthInsight[] }
+  }
   if (/unknown tool/i.test(result.text)) return { problem: NEEDS_CLI }
   return { problem: `Project health: ${(result.text || 'no answer').split('\n')[0]}` }
 }
@@ -316,7 +412,10 @@ async function loop($: EngineInterface, mine: number) {
     }
     await update($, healthAtom, prev => {
       const base = prev ?? fresh()
-      const baseline = base.baseline ?? run.insights.map(pairKey)
+      // A baseline that lands after edits (the first run failed, or the project was opened above the dbt
+      // project) cannot tell the touched models' old issues from the new: all of theirs count as new.
+      const edited = modelsOfFiles(base.touched, run.insights)
+      const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
       const issues = newIssues(run.insights, baseline, modelsOfFiles(base.touched, run.insights))
       return { ...base, baseline, issues, running: false, problem: null }
     })
@@ -432,13 +531,21 @@ export function pushRefusal(blocks: unknown, command: string, issues: readonly H
 
 /**
  * With `healthBlocksPush` on, `git push` waits for the check of the changes so far and is refused while
- * they have new health issues. A check that cannot run does not hold the push: it is told once, and
- * /health shows it.
+ * they have new health issues. A check that cannot run or does not finish holds it too.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) return null
-  if ((await wantsCheck($)) || running?.generation === generation) await within($, CHECK_MS, kick($))
+  const hold = (why: string) => ({
+    deny: `git push is held: ${why}\nRun /${COMMAND} to check again, or turn off "Project health blocks git push" in the plugin's settings.`,
+  })
+  // An edit in the same command would run before any check of it.
+  const root = await $.session.root().catch(() => '')
+  for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
+  if ((await wantsCheck($, true)) || running?.generation === generation) await within($, CHECK_MS, kick($))
   const state = await read($, healthAtom)
+  // A check that failed or did not finish leaves the changes unchecked: a gate that fails open is no gate.
+  if (state && enabled && (state.running || state.pending.length > 0 || (state.baseline === null && state.touched.length > 0)))
+    return hold(`the check of the models changed this session ${state.running ? 'did not finish in time' : `could not run (${state.problem ?? 'no answer'})`}.`)
   return pushRefusal(options.healthBlocksPush, e.command, state?.issues ?? [])
 }
 

@@ -36,7 +36,7 @@ const DEP = { ...insight('base', '', 'Missing tests'), uniqueId: 'model.dep.base
 
 type Options = {
   /** The tool's answer per run (the last repeats). */
-  runs: (ReturnType<typeof insight>[] | { fail: string })[]
+  runs: (ReturnType<typeof insight>[] | { fail: string } | { stale: string })[]
   /** Holds the run with this index (from 0) until released. */
   hold?: { at: number; until: Promise<void> }
   /** Folders that hold a dbt_project.yml (default: the repo). */
@@ -81,7 +81,8 @@ async function start($: any, on: any, options: Options, session: { isInteractive
     calls.push({ tool, args, argv: e.argv })
     if (options.hold?.at === index) await options.hold.until
     const answer = options.runs[Math.min(index, options.runs.length - 1)]!
-    const metadata = 'fail' in answer ? { success: false, insights: [] } : { success: true, insights: answer }
+    const metadata =
+      'fail' in answer ? { success: false, insights: [] } : 'stale' in answer ? { success: true, insights: [OLD_STG], stale_manifest: { message: answer.stale } } : { success: true, insights: answer }
     const output = 'fail' in answer ? answer.fail : ''
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output, metadata }), stderr: '' } }
   })
@@ -208,12 +209,32 @@ test('a failed check is not read as a clean one: it is told, and the next change
   })
   expect(toasts).toEqual(["◆ Project health: DataPilot isn't installed in python3. Install the `altimate-datapilot-cli` package"])
 
-  // The baseline failed: a change asks for it again, which now answers; the edit is checked after it.
+  // The baseline failed: a change asks for it again, which now answers after the edit; the old issues of
+  // the edited model cannot be told from the new, so the next check reports all of them.
   await $.tool.call(edit(STG))
   await endTurn($, clock, 't1')
   expect(calls).toHaveLength(3)
   expect(toasts).toHaveLength(2)
-  expect(toasts[1]).toBe('◆ 1 new health issue · stg_orders: hard coded references · /health')
+  expect(toasts[1]).toBe('◆ 2 new health issues · stg_orders: missing documentation · /health')
+})
+
+test('a model folder file named like a dbt root file is a properties file; a path spelled with ./ or .. is the same file', async ($, on) => {
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG]] })
+  await $.tool.call(edit(`${ROOT}/models/staging/../staging/./profiles.yml`))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  await $.tool.call(edit(`${ROOT}/profiles.yml`))
+  await endTurn($, clock, 't2')
+  expect(calls).toHaveLength(2)
+})
+
+test('a relative spelling of the model file still matches the model the tool names', async ($, on) => {
+  const { clock } = await start($, on, { runs: [[], [NEW_STG]] })
+  await $.tool.call(edit('./models/./staging/stg_orders.sql'))
+  await endTurn($, clock, 't1')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /1 new health issue/ })).toBeDefined()
+  await band.unmount()
 })
 
 test('the same problem at every turn is told once', async ($, on) => {
@@ -316,6 +337,48 @@ test('with healthBlocksPush on, git push is refused while new issues exist and t
   expect(pushRefusal(true, 'git status', [NEW_STG])).toBeNull()
 })
 
+test('with the push gate on, a check that failed holds git push, and the push asks for it again', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const { clock, calls } = await start($, on, { runs: [[], { fail: 'dbt could not parse' }, [NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  // The retry at the push runs the check again and finds the issue.
+  const denied: any = await $.tool.call(command('git push'))
+  expect(calls).toHaveLength(3)
+  expect(denied?.deny).toContain('1 new project health issue')
+})
+
+test('with the push gate on, a check that cannot run keeps holding git push, and says why', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const { clock } = await start($, on, { runs: [[], { fail: 'dbt could not parse' }] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  const denied: any = await $.tool.call(command('git push'))
+  expect(denied?.deny).toContain('could not run (Project health: dbt could not parse)')
+})
+
+test('with the push gate on, a push with no model changed this session goes through', { options: { healthBlocksPush: true } }, async ($, on) => {
+  await start($, on, { runs: [[OLD_STG]] })
+  const allowed: any = await $.tool.call(command('git push'))
+  expect(allowed?.deny).toBeUndefined()
+})
+
+test('with the push gate on, a command that edits a model and pushes is held: the edit is not checked before it runs', { options: { healthBlocksPush: true } }, async ($, on) => {
+  await start($, on, { runs: [[]] })
+  const denied: any = await $.tool.call(command(`sed -i 's/a/b/' models/staging/stg_orders.sql && git push`))
+  expect(denied?.deny).toContain('Run them as separate commands')
+  const unrelated: any = await $.tool.call(command(`sed -i 's/a/b/' README.md && git push`))
+  expect(unrelated?.deny).toBeUndefined()
+})
+
+test('with the push gate on, stale insights (dbt could not parse) are a failed check, not a clean one', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const { clock, toasts } = await start($, on, { runs: [[], { stale: 'dbt could not parse the project' }] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(toasts.at(-1)).toContain('dbt could not parse the project')
+  const denied: any = await $.tool.call(command('git push'))
+  expect(denied?.deny).toContain('dbt could not parse the project')
+})
+
 test('the configured config path is passed to the tool, empty means the defaults', () => {
   expect(toolArgs('datapilot.yml')).toEqual({ config_path: 'datapilot.yml' })
   expect(toolArgs('  datapilot.yml ')).toEqual({ config_path: 'datapilot.yml' })
@@ -381,6 +444,22 @@ test('the model files a Bash command writes, not the ones it only reads', () => 
   expect(filesWrittenBy('perl -pi -e s/a/b/ models/p.sql')).toEqual(['models/p.sql'])
   for (const line of ['cat models/x.sql', 'git diff models/x.sql', 'grep foo models/x.yml', 'sed -n 1,5p models/x.sql', 'ls -la', 'git status'])
     expect([line, filesWrittenBy(line)]).toEqual([line, []])
+})
+
+test('shell syntax: a redirect without spaces, bash -c, cd before the edit, backticks in quotes, heredoc bodies', () => {
+  expect(filesWrittenBy('echo x>models/x.sql')).toEqual(['models/x.sql'])
+  expect(filesWrittenBy('echo x 2>models/e.sql')).toEqual(['models/e.sql'])
+  expect(filesWrittenBy(`bash -c "sed -i s/a/b/ models/x.sql"`)).toEqual(['models/x.sql'])
+  expect(filesWrittenBy('cd models && sed -i s/a/b/ x.sql')).toEqual(['models/x.sql'])
+  expect(filesWrittenBy('cd /repo/models/staging; echo x > y.sql')).toEqual(['/repo/models/staging/y.sql'])
+  expect(filesWrittenBy('echo x > /dev/null 2>&1')).toEqual([])
+  expect(isGitPush('echo "`git push`"')).toBe(true)
+  expect(isGitPush('echo "$(git push)"')).toBe(true)
+  expect(isGitPush("cat <<'EOF'\ngit push\nEOF")).toBe(false)
+  expect(isGitPush('cat <<EOF\ngit push\nEOF')).toBe(false)
+  expect(isGitPush('cat <<EOF\n$(git push)\nEOF')).toBe(true)
+  expect(isGitPush("cat <<'EOF'\nnote\nEOF\ngit push")).toBe(true)
+  expect(isGitPush('cat <<-EOF\n\tgit push\n\tEOF\ngit status')).toBe(false)
 })
 
 test('models match by their own files, so a model of another package is never matched', () => {
