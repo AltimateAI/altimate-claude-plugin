@@ -1,7 +1,7 @@
 # Privacy Policy — Altimate Code plugin for Claude Code
 
 **Effective date:** November 2, 2026
-**Last revised:** November 10, 2026
+**Last revised:** November 13, 2026
 **Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) MCP server and CLI.
 
 This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai/privacy) and [Terms](https://www.altimate.ai/terms), which govern Altimate services generally. Where this document is silent, the master policy applies. Questions: **info@altimate.ai**.
@@ -52,6 +52,17 @@ These service calls are separate from local CLI delegation. Configuring BYOK for
 | Text of a skill Claude uses | Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
 
 Refresh uses your existing Altimate sign-in. Projects altimate-code has never worked in are skipped. Set `ALTIMATE_CLAUDE_SKILL_SYNC=0` to turn copying and refresh off and remove the copies.
+
+## Your skill and knowledge requests
+
+Since plugin 1.6.0, in an interactive session the plugin runs `altimate workspace review decisions` at session start and every 15 minutes. The local CLI asks your Altimate workspace for the review status of the skills and knowledge bases you sent for review, using your existing sign-in, and the plugin shows each new decision as a toast. `/altimate-code:rules` runs `altimate workspace review status` when you use it.
+
+| Data | Where it goes | Retention |
+|---|---|---|
+| Your requests' status, the reviewer's name and their reason | Read by the local CLI from your Altimate workspace; shown as a toast and, at session start, given to Claude Code as session context | The decisions and which of them were shown are kept in altimate-code's state directory (`$XDG_STATE_HOME/altimate-code/workspace-reviews/`), per account and workspace, the 50 most recent |
+| A request's name, reviewer and reason in Claude's context | Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
+
+Nothing is sent but the request for your own requests' status. Signed out, with workspaces off or in a project that is not linked, no request is made.
 
 ## Workspace rules
 
