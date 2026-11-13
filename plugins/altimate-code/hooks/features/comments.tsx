@@ -388,7 +388,8 @@ async function resolve($: EngineInterface, thread: CommentsThread) {
 
 const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 240)
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
-const slashes = (path: string) => path.replace(/\\/g, '/')
+// macOS lists /tmp, /var and /etc under /private: the same folder is named either way.
+const slashes = (path: string) => path.replace(/\\/g, '/').replace(/^\/private(?=\/(tmp|var|etc)\/)/, '')
 
 /** A path relative to the project folder, with forward slashes; the path itself when outside it. */
 export function relativePath(root: string, path: string): string {

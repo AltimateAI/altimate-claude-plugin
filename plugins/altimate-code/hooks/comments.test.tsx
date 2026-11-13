@@ -88,6 +88,9 @@ test('threads are matched to a file by project-relative path and grouped by mode
   const a = toThread(RAW)!
   const b = toThread({ ...RAW, group_id: 12, file_path: 'models/customers.sql' })!
   expect(relativePath(ROOT, FILE)).toBe('models/orders.sql')
+  // The same folder named through the /private alias is the same folder.
+  expect(relativePath('/private/tmp/shop', '/tmp/shop/models/orders.sql')).toBe('models/orders.sql')
+  expect(relativePath('/tmp/shop', '/private/tmp/shop/models/orders.sql')).toBe('models/orders.sql')
   expect(threadsOnFile([a, b], ROOT, FILE)).toEqual([a])
   expect(groupByModel([a, b]).map(g => g.label)).toEqual(['models/customers.sql', 'models/orders.sql'])
   expect(toThread({ group_id: 1 })).toBeNull()
