@@ -234,6 +234,10 @@ test('a command that sets its own target, defer state, vars or project is not es
     'uv run --directory other dbt run -s orders',
     "dbt run -s orders --'vars' x",
     'dbt run -s orders --full-refresh',
+    'dbt run -s orders --full-\\\nrefresh',
+    'if true; then cd other; fi; dbt run -s orders',
+    'dbt --profiles-dir ci run -s orders',
+    'FOO=1 dbt run -s orders',
   ]
   for (const command of commands) {
     const result: any = await $.tool.call(bash(command))
@@ -306,4 +310,21 @@ test('formatBytes writes the units the dry run does', () => {
   expect(formatBytes(1536)).toBe('1.5 KiB')
   expect(formatBytes(10 * GIB)).toBe('10.0 GiB')
   expect(formatBytes(1024 ** 5)).toBe('1.0 PiB')
+})
+
+test('what leaves the query alone is still estimated: other dbt calls before it, thread and limit flags, a launcher', async ($, on) => {
+  const { clock, estimates } = await start($, on, { answers: { orders: UNDER, 'select 1': UNDER } })
+  for (const command of ['dbt deps && dbt run -s orders --threads 4', 'uv run dbt build --select orders --fail-fast', `dbt show --inline "select 1" --limit 5`]) {
+    expect(((await $.tool.call(bash(command))) as any).context[0]).toContain('would scan 2.0 GiB')
+  }
+  await clock.settle()
+  expect(estimates).toEqual(['orders', 'orders', 'select 1'])
+})
+
+test('a very long run of blank lines before the command costs no noticeable time', async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: UNDER } })
+  const began = Date.now()
+  await $.tool.call(bash(`${'\n'.repeat(64000)}dbt run -s orders`))
+  await clock.settle()
+  expect(Date.now() - began).toBeLessThan(3000)
 })

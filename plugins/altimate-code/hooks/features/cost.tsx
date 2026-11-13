@@ -108,7 +108,8 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
-  const invocations = parseDbtCommand(e.command).filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
+  const all = parseDbtCommand(e.command)
+  const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
   if (invocations.length === 0) return null
   const state = (await read($, costAtom)) ?? FRESH
   // A warehouse with no dry run was found out already: the command is never held, and nothing is asked again.
@@ -119,7 +120,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   // One budget for the whole command, however many queries it names.
   const until = (await $.clock.now()) + ESTIMATE_BUDGET_MS
   for (const invocation of invocations) {
-    const target = targetOf(e.command, invocation)
+    const target = targetOf(e.command, invocation, all)
     if (!target.model && target.sql === undefined) {
       lines.push(`cost · no estimate for this selection (${target.why})`)
       continue
@@ -195,25 +196,56 @@ export const editReadsBefore = false
 
 type Target = { model?: string; sql?: string; why: string }
 
+/** The dbt launchers whose project is the session's: nothing else on the line can move it. */
+const PLAIN_LAUNCHER = /^((uv|poetry) run )?(\S*\/)?dbt$/
+/** Flags with one value that leave the project, target and compiled SQL as they are. */
+const VALUE_FLAGS = new Set(['--inline', '--limit', '--threads'])
+/** Flags that name the models; any number of values follow. */
+const SELECT_FLAGS = new Set(['-s', '--select', '-m', '--models', '--model'])
+/** Flags without a value that leave the project, target and compiled SQL as they are. */
+const PLAIN_FLAGS = new Set(['--fail-fast', '-x', '--quiet', '-q'])
+
+/**
+ * Whether the estimate would be of what the invocation runs. It asks about the session's project at its
+ * default target, so it is only so when the line moves neither: the dbt launcher is plain, nothing
+ * precedes the invocation but other dbt invocations, and every flag is one known to leave the query
+ * alone. Anything else (another target, defer state, vars, project, a full refresh) is not estimated.
+ */
+function isPlainInvocation(command: string, invocation: DbtInvocation, all: DbtInvocation[]): boolean {
+  if (!PLAIN_LAUNCHER.test(invocation.binary)) return false
+  let before = command.slice(0, invocation.start)
+  for (const earlier of all.filter(one => one.end <= invocation.start).reverse()) {
+    before = before.slice(0, earlier.start) + ' ' + before.slice(earlier.end)
+  }
+  if (!/^[\s;&]*$/.test(before)) return false
+  const words = shellWords(command.slice(invocation.start, invocation.end))
+  const launcher = shellWords(invocation.binary)
+  if (launcher.some((word, i) => words[i] !== word) || words[launcher.length] !== invocation.subcommand) return false
+  let selecting = false
+  let pending = false
+  for (const word of words.slice(launcher.length + 1)) {
+    if (pending) {
+      pending = false
+      continue
+    }
+    const flag = word.startsWith('-') ? word.split('=')[0]! : null
+    if (flag === null) {
+      if (selecting) continue
+      return false
+    }
+    selecting = SELECT_FLAGS.has(flag)
+    if (selecting || PLAIN_FLAGS.has(flag)) continue
+    if (VALUE_FLAGS.has(flag)) pending = !word.includes('=')
+    else return false
+  }
+  return true
+}
+
 /** What a scanning invocation names to estimate: its inline SQL, or one plain model; else why not. */
-function targetOf(command: string, invocation: DbtInvocation): Target {
-  // The estimate runs in the session's project against its default target: a command that points
-  // elsewhere would be estimated as something it isn't.
+function targetOf(command: string, invocation: DbtInvocation, all: DbtInvocation[]): Target {
   const text = command.slice(invocation.start, invocation.end)
-  // The flags as the shell reads them: quotes and backslashes inside a flag name don't change it.
-  const flags = text.replace(/['"\\]/g, '')
-  if (
-    invocation.target ||
-    invocation.targetPath ||
-    invocation.hasDefer ||
-    invocation.hasState ||
-    /(^|\s)--(vars?|project-dir|profiles-dir|profile|full-refresh|directory|project|env-file)\b/.test(flags) ||
-    /(^|\s)(-f|-C)(\s|$)/.test(flags) ||
-    /\bDBT_[A-Z_]*=/.test(flags) ||
-    // What runs before it in the line may move to another project or set the environment.
-    /(^|[\n;&|({])\s*(cd|pushd|popd|export|env|source|\.|set|unset)\s/.test(command.slice(0, invocation.start))
-  ) {
-    return { why: 'it sets its own target, defer state, vars, project or refresh mode' }
+  if (!isPlainInvocation(command, invocation, all)) {
+    return { why: 'it sets its own target, defer state, vars, project or refresh mode, or runs after something that might' }
   }
   if (invocation.subcommand === 'show') {
     const inline = inlineSql(text)
