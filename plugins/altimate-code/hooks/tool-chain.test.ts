@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { FEATURE_IDS } from './features'
+import { STATUS_ORDER, statusLineOf } from './status-line'
 import { afterCall, beforeCall, PHASES, type ChainSteps } from './tool-chain'
 
 /** Steps that record each phase they run, in order. */
@@ -65,11 +66,20 @@ test('a failed or refused call runs no file phase; a Bash call that failed still
   expect(seen).toEqual(['bashAfter:dbt test'])
 })
 
-test('without context lines the result is passed on as it came; the features run in the stated order', async () => {
+test('without context lines the result is passed on as it came', async () => {
   const { steps } = recording()
   const result = await afterCall({ tool: 'Bash', command: 'ls' } as any, ok, null, steps)
   expect(result).toBe(ok)
+})
+
+test('the features are listed in the stated order, and the status line joins its parts in it', () => {
   expect(FEATURE_IDS).toEqual(['runs', 'defer', 'toModel', 'comments', 'cost', 'health', 'sqlGraph', 'docs', 'cteProfile'])
+  expect(STATUS_ORDER).toEqual(['integrations', ...FEATURE_IDS])
+  // Parts join in that order whatever order they were set in; feature parts alone get the plugin's mark.
+  expect(statusLineOf({ cost: '2 GB', integrations: '1 synced', runs: '3 runs' })).toBe('1 synced · 3 runs · 2 GB')
+  expect(statusLineOf({ integrations: '1 synced' })).toBe('1 synced')
+  expect(statusLineOf({ docs: '80% documented' })).toBe('⚡ Altimate · 80% documented')
+  expect(statusLineOf({ integrations: '', runs: '' })).toBeUndefined()
 })
 
 test('through the plugin, a Bash call passes unchanged while every feature is a stub', async ($, on) => {
