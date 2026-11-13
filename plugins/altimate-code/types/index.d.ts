@@ -237,6 +237,8 @@ export interface DocsGroup {
   column: string
   description: string
   manifest: string
+  /** The YAML file the description was written in. */
+  file: string
   candidates: DocsCandidate[]
 }
 
@@ -254,7 +256,7 @@ export interface DocsCoverageView {
 export interface DocsState {
   /** Written descriptions with candidates, oldest first. */
   groups: DocsGroup[]
-  /** Candidates the person unticked in the pane, keyed `model.column>model.column`. */
+  /** Candidates the person unticked in the pane, keyed `manifest|model.column>unique_id.column`. */
   skipped: string[]
   coverage: DocsCoverageView | null
 }

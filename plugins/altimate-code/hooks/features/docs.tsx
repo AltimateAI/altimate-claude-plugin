@@ -34,6 +34,11 @@ const docsAtom = atom({ plugin: 'altimate-code', key: 'docs' } as const, null as
 // Said once a session: the installed altimate-code lacks what this feature reads.
 let saidOldReach = false
 let saidOldCoverage = false
+// Columns the pane's Apply asked Claude to write a description for, so that writing is not offered again
+// (once each; whatever Apply's turn does not write stays until the session starts again).
+const applied = new Set<string>()
+
+const groupKey = (manifest: string, model: string, column: string) => `${manifest}|${model}.${column}`
 
 const empty = (): DocsState => ({ groups: [], skipped: [], coverage: null })
 
@@ -113,8 +118,10 @@ function valueAt(lines: string[], at: number, keyIndent: number, rest: string): 
 }
 
 /**
- * The column descriptions a model YAML file writes, keyed `model.column`. Block-style YAML as dbt's
- * schema files are written; a model or column without a description is left out.
+ * The column descriptions a model YAML file writes, keyed `model.column`, each as one line of text.
+ * Block-style YAML as dbt's schema files are written; a model or column without a description is
+ * left out. The text is for telling whether a description changed and for showing it: what gets
+ * copied is read from the file by Claude, so line breaks and escapes need not survive here.
  */
 export function columnDescriptions(yaml: string): Map<string, string> {
   const out = new Map<string, string>()
@@ -232,7 +239,8 @@ export function candidatesFrom(metadata: any): { candidates: DocsCandidate[]; un
   return { candidates, unrated: anyColumns && !anyRated }
 }
 
-const candidateKey = (group: { model: string; column: string }, one: { model: string; column: string }) => `${group.model}.${group.column}>${one.model}.${one.column}`
+const groupPrefix = (group: { manifest: string; model: string; column: string }) => `${groupKey(group.manifest, group.model, group.column)}>`
+const candidateKey = (group: { manifest: string; model: string; column: string }, one: { model: string; id?: string; column: string }) => `${groupPrefix(group)}${one.id ?? one.model}.${one.column}`
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
@@ -245,20 +253,22 @@ export function propagationLine(group: DocsGroup): string {
 
 /** The request the pane's Apply sends: the files and columns to edit, for Claude to make the edits. */
 export function applyPrompt(groups: DocsGroup[], skipped: string[]): string | null {
+  // Names come from the project, so each is written as a quoted string: data, not instructions.
+  const name = (model: string, column: string) => JSON.stringify(`${model}.${column}`)
   const blocks: string[] = []
   for (const group of groups) {
     const picked = group.candidates.filter(one => !skipped.includes(candidateKey(group, one)))
     if (!picked.length) continue
     blocks.push(
       [
-        `${group.model}.${group.column} is described as: ${JSON.stringify(group.description)}`,
-        ...picked.map(one => `- ${one.model}.${one.column} (${one.lens === 'Alias' ? 'renamed from it' : 'carried as is'})`),
+        `Take the description of ${name(group.model, group.column)} as it is written in ${JSON.stringify(group.file)} (dbt project at ${JSON.stringify(group.manifest.replace(/\/target\/manifest\.json$/, ''))}), and put it on:`,
+        ...picked.map(one => `- ${name(one.model, one.column)}${one.id ? ` (${JSON.stringify(one.id)})` : ''}, ${one.lens === 'Alias' ? 'renamed from it' : 'carried as is'}`),
       ].join('\n'),
     )
   }
   if (!blocks.length) return null
   return [
-    'Copy these column descriptions to the downstream columns that carry the same value. For each model, edit the YAML file that documents it (add the column there when it is not listed), and leave a column alone when it already has a description of its own that says more.',
+    'Copy these column descriptions to the downstream columns that carry the same value. For each model, edit the YAML file that documents it (add the column there when it is not listed) and copy the text exactly as it is written. Leave a column that already has a different description unchanged, and list those columns at the end so the person can decide.',
     '',
     ...blocks,
   ].join('\n\n')
@@ -271,6 +281,8 @@ export function applyPrompt(groups: DocsGroup[], skipped: string[]): string | nu
 type Project = { root: string; manifest: string; models: string[] }
 
 const normal = (path: string) => path.replace(/\\/g, '/')
+/** A path spelled one way, so the same file named two ways compares equal. */
+const tidy = (path: string) => normal(path).replace(/\/(?:\.\/)+/g, '/').replace(/\/{2,}/g, '/')
 
 /** The dbt project the file is a model file of: its closest dbt_project.yml above it, and the file under one of that project's model folders. */
 async function projectOf($: EngineInterface, file: string): Promise<Project | null> {
@@ -294,14 +306,27 @@ async function projectOf($: EngineInterface, file: string): Promise<Project | nu
 // After an edit
 // ---------------------------------------------------------------------------------------------------
 
-const MISSING_TOOL = /unknown tool|no such tool|not (?:an? )?(?:exposed|available|found|registered)|invalid tool/i
+// Only a message about the tool itself: "model not found" is the model's.
+const MISSING_TOOL = /unknown tool|no such tool|invalid tool|dbt_docs_coverage[^\n]*not (?:an? )?(?:exposed|available|found|registered)/i
 
 async function schemaEdited($: EngineInterface, file: EditedFile): Promise<string[]> {
   const project = await projectOf($, file.path)
   if (!project) return []
   const after = await $.fs.read(file.path).catch(() => null)
   if (after === null) return []
-  const changed = changedDescriptions(file.before, after).slice(0, MAX_COLUMNS)
+  const written = columnDescriptions(after)
+  const fresh = changedDescriptions(file.before, after)
+  // Writing a description Apply asked for is the copy being made, not a new description to offer.
+  const all = fresh.filter(one => !applied.delete(groupKey(project.manifest, one.model, one.column)))
+  const changed = all.slice(0, MAX_COLUMNS)
+  const replaced = new Set(all.map(one => groupKey(project.manifest, one.model, one.column)))
+  // What was offered from this file for a description that has changed or gone no longer holds.
+  await update($, docsAtom, prev => {
+    if (!prev) return prev
+    const groups = prev.groups.filter(g => !(g.file === tidy(file.path) && written.get(`${g.model}.${g.column}`) !== g.description) && !replaced.has(groupKey(g.manifest, g.model, g.column)))
+    return groups.length === prev.groups.length ? prev : { ...prev, groups, skipped: prev.skipped.filter(key => groups.some(g => key.startsWith(groupPrefix(g)))) }
+  })
+  await showStatus($)
   if (!changed.length) return []
   if (!(await $.fs.exists(project.manifest).catch(() => false))) {
     return ['◆ docs · no target/manifest.json: run `dbt compile` so the downstream columns of a description can be found']
@@ -314,10 +339,13 @@ async function schemaEdited($: EngineInterface, file: EditedFile): Promise<strin
       return { one, result }
     }),
   )
+  // The answers can be late: only a description that is still the file's is offered.
+  const now = columnDescriptions((await $.fs.read(file.path).catch(() => null)) ?? '')
 
   const groups: DocsGroup[] = []
   const lines: string[] = []
   for (const { one, result } of traced) {
+    if (now.get(`${one.model}.${one.column}`) !== one.description) continue
     if (!result?.ok || !result.metadata) continue
     const { candidates, unrated } = candidatesFrom(result.metadata)
     if (unrated && !saidOldReach) {
@@ -325,19 +353,20 @@ async function schemaEdited($: EngineInterface, file: EditedFile): Promise<strin
       lines.push('◆ docs · this altimate-code does not rate how each downstream column comes from the traced one (needs a release newer than 0.12.10), so no description can be offered to copy')
     }
     if (!candidates.length) continue
-    groups.push({ model: one.model, column: one.column, description: one.description, manifest: project.manifest, candidates })
+    groups.push({ model: one.model, column: one.column, description: one.description, manifest: project.manifest, file: tidy(file.path), candidates })
   }
   if (groups.length) {
     await update($, docsAtom, prev => {
       const state = prev ?? empty()
-      const replaced = new Set(groups.map(g => `${g.model}.${g.column}`))
-      const kept = state.groups.filter(g => !replaced.has(`${g.model}.${g.column}`))
+      const replaced = new Set(groups.map(g => groupKey(g.manifest, g.model, g.column)))
+      const kept = state.groups.filter(g => !replaced.has(groupKey(g.manifest, g.model, g.column)))
       const all = [...kept, ...groups].slice(-MAX_GROUPS)
-      return { ...state, groups: all, skipped: state.skipped.filter(key => all.some(g => key.startsWith(`${g.model}.${g.column}>`))) }
+      return { ...state, groups: all, skipped: state.skipped.filter(key => all.some(g => key.startsWith(groupPrefix(g)))) }
     })
     await showStatus($)
     for (const group of groups) lines.push(propagationLine(group))
   }
+  if (all.length > changed.length) lines.push(`◆ docs · ${plural(all.length - changed.length, 'more description')} written; only the first ${MAX_COLUMNS} were traced for downstream columns`)
   return lines
 }
 
@@ -359,7 +388,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   }
   const view: DocsCoverageView = {
     model: String(meta.model),
-    percent: Number(meta.percent),
+    percent: Number.isFinite(Number(meta.percent)) ? Number(meta.percent) : 0,
     documented: Array.isArray(meta.documented) ? meta.documented.length : 0,
     total: Array.isArray(meta.output_columns) ? meta.output_columns.length : 0,
     missing: Array.isArray(meta.missing) ? meta.missing.map(String) : [],
@@ -418,7 +447,7 @@ export function register(on: On, context: FeatureContext) {
         ) : null}
         {groups.length === 0 ? <Text dimColor>No description to copy: when Claude writes a column description, the downstream columns that carry the same value are listed here.</Text> : null}
         {groups.map(group => (
-          <Box key={`docs-${group.model}.${group.column}`} flexDirection="column">
+          <Box key={`docs-${groupKey(group.manifest, group.model, group.column)}`} flexDirection="column">
             <Text>
               <Text bold>
                 {group.model}.{group.column}
@@ -447,6 +476,9 @@ export function register(on: On, context: FeatureContext) {
               onPress={() =>
                 later($, async () => {
                   if (!prompt) return
+                  for (const group of groups) {
+                    for (const one of group.candidates) if (!state.skipped.includes(candidateKey(group, one))) applied.add(groupKey(group.manifest, one.model, one.column))
+                  }
                   await $.prompt.submit({ text: prompt })
                   await update($, docsAtom, prev => ({ ...(prev ?? empty()), groups: [], skipped: [] }))
                   await showStatus($)
@@ -472,6 +504,9 @@ export function register(on: On, context: FeatureContext) {
 
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
+  saidOldReach = false
+  saidOldCoverage = false
+  applied.clear()
   await update($, docsAtom, () => null)
   await setStatusPart($, 'docs', null)
   await $.command.register({ name: COMMAND, description: 'Copy a column description Claude wrote to the downstream columns that carry the same value' })
