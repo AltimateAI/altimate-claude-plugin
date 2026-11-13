@@ -477,16 +477,19 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
     if (current && sameContext && current.root === root && (verb === current.verb || verb === 'build') && (select === null || select === current.select)) await update($, failureAtom, () => null)
     return null
   }
-  // run_results.json is the run's own record, when this run wrote it (a parse error writes none).
+  // run_results.json is the run's own record, when this run wrote it (a parse error writes none): it must be
+  // newer than the command's start, so an earlier run's file is never this one's. It holds the last dbt
+  // invocation's nodes only, so the failures dbt printed for the others are added: one entry per node, the
+  // artifact's where both name it.
   const results = `${await targetOf($, root)}/run_results.json`
   const stat = await $.fs.stat(results).catch(() => null)
   let failures = [] as FailureView['failures']
-  if (stat && stat.mtimeMs >= startedAt - 2_000) {
+  if (stat && stat.mtimeMs >= startedAt) {
     const runResults = await $.fs.read(results).then(JSON.parse).catch(() => null)
     const manifest = await readManifest($, root)
     failures = failuresFrom(runResults, manifest?.manifest)
   }
-  if (failures.length === 0) failures = failuresFromText(output)
+  for (const one of failuresFromText(output)) if (!failures.some(known => known.kind === one.kind && known.name === one.name)) failures.push(one)
   // Nothing dbt itself reported (a command the permission check refused, a missing binary): no band.
   if (failures.length === 0) return null
   const view: FailureView = { command, root, verb, select, options, failures, at: await $.clock.now() }
@@ -955,7 +958,10 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
           </Text>
           <Box>
             {deps ? <Button key="dbt-doctor-deps" label="Run dbt deps" onPress={() => later($, async () => {
-              await runDbt($, doctor.root, ['deps'], 300_000).catch(() => null)
+              const deps = await runDbt($, doctor.root, ['deps'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+              if (deps === SKIPPED) return
+              // Parsing without the packages would only fail again: say what deps said and stop.
+              if (deps.exitCode !== 0) return void $.ui.toast(`✖ dbt deps failed · ${(logErrors(deps.stdout)[0] ?? stripAnsi(deps.stderr || deps.stdout).trim().split('\n').slice(-1)[0] ?? '').slice(0, 160)}`, { timeoutMs: 8000 })
               await parseNow($, doctor.root)
             })} /> : null}
             {stale ? <Button key="dbt-doctor-parse" label="Run dbt parse" onPress={() => later($, () => parseNow($, doctor.root))} /> : null}
@@ -1078,7 +1084,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
       const contexts = runs.map(one => [...one.options, ...one.env.map(env => `env:${env}`)])
       const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts.flat()
       // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
-      await recordRun($, command.trim().slice(0, 300), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked).catch(() => null)
+      await recordRun($, command.trim(), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked).catch(() => null)
     }
     // Shows: a command that runs several different shows saves no preview, whatever node dbt names: which
     // show printed which rows cannot be told. One show, or the same show twice (`dbt show -s a || dbt show -s a`),

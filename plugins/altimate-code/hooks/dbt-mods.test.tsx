@@ -153,6 +153,8 @@ type Options = {
   unreadable?: string[]
   /** Runs while Claude's shell command is running, before its result returns. */
   duringBash?: () => Promise<void>
+  /** `dbt deps` fails with this message. */
+  depsFails?: string
   /** A file whose stat waits for `until` while it is set. */
   statGate?: { path: string; until?: Promise<void> }
   /** The project's artifact folder, when not `target`. */
@@ -284,6 +286,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin !== DBT) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
     if (verb === 'debug') return { value: { exitCode: 0, stdout: DEBUG, stderr: '' } }
+    if (verb === 'deps' && options.depsFails) return { value: { exitCode: 1, stdout: '', stderr: options.depsFails } }
     if (verb === 'parse') {
       mtimes['target/manifest.json'] = 10_000
       return { value: { exitCode: 0, stdout: 'Performance info: target/perf_info.json', stderr: '' } }
@@ -1886,3 +1889,63 @@ for (const [name, output] of [['a trailing comment', "    prod:   # production\n
     await ui.unmount()
   })
 }
+
+// ─── Failures from the artifact and the text, the full command, deps ─────────────────────────────
+
+test('two failing invocations in one command both reach the band, whichever one wrote run_results.json', async ($, on) => {
+  const results = { results: [{ unique_id: 'test.shop.not_null_customers_id.abc', status: 'error', message: 'Runtime Error in test not_null_customers_id (models/schema.yml)\n  boom' }] }
+  const { clock, setBash } = await start($, on, { files: { 'target/run_results.json': JSON.stringify(results) } })
+  setBash({ stdout: `${HEADER}\n06:45:43  Compilation Error in model orders (models/orders.sql)\n  unexpected '}'\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=1\n${HEADER}\n${TEST_FAILED.replace('not_null_orders_amount', 'not_null_customers_id')}`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders; dbt test -s customers' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: 'not_null_customers_id, orders' })).toBeDefined()
+  await band.unmount()
+})
+
+test('a run_results.json written just before the command started is not this command\'s', async ($, on) => {
+  const { clock, setBash } = await start($, on, { runResultsAt: 500, now: 1_000 })
+  setBash({ stdout: '\u001b[0m06:45:43  Compilation Error in model customers (models/customers.sql)\n  boom\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=1', isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s customers' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: 'customers' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /not_null_orders_amount/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a long command is kept whole for Explain and Fix; the band shows no more than the failure', async ($, on) => {
+  const { clock, prompts, setBash } = await start($, on)
+  const command = `dbt build -s orders --vars '${JSON.stringify({ note: 'x'.repeat(650) })}'`
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: new RegExp('x{300}') })).toBeUndefined()
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts[0]).toContain(`\`${command}\``)
+  await band.unmount()
+})
+
+test('a versioned model whose retry also shows nothing ends FAILED, naming the model dbt now has', async ($, on) => {
+  const manifest = { metadata: { project_name: 'shop' }, parent_map: {}, child_map: {}, nodes: { 'model.shop.orders': { name: 'orders', resource_type: 'model', package_name: 'shop', version: 1, original_file_path: 'models/legacy.sql', config: {}, columns: {}, depends_on: { nodes: [] } } } }
+  const { clock, runs } = await start($, on, { manifestAfterShow: manifest, files: { 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'never_selected' } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  const note = (result.context ?? []).join('\n')
+  expect(note).toContain('FAILED')
+  expect(note).toContain('the model orders')
+})
+
+test('Run dbt deps that fails says so and does not go on to parse', async ($, on) => {
+  const { clock, runs, toasts } = await start($, on, { interactive: true, files: { 'packages.yml': 'packages: []' }, depsFails: 'Could not find a version of dbt_utils' })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  expect(runs.some(argv => argv[1] === 'deps')).toBe(true)
+  expect(toasts.some(one => one.startsWith('✖ dbt deps failed · Could not find a version of dbt_utils'))).toBe(true)
+  expect(runs.some(argv => argv[1] === 'parse')).toBe(false)
+  await band.unmount()
+})
