@@ -223,9 +223,9 @@ export interface SqlGraphState {
   shown: { model: string; request: number; graph: SqlGraphView | null; loading: boolean; message: string | null; selected: string | null } | null
 }
 
-/** What `dbt_sql_graph` returns: one node per CTE, relation or select, and the edges between them (input, then consumer). */
+/** What `dbt_sql_graph` returns: one node per CTE, relation or select, and the edges between them (input id, then consumer id). A node's `id` is unique; its `name` is only what is shown and can repeat. */
 export interface SqlGraphView {
-  nodes: { name: string; type: string; nodeId?: string; sql: string; columns: { name: string; datatype?: string; expression?: string }[] }[]
+  nodes: { id: string; name: string; type: string; nodeId?: string; sql: string; columns: { name: string; datatype?: string; expression?: string }[] }[]
   edges: [string, string][]
 }
 

@@ -74,11 +74,11 @@ function plain(text: string): string {
 
 /** The graph's nodes in dependency order: a node comes after everything that feeds it; ties keep the backend's order. */
 export function orderNodes(graph: SqlGraphView): SqlGraphView['nodes'] {
-  const names = new Set(graph.nodes.map(node => node.name))
+  const ids = new Set(graph.nodes.map(node => node.id))
   const pending = new Map<string, number>()
   const feeds = new Map<string, string[]>()
   for (const [from, to] of graph.edges) {
-    if (!names.has(from) || !names.has(to) || from === to) continue
+    if (!ids.has(from) || !ids.has(to) || from === to) continue
     pending.set(to, (pending.get(to) ?? 0) + 1)
     feeds.set(from, [...(feeds.get(from) ?? []), to])
   }
@@ -86,21 +86,21 @@ export function orderNodes(graph: SqlGraphView): SqlGraphView['nodes'] {
   const ordered: SqlGraphView['nodes'] = []
   // Repeated passes in the backend's order: a cycle (which SQL cannot have) falls out as the rest, unsorted.
   while (ordered.length < graph.nodes.length) {
-    const ready = graph.nodes.filter(node => !done.has(node.name) && (pending.get(node.name) ?? 0) === 0)
-    const batch = ready.length ? ready : graph.nodes.filter(node => !done.has(node.name))
+    const ready = graph.nodes.filter(node => !done.has(node.id) && (pending.get(node.id) ?? 0) === 0)
+    const batch = ready.length ? ready : graph.nodes.filter(node => !done.has(node.id))
     for (const node of batch) {
-      done.add(node.name)
+      done.add(node.id)
       ordered.push(node)
-      for (const to of feeds.get(node.name) ?? []) pending.set(to, (pending.get(to) ?? 1) - 1)
+      for (const to of feeds.get(node.id) ?? []) pending.set(to, (pending.get(to) ?? 1) - 1)
     }
     if (!ready.length) break
   }
   return ordered.length === graph.nodes.length ? ordered : graph.nodes
 }
 
-/** The inputs of a node: the names with an edge into it. */
-export function inputsOf(graph: SqlGraphView, name: string): string[] {
-  return graph.edges.filter(([, to]) => to === name).map(([from]) => from)
+/** The inputs of a node: the ids with an edge into it. */
+export function inputsOf(graph: SqlGraphView, id: string): string[] {
+  return graph.edges.filter(([, to]) => to === id).map(([from]) => from)
 }
 
 async function merge($: EngineInterface, change: (prev: SqlGraphState) => SqlGraphState) {
@@ -184,17 +184,18 @@ export function register(on: On, context: FeatureContext) {
     }
     const graph = shown.graph
     const nodes = orderNodes(graph)
-    const chosen = nodes.find(node => node.name === shown.selected)
-    const select = (name: string) => later($, () => showing($, shown.request, { selected: name }))
+    const chosen = nodes.find(node => node.id === shown.selected)
+    const nameOf = new Map(nodes.map(node => [node.id, node.name]))
+    const select = (id: string) => later($, () => showing($, shown.request, { selected: id }))
     return (
       <Box key="sql-graph" flexDirection="column">
         <Text key="title" bold>
           {`SQL graph · ${plain(shown.model)} · ${nodes.length} nodes`}
         </Text>
         {nodes.map(node => {
-          const from = inputsOf(graph, node.name)
+          const from = inputsOf(graph, node.id).map(id => nameOf.get(id) ?? id)
           const text = `${plain(node.name)} (${plain(node.type)}) · ${node.columns.length} ${node.columns.length === 1 ? 'column' : 'columns'}${from.length ? ` · from ${from.map(plain).join(', ')}` : ''}`
-          return <Button key={`node-${node.name}`} label={`${node.name === shown.selected ? '▸' : ' '} ${text}`} onPress={() => select(node.name)} />
+          return <Button key={`node-${node.id}`} label={`${node.id === shown.selected ? '▸' : ' '} ${text}`} onPress={() => select(node.id)} />
         })}
         {chosen ? (
           <Box key="sql" flexDirection="column" marginTop={1}>

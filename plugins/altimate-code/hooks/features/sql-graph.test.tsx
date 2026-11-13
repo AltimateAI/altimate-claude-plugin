@@ -15,9 +15,9 @@ const PANE = {
 // The backend's answer for a model with two CTEs, as the tool returns it (response order is not dependency order).
 const GRAPH = {
   nodes: [
-    { name: 'fct_orders', type: 'model', nodeId: 'model.shop.fct_orders', sql: 'select * from paid', columns: [{ name: 'order_id' }, { name: 'amount' }] },
-    { name: 'paid', type: 'cte', sql: 'select order_id, amount\nfrom orders\nwhere status = \'paid\'', columns: [{ name: 'order_id' }, { name: 'amount' }] },
-    { name: 'orders', type: 'model', nodeId: 'model.shop.stg_orders', sql: '', columns: [{ name: 'order_id' }, { name: 'amount' }, { name: 'status' }] },
+    { id: 'fct_orders', name: 'fct_orders', type: 'model', nodeId: 'model.shop.fct_orders', sql: 'select * from paid', columns: [{ name: 'order_id' }, { name: 'amount' }] },
+    { id: 'paid', name: 'paid', type: 'cte', sql: 'select order_id, amount\nfrom orders\nwhere status = \'paid\'', columns: [{ name: 'order_id' }, { name: 'amount' }] },
+    { id: 'orders', name: 'orders', type: 'model', nodeId: 'model.shop.stg_orders', sql: '', columns: [{ name: 'order_id' }, { name: 'amount' }, { name: 'status' }] },
   ],
   edges: [
     ['orders', 'paid'],
@@ -79,16 +79,16 @@ async function start($: any, on: any, options: Options = {}) {
 const composer = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } }
 
 test('orderNodes puts each node after what feeds it, whatever order the backend listed them in', () => {
-  expect(orderNodes(GRAPH as any).map(node => node.name)).toEqual(['orders', 'paid', 'fct_orders'])
+  expect(orderNodes(GRAPH as any).map(node => node.id)).toEqual(['orders', 'paid', 'fct_orders'])
   expect(inputsOf(GRAPH as any, 'fct_orders')).toEqual(['paid'])
   expect(inputsOf(GRAPH as any, 'orders')).toEqual([])
 })
 
 test('orderNodes keeps the listed order for nodes with no edges and survives a cycle', () => {
-  const alone = { nodes: [{ name: 'b' }, { name: 'a' }], edges: [] } as any
-  expect(orderNodes(alone).map(node => node.name)).toEqual(['b', 'a'])
-  const cycle = { nodes: [{ name: 'a' }, { name: 'b' }], edges: [['a', 'b'], ['b', 'a']] } as any
-  expect(orderNodes(cycle).map(node => node.name).sort()).toEqual(['a', 'b'])
+  const alone = { nodes: [{ id: 'b' }, { id: 'a' }], edges: [] } as any
+  expect(orderNodes(alone).map(node => node.id)).toEqual(['b', 'a'])
+  const cycle = { nodes: [{ id: 'a' }, { id: 'b' }], edges: [['a', 'b'], ['b', 'a']] } as any
+  expect(orderNodes(cycle).map(node => node.id).sort()).toEqual(['a', 'b'])
 })
 
 test('a model is the .sql file in a dbt project\'s model folders: by file name, not by an ancestor folder, and never a macro, test, snapshot or build file', async ($, on) => {
@@ -154,6 +154,31 @@ test('pressing a row shows that node\'s SQL', async ($, on) => {
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: 'from orders' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: "where status = 'paid'" })).toBeDefined()
+  await ui.unmount()
+})
+
+test('two nodes with one name stay two rows, each with its own inputs and SQL', async ($, on) => {
+  const answer = {
+    nodes: [
+      { id: 'analytics.customers_1', name: 'customers', type: 'model', nodeId: 'model.shop.customers', sql: 'analytics.customers', columns: [] },
+      { id: 'raw.customers_2', name: 'customers', type: 'source', nodeId: 'source.shop.raw.customers', sql: 'raw.customers', columns: [] },
+      { id: 'LEFT_JOIN_9', name: 'LEFT_JOIN_9', type: 'LEFT_JOIN', sql: 'LEFT JOIN raw.customers', columns: [] },
+    ],
+    edges: [
+      ['analytics.customers_1', 'LEFT_JOIN_9'],
+      ['raw.customers_2', 'LEFT_JOIN_9'],
+    ],
+  }
+  const { clock } = await start($, on, { answer })
+  await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'node-analytics.customers_1' })).toBeDefined()
+  expect(await ui.find({ key: 'node-raw.customers_2' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', label: /LEFT_JOIN_9 \(LEFT_JOIN\) · 0 columns · from customers, customers$/ })).toBeDefined()
+  await ui.press({ key: 'node-raw.customers_2' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: 'raw.customers' })).toBeDefined()
   await ui.unmount()
 })
 
