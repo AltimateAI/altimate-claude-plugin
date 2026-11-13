@@ -642,7 +642,7 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
       ...disabled.map(one => one?.original_file_path),
       ...disabled.map(one => (typeof one?.patch_path === 'string' ? one.patch_path.replace(/^[^:]*:\/\//, '') : null)),
       ...files(manifest.manifest.macros).map(one => (typeof one?.patch_path === 'string' ? one.patch_path.replace(/^[^:]*:\/\//, '') : null)),
-      ...['sources', 'macros', 'exposures', 'metrics', 'groups', 'semantic_models', 'saved_queries', 'unit_tests'].flatMap(group => files(manifest.manifest[group]).map(one => one?.original_file_path)),
+      ...['sources', 'macros', 'exposures', 'metrics', 'groups', 'semantic_models', 'saved_queries', 'unit_tests', 'docs'].flatMap(group => files(manifest.manifest[group]).map(one => one?.original_file_path)),
     ].filter((one): one is string => typeof one === 'string' && one.length > 0)
   }
   const inventory = manifest ? new Set(listed) : null
@@ -679,7 +679,7 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
         if (!/\.(sql|ya?ml|csv|py|md)$/i.test(entry.name)) continue
         const stat = await $.fs.stat(path).catch(() => null)
         if (!stat) complete = false
-        else if (!seen.has(relative(root, path)) && (stat.mtimeMs > mtimeMs || (!!inventory && /\.(sql|ya?ml)$/i.test(entry.name) && !inventory.has(relative(root, path)) && !ROOT_CONFIGS.has(relative(root, path)) && (await dirChanged(dir))))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
+        else if (!seen.has(relative(root, path)) && (stat.mtimeMs > mtimeMs || (!!inventory && /\.(sql|ya?ml|md)$/i.test(entry.name) && !inventory.has(relative(root, path)) && !ROOT_CONFIGS.has(relative(root, path)) && (await dirChanged(dir))))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
       }
     }
     level = next
@@ -886,7 +886,7 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
 
   if (failure) {
     const first = failure.failures[0]!
-    const firstLine = first.message.split('\n').find(line => line.trim() && !/^(Compilation|Database|Runtime) Error$/.test(line.trim())) ?? first.message
+    const firstLine = first.message.split('\n').find(line => line.trim() && !/^(Compilation|Database|Runtime|Parsing) Error$/.test(line.trim())) ?? first.message
     rows.push(
       <Box key="dbt-failure" flexDirection="column">
         <Text>
@@ -958,10 +958,14 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
           </Text>
           <Box>
             {deps ? <Button key="dbt-doctor-deps" label="Run dbt deps" onPress={() => later($, async () => {
+              await update($, doctorAtom, view => (view ? { ...view, busy: 'Running dbt deps…' } : view))
               const deps = await runDbt($, doctor.root, ['deps'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
-              if (deps === SKIPPED) return
               // Parsing without the packages would only fail again: say what deps said and stop.
-              if (deps.exitCode !== 0) return void $.ui.toast(`✖ dbt deps failed · ${(logErrors(deps.stdout)[0] ?? stripAnsi(deps.stderr || deps.stdout).trim().split('\n').slice(-1)[0] ?? '').slice(0, 160)}`, { timeoutMs: 8000 })
+              if (deps === SKIPPED || deps.exitCode !== 0) {
+                await update($, doctorAtom, view => (view ? { ...view, busy: null } : view))
+                if (deps !== SKIPPED) $.ui.toast(`✖ dbt deps failed · ${(logErrors(deps.stdout)[0] ?? stripAnsi(deps.stderr || deps.stdout).trim().split('\n').slice(-1)[0] ?? '').slice(0, 160)}`, { timeoutMs: 8000 })
+                return
+              }
               await parseNow($, doctor.root)
             })} /> : null}
             {stale ? <Button key="dbt-doctor-parse" label="Run dbt parse" onPress={() => later($, () => parseNow($, doctor.root))} /> : null}
@@ -1081,7 +1085,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
       const verb = runs.map(one => one.verb).join('+')
       const select = runs.length === 1 ? runs[0]!.select : runs.map(one => one.select ?? '*').join(' | ')
       // One context when every run shares it (`-t prod` on each), else each run's in turn.
-      const contexts = runs.map(one => [...one.options, ...one.env.map(env => `env:${env}`)])
+      const contexts = runs.map(one => [...one.identity, ...one.env.map(env => `env:${env}`)])
       const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts.flat()
       // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
       await recordRun($, command.trim(), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked).catch(() => null)

@@ -362,8 +362,8 @@ kitTest('a failed dbt command is read from run_results.json by node name, and fr
 })
 
 kitTest('dbt commands are found behind a cd, a venv path or uv run, with their selection; other text is not one', () => {
-  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], at: 0, end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [] })
-  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], at: 8, end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [] })
+  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], identity: [], at: 0, end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [] })
+  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], identity: ['--limit 5'], at: 8, end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [] })
   // Redirections are the shell's: they are neither selection nor argv.
   expect(dbtCommand('dbt show -s orders 2>&1 | tail -20')?.argv).toEqual(['dbt', 'show', '-s', 'orders'])
   expect(dbtCommand('dbt run -s orders > out.txt 2> err.txt')?.select).toBe('orders')
@@ -371,7 +371,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommand('DBT_PROFILES_DIR=. dbt show -s x')?.replayable).toBe(false)
   expect(dbtCommand('dbt show --target $T -s x')?.replayable).toBe(false)
   // A command split with `\` across lines is one command.
-  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], at: 0, end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [] })
+  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], identity: ['--limit 10'], at: 0, end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [] })
   // A redirection inside quoted SQL is SQL.
   expect(dbtCommand('dbt show --inline "select 1 as \\"2>1\\"" -s x')?.inline).toBe('select 1 as "2>1"')
   // Comments and background `&` end it; anything the shell would expand or change turns Re-run off.
@@ -1948,4 +1948,82 @@ test('Run dbt deps that fails says so and does not go on to parse', async ($, on
   expect(toasts.some(one => one.startsWith('✖ dbt deps failed · Could not find a version of dbt_utils'))).toBe(true)
   expect(runs.some(argv => argv[1] === 'parse')).toBe(false)
   await band.unmount()
+})
+
+// ─── What a passing run must have in common with the failed one ──────────────────────────────────
+
+const failedBuild = async ($: any, on: any, command: string) => {
+  const ctx = await start($, on)
+  ctx.setBash({ stdout: `${HEADER}\n${BUILD_FAILED}`, isError: true })
+  await $.tool.call({ tool: 'Bash', command })
+  await ctx.clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  return { ...ctx, band }
+}
+
+test('a passing run that does less or other work than the failed one leaves the failure', async ($, on) => {
+  const { clock, setBash, band } = await failedBuild($, on, 'dbt build -s orders')
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  for (const extra of ['--exclude-resource-types test', '--resource-type model', '--indirect-selection empty', '--empty', '--full-refresh']) {
+    await $.tool.call({ tool: 'Bash', command: `dbt build -s orders ${extra}` })
+    await clock.settle()
+    expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  }
+  await band.unmount()
+})
+
+test('a failed full-refresh run is not cleared by a normal run, but a repeat of it is', async ($, on) => {
+  const { clock, setBash, band } = await failedBuild($, on, 'dbt run -s orders --full-refresh')
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders --full-refresh' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a passing run that differs only in display flags clears the failure', async ($, on) => {
+  const { clock, setBash, band } = await failedBuild($, on, 'dbt build -s orders')
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders --log-format json --threads 8 -q' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+kitTest('a command\'s identity is every flag but the selection and display-only ones', () => {
+  expect(dbtCommand('dbt build -s orders --log-format json --threads 8')?.identity).toEqual([])
+  expect(dbtCommand('dbt --warn-error -t prod build --select orders --full-refresh --vars \'{"a": 1}\'')?.identity).toEqual(['--full-refresh', '--target prod', '--vars {"a": 1}', '--warn-error'])
+  // History and replay keep reading the context flags alone.
+  expect(dbtCommand('dbt build -s orders --full-refresh -t prod')?.options).toEqual(['--target', 'prod'])
+})
+
+test('a changed doc block file makes the manifest stale, and so does a deleted one the manifest lists', async ($, on) => {
+  const manifest = shopManifest()
+  manifest.docs = { 'doc.shop.d': { name: 'd', package_name: 'shop', original_file_path: 'docs/descriptions.md' } }
+  const { clock } = await start($, on, { files: { 'dbt_project.yml': "name: 'shop'\nprofile: 'shop'\ndocs-paths: ['docs']\n", 'target/manifest.json': JSON.stringify(manifest), 'docs/descriptions.md': '{% docs d %}x{% enddocs %}' }, mtimes: { 'docs/descriptions.md': 5_000 } })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(docs\/descriptions\.md\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a doc block file the manifest lists that is gone makes it stale', async ($, on) => {
+  const manifest = shopManifest()
+  manifest.docs = { 'doc.shop.d': { name: 'd', package_name: 'shop', original_file_path: 'docs/descriptions.md' } }
+  const { clock } = await start($, on, { files: { 'dbt_project.yml': "name: 'shop'\nprofile: 'shop'\ndocs-paths: ['docs']\n", 'target/manifest.json': JSON.stringify(manifest) } })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /docs\/descriptions\.md \(deleted\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+kitTest('a versioned model in a large manifest is named without its version', () => {
+  const results = { results: [{ unique_id: 'model.shop.dim.v2', status: 'error', message: 'boom' }, { unique_id: 'model.shop.plain', status: 'error', message: 'boom' }] }
+  expect(failuresFrom(results, null).map(one => one.name)).toEqual(['dim', 'plain'])
 })
