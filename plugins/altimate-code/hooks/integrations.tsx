@@ -81,13 +81,17 @@ async function runJson<T extends { message?: string | null }>($: EngineInterface
   return { data, failure: result.exitCode === 0 ? null : failureText(result) }
 }
 
+/** A CLI reason worth showing: a non-empty string, else null. */
+const reasonOf = (value: unknown): string | null => (typeof value === 'string' && value.trim() ? value : null)
+
 /**
- * Why a failed CLI call failed: a `sync` report's own lines, else the `message` or `error` of the JSON the
+ * Why a failed CLI call failed: a `sync` report's own lines, else the first non-empty `message` or `error` string of the JSON the
  * CLI prints to stdout, else the first line of stderr.
  */
+
 function failureText(result: { stdout: string; stderr: string }, command?: string): string {
-  const data = parseJson<{ message?: string; error?: string }>(result.stdout)
-  return (command === 'sync' ? syncText(result.stdout) : null) ?? data?.message ?? data?.error ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
+  const data = parseJson<{ message?: unknown; error?: unknown }>(result.stdout)
+  return (command === 'sync' ? syncText(result.stdout) : null) ?? reasonOf(data?.message) ?? reasonOf(data?.error) ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
 }
 
 // A status read that finishes after a newer one started is dropped, so an older answer never overwrites a newer one.
@@ -431,7 +435,7 @@ function submitForm($: EngineInterface, localOnly: boolean) {
       const verb = open.mode === 'update' && !localOnly ? 'update' : 'connect'
       const variant = open.variant ? ['--variant', open.variant] : []
       const run = await runJson<Outcome>($, [verb, open.provider, ...(localOnly ? ['--local-only'] : []), ...variant, '--json'], WORKSPACE_TIMEOUT_MS)
-      outcome = { status: 'failed', ...run.data, message: run.data?.message ?? (run.failure === 'failed' ? null : run.failure) }
+      outcome = { status: 'failed', ...run.data, message: run.failure ? (run.failure === 'failed' ? null : run.failure) : reasonOf(run.data?.message) }
     })
     const result = outcome as Outcome | null
     if (!result) return

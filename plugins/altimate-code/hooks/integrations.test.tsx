@@ -83,7 +83,7 @@ function fakeCli(on: any, answers: { connect: { exitCode: number; body: Record<s
       case 'open-token-page':
         return reply({ provider: 'jira', variant: 'cloud', tokenUrl: 'https://id.atlassian.com/manage-profile/security/api-tokens' })
       case 'discard':
-        if (answers.discardFails) return reply({ message: 'store locked' }, 1)
+        if (answers.discardFails) return reply({ status: 'failed', message: 'store locked' }, 1)
         secretSet = false
         return reply({ provider: 'jira', status: 'discarded' })
       case 'connect':
@@ -558,15 +558,15 @@ test('signed out: the band and pane offer Sign in to sync and no sync control; t
   await ui.unmount()
 })
 
-test('a failed discard is reported on open and cancel, next to a CLI failure that answers with an error field', async ($, on) => {
+test('a failed discard is reported on open and cancel, next to the CLI\'s own failure reason', async ($, on) => {
   const clock = mock.clock(on)
   on('command.register', () => ({ value: { command: 'integrations' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
     const args = e.argv.slice(2)
     const reply = (body: unknown, exitCode = 0) => ({ value: { exitCode, stdout: JSON.stringify(body), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
-    if (args[0] === 'fields') return reply({ error: 'catalog unavailable' }, 1)
-    if (args[0] === 'discard') return reply({ message: 'store locked' }, 1)
+    if (args[0] === 'fields') return reply({ status: 'failed', message: 'catalog unavailable' }, 1)
+    if (args[0] === 'discard') return reply({ status: 'failed', message: 'store locked' }, 1)
     return reply(STATUS)
   })
 
@@ -609,11 +609,11 @@ test('a form without variants loads, and a refused connect that answers with an 
   await ui.unmount()
 })
 
-test('a refused connect with no reason keeps the friendly fallback', async ($, on) => {
+test('a refused connect with no usable reason keeps the friendly fallback', async ($, on) => {
   const clock = mock.clock(on)
   on('command.register', () => ({ value: { command: 'integrations' } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  fakeCli(on, { connect: { exitCode: 1, body: { status: 'failed' } } })
+  fakeCli(on, { connect: { exitCode: 1, body: { status: 'failed', message: ' ', error: { code: 1 } } } })
 
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()

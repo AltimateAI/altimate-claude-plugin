@@ -2,6 +2,11 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.5.1] — 2026-11-13
+
+### Fixed
+- Integrations pane: a failed discard of entered values is reported when the form opens and when it is cancelled, instead of ignored. A credential form without variants opens instead of failing. A failure reason is shown only when the CLI gives a non-empty one (`message`, or an `error` field as `altimate workspace` sends); otherwise the pane's own fallback text is shown.
+
 ## [1.5.0] — 2026-11-10
 
 ### Added
@@ -47,7 +52,6 @@ All notable changes to this plugin will be documented in this file.
 - Sync all and Link workspace upload nothing over a connection this tool already saved to the workspace; they only attach it to the linked workspace, also when this machine has no record of it, and say so when it was deleted there. A credential found here stays offered next to a connection made by hand in the web app.
 - The CLI serialises state writes, Keep local, uploads and disconnect with the shared cross-process file lock; a lock left by a killed run is taken over after 12 seconds, and waiting for it ends after 30 seconds.
 - The plugin allows 90 s for local calls, 300 s for connect, update, a one-provider sync and disconnect, and the same 300 s for each provider of Sync all, which makes one call per provider in turn, so one provider failing or timing out does not stop the others. Sessions run with `-p` or the SDK do not scan the machine.
-- A failed discard of entered values is reported instead of ignored, a CLI failure that answers with an `error` field shows that reason, and a credential form without variants opens instead of failing.
 - Tests: `hooks/integrations.test.tsx` (`claude plugin test .`).
 - Team workspace skills as Claude Code skills, in both the MCP and CLI modes. At session start `hooks-handlers/sync-workspace-skills.py` copies the skills of the Altimate workspace linked to the project (from `.altimate-code/skill/_workspace/`) into `.claude/skills/`. Copies keep only `name` and `description` from the frontmatter, have `!` command blocks disarmed, leave out files Claude Code reads as hooks, agents, commands or settings, are served only for the Altimate account the user is signed in to (tenant, URL and key digest), never replace a skill the user wrote (copies carry a marker file; a name clash skips the workspace skill), and get a `.gitignore` so they stay out of version control. When the workspace drops a skill, its copy is removed. The SessionStart context mentions the project skills when copies exist.
 - A project that was never synced, or not for an hour, is refreshed by a detached `altimate workspace refresh` that the hook does not wait for. It is bounded by a per-project lock that expires after ten minutes, and it is skipped silently when no CLI is on PATH or the project has no `.altimate-code` directory. Claude Code's skill watcher loads the copies when it finishes.
