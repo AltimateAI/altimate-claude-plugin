@@ -476,6 +476,18 @@ test('shell syntax: a redirect without spaces, bash -c, cd before the edit, back
   // A shell reads its heredoc as its script.
   expect(isGitPush("bash <<'EOF'\ngit push\nEOF")).toBe(true)
   expect(filesWrittenBy("sh <<'EOF'\nsed -i s/a/b/ models/x.sql\nEOF")).toEqual(['models/x.sql'])
+  // The heredoc belongs to the command it follows, whatever comes after it on the line.
+  expect(isGitPush('bash <<EOF && echo ok\ngit push\nEOF')).toBe(true)
+  expect(isGitPush('bash <<EOF | tee log\ngit push\nEOF')).toBe(true)
+  expect(isGitPush('cat <<EOF; bash\ngit push\nEOF')).toBe(false)
+  expect(filesWrittenBy("sh <<'EOF' && echo done\nsed -i s/a/b/ models/x.sql\nEOF")).toEqual(['models/x.sql'])
+  // A shift with names or spaces is not a heredoc: nothing closes it.
+  expect(isGitPush('x=$((a<<b))\ngit push')).toBe(true)
+  expect(isGitPush('echo $((x << y))\ngit push')).toBe(true)
+  expect(isGitPush('((n<<k))\ngit push')).toBe(true)
+  // Delimiters that are not names, and CRLF line ends.
+  expect(isGitPush("cat <<1\nit's\n1\ngit push")).toBe(true)
+  expect(isGitPush('cat <<EOF\r\ngit push\r\nEOF\r\ngit status')).toBe(false)
 })
 
 test('models match by their own files, so a model of another package is never matched', () => {

@@ -117,7 +117,6 @@ function heredocAt(text: string, i: number): { delimiter: string; quoted: boolea
   const strip = text[j] === '-'
   if (strip) j++
   while (text[j] === ' ' || text[j] === '\t') j++
-  if (!/[A-Za-z_'"\\]/.test(text[j] ?? '')) return null
   let delimiter = ''
   let quoted = false
   for (; j < text.length && !/[\s;&|()<>]/.test(text[j]!); j++) {
@@ -131,6 +130,11 @@ function heredocAt(text: string, i: number): { delimiter: string; quoted: boolea
       delimiter += text[++j] ?? ''
     } else delimiter += text[j]
   }
+  // A `<<` with no closing line after it is a shift (`$((a<<b))`), not a heredoc.
+  if (!delimiter) return null
+  const closes = (line: string) => (strip ? line.replace(/^\t+/, '') : line).replace(/\r$/, '') === delimiter
+  const eol = text.indexOf('\n', j)
+  if (eol < 0 || !text.slice(eol + 1).split('\n').some(closes)) return null
   return { delimiter, quoted, strip, end: j - 1 }
 }
 
@@ -142,7 +146,7 @@ function heredocBody(text: string, eol: number, doc: { delimiter: string; strip:
     const end = text.indexOf('\n', at)
     const line = text.slice(at, end < 0 ? text.length : end)
     at = end < 0 ? text.length : end + 1
-    if ((doc.strip ? line.replace(/^\t+/, '') : line) === doc.delimiter) break
+    if ((doc.strip ? line.replace(/^\t+/, '') : line).replace(/\r$/, '') === doc.delimiter) break
     body += line + '\n'
   }
   return { body, next: at }
@@ -196,7 +200,7 @@ function substitutionsIn(text: string): string[] {
 export function simpleCommands(line: string): string[][] {
   const commands: string[][] = []
   const nested: string[][] = []
-  const heredocs: { delimiter: string; quoted: boolean; strip: boolean }[] = []
+  const heredocs: { delimiter: string; quoted: boolean; strip: boolean; owner: string[] }[] = []
   let words: string[] = []
   let word = ''
   let inWord = false
@@ -246,18 +250,18 @@ export function simpleCommands(line: string): string[][] {
       i++
     } else if (c === '<' && heredocAt(line, i)) {
       const doc = heredocAt(line, i)!
-      heredocs.push(doc)
+      // The command the heredoc feeds: the one being read now, which `words` goes on to hold.
+      heredocs.push({ ...doc, owner: words })
       i = doc.end
     } else if (c === '\n' && heredocs.length) {
       endCommand()
       let at = i
       // A heredoc fed to a shell is that shell's script; an unquoted body's substitutions run either way.
-      const target = commands[commands.length - 1]
-      const bin = target ? (target[leaderEnd(target)] ?? '').split('/').pop() ?? '' : ''
       for (const doc of heredocs.splice(0)) {
         const { body, next } = heredocBody(line, at, doc)
         at = next - 1
-        if (SHELLS.has(bin) && !target!.some(w => /^-[a-z]*c$/.test(w))) nested.push(...simpleCommands(body))
+        const bin = (doc.owner[leaderEnd(doc.owner)] ?? '').split('/').pop() ?? ''
+        if (SHELLS.has(bin) && !doc.owner.some(w => /^-[a-z]*c$/.test(w))) nested.push(...simpleCommands(body))
         else if (!doc.quoted) nested.push(...substitutionsIn(body).flatMap(simpleCommands))
       }
       i = at
