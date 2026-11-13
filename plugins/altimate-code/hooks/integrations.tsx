@@ -85,10 +85,9 @@ async function runJson<T extends { message?: string | null }>($: EngineInterface
 const reasonOf = (value: unknown): string | null => (typeof value === 'string' && value.trim() ? value : null)
 
 /**
- * Why a failed CLI call failed: a `sync` report's own lines, else the first non-empty `message` or `error` string of the JSON the
- * CLI prints to stdout, else the first line of stderr.
+ * Why a failed CLI call failed: a `sync` report's own lines, else the first non-empty `message` or `error`
+ * string of the JSON the CLI prints to stdout, else the first line of stderr.
  */
-
 function failureText(result: { stdout: string; stderr: string }, command?: string): string {
   const data = parseJson<{ message?: unknown; error?: unknown }>(result.stdout)
   return (command === 'sync' ? syncText(result.stdout) : null) ?? reasonOf(data?.message) ?? reasonOf(data?.error) ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
