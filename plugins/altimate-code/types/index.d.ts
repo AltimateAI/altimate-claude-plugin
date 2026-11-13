@@ -204,7 +204,16 @@ export interface CommentsState {}
 // Cost check: the last scan estimate and any scan allowed once.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface CostState {}
+export interface CostState {
+  /** The warehouse that has no dry run (any but BigQuery), once the tool said so: nothing is estimated after that. */
+  unsupportedAdapter: string | null
+  /** The newest estimate: what was estimated, in bytes, as the dry run wrote it. */
+  lastEstimate: { target: string; bytes: number; display: string } | null
+  /** The command held for being over the limit, until it is allowed or a later command is not held. */
+  held: { command: string; target: string; bytes: number; display: string } | null
+  /** /allow-scan was given: the next command that would be held runs. */
+  allowOnce: boolean
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Project health: the health check issues on the changed models.
