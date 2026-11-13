@@ -4,6 +4,7 @@ import {
   columnDrift,
   columnWidths,
   dbtCommand,
+  dbtCommands,
   debugInfo,
   failuresFrom,
   failuresFromText,
@@ -148,6 +149,10 @@ type Options = {
   statGate?: { path: string; until?: Promise<void> }
   /** The project's artifact folder, when not `target`. */
   target?: string
+  /** Where Claude's shell is, when not the session folder. */
+  cwd?: string
+  /** The session's root folder, when not the project. */
+  sessionRoot?: string
 }
 
 /** A dbt project at /proj with its own .venv dbt, and the session beneath the plugin. */
@@ -185,7 +190,9 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'test' }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
-  on('session.root', () => ({ value: ROOT }))
+  on('session.root', () => ({ value: options.sessionRoot ?? ROOT }))
+  // Where Claude's shell is: the session folder unless a test moved it.
+  on('session.cwd', () => ({ value: options.cwd ?? ROOT }))
   const opened: string[] = []
   on('ui.open', (_: unknown, e: { id: string; focus?: boolean }) => {
     opened.push(`${e.id}${e.focus ? ':focus' : ''}`)
@@ -274,7 +281,9 @@ async function start($: any, on: any, options: Options = {}) {
       if (show.error) return { value: { exitCode: 2, stdout: errorLog(show.error), stderr: '' } }
       // A selection that matches no node: dbt exits 0 and previews nothing.
       if (show.node === 'none') return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
-      const select = e.argv.includes('--select') ? e.argv[e.argv.indexOf('--select') + 1]! : null
+      // dbt names the node it shows: `path:models/x.sql,package:p` selects the model x.
+      const selected = e.argv.includes("--select") ? e.argv[e.argv.indexOf("--select") + 1]! : null
+      const select = selected?.startsWith("path:") ? selected.slice(5).split(',')[0]!.split('/').pop()!.replace(/\.sql$/, '') : selected
       return { value: { exitCode: 0, stdout: showLog(show.rows ?? [], show.node === undefined ? select : show.node), stderr: '' } }
     }
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
@@ -321,8 +330,8 @@ kitTest('a failed dbt command is read from run_results.json by node name, and fr
 })
 
 kitTest('dbt commands are found behind a cd, a venv path or uv run, with their selection; other text is not one', () => {
-  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], at: 0, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [] })
-  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], at: 8, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [] })
+  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], at: 0, end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [] })
+  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], at: 8, end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [] })
   // Redirections are the shell's: they are neither selection nor argv.
   expect(dbtCommand('dbt show -s orders 2>&1 | tail -20')?.argv).toEqual(['dbt', 'show', '-s', 'orders'])
   expect(dbtCommand('dbt run -s orders > out.txt 2> err.txt')?.select).toBe('orders')
@@ -330,7 +339,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommand('DBT_PROFILES_DIR=. dbt show -s x')?.replayable).toBe(false)
   expect(dbtCommand('dbt show --target $T -s x')?.replayable).toBe(false)
   // A command split with `\` across lines is one command.
-  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], at: 0, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [] })
+  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], at: 0, end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [] })
   // A redirection inside quoted SQL is SQL.
   expect(dbtCommand('dbt show --inline "select 1 as \\"2>1\\"" -s x')?.inline).toBe('select 1 as "2>1"')
   // Comments and background `&` end it; anything the shell would expand or change turns Re-run off.
@@ -384,6 +393,12 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommand('dbt run -s a b --threads 4')?.select).toBe('a b')
   expect(dbtCommand('dbt run --exclude orders')?.select).toBe('--exclude orders')
   expect(dbtCommand('dbt build --selector nightly')?.select).toBe('--selector nightly')
+  // A verb inside the executable's path is not another invocation.
+  for (const command of ['/home/run/proj/.venv/bin/dbt run -s a', '/Users/me/shows/p/.venv/bin/dbt show -s orders', './build/.venv/bin/dbt build']) expect(dbtCommands(command).length).toBe(1)
+  expect(dbtCommands('/Users/me/shows/p/.venv/bin/dbt show -s orders')[0]!.argv[0]).toBe('/Users/me/shows/p/.venv/bin/dbt')
+  expect(dbtCommands('dbt run -s a && dbt test -s a').map(one => one.verb)).toEqual(['run', 'test'])
+  // An export before the first invocation applies to every later one.
+  expect(dbtCommands('export DBT_TARGET=prod; dbt run -s a; dbt show -s a').map(one => one.env)).toEqual([['DBT_TARGET=prod'], ['DBT_TARGET=prod']])
   // run-operation is not a run.
   expect(dbtCommand('dbt run-operation grant_select')).toBeNull()
   expect(dbtCommand('echo dbt is great')).toBeNull()
@@ -454,7 +469,7 @@ test('an edit is compiled and run against the warehouse; column drift from schem
   await clock.settle()
 
   // Only the model runs: its tests would fail on the renamed column and be reported as the model's error.
-  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '--select', 'path:models/orders.sql', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
+  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '--select', 'path:models/orders.sql,package:shop', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
   const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(note).toContain('the warehouse returned 2 columns')
   expect(note).toContain('- documented in schema.yml but not returned: amount')
@@ -1197,7 +1212,7 @@ test('a file path with `..` in it is read as the plain path inside its project',
   const { clock, runs } = await start($, on)
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/../models/orders.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.find(argv => argv[1] === 'show')?.[3]).toBe('path:models/orders.sql')
+  expect(runs.find(argv => argv[1] === 'show')?.[3]).toBe('path:models/orders.sql,package:shop')
 })
 
 test('a schema.yml written while the model\'s first check still runs checks it again once that check ends', async ($, on) => {
@@ -1269,4 +1284,62 @@ test('Claude\'s plain `dbt show` (dbt\'s text table, as dbt prints it) lands in 
   const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /2 rows · 2 columns/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('compound dbt commands: a run then a test is one compound result, and the last dbt show\'s rows are its own', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders && dbt test -s orders' })
+  setBash({ stdout: 'Done. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1' })
+  // A passing run alone did not rerun the failing test: the failure stays.
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await band.unmount()
+  setBash({ stdout: showLog([{ customer_id: 1 }], 'customers') })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders; dbt show -s customers' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[])[0].title).toBe('customers')
+})
+
+test('a dbt command run where Claude\'s shell is (a subfolder project after a cd) is found there', async ($, on) => {
+  // The session starts above the project; Claude's shell has moved into it.
+  const { clock, setBash } = await start($, on, { sessionRoot: '/', cwd: ROOT })
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await band.unmount()
+})
+
+test('validation previews only the edited model when dbt shows several', async ($, on) => {
+  const two = [showLog([{ order_id: 1, amount: 2 }], 'orders'), JSON.stringify({ data: { node_name: 'orders', output_format: 'json', preview: JSON.stringify([{ other: 1 }]), unique_id: 'model.pkg.orders' }, info: { code: 'Q041' } })].join('\n')
+  expect(showPreview(two, 'model.shop.orders')?.columns).toEqual(['order_id', 'amount'])
+  const { clock } = await start($, on, { show: { rows: [{ order_id: 1, amount: 2 }] } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('the warehouse returned 2 columns')
+})
+
+test('the doctor finds packages installed under packages-install-path', async ($, on) => {
+  const { clock } = await start($, on, { files: { 'dbt_project.yml': "name: 'shop'\nprofile: 'shop'\npackages-install-path: vendor\n", 'packages.yml': 'packages: []', 'vendor/dbt_utils/dbt_project.yml': 'name: dbt_utils' } })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'vendor installed' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a compound run with the same target on each part is cleared by a whole-project build on that target', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -t prod -s orders && dbt test -t prod -s orders' })
+  setBash({ stdout: 'Done. PASS=11 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=11' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -t prod' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
 })

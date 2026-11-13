@@ -10,7 +10,7 @@ import {
   cellText,
   columnDrift,
   columnWidths,
-  dbtCommand,
+  dbtCommands,
   doctorNote,
   explainPrompt,
   failuresFrom,
@@ -85,6 +85,8 @@ function noteDoctor(root: string, view: DoctorView, asked: number) {
 // Slices of manifests too big to read here, by manifest path, file and revision.
 const slices = new Map<string, Promise<any>>()
 const MAX_SLICES = 16
+// The last manifest read whole, by path and revision.
+let parsed: { path: string; mtimeMs: number; manifest: any } | null = null
 
 const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const basename = (path: string) => path.split(/[\\/]/).pop() ?? path
@@ -252,7 +254,11 @@ async function readManifest($: EngineInterface, root: string, rel?: string): Pro
   const stat = await $.fs.stat(path).catch(() => null)
   if (!stat || stat.kind !== 'file') return null
   try {
-    if (stat.size <= MAX_MANIFEST_BYTES) return { manifest: JSON.parse(await $.fs.read(path)), mtimeMs: stat.mtimeMs }
+    // Parsed once per revision: Reads in a turn and an edit's two lookups share it.
+    if (stat.size <= MAX_MANIFEST_BYTES) {
+      if (parsed?.path !== path || parsed.mtimeMs !== stat.mtimeMs) parsed = { path, mtimeMs: stat.mtimeMs, manifest: JSON.parse(await $.fs.read(path)) }
+      return { manifest: parsed.manifest, mtimeMs: stat.mtimeMs }
+    }
     if (!rel) return null
     // One slice per file and manifest revision: a re-read in the same turn, and an edit's checks, reuse it.
     const key = JSON.stringify([path, rel, stat.mtimeMs])
@@ -312,7 +318,10 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   await setCheck($, { ...blank, status: 'running', ms: 0, at: started }, current)
   // The file itself, by path (a name can be a version's or another package's), and only it: dbt's eager
   // indirect selection would also run its tests, and show a test's failure as the model's.
-  const run = await runDbt($, root, ['show', '--select', `path:${rel}`, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  // `path:` matches an installed package's file at the same path too: the intersection with the project's
+  // package (`a,b`) selects only the project's model.
+  const pkg = await projectName($, root)
+  const run = await runDbt($, root, ['show', '--select', pkg ? `path:${rel},package:${pkg}` : `path:${rel}`, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   // A newer edit replaced this check before its turn: nothing ran, nothing to report.
   if (run === SKIPPED) return { view: { ...blank, status: 'partial', reason: 'a newer check replaced this one', ms: 0, at: started }, note: '', current }
   // dbt show re-parsed the project: the manifest now holds the model and schema.yml as they are.
@@ -320,7 +329,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   const node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
   const named = typeof node?.node?.name === 'string' ? node.node.name : null
   const ms = (await $.clock.now()) - started
-  const preview = run.exitCode === 0 ? showPreview(run.stdout) : null
+  const preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
   const errors = run.exitCode === 0 ? [] : logErrors(run.stdout)
   if (run.exitCode !== 0 && errors.length === 0) errors.push(stripAnsi(run.stderr || run.stdout).trim().split('\n').slice(-6).join('\n') || `dbt exited ${run.exitCode}`)
   // dbt exited 0 but showed nothing. A model the manifest still lists is a failure; a file it does not
@@ -707,11 +716,16 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     checks.push({ id: 'adapter', label: 'Adapter', status: 'ok', detail: `${type}${adapter ? ` ${adapter.version}` : ''}`, fix: null })
   }
 
-  // Packages: packages.yml without dbt_packages/ fails every parse.
+  // Packages: packages.yml with nothing installed (at packages-install-path) fails every parse.
   const wantsPackages = (await $.fs.exists(`${root}/packages.yml`).catch(() => false)) || (await $.fs.exists(`${root}/dependencies.yml`).catch(() => false))
   if (wantsPackages) {
-    const has = (await $.fs.list(`${root}/dbt_packages`).catch(() => [])).length > 0
-    checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail: has ? 'dbt_packages installed' : 'packages.yml is not installed', fix: has ? null : 'dbt deps' })
+    // `packages-install-path` in dbt_project.yml, `dbt_packages` when absent.
+    const configured = /^packages-install-path:\s*['"]?([^'"#\s]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1]
+    // A Jinja value is dbt's to render: dbt's default stands in.
+    const installPath = configured && !configured.includes('{{') ? configured : 'dbt_packages'
+    const installed = installPath.startsWith('/') ? installPath : `${root}/${installPath}`
+    const has = (await $.fs.list(installed).catch(() => [])).length > 0
+    checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail: has ? `${installPath} installed` : 'packages.yml is not installed', fix: has ? null : 'dbt deps' })
   }
 
   // Manifest freshness.
@@ -918,7 +932,10 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? normalize(String((e as any).file_path)) : null
   const isSql = !!file && /\.sql$/i.test(file)
   const command = e.tool === 'Bash' && 'command' in e ? String((e as any).command) : null
-  const dbt = command ? dbtCommand(command) : null
+  // Every dbt invocation in the command; the session's folder now, before the command can move it.
+  const invocations = command ? dbtCommands(command) : []
+  const dbt = invocations[0] ?? null
+  const cwdBefore = command && dbt ? await $.session.cwd().catch(() => null) : null
   const agentId: string | null = (e as { agentId?: string }).agentId ?? null
   // The conversation this tool call belongs to: one that ends (/clear) while it runs gets nothing from it.
   const asked = generation
@@ -974,29 +991,50 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   if (command && dbt) {
     const raw = (result as any).result
     const output = typeof raw?.stdout === 'string' ? `${raw.stdout}\n${raw.stderr ?? ''}` : String(result.text ?? '')
-    // Where it ran: the `cd`s before the dbt invocation; its project: --project-dir, else the folder's.
-    const dir = cdTarget(command.slice(0, dbt.at), (await $.session.root().catch(() => '.')) as string)
-    // A `cd ~/x` or `cd $DIR` leaves the folder unknown: nothing is filed under a guessed project.
-    if (dir === null) return withPending(result, agentId)
-    const projectDir = dbt.options.reduce<string | null>((found, value, i) => (dbt.options[i - 1] === '--project-dir' ? value : found), null)
-    const root = await projectRoot($, projectDir ? (projectDir.startsWith('/') ? projectDir : `${dir.replace(/\/+$/, '')}/${projectDir}`) : dir, false)
-    if (root && ['run', 'test', 'build', 'seed', 'snapshot'].includes(dbt.verb)) {
-      const failed = !!result.isError || saysFailed(output)
-      // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
-      await recordRun($, command.trim().slice(0, 300), dbt.verb, dbt.select, [...dbt.options, ...dbt.env.map(one => `env:${one}`)], root, output, failed, startedAt, asked).catch(() => null)
+    // Where an invocation ran: the session's folder before the command (Claude's shell keeps its `cd`s), moved
+    // by the `cd`s before it; its project: --project-dir, else the folder's.
+    const base = cwdBefore ?? ((await $.session.root().catch(() => '.')) as string)
+    const placeOf = async (one: (typeof invocations)[number]) => {
+      const dir = cdTarget(command.slice(0, one.at), base)
+      // A `cd ~/x` or `cd $DIR` leaves the folder unknown: nothing is filed under a guessed project.
+      if (dir === null) return null
+      const projectDir = one.options.reduce<string | null>((found, value, i) => (one.options[i - 1] === '--project-dir' ? value : found), null)
+      const root = await projectRoot($, projectDir ? (projectDir.startsWith('/') ? projectDir : `${dir.replace(/\/+$/, '')}/${projectDir}`) : dir, false)
+      return root ? { dir, root } : null
     }
-    if (root && dbt.verb === 'show' && !result.isError) {
-      const table = showPreview(output) ?? textTable(output)
+    // Runs: one result for the whole command. Two or more (`dbt run -s a && dbt test -s a`) are recorded as
+    // one compound run, so only the same compound command (or a whole-project build) clears its failure.
+    const runs = invocations.filter(one => ['run', 'test', 'build', 'seed', 'snapshot'].includes(one.verb))
+    const places = await Promise.all(runs.map(placeOf))
+    const firstRun = places[0] ?? null
+    // Runs in two projects in one command (`cd a && dbt run; cd ../b && dbt test`) are not one result.
+    if (firstRun && places.every(place => place?.root === firstRun.root)) {
+      const failed = !!result.isError || saysFailed(output)
+      const verb = runs.map(one => one.verb).join('+')
+      const select = runs.length === 1 ? runs[0]!.select : runs.map(one => one.select ?? '*').join(' | ')
+      // One context when every run shares it (`-t prod` on each), else each run's in turn.
+      const contexts = runs.map(one => [...one.options, ...one.env.map(env => `env:${env}`)])
+      const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts.flat()
+      // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
+      await recordRun($, command.trim().slice(0, 300), verb, select, context, firstRun.root, output, failed, startedAt, asked).catch(() => null)
+    }
+    // Shows: dbt prints each preview as it runs; the rows belong to the show that selected the previewed node
+    // (the last one whose selection names it), else to the last show.
+    const table = showPreview(output) ?? textTable(output)
+    const shows = invocations.filter(one => one.verb === 'show')
+    const node = table && 'node' in table ? table.node : null
+    const show = (node ? shows.filter(one => one.select === node).at(-1) : null) ?? shows.at(-1)
+    const shown = show && !result.isError ? await placeOf(show) : null
+    if (show && shown) {
       if (table) {
-        const select = dbt.select
-        const inline = select ? null : dbt.inline
-        // A re-run runs Claude's own invocation again, from where it ran: same flags, same order.
-        const replay = replayArgv(dbt.argv, 0).slice(0, -6)
-        // A command that depended on its shell (variables, `~`, globs, other commands before it) cannot be
-        // repeated word for word: it is kept in the pane, with no Re-run.
+        const select = show.select
+        const inline = select ? null : show.inline
+        // A re-run runs Claude's own invocation again, from where it ran: same flags, same order. One that
+        // depended on its shell (variables, `~`, globs, other commands before it) is kept with no Re-run.
+        const replay = replayArgv(show.argv, 0).slice(0, -6)
         await showResult(
           $,
-          { id: JSON.stringify([root, dir, replay, dbt.env]), title: titleOf(select, inline) || 'dbt show', root, select, inline, options: dbt.options, argv: dbt.replayable ? dbt.argv : null, cwd: dir, replayable: dbt.replayable, columns: table.columns, rows: table.rows, limit: dbt.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
+          { id: JSON.stringify([shown.root, shown.dir, replay, show.env]), title: titleOf(select, inline) || 'dbt show', root: shown.root, select, inline, options: show.options, argv: show.replayable ? show.argv : null, cwd: shown.dir, replayable: show.replayable, columns: table.columns, rows: table.rows, limit: show.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
           true,
         ).catch(() => null)
       }
@@ -1012,6 +1050,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
 export async function endDbtMods($: EngineInterface) {
   generation++
   slices.clear()
+  parsed = null
   forcedWhileBusy = null
   contextGiven.clear()
   pendingNotes.splice(0)

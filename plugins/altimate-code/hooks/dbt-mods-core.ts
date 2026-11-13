@@ -21,10 +21,12 @@ function logLine(line: string): { code?: string; msg?: string; level?: string; d
 }
 
 /** The rows `dbt show --log-format json` previews (event Q041), with their columns in dbt's order. */
-export function showPreview(stdout: string): { columns: string[]; rows: unknown[][]; node: string | null } | null {
+export function showPreview(stdout: string, uniqueId?: string): { columns: string[]; rows: unknown[][]; node: string | null } | null {
   for (const line of stdout.split('\n').reverse()) {
     const one = logLine(line)
     if (one?.code !== 'Q041' || typeof one.data?.preview !== 'string') continue
+    // When dbt previews several nodes, only the one asked for counts.
+    if (uniqueId && one.data.unique_id && one.data.unique_id !== uniqueId) continue
     // `--output text` with JSON logs: the preview is dbt's text table.
     if (one.data.output_format && one.data.output_format !== 'json') {
       const table = textTable(one.data.preview)
@@ -112,6 +114,8 @@ export type DbtCommand = {
   options: string[]
   /** Where the dbt invocation starts in the command: a `cd` after it does not move where it ran. */
   at: number
+  /** Where its verb ends in the command: the next invocation is looked for after it. */
+  end: number
   /** The dbt invocation as the shell passes it: the executable as written, then every argument, quotes decoded, redirections left out. */
   argv: string[]
   /** False when it depended on its shell (variables, `~`, globs, other commands before it): no Re-run. */
@@ -176,7 +180,7 @@ function flagValues(words: string[], index: number): { values: string[]; next: n
 }
 
 /** The dbt command a shell command runs, when it runs one: its verb, selection, inline SQL, limit, context and argv. */
-export function dbtCommand(written: string): DbtCommand | null {
+export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
   // A `\` at a line's end continues the command: one space each, so positions stay aligned.
   const command = written.replace(/\\\r?\n/g, m => ' '.repeat(m.length))
   // Quoted text is an argument, not the command: `altimate run "fix it, then dbt build"` runs no dbt.
@@ -194,8 +198,10 @@ export function dbtCommand(written: string): DbtCommand | null {
   }
   // The dbt invocation itself: after a `cd x &&`, a venv's `bin/dbt`, `uv run dbt`, `python -m dbt`.
   // `run-operation` is not `run`.
-  const match = /(?:^|[\s;&|(]|\/)dbt(?:\.exe)?\s+((?:--?[\w-]+(?:[ =](?!-)\S+)?\s+)*)(run|test|build|seed|snapshot|show|compile|parse)(?![\w-])/m.exec(bare)
-  if (!match) return null
+  // The first invocation at or after `searchFrom`; what comes before it (exports, `cd`s) is still read.
+  const found = /(?:^|[\s;&|(]|\/)dbt(?:\.exe)?\s+((?:--?[\w-]+(?:[ =](?!-)\S+)?\s+)*)(run|test|build|seed|snapshot|show|compile|parse)(?![\w-])/m.exec(bare.slice(searchFrom))
+  if (!found) return null
+  const match = Object.assign([...found], { index: found.index + searchFrom }) as unknown as RegExpExecArray
   // The executable's word starts after the last separator before `dbt` (`.venv/bin/dbt` is one word).
   const dbtAt = match.index + match[0].search(/dbt(?:\.exe)?\s/)
   const head = bare.slice(0, dbtAt)
@@ -254,7 +260,22 @@ export function dbtCommand(written: string): DbtCommand | null {
     }
   }
   const context = [...env.values()].sort()
-  return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, at: start, argv: words, replayable, env: context }
+  return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, at: start, end: match.index + match[0].length, argv: words, replayable, env: context }
+}
+
+/** Every dbt invocation in a shell command, in order (`dbt run -s a && dbt test -s a` is two). */
+export function dbtCommands(command: string): DbtCommand[] {
+  const found: DbtCommand[] = []
+  let from = 0
+  for (let i = 0; i < 20; i++) {
+    // Each invocation is read in the whole command, so an export before an earlier one still applies.
+    const one = dbtCommand(command, from)
+    if (!one) break
+    found.push(one)
+    // The next search starts after this invocation's verb (a path holding `run` or `test` is not one).
+    from = one.end
+  }
+  return found
 }
 
 /** The argv that runs a captured `dbt show` again with JSON output and `limit` rows, every other argument as it was. */
