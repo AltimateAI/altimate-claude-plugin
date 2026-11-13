@@ -36,8 +36,8 @@ const FRESH: CostState = { unsupportedAdapter: null, lastEstimate: null, held: n
 
 /** The limit in force; set by `register` from the plugin's options. 0 never holds. */
 let limitBytes = DEFAULT_MAX_SCAN_BYTES
-/** The lines to show under each estimated command's Bash row, per command, oldest first. Taken by bashAfter. */
-const notes = new Map<string, string[][]>()
+/** The lines to show under an estimated command's Bash row, by command; each gate pass replaces the last. Taken by bashAfter. */
+const notes = new Map<string, string[]>()
 
 /** Adds this feature's own hooks. */
 export function register(on: On, context: FeatureContext) {
@@ -45,10 +45,17 @@ export function register(on: On, context: FeatureContext) {
   limitBytes = Number.isFinite(configured) && configured >= 0 ? configured : DEFAULT_MAX_SCAN_BYTES
 
   on('command.run', { command: 'allow-scan' }, async $ => {
+    // The allowance is set against the hold it was read from, in the same step: a hold replaced meanwhile is not allowed.
     const held = (await read($, costAtom))?.held
+    let allowed = false
+    await update($, costAtom, prev => {
+      const current = prev ?? FRESH
+      allowed = !!held && current.held?.command === held.command
+      return allowed ? { ...current, allowOnce: true } : current
+    })
     if (!held) return { text: 'Nothing is held: no dbt command is waiting on its scan size.' }
-    await update($, costAtom, prev => ({ ...(prev ?? FRESH), allowOnce: true }))
-    return { text: `The held command (${held.target}, ≈ ${held.display}) runs once when Claude runs it again; after that it is held again.` }
+    if (!allowed) return { text: 'The held command changed meanwhile: run /allow-scan again to allow the one now held.' }
+    return { text: `Allowed: ${held.target} (≈ ${held.display}) runs once when Claude runs the same command again; after that it is held again.` }
   })
 
   on('command.run', { command: 'scan-cost' }, async ($, e) => {
@@ -68,9 +75,10 @@ export function register(on: On, context: FeatureContext) {
 
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
+  notes.clear()
   await update($, costAtom, () => ({ ...FRESH }))
   await setStatusPart($, 'cost', null)
-  await $.command.register({ name: 'allow-scan', description: 'Let the next dbt command held for its BigQuery scan size run, once' })
+  await $.command.register({ name: 'allow-scan', description: 'Let the dbt command held for its BigQuery scan size run once, when run again unchanged' })
   await $.command.register({ name: 'scan-cost', description: 'Estimate the BigQuery scan of a dbt model before running it', argumentHint: '<model>' })
 }
 
@@ -82,7 +90,7 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {}
 
-/** This feature's line in the band: the command held, until it is allowed or something else runs. */
+/** This feature's line in the band: the command held, until it is allowed or a later dbt command is not held. */
 export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderElement | null> {
   const held = (await read($, costAtom))?.held
   if (!held) return null
@@ -149,14 +157,15 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       keepNotes(e.command, lines)
       return null
     }
+    notes.delete(e.command)
     await setStatusPart($, 'cost', `scan held ≈ ${worst.display}`)
     return {
-      deny: `≈ ${worst.display} would be scanned, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan.`,
+      deny: `≈ ${worst.display} would be scanned, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
     }
   }
   // Nothing held: an earlier hold is over, as the person has moved on, and so is its allowance.
   if (state.held || state.allowOnce) {
-    await update($, costAtom, prev => ({ ...(prev ?? FRESH), held: null, allowOnce: false }))
+    await update($, costAtom, prev => (prev?.held || prev?.allowOnce ? { ...prev, held: null, allowOnce: false } : prev))
     const last = (await read($, costAtom))?.lastEstimate
     await setStatusPart($, 'cost', last ? `scan ≈ ${last.display}` : null)
   }
@@ -165,15 +174,14 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 }
 
 function keepNotes(command: string, lines: string[]) {
-  if (lines.length === 0) return
-  notes.set(command, [...(notes.get(command) ?? []), lines])
+  if (lines.length > 0) notes.set(command, lines)
+  else notes.delete(command)
 }
 
 /** What the gate said about the command, under its Bash row. */
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
-  const queue = notes.get(e.command)
-  const lines = queue?.shift()
-  if (queue?.length === 0) notes.delete(e.command)
+  const lines = notes.get(e.command)
+  notes.delete(e.command)
   return lines
 }
 
@@ -192,16 +200,20 @@ function targetOf(command: string, invocation: DbtInvocation): Target {
   // The estimate runs in the session's project against its default target: a command that points
   // elsewhere would be estimated as something it isn't.
   const text = command.slice(invocation.start, invocation.end)
+  // The flags as the shell reads them: quotes and backslashes inside a flag name don't change it.
+  const flags = text.replace(/['"\\]/g, '')
   if (
     invocation.target ||
     invocation.targetPath ||
     invocation.hasDefer ||
     invocation.hasState ||
-    /(^|\s)--(vars?|project-dir|profiles-dir|profile)\b/.test(text) ||
-    /\bDBT_(PROJECT_DIR|PROFILES_DIR|PROFILE|VARS)=/.test(text) ||
-    /(^|[;&|(]\s*)cd\s/.test(command.slice(0, invocation.start))
+    /(^|\s)--(vars?|project-dir|profiles-dir|profile|full-refresh|directory|project|env-file)\b/.test(flags) ||
+    /(^|\s)(-f|-C)(\s|$)/.test(flags) ||
+    /\bDBT_[A-Z_]*=/.test(flags) ||
+    // What runs before it in the line may move to another project or set the environment.
+    /(^|[\n;&|({])\s*(cd|pushd|popd|export|env|source|\.|set|unset)\s/.test(command.slice(0, invocation.start))
   ) {
-    return { why: 'it sets its own target, defer state, vars or project' }
+    return { why: 'it sets its own target, defer state, vars, project or refresh mode' }
   }
   if (invocation.subcommand === 'show') {
     const inline = inlineSql(text)

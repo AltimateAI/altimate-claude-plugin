@@ -72,7 +72,7 @@ test('a model over the limit is refused with its estimate, and the command never
 
   expect(estimates).toEqual(['orders'])
   expect(ran).toEqual([])
-  expect(result.deny).toBe('≈ 20.0 GiB would be scanned, over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan.')
+  expect(result.deny).toBe('≈ 20.0 GiB would be scanned, over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.')
 })
 
 test('a model under the limit runs, with the estimate in a line under the row', async ($, on) => {
@@ -229,11 +229,16 @@ test('a command that sets its own target, defer state, vars or project is not es
     'dbt run -s orders --project-dir other',
     'DBT_PROFILES_DIR=ci dbt run -s orders',
     'cd other && dbt run -s orders',
+    ' cd other && dbt run -s orders',
+    'export DBT_TARGET=prod; dbt run -s orders',
+    'uv run --directory other dbt run -s orders',
+    "dbt run -s orders --'vars' x",
+    'dbt run -s orders --full-refresh',
   ]
   for (const command of commands) {
     const result: any = await $.tool.call(bash(command))
     expect(result.deny).toBeUndefined()
-    expect(result.context[0]).toContain('it sets its own target, defer state, vars or project')
+    expect(result.context[0]).toContain('it sets its own target, defer state, vars, project or refresh mode')
   }
   await clock.settle()
   expect(estimates).toEqual([])
@@ -256,12 +261,36 @@ test('letting a later command through clears the hold from the status line', asy
   expect(statuses.filter(Boolean).at(-1)).not.toContain('held')
 })
 
-test('two calls of the same command each get their own lines under the row', async ($, on) => {
-  const { clock } = await start($, on, { answers: { orders: UNDER } })
-  const [first, second]: any[] = await Promise.all([$.tool.call(bash('dbt run -s orders')), $.tool.call(bash('dbt run -s orders'))])
+test('the lines under a command are the latest estimate of it, never an earlier one', async ($, on) => {
+  const answers: Record<string, any> = { orders: UNDER }
+  const { clock } = await start($, on, { answers })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).context).toEqual(['cost · orders would scan 2.0 GiB'])
+  answers.orders = bq(3 * GIB, '3.0 GiB')
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).context).toEqual(['cost · orders would scan 3.0 GiB'])
   await clock.settle()
-  expect(first.context).toEqual(['cost · orders would scan 2.0 GiB'])
-  expect(second.context).toEqual(['cost · orders would scan 2.0 GiB'])
+})
+
+test('/allow-scan allows only the hold it read: a hold replaced meanwhile is not allowed', async ($, on) => {
+  const { clock, ran } = await start($, on, { answers: { orders: OVER, customers: OVER } })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  const allowing = $.command.run({ command: 'allow-scan', args: '' } as any)
+  expect(((await $.tool.call(bash('dbt run -s customers'))) as any).deny).toBeDefined()
+  await allowing
+  await clock.settle()
+  // Whichever order the two steps took, customers (the later hold) is not allowed by a read of orders.
+  expect(((await $.tool.call(bash('dbt run -s customers'))) as any).deny).toBeDefined()
+  expect(ran).toEqual([])
+})
+
+test('a non-dbt command in between neither clears the hold nor spends the allowance', async ($, on) => {
+  const { clock, ran } = await start($, on, { answers: { orders: OVER } })
+  await $.tool.call(bash('dbt run -s orders'))
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  await $.tool.call(bash('ls'))
+  const through: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(through.deny).toBeUndefined()
+  expect(ran).toEqual(['ls', 'dbt run -s orders'])
 })
 
 test('inlineSql reads the query as the shell would', () => {
