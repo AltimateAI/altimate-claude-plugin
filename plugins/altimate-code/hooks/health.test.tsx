@@ -1,9 +1,10 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { bandText, isGitPush, modelNamesInYaml, modelsOfFile, newIssues, pairKey, pushRefusal, reportText, toolArgs } from './features/health'
+import { bandText, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
 
 const ROOT = '/repo'
 const STG = `${ROOT}/models/staging/stg_orders.sql`
+const STG_YML = `${ROOT}/models/staging/_staging.yml`
 const FCT = `${ROOT}/models/marts/fct_orders.sql`
 const NOTES = `${ROOT}/README.md`
 
@@ -13,31 +14,36 @@ const BAND = {
   props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
 } as const
 
-const insight = (id: string, path: string, name: string, message = `${name} found`) => ({
+const insight = (id: string, file: string, name: string, message = `${name} found`, properties = '') => ({
   uniqueId: `model.shop.${id}`,
-  path,
+  path: file.replace(`${ROOT}/`, ''),
   name,
   severity: 'WARNING',
   message,
   recommendation: `Fix ${name}`,
+  file,
+  properties,
 })
 
 // What the project already has before Claude changes anything.
-const OLD_STG = insight('stg_orders', 'models/staging/stg_orders.sql', 'Missing documentation')
-const OLD_FCT = insight('fct_orders', 'models/marts/fct_orders.sql', 'Missing tests')
+const OLD_STG = insight('stg_orders', STG, 'Missing documentation', undefined, STG_YML)
+const OLD_FCT = insight('fct_orders', FCT, 'Missing tests')
 // What a change adds.
-const NEW_STG = insight('stg_orders', 'models/staging/stg_orders.sql', 'Hard coded references', 'stg_orders reads raw.orders directly')
-const NEW_FCT = insight('fct_orders', 'models/marts/fct_orders.sql', 'Model fanout', 'fct_orders has 4 direct children')
+const NEW_STG = insight('stg_orders', STG, 'Hard coded references', 'stg_orders reads raw.orders directly', STG_YML)
+const NEW_FCT = insight('fct_orders', FCT, 'Model fanout', 'fct_orders has 4 direct children')
+// A model of a dependency package: it has no files in the project.
+const DEP = { ...insight('base', '', 'Missing tests'), uniqueId: 'model.dep.base', path: 'models/base.sql' }
 
 type Options = {
-  /** The tool's insights, per run (the last repeats). */
-  runs: ReturnType<typeof insight>[][]
-  /** What the CLI prints instead of an answer. */
-  cliStdout?: string
-  yaml?: Record<string, string>
+  /** The tool's answer per run (the last repeats). */
+  runs: (ReturnType<typeof insight>[] | { fail: string })[]
+  /** Holds the run with this index (from 0) until released. */
+  hold?: { at: number; until: Promise<void> }
+  /** Folders that hold a dbt_project.yml (default: the repo). */
+  projects?: string[]
 }
 
-async function start($: any, on: any, options: Options) {
+async function start($: any, on: any, options: Options, session: { isInteractive?: boolean } = {}) {
   const clock = mock.clock(on)
   const calls: { tool: string; args: Record<string, unknown>; argv: readonly string[] }[] = []
   const toasts: string[] = []
@@ -60,22 +66,26 @@ async function start($: any, on: any, options: Options) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` }))
-  on('fs.read', (_: unknown, e: { path: string }) => ({ value: options.yaml?.[e.path] ?? '' }))
+  const projects = options.projects ?? [ROOT]
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: projects.some(p => e.path === `${p}/dbt_project.yml`) }))
+  on('fs.read', () => ({ value: '' }))
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
   on('tool.call', () => ({ result: { ok: true } }))
   let run = 0
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool = ''] = e.argv
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
+    const index = run++
     calls.push({ tool, args, argv: e.argv })
-    if (options.cliStdout !== undefined) return { value: { exitCode: 0, stdout: options.cliStdout, stderr: '' } }
-    const insights = options.runs[Math.min(run++, options.runs.length - 1)]
-    return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, insights } }), stderr: '' } }
+    if (options.hold?.at === index) await options.hold.until
+    const answer = options.runs[Math.min(index, options.runs.length - 1)]!
+    const metadata = 'fail' in answer ? { success: false, insights: [] } : { success: true, insights: answer }
+    const output = 'fail' in answer ? answer.fail : ''
+    return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output, metadata }), stderr: '' } }
   })
-  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: session.isInteractive ?? true })
   await clock.settle()
   return { clock, calls, toasts, statuses }
 }
@@ -86,6 +96,7 @@ async function endTurn($: any, clock: any, id: string) {
 }
 
 const edit = (file: string) => ({ tool: 'Edit' as const, file_path: file, old_string: 'a', new_string: 'b' })
+const command = (text: string) => ({ tool: 'Bash' as const, command: text }) as any
 
 test('a baseline run at session start; a changed model with a new insight shows in the band, not the ones the project already had', async ($, on) => {
   const { clock, calls, toasts, statuses } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG, NEW_FCT]] })
@@ -115,15 +126,20 @@ test('two changed models give "2 new health issues" with the first model named',
   await band.unmount()
 })
 
-test('a turn that changed no model file runs no check; other files are ignored', async ($, on) => {
+test('README, dbt_project.yml, profiles, CI and dbt_packages files are not model files: no check runs', async ($, on) => {
   const { clock, calls, toasts } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG]] })
-  await $.tool.call(edit(NOTES))
+  for (const file of [NOTES, `${ROOT}/dbt_project.yml`, `${ROOT}/profiles.yml`, `${ROOT}/.github/workflows/ci.yml`, `${ROOT}/dbt_packages/dep/models/x.sql`, `${ROOT}/target/compiled/x.sql`])
+    await $.tool.call(edit(file))
   await endTurn($, clock, 't1')
   expect(calls).toHaveLength(1)
   expect(toasts).toEqual([])
-  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /health issue/ })).toBeUndefined()
-  await band.unmount()
+})
+
+test('a .sql file outside any dbt project is not a model file', async ($, on) => {
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG]] })
+  await $.tool.call(edit('/elsewhere/query.sql'))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(1)
 })
 
 test('an insight the baseline already had is not new', async ($, on) => {
@@ -133,15 +149,148 @@ test('an insight the baseline already had is not new', async ($, on) => {
   expect(toasts).toEqual([])
 })
 
-test('a changed properties file checks the models it lists', async ($, on) => {
-  const yml = `${ROOT}/models/staging/_staging.yml`
-  const { clock, toasts } = await start($, on, {
-    runs: [[], [NEW_STG]],
-    yaml: { [yml]: 'version: 2\nmodels:\n  - name: stg_orders\n    description: orders\n' },
-  })
-  await $.tool.call(edit(yml))
+test('a changed properties file checks the models it documents, and a dependency package model is never a changed model', async ($, on) => {
+  const { clock, toasts } = await start($, on, { runs: [[], [NEW_STG, DEP]] })
+  await $.tool.call(edit(STG_YML))
   await endTurn($, clock, 't1')
   expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('a model file Bash writes counts like one Claude edited; a command naming no model file starts no check', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { runs: [[], [NEW_STG]] })
+  await $.tool.call(command('ls -la && git status'))
+  await endTurn($, clock, 't0')
+  expect(calls).toHaveLength(1)
+  await $.tool.call(command(`sed -i 's/a/b/' ${STG}`))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('edits made while a check runs are checked by the next one, not dropped', async ($, on) => {
+  let release!: () => void
+  const until = new Promise<void>(resolve => (release = resolve))
+  // Run 0 is the baseline; run 1 (turn 1's check) is held; run 2 follows for turn 2's edit.
+  const { clock, calls, toasts } = await start($, on, { runs: [[], [], [NEW_FCT]], hold: { at: 1, until } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+
+  await $.tool.call(edit(FCT))
+  await endTurn($, clock, 't2')
+  // Turn 1's check is still running: no second run starts beside it.
+  expect(calls).toHaveLength(2)
+
+  release()
+  await clock.settle()
+  expect(calls).toHaveLength(3)
+  expect(toasts).toEqual(['◆ 1 new health issue · fct_orders: model fanout · /health'])
+})
+
+test('edits made before the baseline lands are checked once it has', async ($, on) => {
+  let release!: () => void
+  const until = new Promise<void>(resolve => (release = resolve))
+  const { clock, calls, toasts } = await start($, on, { runs: [[], [NEW_STG]], hold: { at: 0, until } })
+  expect(calls).toHaveLength(1)
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  // The baseline is still running: nothing else starts beside it.
+  expect(calls).toHaveLength(1)
+  release()
+  await clock.settle()
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('a failed check is not read as a clean one: it is told, and the next change asks again', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, {
+    runs: [{ fail: "DataPilot isn't installed in python3. Install the `altimate-datapilot-cli` package" }, [OLD_STG], [OLD_STG, NEW_STG]],
+  })
+  expect(toasts).toEqual(["◆ Project health: DataPilot isn't installed in python3. Install the `altimate-datapilot-cli` package"])
+
+  // The baseline failed: a change asks for it again, which now answers; the edit is checked after it.
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(3)
+  expect(toasts).toHaveLength(2)
+  expect(toasts[1]).toBe('◆ 1 new health issue · stg_orders: hard coded references · /health')
+})
+
+test('the same problem at every turn is told once', async ($, on) => {
+  const { clock, toasts } = await start($, on, { runs: [{ fail: "the dbt adapter didn't start" }] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await $.tool.call(edit(FCT))
+  await endTurn($, clock, 't2')
+  expect(toasts).toEqual(["◆ Project health: the dbt adapter didn't start"])
+})
+
+test('/health shows the issues Claude introduced, and retries a first check that failed', async ($, on) => {
+  const { clock, calls } = await start($, on, { runs: [{ fail: "the dbt adapter didn't start" }, [OLD_STG], [OLD_STG, NEW_STG]] })
+  const retried: any = await $.command.run({ command: 'health' } as any)
+  await clock.settle()
+  // Asking again ran the baseline again; it answered, and nothing has changed yet.
+  expect(calls).toHaveLength(2)
+  expect(String(retried?.text)).toContain('No new health issues')
+
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(String(shown?.text)).toContain('1 new health issue · stg_orders: hard coded references')
+  expect(String(shown?.text)).toContain('stg_orders reads raw.orders directly')
+})
+
+test('a session in no dbt project starts no check at session start, at a turn, at /health or at a push', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { runs: [[OLD_STG]], projects: [] })
+  expect(calls).toHaveLength(0)
+  await endTurn($, clock, 't1')
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  await $.tool.call(command('git push'))
+  await clock.settle()
+  expect(calls).toHaveLength(0)
+  expect(toasts).toEqual([])
+  expect(String(shown?.text)).toContain('none open')
+})
+
+test('a session with nobody at the prompt starts no check while the push gate is off, at session start or at a turn', async ($, on) => {
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG]] }, { isInteractive: false })
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(0)
+})
+
+test('a baseline that failed is not asked for again at every turn, only by a change or /health', async ($, on) => {
+  const { clock, calls } = await start($, on, { runs: [{ fail: "the dbt adapter didn't start" }, [OLD_STG]] })
+  expect(calls).toHaveLength(1)
+  await endTurn($, clock, 't1')
+  await endTurn($, clock, 't2')
+  expect(calls).toHaveLength(1)
+  await $.command.run({ command: 'health' } as any)
+  await clock.settle()
+  expect(calls).toHaveLength(2)
+})
+
+test('a recheck that fails keeps the issues found before, and the change it did not cover is asked for again by the next change', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { runs: [[], [NEW_STG], { fail: 'dbt timed out' }, [NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /1 new health issue/ })).toBeDefined()
+  await band.unmount()
+
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't2')
+  expect(calls).toHaveLength(3)
+  expect(toasts.at(-1)).toBe('◆ Project health: dbt timed out')
+  // Not asked for again at the next turn's end without a new change.
+  await endTurn($, clock, 't3')
+  expect(calls).toHaveLength(3)
+  const again = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await again.find({ type: 'Text', text: /1 new health issue/ })).toBeDefined()
+  await again.unmount()
+
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't4')
+  expect(calls).toHaveLength(4)
 })
 
 test('git push goes through by default (the setting is off), with new issues open', async ($, on) => {
@@ -151,7 +300,7 @@ test('git push goes through by default (the setting is off), with new issues ope
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: /1 new health issue/ })).toBeDefined()
   await band.unmount()
-  const allowed: any = await $.tool.call({ tool: 'Bash', command: 'git push origin main' } as any)
+  const allowed: any = await $.tool.call(command('git push origin main'))
   expect(allowed?.deny).toBeUndefined()
 })
 
@@ -174,34 +323,79 @@ test('the configured config path is passed to the tool, empty means the defaults
   expect(toolArgs(undefined)).toEqual({})
 })
 
-test('a CLI without the tool, or a tool that refuses, is said once and never blocks a push', async ($, on) => {
-  const { clock, toasts } = await start($, on, {
-    runs: [[]],
-    cliStdout: JSON.stringify({ status: 'error', output: 'DataPilot isn\'t installed in python3. Install the `altimate-datapilot-cli` package', metadata: { success: false, insights: [] } }),
-  })
-  await $.tool.call(edit(STG))
-  await endTurn($, clock, 't1')
-  await $.tool.call(edit(STG))
-  await endTurn($, clock, 't2')
-  expect(toasts).toEqual([])
-  const push: any = await $.tool.call({ tool: 'Bash', command: 'git push' } as any)
-  expect(push?.deny).toBeUndefined()
+test('git push is found by its command words, not by its text', () => {
+  for (const line of [
+    'git push',
+    'git push origin main',
+    'git -C sub push origin x',
+    'git -C "my project" push',
+    'git --git-dir .git push',
+    'git --git-dir=.git push',
+    'GIT_SSH=ssh git push --force',
+    'git add . && git push',
+    'git add .; git push',
+    'sudo git push',
+    'command git push',
+    'env X=1 git push',
+    'time git push',
+    '/usr/bin/git push',
+    '(git push)',
+    '{ git push; }',
+    'git push&',
+    'bash -c "git push"',
+    "sh -c 'git add . && git push'",
+    'echo $(git push)',
+    'git commit -m x\ngit push',
+    'git \\\npush',
+    'bash -lc "git push"',
+    'sudo -u bob git push',
+    'nice -n 10 git push',
+    'env -u X git push',
+    'echo "$(git push)"',
+  ])
+    expect([line, isGitPush(line)]).toEqual([line, true])
+  for (const line of [
+    'git status',
+    'git pushd',
+    'git commit -m "fix; git push later"',
+    'echo git push',
+    'echo "example; git push origin main"',
+    "echo 'git push'",
+    'git log --oneline -- push',
+    'grep -r push .',
+  ])
+    expect([line, isGitPush(line)]).toEqual([line, false])
 })
 
-test('the pure helpers', () => {
-  expect(isGitPush('git push')).toBe(true)
-  expect(isGitPush('git -C sub push origin x')).toBe(true)
-  expect(isGitPush('GIT_SSH=ssh git push --force')).toBe(true)
-  expect(isGitPush('git add . && git push')).toBe(true)
-  expect(isGitPush('git pushd')).toBe(false)
-  expect(isGitPush('echo git push')).toBe(false)
-  expect(isGitPush('git status')).toBe(false)
+test('simple commands split on operators outside quotes, and an unclosed quote still ends', () => {
+  expect(simpleCommands('a b && c "d e"; f | g')).toEqual([['a', 'b'], ['c', 'd e'], ['f'], ['g']])
+  expect(simpleCommands("a 'b c")).toEqual([['a', 'b c']])
+})
 
+test('the model files a Bash command writes, not the ones it only reads', () => {
+  expect(filesWrittenBy(`sed -i 's/a/b/' models/x.sql && cat > models/y.yml`)).toEqual(['models/x.sql', 'models/y.yml'])
+  expect(filesWrittenBy('echo hi >models/z.sql')).toEqual(['models/z.sql'])
+  expect(filesWrittenBy('echo hi >> models/z.sql; mv models/a.sql models/b.sql')).toEqual(['models/z.sql', 'models/a.sql', 'models/b.sql'])
+  expect(filesWrittenBy('printf x | tee models/t.sql')).toEqual(['models/t.sql'])
+  expect(filesWrittenBy('git checkout -- models/c.sql')).toEqual(['models/c.sql'])
+  expect(filesWrittenBy('perl -pi -e s/a/b/ models/p.sql')).toEqual(['models/p.sql'])
+  for (const line of ['cat models/x.sql', 'git diff models/x.sql', 'grep foo models/x.yml', 'sed -n 1,5p models/x.sql', 'ls -la', 'git status'])
+    expect([line, filesWrittenBy(line)]).toEqual([line, []])
+})
+
+test('models match by their own files, so a model of another package is never matched', () => {
+  expect([...modelsOfFiles([STG], [OLD_STG, OLD_FCT, DEP])]).toEqual(['model.shop.stg_orders'])
+  expect([...modelsOfFiles([STG_YML], [OLD_STG, OLD_FCT])]).toEqual(['model.shop.stg_orders'])
+  expect([...modelsOfFiles(['/elsewhere/other.sql'], [OLD_STG, DEP])]).toEqual([])
+})
+
+test('new issues are the pairs the baseline lacks, on the given models', () => {
   expect(pairKey(NEW_STG)).toBe('model.shop.stg_orders\u0000Hard coded references')
-  expect([...modelsOfFile(STG, [OLD_STG, OLD_FCT])]).toEqual(['model.shop.stg_orders'])
-  expect([...modelsOfFile('/elsewhere/other.sql', [OLD_STG])]).toEqual([])
   expect(newIssues([OLD_STG, NEW_STG, NEW_FCT], [pairKey(OLD_STG)], new Set(['model.shop.stg_orders']))).toEqual([NEW_STG])
-  expect(modelNamesInYaml('version: 2\nmodels:\n  - name: a\n  - name: "b"\nsources:\n  - name: c\n')).toEqual(['a', 'b'])
+})
+
+test('the band line and the report', () => {
   expect(bandText([NEW_STG])).toBe('1 new health issue · stg_orders: hard coded references · /health')
+  expect(bandText([])).toBe('')
   expect(reportText([NEW_STG])).toBe('- stg_orders: hard coded references (warning) stg_orders reads raw.orders directly → Fix Hard coded references')
 })

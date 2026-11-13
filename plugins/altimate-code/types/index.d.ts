@@ -210,6 +210,19 @@ export interface CostState {}
 // Project health: the health check issues on the changed models.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
+/** One DataPilot insight on a model, as altimate-code's dbt_health returns it. */
+export interface HealthInsight {
+  uniqueId: string
+  path: string
+  name: string
+  severity: string
+  message: string
+  recommendation: string
+  /** The model's SQL file and its properties file, absolute; empty when the model is not the project's own. */
+  file: string
+  properties: string
+}
+
 export interface HealthState {
   /** `uniqueId\u0000insight name` of every insight the project had at session start; null until that run lands. */
   baseline: string[] | null
@@ -218,7 +231,7 @@ export interface HealthState {
   /** Every model file changed this session. */
   touched: string[]
   /** What the last check found that the baseline lacked, on the touched models. */
-  issues: Array<{ uniqueId: string; path: string; name: string; severity: string; message: string; recommendation: string }>
+  issues: HealthInsight[]
   /** Why the check can't run, shown once per distinct reason. */
   problem: string | null
   running: boolean
