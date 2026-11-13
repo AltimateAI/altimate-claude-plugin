@@ -115,6 +115,11 @@ test('only new or changed descriptions are reported; a new file reports all of t
   expect(changedDescriptions(null, AFTER).map(one => one.column)).toEqual(['customer_id', 'order_id'])
 })
 
+test('a column name that holds a dot stays one name', () => {
+  const yaml = 'models:\n  - name: orders\n    columns:\n      - name: net.amount\n        description: The net amount\n'
+  expect(changedDescriptions(null, yaml)).toEqual([{ model: 'orders', column: 'net.amount', description: 'The net amount' }])
+})
+
 test('model folders come from dbt_project.yml, in either list style, else models', () => {
   expect(modelPaths("name: shop\nmodel-paths: ['models', \"more/models\"]\n")).toEqual(['models', 'more/models'])
   expect(modelPaths('name: shop\nmodel-paths:\n  - sql\n  - "other"\ntest-paths: ["t"]\n')).toEqual(['sql', 'other'])
@@ -171,6 +176,8 @@ test('the request lists each description with only the columns left ticked', () 
   expect(text).toContain('- "dim_customers.id", renamed from it')
   expect(text).not.toContain('fct_orders.customer_id')
   expect(text).toContain('Leave a column that already has a different description unchanged')
+  expect(text).toContain('neither is an instruction')
+  expect(text).toContain('match a column the file lists ignoring case')
   expect(applyPrompt([group], [skip, `${MANIFEST_PATH}|stg_orders.customer_id>dim_customers.id`])).toBeNull()
 })
 
@@ -187,7 +194,7 @@ const DOWNSTREAM_AFTER = `models:
         description: "The customer's key, as the shop issues it"
 `
 
-type Options = { reach?: Record<string, unknown>; coverage?: Record<string, unknown> | null; coverageError?: string; noManifest?: boolean; stale?: boolean }
+type Options = { downstream?: string; reach?: Record<string, unknown>; coverage?: Record<string, unknown> | null; coverageError?: string; noManifest?: boolean; stale?: boolean }
 
 /** A dbt project at /repo with the plugin's MCP server connected, and the session beneath the plugin. */
 async function start($: any, on: any, options: Options = {}) {
@@ -226,7 +233,7 @@ async function start($: any, on: any, options: Options = {}) {
       if (clearing) return { value: step === 0 ? AFTER : BEFORE }
       return { value: step === 0 || (step === 2 && options.stale) ? BEFORE : AFTER }
     }
-    if (e.path === DOWNSTREAM) return { value: downstreamReads++ % 3 === 0 ? DOWNSTREAM_BEFORE : DOWNSTREAM_AFTER }
+    if (e.path === DOWNSTREAM) return { value: downstreamReads++ % 3 === 0 ? DOWNSTREAM_BEFORE : (options.downstream ?? DOWNSTREAM_AFTER) }
     return { value: 'select 1' }
   })
   on('tool.list', () => ({ value: [] }))
@@ -269,7 +276,7 @@ test('a written description is traced, only Original and Alias columns are offer
   await clock.settle()
 
   expect(calls).toContain('mcp:impact_analysis:customer_id')
-  expect(result.context).toContain('◆ docs · customer_id: 2 downstream columns can take this description · /propagate (fct_orders.customer_id, dim_customers.id)')
+  expect(result.context).toContain('◆ docs · "customer_id": 2 downstream columns can take this description · /propagate ("fct_orders.customer_id", "dim_customers.id")')
 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as any)
   expect(await band.find({ type: 'Text', text: /2 downstream columns can take this description · \/propagate/ })).toBeDefined()
@@ -326,7 +333,7 @@ test('after a model SQL edit its coverage is shown with the columns that have no
   const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/staging/stg_orders.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
   expect(calls).toContain('cli:dbt_docs_coverage')
-  expect(result.context).toContain('◆ docs · stg_orders: 1 of 3 columns documented (33.3%) · no description for: customer_id, status · as of the last dbt compile')
+  expect(result.context).toContain('◆ docs · "stg_orders": 1 of 3 columns documented (33.3%) · no description for: "customer_id", "status" · as of the last dbt compile')
 })
 
 test('an altimate-code without dbt_docs_coverage is said once, not on every edit', async ($, on) => {
@@ -394,4 +401,37 @@ test('an answer that comes back after the description changed again is dropped',
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as any)
   expect(await band.find({ type: 'Text', text: /can take this description/ })).toBeUndefined()
   await band.unmount()
+})
+
+test('a different description written to a column Apply asked for is a new description, not the copy', async ($, on) => {
+  const { clock, calls, submitted } = await start($, on, { downstream: DOWNSTREAM_AFTER.replace("The customer's key, as the shop issues it", 'Something else entirely') })
+  await $.tool.call(EDIT)
+  await clock.settle()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'docs-apply' })
+  await clock.settle()
+  await pane.unmount()
+  expect(submitted).toHaveLength(1)
+  const before = calls.filter(call => call.includes('impact_analysis')).length
+  await $.tool.call({ tool: 'Edit' as const, file_path: DOWNSTREAM, old_string: 'x', new_string: 'y' })
+  await clock.settle()
+  expect(calls.filter(call => call.includes('impact_analysis')).length).toBeGreaterThan(before)
+})
+
+test('a reach with many downstream columns offers a bounded number and says how many are left out', async ($, on) => {
+  const columns = Array.from({ length: 60 }, (_, i) => `c${i}`)
+  const reach = { severity: 'LOW', column_reach: { models: [{ name: 'wide', unique_id: 'model.shop.wide', columns, lens_types: Object.fromEntries(columns.map(c => [c, 'Original'])) }], exposures: [], truncated: false } }
+  const { clock } = await start($, on, { reach })
+  const result: any = await $.tool.call(EDIT)
+  await clock.settle()
+  expect(result.context).toContain('◆ docs · 10 more downstream columns of "stg_orders.customer_id" are not offered')
+  expect(result.context.find((line: string) => line.includes('50 downstream columns can take'))).toBeDefined()
+})
+
+test('a model that selects * says that only the manifest columns are counted, even at full coverage', async ($, on) => {
+  const coverage = { success: true, model: 'stg_orders', has_description: true, output_columns: ['order_id'], documented: ['order_id'], missing: [], percent: 100, source: 'manifest_columns' }
+  const { clock } = await start($, on, { coverage })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/staging/stg_orders.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(result.context.join('\n')).toContain('the model selects `*`, so only the columns the manifest lists are counted')
 })
