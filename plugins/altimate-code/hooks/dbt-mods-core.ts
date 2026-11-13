@@ -84,24 +84,138 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
 }
 
 /** The dbt command a shell command runs, when it runs one: its verb and its `-s`/`--select`. */
-export function dbtCommand(command: string): { verb: string; select: string | null; inline: string | null; limit: number | null } | null {
-  // The dbt invocation itself: after a `cd x &&`, a venv's `bin/dbt`, `uv run dbt`, `python -m dbt`.
+export type DbtCommand = {
+  verb: string
+  select: string | null
+  inline: string | null
+  limit: number | null
+  /** The flags that decide where and how it ran (target, profile, vars, …), as flag and value pairs, for a re-run. */
+  options: string[]
+  /** Where the dbt invocation starts in the command: a `cd` after it does not move where it ran. */
+  at: number
+}
+
+// Flags a re-run of Claude's `dbt show` must keep, so it runs against the same target and profile.
+const KEPT_FLAGS = ['--target', '-t', '--profile', '--profiles-dir', '--project-dir', '--vars', '--threads']
+
+/**
+ * A flag's value in a dbt command's own arguments: `--flag value`, `--flag=value`, quoted or not. The
+ * flag is found in `masked` (quoted text blanked, same length), so a `-t prod` inside quoted SQL is not
+ * one; its value is read from `rest` at that position.
+ */
+function flagValue(rest: string, masked: string, flags: string[]): string | null {
+  for (const flag of flags) {
+    const escaped = flag.replace(/-/g, '\\-')
+    const at = new RegExp(`(?:^|\\s)${escaped}(?:\\s+|=)`).exec(masked)
+    if (!at) continue
+    const found = /^(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s'"]+))/.exec(rest.slice(at.index + at[0].length))
+    if (found) return found[1] ?? found[2] ?? found[3] ?? null
+  }
+  return null
+}
+
+/**
+ * What a dbt command selects, as one string: every `--select` value (`-s a b` is two), and any
+ * `--exclude` or `--selector`, which make it less than the whole project. Null for the whole project.
+ */
+function selection(rest: string, masked: string): string | null {
+  const parts: string[] = []
+  const flag = /(?:^|\s)(--select|-s|--models|-m|--exclude|--selector)(\s+|=)/g
+  for (let found = flag.exec(masked); found; found = flag.exec(masked)) {
+    const values: string[] = []
+    let at = found.index + found[0].length
+    // A flag's values run until the next flag; `--select=a` takes one.
+    for (;;) {
+      const token = /^(?:"((?:[^"\\]|\\.)*)"|'([^']*)'|([^\s'"]+))\s*/.exec(rest.slice(at))
+      if (!token || (token[3] ?? '').startsWith('-')) break
+      values.push(token[1] ?? token[2] ?? token[3] ?? '')
+      at += token[0].length
+      if (found[2] === '=') break
+    }
+    const name = ['-s', '--models', '-m'].includes(found[1]!) ? '--select' : found[1]!
+    parts.push(name === '--select' ? values.join(' ') : `${name} ${values.join(' ')}`)
+  }
+  return parts.length ? parts.join(' ') : null
+}
+
+/** The dbt command a shell command runs, when it runs one: its verb, selection, inline SQL, limit and kept options. */
+export function dbtCommand(command: string): DbtCommand | null {
   // Quoted text is an argument, not the command: `altimate run "fix it, then dbt build"` runs no dbt.
-  const bare = command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, '""')
-  const match = /(?:^|[\s;&|(]|\/)dbt(?:\.exe)?\s+((?:--?[\w-]+(?:[ =](?!-)\S+)?\s+)*)(run|test|build|seed|snapshot|show|compile|parse)\b(.*)$/m.exec(bare)
+  // Each quoted string is masked to the same length, so positions in it match the command's own.
+  const bare = command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, quoted => `${quoted[0]}${'x'.repeat(quoted.length - 2)}${quoted[0]}`)
+  // The dbt invocation itself: after a `cd x &&`, a venv's `bin/dbt`, `uv run dbt`, `python -m dbt`.
+  // `run-operation` is not `run`.
+  const match = /(?:^|[\s;&|(]|\/)dbt(?:\.exe)?\s+((?:--?[\w-]+(?:[ =](?!-)\S+)?\s+)*)(run|test|build|seed|snapshot|show|compile|parse)(?![\w-])/m.exec(bare)
   if (!match) return null
-  // The options come from the command as written, so a quoted --inline keeps its SQL.
-  const at = command.indexOf(match[2]!, bare.slice(0, match.index).length)
-  const rest = at >= 0 ? command.slice(at + match[2]!.length) : (match[3] ?? '')
-  const select = /(?:^|\s)(?:-s|--select|-m|--models)\s+(?:"([^"]+)"|'([^']+)'|(\S+))/.exec(rest)
-  const inline = /--inline\s+(?:"((?:[^"\\]|\\.)*)"|'([^']*)')/.exec(rest)
-  const limit = /--limit\s+(-?\d+)/.exec(rest)
+  const verbAt = match.index + match[0].length - match[2]!.length
+  // Its own arguments end where the shell starts the next command.
+  const tail = bare.slice(verbAt + match[2]!.length)
+  const stop = tail.search(/;|&&|\|\||\||\n/)
+  const end = stop < 0 ? undefined : verbAt + match[2]!.length + stop
+  const rest = command.slice(verbAt + match[2]!.length, end)
+  const masked = bare.slice(verbAt + match[2]!.length, end)
+  const limit = flagValue(rest, masked, ['--limit'])
+  const options: string[] = []
+  for (const flag of KEPT_FLAGS) {
+    const value = flagValue(rest, masked, [flag])
+    if (value !== null) options.push(flag === '-t' ? '--target' : flag, value)
+  }
   return {
     verb: match[2]!,
-    select: select ? (select[1] ?? select[2] ?? select[3] ?? null) : null,
-    inline: inline ? (inline[1] ?? inline[2] ?? null) : null,
-    limit: limit ? Number(limit[1]) : null,
+    select: selection(rest, masked),
+    inline: flagValue(rest, masked, ['--inline']),
+    limit: limit !== null && /^-?\d+$/.test(limit) ? Number(limit) : null,
+    options,
+    at: match.index,
   }
+}
+
+/** The folders some dbt_project.yml keys name, each key's fallback when absent; inline and block lists. */
+function pathsOf(yml: string, keys: [string, string[]][]): string[] {
+  const lines = yml.replace(/\r\n?/g, '\n').split('\n')
+  const read = (key: string, fallback: string[]) => {
+    const at = lines.findIndex(line => line.startsWith(`${key}:`))
+    if (at < 0) return fallback
+    const inline = lines[at]!.slice(key.length + 1).replace(/#.*$/, '').trim()
+    const unquote = (item: string) => item.trim().replace(/^['"]|['"]$/g, '')
+    if (inline.startsWith('[')) return inline.replace(/^\[|\]$/g, '').split(',').map(unquote).filter(Boolean)
+    const items: string[] = []
+    for (const line of lines.slice(at + 1)) {
+      // Comments and blank lines inside the list are skipped; the next key ends it.
+      if (/^\s*(#.*)?$/.test(line)) continue
+      const item = /^\s*-\s*(.+)$/.exec(line.replace(/\s#.*$/, ''))
+      if (!item) break
+      items.push(unquote(item[1]!))
+    }
+    return items.length ? items : fallback
+  }
+  const paths = keys.flatMap(([key, fallback]) => read(key, fallback))
+  // `.` is the project folder itself (''); a path outside the project (`../shared`) is not this project's.
+  return [...new Set(paths.map(one => (one === '.' ? '' : one.replace(/^\.\/|\/+$/g, ''))).filter(one => !one.startsWith('..') && !one.startsWith('/')))]
+}
+
+/**
+ * The folders a project's files live in, from dbt_project.yml: its model, seed, snapshot, macro, test
+ * and analysis paths (dbt's defaults when a key is absent). `''` is the project folder itself.
+ */
+export function projectPaths(yml: string): string[] {
+  // dbt before 1.0 named seeds' folders data-paths.
+  const seeds = pathsOf(yml, [['seed-paths', []], ['data-paths', []]])
+  return [...new Set([...(seeds.length || /^(seed|data)-paths:/m.test(yml) ? seeds : ['seeds']), ...pathsOf(yml, [
+    ['model-paths', ['models']],
+    ['source-paths', []],
+    ['snapshot-paths', ['snapshots']],
+    ['macro-paths', ['macros']],
+    ['test-paths', ['tests']],
+    ['analysis-paths', ['analyses']],
+  ])])]
+}
+
+/** The folders a project's models live in (`model-paths`, `models` when absent). */
+export function modelPaths(yml: string): string[] {
+  // dbt before 1.0 named them source-paths.
+  const named = pathsOf(yml, [['model-paths', []], ['source-paths', []]])
+  return named.length ? named : ['models']
 }
 
 /** The failed nodes of a run_results.json: errors, failed tests and failed snapshots, first failed first. */

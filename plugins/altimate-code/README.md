@@ -113,18 +113,6 @@ The plugin's lineage pane follows the dbt model Claude reads or edits (by Read, 
 
 `/lineage <model>[.column]` opens the pane on a model, at any width. When the pane follows Claude's reads on its own, Claude Code draws it only in a terminal at least 144 columns wide (110 once you have opened it yourself); in a narrower one it waits, and a toast says so once. Lineage calls go to the plugin's MCP server without a permission prompt, or to `altimate tool run` when the server is not available. A manifest over 4 MiB is read through altimate-code (`dbt_lineage` with `include_graph`). Run `dbt parse` or `dbt compile` first; column lineage and reach need compiled SQL. When the shown model's `.sql` file changed after the manifest was written, the pane and the edit note say so: run `dbt compile`, then `r`.
 
-## dbt helpers
-
-What dbt Power User does in VS Code, inside the Claude Code session. Each helper runs the project's own dbt (its `.venv/bin/dbt` or `venv/bin/dbt` when there is one, else `dbt` on `PATH`), one at a time per project, and calls no model:
-
-- **Compile and validate, on every edit.** After Claude edits or writes a model's `.sql` file, the plugin runs the model with `dbt show --limit 1`: dbt compiles it and the warehouse runs it, so a Jinja error or a column the warehouse does not have shows at once. The columns the query returns are held to the ones `schema.yml` documents. The result goes to Claude with the edit's result (it waits up to 30 seconds; a slower check rides on Claude's next tool result) and stays above the prompt. When the check finds a problem, the **dbt check** pane opens beside the chat (**Details** brings it back): every column the warehouse returned against the ones `schema.yml` documents, or dbt's full error, with **Check again**. When a shell command changes the checked model or the manifest afterwards (a fix altimate-code made, a build), the check runs again by itself. Macros, tests and analyses are not run.
-- **A failed run, one press from a fix.** When a `dbt run`, `test`, `build`, `seed` or `snapshot` that Claude ran fails, the failed nodes (from `target/run_results.json`, or dbt's own text when the run wrote none) show above the prompt with **Explain**, which asks Claude to explain each failure without changing files, and **Fix with Altimate Code**, which hands them to `/altimate-code:altimate`. A passing run clears it.
-- **Query results in a pane.** Rows from a `dbt show` Claude runs, and from `/dbt-show <model>` or `/dbt-show select …` (50 rows), open as a table beside the chat. **Re-run** runs the query again, **Bookmark** keeps it, and the pane lists your bookmarks and the last 20 queries, kept across sessions.
-- **Model context, before Claude guesses.** When Claude reads a model's `.sql` file, the model's materialization, relation, columns (types, descriptions and tests), model tests, parents, children and depth upstream and downstream, from `target/manifest.json`, go to Claude with the file, once a turn. A file newer than the manifest is said to need `dbt parse`.
-- **An environment doctor at session start.** The plugin checks dbt-core, the Python that runs it, whether the profile's adapter is installed, whether `packages.yml` has been installed, and whether the manifest is older than the project's files. Anything wrong shows above the prompt with **Run dbt parse** or **Run dbt deps**, and Claude is told with your first prompt. `/dbt-doctor` opens the checks in a pane and also tests the warehouse connection (`dbt debug`), which session start never does.
-
-Set the plugin's `dbt_mods` option to false (in `/config`) to turn all of them off.
-
 ### Team rules
 
 In a project linked to an Altimate workspace, the workspace's approved **team rules** apply to Claude Code itself, not only to the tasks it hands over. With learning on (`altimate learn enable` in the project, or the workspace's "Learn from sessions" if you have made no choice of your own), your corrections can become proposed rules too:
@@ -141,6 +129,18 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 - **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds). All of them run only in a linked folder (or below it), as recorded in altimate-code's link cache in your own state directory: nothing in the repository turns them on.
 - **`ALTIMATE_LEARN=0`** turns all of it off: the hooks start nothing.
 
+## dbt helpers
+
+What dbt Power User does in VS Code, inside the Claude Code session. Each helper runs the project's own dbt (`.venv` or `venv` in the project folder, `bin/dbt` or `Scripts\dbt.exe`, else `dbt` on `PATH`), one at a time per project, and calls no model:
+
+- **Compile and validate, on every edit.** After Claude edits or writes a model's `.sql` file, the plugin runs the model with `dbt show --limit 1`: dbt compiles it and the warehouse runs it, so a Jinja error or a column the warehouse does not have shows at once. The columns the query returns are held to the ones `schema.yml` documents. The result goes to Claude with the edit's result (it waits up to 30 seconds; a slower check rides on Claude's next tool result) and stays above the prompt. When the query returns no row, or `schema.yml` documents no columns for the model, the check says the columns were not compared rather than calling them a match. When the check finds a problem, the **dbt check** pane opens beside the chat (**Details** brings it back): every column the warehouse returned against the ones `schema.yml` documents, or dbt's full error, with **Check again**. When the model's file or the schema file that documents it changes afterwards outside Claude's edits (a fix altimate-code made), the check runs again after Claude's next shell command. Macros, tests and analyses are not run.
+- **A failed run, one press from a fix.** When a `dbt run`, `test`, `build`, `seed` or `snapshot` that Claude ran fails, the failed nodes (from `target/run_results.json`, or dbt's own text when the run wrote none) show above the prompt with **Explain**, which asks Claude to explain each failure without changing files, and **Fix with Altimate Code**, which hands them to `/altimate-code:altimate`. A passing run of the same kind (or a build) with the same selection, or of the whole project, clears it.
+- **Query results in a pane.** Rows from a `dbt show` Claude runs, and from `/dbt-show <model>` or `/dbt-show select …` (50 rows), open as a table beside the chat. **Re-run** runs the query again with the same target, profile, vars and limit, **Bookmark** keeps it, and the pane lists your bookmarks and the last 20 queries. They are kept on this machine in Claude Code's plugin store, up to 50 rows each, across sessions; **Clear history** forgets every query that is not bookmarked.
+- **Model context, before Claude guesses.** When Claude reads a model's `.sql` file, the model's materialization, relation, columns (types, descriptions and tests), model tests, parents, children and depth upstream and downstream, from `target/manifest.json`, go to Claude with the file, once a turn. A manifest over 4 MiB is read for that model through the project's Python. A file newer than the manifest is said to need `dbt parse`.
+- **An environment doctor at session start.** The plugin checks dbt-core, the Python that runs it, whether the profile's adapter is installed, whether `packages.yml` has been installed, and whether the manifest is older than the project's files. Anything wrong shows above the prompt with **Run dbt parse** or **Run dbt deps**, and Claude is told with your first prompt. `/dbt-doctor` opens the checks in a pane and also tests the warehouse connection (`dbt debug`), which session start never does.
+
+Compile and validate runs a query on your warehouse after every model edit (`dbt show --limit 1`). On a warehouse that bills by bytes scanned or wakes a suspended warehouse for it, that costs money. Set the plugin's `dbt_mods` option to false (in `/config`) to turn all of the helpers off.
+
 ## Example prompts
 
 Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):
@@ -153,6 +153,8 @@ Once installed, try these in Claude Code (or prefix any of them with `/altimate-
 ## Data handling
 
 MCP tools and `tool run` run locally under your credentials; tool results Claude reads enter the Claude Code conversation and reach its model provider. Neither makes an LLM call of its own.
+
+The dbt helpers run the project's dbt on this machine. What they add to Claude's context (dbt's errors, column names, the manifest's facts about a model) reaches its model provider like any tool result. The rows of the results pane are kept on this machine only, in Claude Code's plugin store, until you clear them.
 
 Delegating a task with `altimate run` passes your prompt text to the altimate-code CLI, which sends it to your configured LLM provider — the Altimate LLM Gateway by default, or your own provider (BYOK), in which case Altimate never sees it. Warehouse credentials and query results stay on your machine.
 

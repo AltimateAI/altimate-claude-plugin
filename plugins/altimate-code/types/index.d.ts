@@ -191,7 +191,16 @@ export type DbtFailure = {
 }
 
 /** The last failed dbt command Claude ran, offered for Explain and Fix. */
-export type FailureView = { command: string; root: string; failures: DbtFailure[]; at: number }
+export type FailureView = {
+  command: string
+  root: string
+  /** run, test, build, seed or snapshot. */
+  verb: string
+  /** The failed command's --select; null when it ran the whole project. */
+  select: string | null
+  failures: DbtFailure[]
+  at: number
+}
 
 /** What compile-and-validate found after Claude edited a model. */
 export type CheckView = {
@@ -200,7 +209,14 @@ export type CheckView = {
   root: string
   /** Project-relative path of the model's file. */
   file: string
-  status: 'running' | 'ok' | 'warn' | 'error'
+  /** `partial`: not fully checked (see `reason`): its columns could not be compared, or dbt has no model for the file. */
+  status: 'running' | 'ok' | 'warn' | 'error' | 'partial'
+  /** What was not checked, for a `partial` check. */
+  reason: string | null
+  /** Whether dbt compiled and ran the model at all. */
+  ran: boolean
+  /** Project-relative path of the schema file that documents the model, when the manifest names one. */
+  schema: string | null
   /** dbt's compile or warehouse errors. */
   errors: string[]
   /** Columns schema.yml documents that the warehouse did not return. */
@@ -225,6 +241,8 @@ export type QueryResult = {
   root: string
   select: string | null
   inline: string | null
+  /** The flags it ran with that a re-run keeps (target, profile, vars, …), as flag and value pairs. */
+  options: string[]
   columns: string[]
   rows: unknown[][]
   limit: number
@@ -329,7 +347,6 @@ declare module 'claude-code' {
       dbtHistory: SavedQuery[]
       /** A /dbt-show or Re-run in flight: its label. */
       dbtResultBusy: string | null
-      isDbtBandHidden: boolean
     }
   }
 }

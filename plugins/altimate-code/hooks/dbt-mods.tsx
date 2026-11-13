@@ -19,7 +19,9 @@ import {
   logErrors,
   modelContext,
   modelContextNote,
+  modelPaths,
   nodeForFile,
+  projectPaths,
   saysFailed,
   showPreview,
   stripAnsi,
@@ -37,7 +39,8 @@ const CHECK_TITLE = 'dbt check'
 const SHOW_COMMAND = 'dbt-show'
 const DOCTOR_COMMAND = 'dbt-doctor'
 const HISTORY_KEY = 'dbt-results-history'
-const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
+// The tools that write a file in this Claude Code build (MultiEdit is not one of them).
+const EDIT_TOOLS = new Set(['Edit', 'Write'])
 // How long an edit's result waits for compile-and-validate before it goes back to Claude without it;
 // a later answer rides on Claude's next tool result.
 const CHECK_HOLD_MS = 30_000
@@ -46,9 +49,10 @@ const SHOW_LIMIT = 50
 const HISTORY_SIZE = 20
 // $.fs.read refuses files over 4 MiB.
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024
-// Folders the doctor's freshness check walks, and the most files it looks at.
-const SOURCE_DIRS = ['models', 'macros', 'seeds', 'snapshots', 'tests', 'analyses']
+// The most files the doctor's freshness check looks at.
 const MAX_SCANNED = 3000
+// The history the results pane lists: every saved query, most recent first.
+const HISTORY_SHOWN = HISTORY_SIZE
 
 const checkAtom = atom({ plugin: 'altimate-code', key: 'dbtCheck' } as const, null as CheckView | null)
 const failureAtom = atom({ plugin: 'altimate-code', key: 'dbtFailure' } as const, null as FailureView | null)
@@ -56,7 +60,6 @@ const doctorAtom = atom({ plugin: 'altimate-code', key: 'dbtDoctor' } as const, 
 const resultAtom = atom({ plugin: 'altimate-code', key: 'dbtResult' } as const, null as QueryResult | null)
 const historyAtom = atom({ plugin: 'altimate-code', key: 'dbtHistory' } as const, [] as SavedQuery[])
 const resultBusyAtom = atom({ plugin: 'altimate-code', key: 'dbtResultBusy' } as const, null as string | null)
-const bandHiddenAtom = atom({ plugin: 'altimate-code', key: 'isDbtBandHidden' } as const, false)
 
 // Notes for Claude that missed their own tool result (a slow check): they ride on the next one.
 const pendingNotes: string[] = []
@@ -70,6 +73,11 @@ const queues = new Map<string, Promise<unknown>>()
 // The newest check per model: an older one landing late does not overwrite it.
 const checkSeq = new Map<string, number>()
 let seq = 0
+// Bumped when a conversation ends (/clear): work started in the last one lands nowhere in this one.
+let generation = 0
+// Slices of manifests too big to read here, by manifest path, file and revision.
+const slices = new Map<string, Promise<any>>()
+const MAX_SLICES = 16
 
 const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const basename = (path: string) => path.split(/[\\/]/).pop() ?? path
@@ -125,7 +133,8 @@ async function sessionProject($: EngineInterface): Promise<string | null> {
 
 /** The project's dbt: its virtual environment's when it has one, else the one on PATH. */
 async function dbtBinary($: EngineInterface, root: string): Promise<string> {
-  for (const candidate of [`${root}/.venv/bin/dbt`, `${root}/venv/bin/dbt`, `${dirname(root)}/.venv/bin/dbt`]) {
+  // Only the project's own folders: never a dbt found above the folder the person opened.
+  for (const candidate of [`${root}/.venv/bin/dbt`, `${root}/venv/bin/dbt`, `${root}/.venv/Scripts/dbt.exe`, `${root}/venv/Scripts/dbt.exe`]) {
     if (await $.fs.exists(candidate).catch(() => false)) return candidate
   }
   return 'dbt'
@@ -144,13 +153,80 @@ function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DB
   return run
 }
 
-/** The manifest of a project, parsed, with its modification time; null when absent or over 4 MiB. */
-async function readManifest($: EngineInterface, root: string): Promise<{ manifest: any; mtimeMs: number } | null> {
+// Reads a manifest too big for $.fs.read with the project's Python, and prints only what the helpers need
+// about one file's node: the node, its tests, and the graph above and below it, names only.
+const MANIFEST_SLICE = `import json, sys
+m = json.load(open(sys.argv[1]))
+rel = sys.argv[2]
+nodes = m.get('nodes') or {}
+pm = m.get('parent_map') or {}
+cm = m.get('child_map') or {}
+if not pm:
+    for k, n in nodes.items():
+        pm[k] = (n.get('depends_on') or {}).get('nodes') or []
+        for p in pm[k]:
+            cm.setdefault(p, []).append(k)
+hit = [k for k, n in nodes.items() if n.get('original_file_path') == rel and n.get('resource_type') != 'test']
+keep = set(hit)
+for graph in (pm, cm):
+    todo = list(hit)
+    while todo and len(keep) < 20000:
+        for x in graph.get(todo.pop(), []):
+            if x not in keep:
+                keep.add(x)
+                todo.append(x)
+tests = [c for h in hit for c in cm.get(h, []) if c.startswith('test.')]
+keep.update(tests)
+full = set(hit) | set(tests)
+fields = ('name', 'resource_type', 'original_file_path', 'relation_name', 'description', 'config', 'tags', 'columns', 'column_name', 'test_metadata', 'depends_on', 'patch_path')
+out = {'nodes': {}, 'parent_map': {}, 'child_map': {}}
+for k in keep:
+    n = nodes.get(k)
+    if n is not None:
+        out['nodes'][k] = {f: n.get(f) for f in fields} if k in full else {'name': n.get('name'), 'resource_type': n.get('resource_type')}
+    out['parent_map'][k] = pm.get(k, [])
+    out['child_map'][k] = cm.get(k, [])
+print(json.dumps(out))
+`
+
+/** The Python beside the project's dbt, else the one on PATH. */
+async function pythonFor($: EngineInterface, root: string): Promise<string> {
+  const dbt = await dbtBinary($, root)
+  if (dbt !== 'dbt') {
+    const beside = dbt.replace(/dbt(\.exe)?$/, (_, exe) => (exe ? 'python.exe' : 'python'))
+    if (await $.fs.exists(beside).catch(() => false)) return beside
+  }
+  return 'python3'
+}
+
+/**
+ * The manifest of a project, parsed, with its modification time; null when absent or unreadable. A
+ * manifest over 4 MiB (more than $.fs.read takes) is read for one file's node only, `rel`, through the
+ * project's Python, as the lineage half reads one through altimate-code.
+ */
+async function readManifest($: EngineInterface, root: string, rel?: string): Promise<{ manifest: any; mtimeMs: number } | null> {
   const path = `${root}/target/manifest.json`
   const stat = await $.fs.stat(path).catch(() => null)
-  if (!stat || stat.kind !== 'file' || stat.size > MAX_MANIFEST_BYTES) return null
+  if (!stat || stat.kind !== 'file') return null
   try {
-    return { manifest: JSON.parse(await $.fs.read(path)), mtimeMs: stat.mtimeMs }
+    if (stat.size <= MAX_MANIFEST_BYTES) return { manifest: JSON.parse(await $.fs.read(path)), mtimeMs: stat.mtimeMs }
+    if (!rel) return null
+    // One slice per file and manifest revision: a re-read in the same turn, and an edit's checks, reuse it.
+    const key = JSON.stringify([path, rel, stat.mtimeMs])
+    const cached = slices.get(key)
+    if (cached) return { manifest: await cached, mtimeMs: stat.mtimeMs }
+    const slicing = (async () => {
+      const python = await pythonFor($, root)
+      const run = await $.process.run([python, '-c', MANIFEST_SLICE, path, rel], { cwd: root, timeoutMs: 60_000 })
+      if (run.exitCode !== 0 || run.isStdoutTruncated) throw new Error('manifest slice failed')
+      return JSON.parse(run.stdout)
+    })()
+    // Only the newest revision of each file is kept, and at most a few files.
+    for (const old of [...slices.keys()]) if (JSON.parse(old)[1] === rel && JSON.parse(old)[0] === path) slices.delete(old)
+    while (slices.size >= MAX_SLICES) slices.delete(slices.keys().next().value!)
+    slices.set(key, slicing)
+    slicing.catch(() => slices.delete(key))
+    return { manifest: await slicing, mtimeMs: stat.mtimeMs }
   } catch {
     return null
   }
@@ -169,66 +245,100 @@ function addContext<T extends { context?: string[] }>(result: T, note: string | 
 
 // ─── 07 · Compile and validate, on every edit ─────────────────────────────────────────────────────
 
+/** The project-relative schema file a manifest node's columns come from (`patch_path`), when it names one. */
+const schemaOf = (node: any): string | null => (typeof node?.patch_path === 'string' ? node.patch_path.replace(/^[^:]*:\/\//, '') : null)
+
 /** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
-async function compileAndValidate($: EngineInterface, root: string, file: string): Promise<{ view: CheckView; note: string }> {
-  const model = basename(file).replace(/\.sql$/i, '')
+async function compileAndValidate($: EngineInterface, root: string, file: string): Promise<{ view: CheckView; note: string; current: () => boolean }> {
+  const rel = relative(root, file)
+  // The model's own name, from the manifest when it knows the file (an `alias` or a renamed file is not the name).
+  const before = await readManifest($, root, rel)
+  const known = before ? nodeForFile(before.manifest, rel) : null
+  const model = typeof known?.node?.name === 'string' ? known.node.name : basename(file).replace(/\.sql$/i, '')
   const started = await $.clock.now()
   const mine = ++seq
+  const mineGeneration = generation
   checkSeq.set(model, mine)
-  await setCheck($, model, { model, root, file: relative(root, file), status: 'running', errors: [], missing: [], undocumented: [], columns: null, returned: [], documented: [], ms: 0, at: started })
+  const current = () => checkSeq.get(model) === mine && generation === mineGeneration
+  const blank = { model, root, file: rel, errors: [], missing: [], undocumented: [], columns: null, returned: [], documented: [], reason: null, ran: false, schema: schemaOf(known?.node) }
+  await setCheck($, { ...blank, status: 'running', ms: 0, at: started }, current)
   // Only the model: dbt's eager indirect selection would also run its tests, and show a test's failure as the model's.
-  const run = await runDbt($, root, ['show', '--select', model, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json']).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  const show = (name: string) => runDbt($, root, ['show', '--select', name, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json']).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  let run = await show(model)
+  // dbt show re-parsed the project: the manifest now holds the model and schema.yml as they are.
+  const after = await readManifest($, root, rel)
+  const node = after ? nodeForFile(after.manifest, rel) : null
+  // With no manifest before, the name came from the file: a model named otherwise (a version, a config
+  // name) that dbt showed nothing for is shown again under the name the manifest now gives it.
+  const named = typeof node?.node?.name === 'string' ? node.node.name : null
+  if (run.exitCode === 0 && !showPreview(run.stdout) && named && named !== model) run = await show(named)
   const ms = (await $.clock.now()) - started
   const preview = run.exitCode === 0 ? showPreview(run.stdout) : null
   const errors = run.exitCode === 0 ? [] : logErrors(run.stdout)
   if (run.exitCode !== 0 && errors.length === 0) errors.push(stripAnsi(run.stderr || run.stdout).trim().split('\n').slice(-6).join('\n') || `dbt exited ${run.exitCode}`)
-  // dbt show re-parsed the project: the manifest now holds schema.yml as it is.
-  const read = await readManifest($, root)
-  const node = read ? nodeForFile(read.manifest, relative(root, file)) : null
+  // dbt exited 0 but showed nothing. A model the manifest still lists is a failure; a file it does not
+  // list (a model just disabled, not a model at all) was not checked.
+  const nothingShown = run.exitCode === 0 && !preview
+  if (nothingShown && node) errors.push(`dbt show selected no model named ${named ?? model}, so nothing was compiled or run. ${stripAnsi(run.stdout).split('\n').map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? ''}`.trim())
   const documented = node ? Object.values<any>(node.node.columns ?? {}).map(column => String(column.name)) : []
   const returned = preview && preview.rows.length > 0 ? preview.columns : null
   const drift = returned && documented.length ? columnDrift(documented, returned) : { missing: [], undocumented: [] }
-  const status: CheckView['status'] = errors.length ? 'error' : drift.missing.length || drift.undocumented.length ? 'warn' : 'ok'
-  const view: CheckView = { model, root, file: relative(root, file), status, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: await $.clock.now() }
-  await setCheck($, model, view, mine)
+  // Agreement is claimed only when both sides were read: else it says what was not checked.
+  const reason = errors.length
+    ? null
+    : nothingShown
+      ? 'dbt has no model for this file (disabled, or not a model), so nothing was compiled or run'
+      : !returned
+        ? 'the query returned no row, so its columns could not be read'
+        : !node
+          ? 'the manifest has no entry for this file, so the documented columns could not be read'
+          : documented.length === 0
+            ? 'schema.yml documents no columns for this model'
+            : null
+  const status: CheckView['status'] = errors.length ? 'error' : reason ? 'partial' : drift.missing.length || drift.undocumented.length ? 'warn' : 'ok'
+  const view: CheckView = { ...blank, model: named ?? model, schema: schemaOf(node?.node) ?? blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: await $.clock.now() }
+  await setCheck($, view, current)
   // A problem opens the whole answer beside the chat: the band has room for one line of dbt's error.
-  if (view.status !== 'ok' && checkSeq.get(model) === mine) await openCheck($, false).catch(() => null)
-  return { view, note: checkNote(view) }
+  if ((view.status === 'warn' || view.status === 'error') && current()) await openCheck($, false).catch(() => null)
+  return { view, note: checkNote(view), current }
 }
 
-async function setCheck($: EngineInterface, model: string, view: CheckView, mine?: number) {
-  if (mine !== undefined && checkSeq.get(model) !== mine) return
+async function setCheck($: EngineInterface, view: CheckView, current: () => boolean) {
+  if (!current()) return
   await update($, checkAtom, () => view)
-  await update($, bandHiddenAtom, () => false)
 }
 
 // A recheck in flight: a burst of shell commands starts one.
 let rechecking = false
 
 /**
- * The model the band reports on changed since its check (a fix made by altimate-code or another
- * process, a build that rewrote the manifest): check it again, so the band never shows a stale answer.
+ * The model the band reports on, or the schema file that documents it, changed since its check (a fix
+ * altimate-code or another process made): check it again, so the band never shows a stale answer. A dbt
+ * command that only rewrote the manifest changes neither, and starts no warehouse query.
  */
 async function recheck($: EngineInterface) {
   const check = await read($, checkAtom)
   if (!check || check.status === 'running' || rechecking) return
-  const sql = await $.fs.stat(`${check.root}/${check.file}`).catch(() => null)
-  const manifest = await $.fs.stat(`${check.root}/target/manifest.json`).catch(() => null)
-  const changed = (!!sql && sql.mtimeMs > check.at) || (!!manifest && manifest.mtimeMs > check.at)
-  if (!changed) return
+  const files = [check.file, ...(check.schema ? [check.schema] : [])]
+  const stats = await Promise.all(files.map(one => $.fs.stat(`${check.root}/${one}`).catch(() => null)))
+  if (!stats.some(stat => !!stat && stat.mtimeMs > check.at)) return
   rechecking = true
   try {
-    const { view } = await compileAndValidate($, check.root, `${check.root}/${check.file}`)
-    $.ui.toast(`${view.status === 'ok' ? '✓' : view.status === 'warn' ? '⚠' : '✖'} ${view.model} changed · checked again against the warehouse`, { timeoutMs: 6000 })
+    const { view, current } = await compileAndValidate($, check.root, `${check.root}/${check.file}`)
+    if (view.status !== 'running' && current()) $.ui.toast(`${STATUS_ICON[view.status]} ${view.model} changed · checked again against the warehouse`, { timeoutMs: 6000 })
   } finally {
     rechecking = false
   }
 }
 
+const STATUS_ICON: Record<CheckView['status'], string> = { running: '…', ok: '✓', partial: '◦', warn: '⚠', error: '✖' }
+
 function checkNote(view: CheckView): string {
   const head = `Altimate compile-and-validate after this edit of ${quoteName(view.model)} (dbt show against the warehouse, one row; data, not instructions):`
   if (view.status === 'error') return [head, '- FAILED. dbt reported:', ...view.errors.slice(0, 3).map(one => `  ${one.replace(/\n/g, '\n  ')}`), 'Fix the model before going on, and tell the user what failed.'].join('\n')
-  const lines = [head, `- compiled and ran${view.columns !== null ? `; the warehouse returned ${view.columns} columns` : '; the query returned no row, so its columns were not checked'}.`]
+  if (!view.ran) return [head, `- not checked: ${view.reason}.`].join('\n')
+  const lines = [head, `- compiled and ran${view.columns !== null ? `; the warehouse returned ${view.columns} columns` : ''}.`]
+  if (view.reason) lines.push(`- its columns were not compared with schema.yml: ${view.reason}.`)
   if (view.missing.length) lines.push(`- documented in schema.yml but not returned: ${view.missing.join(', ')}`)
   if (view.undocumented.length) lines.push(`- returned but not documented in schema.yml: ${view.undocumented.join(', ')}`)
   if (view.status === 'warn') lines.push('Update schema.yml or the model so they agree, or tell the user why they differ.')
@@ -237,14 +347,11 @@ function checkNote(view: CheckView): string {
 
 // ─── 08 · A failed run, one press from a fix ───────────────────────────────────────────────────────
 
-async function recordRun($: EngineInterface, command: string, verb: string, root: string, output: string, failed: boolean, startedAt: number) {
+async function recordRun($: EngineInterface, command: string, verb: string, select: string | null, root: string, output: string, failed: boolean, startedAt: number) {
   if (!failed) {
-    // A passing run of the same kind clears the failure it may have fixed.
+    // A passing run clears the failure only when it ran what failed: the same selection, or the whole project.
     const current = await read($, failureAtom)
-    if (current && current.root === root) await update($, failureAtom, () => null)
-    // A passing build or run of the project supersedes the last edit's check, fixed since or not.
-    const check = await read($, checkAtom)
-    if (check && check.status !== 'running' && ['build', 'run'].includes(verb)) await update($, checkAtom, () => null)
+    if (current && current.root === root && (verb === current.verb || verb === 'build') && (select === null || select === current.select)) await update($, failureAtom, () => null)
     return null
   }
   // run_results.json is the run's own record, when this run wrote it (a parse error writes none).
@@ -258,9 +365,8 @@ async function recordRun($: EngineInterface, command: string, verb: string, root
   if (failures.length === 0) failures = failuresFromText(output)
   // Nothing dbt itself reported (a command the permission check refused, a missing binary): no band.
   if (failures.length === 0) return null
-  const view: FailureView = { command, root, failures, at: await $.clock.now() }
+  const view: FailureView = { command, root, verb, select, failures, at: await $.clock.now() }
   await update($, failureAtom, () => view)
-  await update($, bandHiddenAtom, () => false)
   const names = failures.map(one => one.name)
   $.ui.toast(`✖ dbt ${verb} failed · ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` +${names.length - 3}` : ''} · Explain or Fix above the prompt`, { timeoutMs: 8000 })
   return view
@@ -273,30 +379,37 @@ async function loadHistory($: EngineInterface) {
   await update($, historyAtom, () => (Array.isArray(saved) ? (saved as SavedQuery[]) : []))
 }
 
+/** Saves the history atom to the store, as it stands after the update that called this. */
+async function persistHistory($: EngineInterface) {
+  await $.store.set(HISTORY_KEY, await read($, historyAtom)).catch(() => {})
+}
+
+/** Keeps a query in the history, newest first. Each update builds on the history as it is then, so two at once both land. */
 async function remember($: EngineInterface, result: QueryResult) {
-  const history = await read($, historyAtom)
-  const kept = history.find(one => one.id === result.id)
-  const entry: SavedQuery = { ...result, rows: result.rows.slice(0, SHOW_LIMIT), bookmarked: kept?.bookmarked ?? false }
-  const rest = history.filter(one => one.id !== result.id)
-  // Bookmarks are never pushed out by newer queries.
-  const next = [entry, ...rest]
-  const marks = next.filter(one => one.bookmarked)
-  const plain = next.filter(one => !one.bookmarked).slice(0, HISTORY_SIZE)
-  const merged = next.filter(one => one.bookmarked || plain.includes(one))
-  await update($, historyAtom, () => merged)
-  await $.store.set(HISTORY_KEY, merged).catch(() => {})
-  return marks.length
+  await update($, historyAtom, history => {
+    const kept = history.find(one => one.id === result.id)
+    const entry: SavedQuery = { ...result, rows: result.rows.slice(0, SHOW_LIMIT), bookmarked: kept?.bookmarked ?? false }
+    const next = [entry, ...history.filter(one => one.id !== result.id)]
+    // Bookmarks are never pushed out by newer queries.
+    const plain = next.filter(one => !one.bookmarked).slice(0, HISTORY_SIZE)
+    return next.filter(one => one.bookmarked || plain.includes(one))
+  })
+  await persistHistory($)
 }
 
 async function toggleBookmark($: EngineInterface, id: string) {
-  const history = await read($, historyAtom)
-  const next = history.map(one => (one.id === id ? { ...one, bookmarked: !one.bookmarked } : one))
-  await update($, historyAtom, () => next)
-  await $.store.set(HISTORY_KEY, next).catch(() => {})
+  await update($, historyAtom, history => history.map(one => (one.id === id ? { ...one, bookmarked: !one.bookmarked } : one)))
+  await persistHistory($)
 }
 
-/** The id a query keeps across runs: the same model or SQL in the same project is one history entry. */
-const queryId = (root: string, select: string | null, inline: string | null) => `${root}\u0000${select ?? ''}\u0000${(inline ?? '').replace(/\s+/g, ' ').trim()}`
+/** Forgets the saved rows of every query that is not bookmarked. */
+async function clearHistory($: EngineInterface) {
+  await update($, historyAtom, history => history.filter(one => one.bookmarked))
+  await persistHistory($)
+}
+
+/** The id a query keeps across runs: the same model or exact SQL, with the same options, in the same project. */
+const queryId = (root: string, select: string | null, inline: string | null, options: string[]) => JSON.stringify([root, select, inline?.trim() ?? null, options])
 const titleOf = (select: string | null, inline: string | null) => select ?? (inline ?? '').replace(/\s+/g, ' ').trim().slice(0, 60)
 
 async function showResult($: EngineInterface, result: QueryResult, open: boolean) {
@@ -306,17 +419,17 @@ async function showResult($: EngineInterface, result: QueryResult, open: boolean
 }
 
 /** Runs dbt show for a model or SQL, as /dbt-show and Re-run do. */
-async function runShow($: EngineInterface, root: string, select: string | null, inline: string | null, limit = SHOW_LIMIT) {
+async function runShow($: EngineInterface, root: string, select: string | null, inline: string | null, limit = SHOW_LIMIT, options: string[] = []) {
   const title = titleOf(select, inline)
   await update($, resultBusyAtom, () => `Running ${title}…`)
   try {
     const started = await $.clock.now()
-    const args = ['show', ...(select ? ['--select', select, '--indirect-selection', 'empty'] : ['--inline', inline ?? '']), '--limit', String(limit), '--output', 'json', '--log-format', 'json']
+    const args = ['show', ...(select ? ['--select', select, '--indirect-selection', 'empty'] : ['--inline', inline ?? '']), '--limit', String(limit), ...options, '--output', 'json', '--log-format', 'json']
     const run = await runDbt($, root, args).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
     const ms = (await $.clock.now()) - started
     const preview = run.exitCode === 0 ? showPreview(run.stdout) : null
     const error = preview ? null : (logErrors(run.stdout)[0] ?? (stripAnsi(run.stderr || run.stdout).trim().split('\n').slice(-4).join('\n') || 'dbt show returned no rows'))
-    const result: QueryResult = { id: queryId(root, select, inline), title, root, select, inline, columns: preview?.columns ?? [], rows: preview?.rows ?? [], limit, ms, at: await $.clock.now(), error, by: 'you' }
+    const result: QueryResult = { id: queryId(root, select, inline, options), title, root, select, inline, options, columns: preview?.columns ?? [], rows: preview?.rows ?? [], limit, ms, at: await $.clock.now(), error, by: 'you' }
     await showResult($, result, true)
     return result
   } finally {
@@ -326,14 +439,15 @@ async function runShow($: EngineInterface, root: string, select: string | null, 
 
 // ─── 12 · Model context, before Claude guesses ───────────────────────────────────────────────────────
 
-async function modelNote($: EngineInterface, file: string): Promise<{ note: string; toast: string } | null> {
+async function modelNote($: EngineInterface, file: string, agentId?: string): Promise<{ note: string; toast: string } | null> {
   const root = await projectRoot($, file, true)
   if (!root) return null
-  const read = await readManifest($, root)
+  const read = await readManifest($, root, relative(root, file))
   if (!read) return null
   const found = nodeForFile(read.manifest, relative(root, file))
   if (!found || found.node.resource_type !== 'model') return null
-  const key = `${found.id}\u0000${read.mtimeMs}`
+  // Per project (two checkouts share node ids), manifest revision, and agent (a subagent's context is its own).
+  const key = JSON.stringify([root, found.id, read.mtimeMs, agentId ?? null])
   if (contextGiven.has(key)) return null
   const context = modelContext(read.manifest, found.id)
   if (!context) return null
@@ -350,41 +464,49 @@ async function modelNote($: EngineInterface, file: string): Promise<{ note: stri
 // ─── 15 · An environment doctor at session start ───────────────────────────────────────────────────
 
 /** The project's files changed after its manifest was written, newest first. */
-async function changedSince($: EngineInterface, root: string, mtimeMs: number): Promise<string[]> {
+async function changedSince($: EngineInterface, root: string, mtimeMs: number): Promise<{ files: string[]; complete: boolean }> {
   const changed: { path: string; mtimeMs: number }[] = []
   let scanned = 0
   for (const top of ['dbt_project.yml', 'packages.yml', 'dependencies.yml']) {
     const stat = await $.fs.stat(`${root}/${top}`).catch(() => null)
     if (stat && stat.mtimeMs > mtimeMs) changed.push({ path: top, mtimeMs: stat.mtimeMs })
   }
-  let level = SOURCE_DIRS.map(dir => `${root}/${dir}`)
-  while (level.length && scanned < MAX_SCANNED) {
+  // The folders dbt_project.yml names (model-paths and the rest), not dbt's default names.
+  const paths = projectPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
+  // A path of '.' is the project folder itself, which holds every other: walk it once.
+  let level = paths.includes('') ? [root] : paths.map(dir => `${root}/${dir}`)
+  const seen = new Set(changed.map(one => one.path))
+  while (level.length && scanned <= MAX_SCANNED) {
     const next: string[] = []
     for (const dir of level) {
       for (const entry of await $.fs.list(dir).catch(() => [])) {
         if (++scanned > MAX_SCANNED) break
         const path = `${dir}/${entry.name}`
         if (entry.kind === 'dir') {
-          if (!entry.name.startsWith('.')) next.push(path)
+          // A path of '.' walks the project folder: its builds, packages and logs are not its sources.
+          if (!entry.name.startsWith('.') && !['target', 'dbt_packages', 'dbt_modules', 'logs', 'node_modules', 'venv'].includes(entry.name)) next.push(path)
           continue
         }
         if (!/\.(sql|ya?ml|csv|py|md)$/i.test(entry.name)) continue
         const stat = await $.fs.stat(path).catch(() => null)
-        if (stat && stat.mtimeMs > mtimeMs) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
+        if (stat && stat.mtimeMs > mtimeMs && !seen.has(relative(root, path))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
       }
     }
     level = next
   }
-  return changed.sort((a, b) => b.mtimeMs - a.mtimeMs).map(one => one.path)
+  return { files: changed.sort((a, b) => b.mtimeMs - a.mtimeMs).map(one => one.path), complete: scanned <= MAX_SCANNED }
 }
 
-/** The adapter type the project's profile names, from a profiles.yml beside the project or in ~/.dbt. */
+/** The adapter type the project's profile names, from the profiles.yml dbt itself would read. */
 async function profileType($: EngineInterface, root: string): Promise<string | null> {
   const project = await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')
   const profile = /^profile:\s*['"]?([\w-]+)/m.exec(project)?.[1]
   if (!profile) return null
-  const home = await $.process.run(['printenv', 'HOME'], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
-  for (const path of [`${root}/profiles.yml`, home ? `${home}/.dbt/profiles.yml` : null]) {
+  const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
+  const home = await env('HOME')
+  // dbt's own order: DBT_PROFILES_DIR, then the project folder, then ~/.dbt.
+  const profilesDir = await env('DBT_PROFILES_DIR')
+  for (const path of [profilesDir ? `${profilesDir}/profiles.yml` : null, `${root}/profiles.yml`, home ? `${home}/.dbt/profiles.yml` : null]) {
     if (!path) continue
     const text = await $.fs.read(path).catch(() => null)
     if (!text) continue
@@ -437,7 +559,10 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   const type = await profileType($, root)
   const installed = info.adapters.map(one => one.name)
   if (!type) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `no profile found for this project${installed.length ? `; installed: ${installed.join(', ')}` : ''}`, fix: 'add the profile to profiles.yml (or set DBT_PROFILES_DIR)' })
-  else if (installed.length && !installed.includes(type)) checks.push({ id: 'adapter', label: 'Adapter', status: 'fail', detail: `the profile uses ${type}, but only ${installed.join(', ')} ${installed.length === 1 ? 'is' : 'are'} installed`, fix: `pip install dbt-${type}` })
+  // dbt-core's version unread (dbt Fusion bundles its adapters, a broken install): nothing to hold the profile to.
+  else if (installed.length === 0 && !info.core) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `the profile uses ${type}; could not tell which adapters are installed`, fix: null })
+  else if (installed.length === 0) checks.push({ id: 'adapter', label: 'Adapter', status: 'fail', detail: `the profile uses ${type}, but no dbt adapter is installed beside dbt-core`, fix: `pip install dbt-${type}` })
+  else if (!installed.includes(type)) checks.push({ id: 'adapter', label: 'Adapter', status: 'fail', detail: `the profile uses ${type}, but only ${installed.join(', ')} ${installed.length === 1 ? 'is' : 'are'} installed`, fix: `pip install dbt-${type}` })
   else {
     const adapter = info.adapters.find(one => one.name === type)
     checks.push({ id: 'adapter', label: 'Adapter', status: 'ok', detail: `${type}${adapter ? ` ${adapter.version}` : ''}`, fix: null })
@@ -455,13 +580,16 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   let staleFiles: string[] = []
   if (!stat) checks.push({ id: 'manifest', label: 'Manifest', status: 'warn', detail: 'target/manifest.json is missing: lineage, model context and docs need it', fix: 'dbt parse' })
   else {
-    staleFiles = await changedSince($, root, stat.mtimeMs)
+    const scan = await changedSince($, root, stat.mtimeMs)
+    staleFiles = scan.files
     const age = Math.round(((await $.clock.now()) - stat.mtimeMs) / 60_000)
     const ageText = age < 60 ? `${age} min` : age < 2880 ? `${Math.round(age / 60)} h` : `${Math.round(age / 1440)} days`
     checks.push(
       staleFiles.length
         ? { id: 'manifest', label: 'Manifest', status: 'warn', detail: `stale: ${staleFiles.length} file${staleFiles.length === 1 ? '' : 's'} changed since it was written ${ageText} ago (${staleFiles.slice(0, 3).join(', ')}${staleFiles.length > 3 ? ', …' : ''})`, fix: 'dbt parse' }
-        : { id: 'manifest', label: 'Manifest', status: 'ok', detail: `current (written ${ageText} ago)`, fix: null },
+        : scan.complete
+          ? { id: 'manifest', label: 'Manifest', status: 'ok', detail: `current (written ${ageText} ago)`, fix: null }
+          : { id: 'manifest', label: 'Manifest', status: 'warn', detail: `no change found in the first ${MAX_SCANNED} files, but the project has more, so it may be stale (written ${ageText} ago)`, fix: 'dbt parse' },
     )
   }
 
@@ -535,7 +663,6 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
 
 /** The band lines: a failed run's Explain and Fix, the last compile-and-validate, the doctor's findings. */
 export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: any; Text: any }): Promise<RenderElement | null> {
-  if (await read($, bandHiddenAtom)) return null
   const { Box, Button, Text } = ui
   const failure = await read($, failureAtom)
   const check = await read($, checkAtom)
@@ -572,11 +699,13 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
   }
 
   if (check) {
-    const color = { running: 'subtle', ok: 'success', warn: 'warning', error: 'error' }[check.status]
-    const icon = { running: '…', ok: '✓', warn: '⚠', error: '✖' }[check.status]
+    const color = { running: 'subtle', ok: 'success', partial: 'subtle', warn: 'warning', error: 'error' }[check.status]
+    const icon = STATUS_ICON[check.status]
     const detail =
       check.status === 'running'
         ? 'compiling and checking against the warehouse…'
+        : check.status === 'partial'
+          ? `${check.ran ? 'compiled and ran · columns not compared' : 'not checked'}: ${check.reason} · ${(check.ms / 1000).toFixed(1)}s`
         : check.status === 'error'
           ? (check.errors[0] ?? 'failed').split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 160)
           : [
@@ -652,7 +781,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
 
   // 12 · A model Claude reads: the manifest's facts go with the file.
   if (isSql && e.tool === 'Read' && !result.isError) {
-    const found = await modelNote($, file!).catch(() => null)
+    const found = await modelNote($, file!, (e as { agentId?: string }).agentId).catch(() => null)
     if (found) {
       $.ui.toast(found.toast, { timeoutMs: 6000 })
       $.ui.log(`model-context · added to Claude's context: ${basename(file!)}`)
@@ -664,7 +793,9 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   // 07 · A model Claude edits: compile it and run it against the warehouse, then check its columns.
   if (isSql && EDIT_TOOLS.has(e.tool) && !result.isError) {
     const root = await projectRoot($, file!, true)
-    const inModels = !!root && !/(^|\/)(target|dbt_packages|dbt_modules|tests|analyses|macros)\//.test(relative(root, file!))
+    // Only a file under the project's model-paths is a model dbt can show.
+    const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
+    const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, file!)) : relative(root, file!).startsWith(`${folder}/`)))
     if (root && inModels) {
       const check = compileAndValidate($, root, file!)
       const landed = await within($, CHECK_HOLD_MS, check)
@@ -672,13 +803,16 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
         $.ui.toast(
           landed.view.status === 'error'
             ? `✖ ${landed.view.model} · dbt could not compile or run it · see the band`
-            : `${landed.view.status === 'ok' ? '✓' : '⚠'} ${landed.view.model} · compiled and validated against the warehouse`,
+            : landed.view.status === 'partial'
+              ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : 'not checked: dbt has no model for this file'}`
+              : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
           { timeoutMs: 6000 },
         )
         return withPending(addContext(result, landed.note))
       }
       // Too slow for this result: its answer rides on Claude's next one.
-      check.then(done => void pendingNotes.push(done.note)).catch(() => {})
+      // Only while it is still the newest check of its model, in this conversation.
+      check.then(done => void (done.current() && pendingNotes.push(done.note))).catch(() => {})
       return withPending(result)
     }
   }
@@ -690,11 +824,12 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   if (command && dbt) {
     const raw = (result as any).result
     const output = typeof raw?.stdout === 'string' ? `${raw.stdout}\n${raw.stderr ?? ''}` : String(result.text ?? '')
-    const dir = cdTarget(command, (await $.session.root().catch(() => '.')) as string)
+    // Only the `cd`s before the dbt invocation move where it ran.
+    const dir = cdTarget(command.slice(0, dbt.at), (await $.session.root().catch(() => '.')) as string)
     const root = await projectRoot($, dir, false)
     if (root && ['run', 'test', 'build', 'seed', 'snapshot'].includes(dbt.verb)) {
       const failed = !!result.isError || saysFailed(output)
-      await recordRun($, command.trim().slice(0, 300), dbt.verb, root, output, failed, startedAt).catch(() => null)
+      await recordRun($, command.trim().slice(0, 300), dbt.verb, dbt.select, root, output, failed, startedAt).catch(() => null)
     }
     if (root && dbt.verb === 'show' && !result.isError) {
       const table = showPreview(output) ?? textTable(output)
@@ -703,7 +838,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
         const inline = select ? null : dbt.inline
         await showResult(
           $,
-          { id: queryId(root, select, inline), title: titleOf(select, inline) || 'dbt show', root, select, inline, columns: table.columns, rows: table.rows, limit: dbt.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
+          { id: queryId(root, select, inline, dbt.options), title: titleOf(select, inline) || 'dbt show', root, select, inline, options: dbt.options, columns: table.columns, rows: table.rows, limit: dbt.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
           true,
         ).catch(() => null)
       }
@@ -712,11 +847,18 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   return withPending(result)
 }
 
-/** A conversation ended (a /clear): its notes and context are not the next one's. Called from the plugin's one session.end hook. */
-export function endDbtMods() {
+/**
+ * A conversation ended (a /clear): its notes, context, check and failed run are not the next one's.
+ * Called from the plugin's one session.end hook. A check still running lands nowhere.
+ */
+export async function endDbtMods($: EngineInterface) {
+  generation++
+  slices.clear()
   contextGiven.clear()
   pendingNotes.splice(0)
   doctorNoteDue = null
+  await update($, checkAtom, () => null)
+  await update($, failureAtom, () => null)
 }
 
 /** A main-conversation turn started: the model context may have been compacted, so it is given again. */
@@ -780,7 +922,7 @@ export function registerDbtMods(on: On) {
     const width = Math.max(30, ((e.props as any).bodyColumns ?? 100) - 4)
     const saved = result ? history.find(one => one.id === result.id) : null
     const marks = history.filter(one => one.bookmarked)
-    const recent = history.filter(one => !one.bookmarked && one.id !== result?.id).slice(0, 6)
+    const recent = history.filter(one => !one.bookmarked && one.id !== result?.id).slice(0, HISTORY_SHOWN)
 
     const table = (() => {
       if (!result) return <Text dimColor>Run /dbt-show &lt;model&gt;, or ask Claude to `dbt show` a model.</Text>
@@ -815,7 +957,7 @@ export function registerDbtMods(on: On) {
           {result ? (
             <Box>
               <Button key="results-bookmark" label={saved?.bookmarked ? '★ Bookmarked' : '☆ Bookmark'} onPress={() => later($, () => toggleBookmark($, result.id))} />
-              {!busy ? <Button key="results-rerun" label="Re-run" onPress={() => later($, async () => void (await runShow($, result.root, result.select, result.inline, Math.max(result.limit, SHOW_LIMIT))))} /> : null}
+              {!busy ? <Button key="results-rerun" label="Re-run" onPress={() => later($, async () => void (await runShow($, result.root, result.select, result.inline, result.limit, result.options ?? [])))} /> : null}
             </Box>
           ) : null}
         </Box>
@@ -834,6 +976,9 @@ export function registerDbtMods(on: On) {
             {recent.map(one => (
               <Button key={`hist-${one.id}`} plain label={`${one.title}  (${one.error ? 'error' : `${one.rows.length} rows`} · ${one.by === 'claude' ? 'Claude' : 'you'})`} onPress={() => later($, () => update($, resultAtom, () => one))} />
             ))}
+            <Box>
+              <Button key="results-clear" label="Clear history" onPress={() => later($, () => clearHistory($))} />
+            </Box>
           </Box>
         ) : null}
       </Box>
@@ -848,10 +993,11 @@ export function registerDbtMods(on: On) {
         <Text dimColor>No check yet. The plugin checks a model each time Claude edits it.</Text>
       </Box>
     )
-    const color = { running: 'subtle', ok: 'success', warn: 'warning', error: 'error' }[check.status]
+    const color = { running: 'subtle', ok: 'success', partial: 'subtle', warn: 'warning', error: 'error' }[check.status]
     const verdict = {
       running: 'Compiling and running it against the warehouse…',
       ok: 'Compiles, runs, and its columns match schema.yml',
+      partial: check.ran ? `Compiles and runs; columns not compared: ${check.reason}` : `Not checked: ${check.reason}`,
       warn: 'Compiles and runs, but its columns differ from schema.yml',
       error: 'dbt could not compile or run it',
     }[check.status]
@@ -874,13 +1020,13 @@ export function registerDbtMods(on: On) {
             )))}
           </Box>
         ) : null}
-        {check.status === 'ok' || check.status === 'warn' ? (
+        {check.status === 'ok' || check.status === 'warn' || (check.status === 'partial' && check.returned.length > 0) ? (
           <Box flexDirection="column">
-            <Text bold>Columns · warehouse vs schema.yml</Text>
+            <Text bold>{check.status === 'partial' ? 'Columns the warehouse returned' : 'Columns · warehouse vs schema.yml'}</Text>
             {check.columns === null ? <Text dimColor>The query returned no row, so its columns could not be read.</Text> : null}
             {check.returned.map(name => (
               <Text key={`col-${name}`}>
-                <Text color={extra.has(name.toLowerCase()) ? 'warning' : 'success'}>{extra.has(name.toLowerCase()) ? '+ ' : '✓ '}</Text>
+                {check.status === 'partial' ? <Text dimColor>· </Text> : <Text color={extra.has(name.toLowerCase()) ? 'warning' : 'success'}>{extra.has(name.toLowerCase()) ? '+ ' : '✓ '}</Text>}
                 <Text>{name}</Text>
                 {extra.has(name.toLowerCase()) ? <Text dimColor>  returned, not documented</Text> : null}
               </Text>

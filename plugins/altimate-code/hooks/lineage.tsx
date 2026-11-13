@@ -1227,7 +1227,7 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
 export function registerLineage(on: On) {
   // A new user turn gets the lineage note again (its context may have been compacted since), once.
   on('session.end', async ($, e, next) => {
-    endDbtMods()
+    await endDbtMods($).catch(() => {})
     paneOpened = false
     narrowHintShown = false
     drawnCache = null
