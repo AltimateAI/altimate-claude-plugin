@@ -42,12 +42,16 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
   const { stateDir, favorState = false, target, defaultTarget } = options
   if (!stateDir && !target) return command
   let out = command
+  // DBT_STATE or DBT_TARGET exported in the line is the user's own choice: none of its dbt commands gets the flag
+  // (a line with an `export` and the variable anywhere in it counts, whatever the quoting).
+  const exportedState = /\bexport\b/.test(command) && /\bDBT_STATE=/.test(command)
+  const exportedTarget = /\bexport\b/.test(command) && /\bDBT_TARGET=/.test(command)
   // From the last invocation to the first, so the offsets of those before stay right.
-  for (const one of parseDbtCommand(command).reverse()) {
+  for (const one of [...parseDbtCommand(command)].sort((a, b) => b.subcommandEnd - a.subcommandEnd)) {
     if (!one.subcommand) continue
     const flags: string[] = []
-    if (stateDir && !NO_DEFER.has(one.subcommand) && !one.hasDefer && !one.hasState) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
-    if (target && !NO_TARGET.has(one.subcommand) && target !== defaultTarget && one.target === null && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
+    if (stateDir && !exportedState && !NO_DEFER.has(one.subcommand) && !one.hasDefer && !one.hasState) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
+    if (target && !NO_TARGET.has(one.subcommand) && target !== defaultTarget && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
     if (flags.length === 0) continue
     out = `${out.slice(0, one.subcommandEnd)} ${flags.join(' ')}${out.slice(one.subcommandEnd)}`
   }
@@ -86,13 +90,13 @@ async function findProject($: EngineInterface): Promise<string | null> {
 }
 
 // Where a command runs from: the session folder, moved by each `cd` or `pushd` in the command.
-const CD = /(?:^|[;&|(\n{!]\s*|\b(?:if|elif|while|until|then|do|else|time)\s+)(?:cd|pushd)\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
+const CD = /(?:^|[;&|(\n{!]\s*|\b(?:if|elif|while|until|then|do|else|time)\s+)(?:cd|pushd)[ \t]+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
 const PROJECT_DIR = /(?:--project-dir[ =]|\bDBT_PROJECT_DIR=)("[^"]+"|'[^']+'|[^\s;&|)]+)/g
 const UNQUOTE = /^['"]|['"]$/g
 
 /** `target` seen from `base`, as an absolute path with forward slashes (a drive letter kept); null when it cannot be known. */
 function resolvePath(base: string, target: string): string | null {
-  if (/^[~$]/.test(target)) return null
+  if (/^~|[$`]/.test(target)) return null
   const from = base.replace(/\\/g, '/')
   const to = target.replace(/\\/g, '/')
   const drive = /^[A-Za-z]:/.exec(to)?.[0] ?? /^[A-Za-z]:/.exec(from)?.[0] ?? ''
@@ -112,7 +116,15 @@ function resolvePath(base: string, target: string): string | null {
  */
 export function runsInProject(command: string, root: string, projectDir: string): boolean {
   if (/\s--(?:directory|project)[\s=]/.test(command)) return false
-  const first = parseDbtCommand(command)[0]
+  // A folder change this does not follow (`popd`, `env -C`, `command cd`, a `cd` with no folder) leaves the folder unknown.
+  // Quotes and backslashes are dropped for this check: `command 'cd' ../b` and `env "-C" ../b` change folder like their plain forms.
+  const plain = command.replace(/["'\\]/g, '')
+  if (/(?:^|[\s;&|(){}!])(?:popd|chdir)(?=[\s;&|)]|$)|\benv\s+(?:\S+\s+)*(?:-C|--chdir)\b/.test(plain)) return false
+  const cdWords = plain.match(/(?:^|[\s;&|(){}!])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
+  if (cdWords !== [...command.matchAll(CD)].length) return false
+  const invocations = parseDbtCommand(command)
+  // The outermost command that starts first, not an invocation inside a `<(...)` that ends up first in the list.
+  const first = [...invocations].sort((a, b) => a.start - b.start)[0]
   const project = resolvePath(projectDir, '.')
   if (!first || !project) return false
   const inside = (dir: string | null) => !!dir && (dir === project || dir.startsWith(`${project.replace(/\/+$/, '')}/`))
@@ -120,6 +132,8 @@ export function runsInProject(command: string, root: string, projectDir: string)
   let before = dir
   for (const match of command.matchAll(CD)) {
     if (!dir) return false
+    // A folder word that goes on after its quotes (`"."/..`) is not one this can work out.
+    if (!/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length))) return false
     const word = match[1]!.replace(UNQUOTE, '')
     // `cd -P dir`, `cd -`: not a folder this can work out.
     dir = word.startsWith('-') ? null : resolvePath(dir, word)
@@ -128,8 +142,12 @@ export function runsInProject(command: string, root: string, projectDir: string)
   }
   // A project named outright is the one to judge; otherwise the folder the command runs from.
   const named = [...command.matchAll(PROJECT_DIR)]
+  // A project option written with quotes (`"--project-dir" ../b`) is only seen in the plain copy: unknown.
+  if (named.length !== (plain.match(/--project-dir[ =]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
   if (named.length === 0) return inside(before)
-  if (!before) return false
+  // Only a single dbt invocation, with the project named inside it, is judged: elsewhere in the line it is another command's.
+  if (invocations.length !== 1 || !before) return false
+  if (named.some(match => match.index < first.start || match.index >= first.end)) return false
   return named.every(match => inside(resolvePath(before!, match[1]!.replace(UNQUOTE, ''))))
 }
 
@@ -244,8 +262,10 @@ export function register(on: On, context: FeatureContext) {
       return { text: `Defer ${word} for this session.\n${describe(state)}` }
     }
     if (word === 'reset') {
+      const mine = generation
       state = await load($, null)
-      await publish($, state)
+      // A session that started while this read ran has its own state.
+      if (mine === generation) await publish($, state)
       return { text: `Defer and target back to the project's settings.\n${describe(state)}` }
     }
     if (word === '' || word === 'status') {
@@ -269,6 +289,7 @@ export function register(on: On, context: FeatureContext) {
     if (state.targets.length && !state.targets.includes(name)) {
       return { text: `No target "${name}" in the profile. Targets: ${state.targets.join(', ')}` }
     }
+    if (!state.projectDir) return { text: 'No dbt project found in this folder, so there is no target to set.' }
     state = { ...state, target: name }
     await publish($, state)
     return { text: `dbt commands now run with --target ${name} (this session).` }

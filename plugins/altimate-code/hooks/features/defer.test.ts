@@ -68,6 +68,40 @@ test('a command for another project, by cd or --project-dir, is not rewritten', 
   expect(runsInProject('dbt run --project-dir ./models/..', '/repo/a', '/repo/a')).toBe(true)
 })
 
+test('a folder change or project named outside the dbt command itself is not trusted', () => {
+  const run = (command: string) => runsInProject(command, '/repo/a', '/repo/a')
+  // A project named by another command or in a comment does not vouch for a different dbt command.
+  expect(run('cd ../b && dbt run --project-dir ../a && dbt test')).toBe(false)
+  expect(run('cd ../b; echo --project-dir ../a; dbt run')).toBe(false)
+  expect(run('dbt run # --project-dir ../a')).toBe(false)
+  // Folder changes that are not followed leave the folder unknown.
+  expect(run('cd && dbt run')).toBe(false)
+  expect(run('popd && dbt run')).toBe(false)
+  expect(run('command cd ../b && dbt run')).toBe(false)
+  expect(run('env -C ../b dbt run')).toBe(false)
+  expect(run('env --chdir=../b dbt run')).toBe(false)
+  expect(run('cd ./$SUB && dbt run')).toBe(false)
+  expect(run('cd `pwd`/../b && dbt run')).toBe(false)
+  expect(run("command 'cd' ../b && dbt run")).toBe(false)
+  expect(run('env "-C" ../b dbt run')).toBe(false)
+  expect(run('dbt run "--project-dir" ../b')).toBe(false)
+  expect(run('cd "\'.\'"/.. && dbt run')).toBe(false)
+  expect(run('cd "a"/.. && dbt run')).toBe(false)
+  expect(run('popd; dbt run')).toBe(false)
+  expect(run('cd\ndbt run')).toBe(false)
+  expect(run('cd ../b && dbt ls <(cd ../a; dbt ls)')).toBe(false)
+  expect(run('cd models && dbt run')).toBe(true)
+})
+
+test('DBT_STATE or DBT_TARGET exported earlier in the line is left alone, and an inner invocation keeps its place', () => {
+  expect(rewriteDeferCommand('export DBT_STATE=/mine && dbt build', on)).toBe('export DBT_STATE=/mine && dbt build')
+  expect(rewriteDeferCommand('export OTHER=x DBT_STATE=/mine DBT_TARGET=prod && dbt build', { ...on, target: 'qa', defaultTarget: 'dev' })).toBe('export OTHER=x DBT_STATE=/mine DBT_TARGET=prod && dbt build')
+  expect(rewriteDeferCommand('export OTHER="two words" DBT_STATE=/mine && dbt build', on)).toBe('export OTHER="two words" DBT_STATE=/mine && dbt build')
+  expect(rewriteDeferCommand('export OTHER="a;b" DBT_STATE=/mine DBT_TARGET=prod && dbt build', { ...on, target: 'qa', defaultTarget: 'dev' })).toBe('export OTHER="a;b" DBT_STATE=/mine DBT_TARGET=prod && dbt build')
+  expect(rewriteDeferCommand('export DBT_TARGET=prod && dbt build', { target: 'qa', defaultTarget: 'dev' })).toBe('export DBT_TARGET=prod && dbt build')
+  expect(rewriteDeferCommand('dbt ls <(dbt ls)', on)).toBe('dbt ls --defer --state /work/prod-state <(dbt ls --defer --state /work/prod-state)')
+})
+
 test('a Windows session folder, with either slash, is the project it names', () => {
   expect(runsInProject('dbt run', 'C:\\repo', 'C:/repo')).toBe(true)
   expect(runsInProject('cd models && dbt run', 'C:/repo', 'C:\\repo')).toBe(true)
