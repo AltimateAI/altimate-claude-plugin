@@ -210,7 +210,19 @@ export interface CostState {}
 // Project health: the health check issues on the changed models.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface HealthState {}
+export interface HealthState {
+  /** `uniqueId\u0000insight name` of every insight the project had at session start; null until that run lands. */
+  baseline: string[] | null
+  /** Model files changed since the last check. */
+  pending: string[]
+  /** Every model file changed this session. */
+  touched: string[]
+  /** What the last check found that the baseline lacked, on the touched models. */
+  issues: Array<{ uniqueId: string; path: string; name: string; severity: string; message: string; recommendation: string }>
+  /** Why the check can't run, shown once per distinct reason. */
+  problem: string | null
+  running: boolean
+}
 
 // ---------------------------------------------------------------------------------------------------
 // SQL graph: the edited model's SQL graph.
