@@ -195,7 +195,8 @@ if not pm:
         pm[k] = (n.get('depends_on') or {}).get('nodes') or []
         for p in pm[k]:
             cm.setdefault(p, []).append(k)
-hit = [k for k, n in nodes.items() if n.get('original_file_path') == rel and n.get('resource_type') != 'test']
+project = sys.argv[3] if len(sys.argv) > 3 else ''
+hit = [k for k, n in nodes.items() if n.get('original_file_path') == rel and n.get('resource_type') != 'test' and (not project or not n.get('package_name') or n.get('package_name') == project)]
 keep = set(hit)
 for graph in (pm, cm):
     todo = list(hit)
@@ -209,8 +210,8 @@ for graph in (pm, cm):
 tests = [c for h in hit for c in cm.get(h, []) if c.startswith('test.')]
 keep.update(tests)
 full = set(hit) | set(tests)
-fields = ('name', 'resource_type', 'original_file_path', 'relation_name', 'description', 'config', 'tags', 'columns', 'column_name', 'test_metadata', 'depends_on', 'patch_path')
-out = {'nodes': {}, 'parent_map': {}, 'child_map': {}}
+fields = ('name', 'package_name', 'resource_type', 'original_file_path', 'relation_name', 'description', 'config', 'tags', 'columns', 'column_name', 'test_metadata', 'depends_on', 'patch_path')
+out = {'nodes': {}, 'parent_map': {}, 'child_map': {}, 'metadata': {'project_name': project or (m.get('metadata') or {}).get('project_name')}}
 for k in keep:
     n = nodes.get(k)
     if n is not None:
@@ -219,6 +220,11 @@ for k in keep:
     out['child_map'][k] = cm.get(k, [])
 print(json.dumps(out))
 `
+
+/** The project's name in dbt_project.yml: which manifest nodes are its own, not an installed package's. */
+async function projectName($: EngineInterface, root: string): Promise<string | null> {
+  return /^name:\s*['"]?([\w-]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1] ?? null
+}
 
 /** The project's artifact folder (`target-path` in dbt_project.yml): absolute, or under the project. */
 async function targetOf($: EngineInterface, root: string): Promise<string> {
@@ -254,7 +260,8 @@ async function readManifest($: EngineInterface, root: string, rel?: string): Pro
     if (cached) return { manifest: await cached, mtimeMs: stat.mtimeMs }
     const slicing = (async () => {
       const python = await pythonFor($, root)
-      const run = await $.process.run([python, '-c', MANIFEST_SLICE, path, rel], { cwd: root, timeoutMs: 60_000 })
+      const project = (await projectName($, root)) ?? ''
+      const run = await $.process.run([python, '-c', MANIFEST_SLICE, path, rel, project], { cwd: root, timeoutMs: 60_000 })
       if (run.exitCode !== 0 || run.isStdoutTruncated) throw new Error('manifest slice failed')
       return JSON.parse(run.stdout)
     })()
@@ -299,9 +306,9 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   const started = await $.clock.now()
   // The model's own name, from the manifest when it knows the file (shown to the person; dbt selects by path).
   const before = await readManifest($, root, rel)
-  const known = before ? nodeForFile(before.manifest, rel) : null
+  const known = before ? nodeForFile(before.manifest, rel, await projectName($, root)) : null
   const model = typeof known?.node?.name === 'string' ? known.node.name : basename(file).replace(/\.sql$/i, '')
-  const blank = { model, root, file: rel, errors: [], missing: [], undocumented: [], columns: null, returned: [], documented: [], reason: null, ran: false, schema: schemaOf(known?.node) }
+  const blank = { model, root, file: rel, errors: [], missing: [], undocumented: [], columns: null, returned: [], documented: [], reason: null, ran: false, schema: schemaOf(known?.node), target: await targetOf($, root) }
   await setCheck($, { ...blank, status: 'running', ms: 0, at: started }, current)
   // The file itself, by path (a name can be a version's or another package's), and only it: dbt's eager
   // indirect selection would also run its tests, and show a test's failure as the model's.
@@ -310,7 +317,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   if (run === SKIPPED) return { view: { ...blank, status: 'partial', reason: 'a newer check replaced this one', ms: 0, at: started }, note: '', current }
   // dbt show re-parsed the project: the manifest now holds the model and schema.yml as they are.
   const after = await readManifest($, root, rel)
-  const node = after ? nodeForFile(after.manifest, rel) : null
+  const node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
   const named = typeof node?.node?.name === 'string' ? node.node.name : null
   const ms = (await $.clock.now()) - started
   const preview = run.exitCode === 0 ? showPreview(run.stdout) : null
@@ -336,7 +343,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
             ? 'schema.yml documents no columns for this model'
             : null
   const status: CheckView['status'] = errors.length ? 'error' : reason ? 'partial' : drift.missing.length || drift.undocumented.length ? 'warn' : 'ok'
-  const view: CheckView = { ...blank, model: named ?? model, schema: schemaOf(node?.node) ?? blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
+  const view: CheckView = { ...blank, model: named ?? model, schema: node ? schemaOf(node.node) : blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
   await setCheck($, view, current)
   // An edit of a schema file or macro that came while this ran checks it again now.
   if (forcedWhileBusy && current() && !rechecking) {
@@ -372,7 +379,8 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   if (!check) return
   // Busy (a check or recheck running): a forced recheck waits for it, so a schema.yml written meanwhile is not missed.
   if (check.status === 'running' || rechecking) {
-    if (edited) forcedWhileBusy = edited
+    // Only an edit that concerns this check waits for it; an unrelated one never replaces it.
+    if (edited && editConcerns(check, edited)) forcedWhileBusy = edited
     return
   }
   const files = [check.file, ...(check.schema ? [check.schema] : [])]
@@ -380,9 +388,9 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   if (generation !== asked) return
   // The model's file is gone: there is nothing left to check, and its old answer is not shown.
   if (!stats[0]) return void (await update($, checkAtom, current => (current === check ? null : current)))
-  // An edited .yml or .sql of the checked model's own project (not its build output) checks it again.
-  const target = edited ? await targetOf($, check.root) : null
-  const force = !!edited && edited.startsWith(`${check.root}/`) && !edited.startsWith(`${target}/`)
+  // An edited .yml or .sql of the checked model's own project (not its build output) checks it again, and so
+  // does a schema file that documented it and is gone.
+  const force = (!!edited && editConcerns(check, edited)) || (!!check.schema && !stats[1])
   if (!force && !stats.some(stat => !!stat && stat.mtimeMs > check.at)) return
   rechecking = true
   try {
@@ -395,6 +403,11 @@ async function recheck($: EngineInterface, edited: string | null = null) {
     forcedWhileBusy = null
     if (waiting && generation === asked) later($, () => recheck($, waiting))
   }
+}
+
+/** Whether an edited file is one of the checked model's project's own sources (not its build output). */
+function editConcerns(check: CheckView, edited: string): boolean {
+  return edited.startsWith(`${check.root}/`) && !edited.startsWith(`${check.target ?? `${check.root}/target`}/`)
 }
 
 const STATUS_ICON: Record<CheckView['status'], string> = { running: '…', ok: '✓', partial: '◦', warn: '⚠', error: '✖' }
@@ -536,7 +549,7 @@ async function modelNote($: EngineInterface, file: string, agentId?: string): Pr
   if (!root) return null
   const read = await readManifest($, root, relative(root, file))
   if (!read) return null
-  const found = nodeForFile(read.manifest, relative(root, file))
+  const found = nodeForFile(read.manifest, relative(root, file), await projectName($, root))
   if (!found || found.node.resource_type !== 'model') return null
   // Per project (two checkouts share node ids), manifest revision, and agent (a subagent's context is its own).
   const key = JSON.stringify([root, found.id, read.mtimeMs, agentId ?? null])
@@ -597,16 +610,22 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
     level = next
   }
   // A file of this project the manifest lists that is gone (a deleted model, a whole deleted folder) makes it
-  // stale too. Installed packages' files live under dbt_packages, so only the project's own nodes are looked at.
+  // stale too. Installed packages' files live under dbt_packages, so only the project's own files are looked at.
   // A manifest over 4 MiB is not read here: deletions are then not looked for (changed files still are).
   const manifest = await readManifest($, root)
   if (manifest) {
     // The project's name from the manifest, else dbt_project.yml's (older manifests do not record it).
-    const project = manifest.manifest.metadata?.project_name ?? /^name:\s*['"]?([\w-]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1]
-    const listed = Object.values<any>(manifest.manifest.nodes ?? {})
-      .filter(node => ['model', 'seed', 'snapshot', 'analysis'].includes(node?.resource_type) && typeof node?.original_file_path === 'string')
-      .filter(node => !project || !node.package_name || node.package_name === project)
-      .map(node => node.original_file_path as string)
+    const project = manifest.manifest.metadata?.project_name ?? (await projectName($, root))
+    // Every file of the project the manifest names: nodes (models, seeds, snapshots, analyses, singular tests),
+    // the schema files that document them, sources' and macros' files.
+    const own = (one: any) => !project || !one?.package_name || one.package_name === project
+    const files = (group: any) => Object.values<any>(group ?? {}).filter(own)
+    const listed = [
+      ...files(manifest.manifest.nodes).map(one => (one?.resource_type === 'test' && one?.test_metadata ? null : one?.original_file_path)),
+      ...files(manifest.manifest.nodes).map(one => (typeof one?.patch_path === 'string' ? one.patch_path.replace(/^[^:]*:\/\//, '') : null)),
+      ...files(manifest.manifest.sources).map(one => one?.original_file_path),
+      ...files(manifest.manifest.macros).map(one => one?.original_file_path),
+    ].filter((one): one is string => typeof one === 'string' && one.length > 0)
     for (const path of [...new Set(listed)].slice(0, MAX_SCANNED)) {
       if (!(await $.fs.exists(`${root}/${path}`).catch(() => true))) changed.push({ path: `${path} (deleted)`, mtimeMs: Number.MAX_SAFE_INTEGER })
     }
@@ -977,7 +996,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
         // repeated word for word: it is kept in the pane, with no Re-run.
         await showResult(
           $,
-          { id: JSON.stringify([root, dir, replay]), title: titleOf(select, inline) || 'dbt show', root, select, inline, options: dbt.options, argv: dbt.replayable ? dbt.argv : null, cwd: dir, replayable: dbt.replayable, columns: table.columns, rows: table.rows, limit: dbt.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
+          { id: JSON.stringify([root, dir, replay, dbt.env]), title: titleOf(select, inline) || 'dbt show', root, select, inline, options: dbt.options, argv: dbt.replayable ? dbt.argv : null, cwd: dir, replayable: dbt.replayable, columns: table.columns, rows: table.rows, limit: dbt.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
           true,
         ).catch(() => null)
       }
@@ -993,6 +1012,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
 export async function endDbtMods($: EngineInterface) {
   generation++
   slices.clear()
+  forcedWhileBusy = null
   contextGiven.clear()
   pendingNotes.splice(0)
   doctorNoteDue = null

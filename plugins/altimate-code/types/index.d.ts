@@ -219,6 +219,8 @@ export type CheckView = {
   ran: boolean
   /** Project-relative path of the schema file that documents the model, when the manifest names one. */
   schema: string | null
+  /** The project's artifact folder (absolute): edits there are dbt's output, not sources. */
+  target: string
   /** dbt's compile or warehouse errors. */
   errors: string[]
   /** Columns schema.yml documents that the warehouse did not return. */

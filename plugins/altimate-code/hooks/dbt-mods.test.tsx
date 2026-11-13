@@ -10,6 +10,7 @@ import {
   logErrors,
   modelContext,
   modelContextNote,
+  nodeForFile,
   projectPaths,
   replayArgv,
   saysFailed,
@@ -350,6 +351,15 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   // Only real assignments: a word with `=` in another command is not one.
   expect(dbtCommand('echo a=b; git commit -m x=1 && dbt run -s o')?.env).toEqual([])
   expect(dbtCommand('export A=1 B=2; dbt run -s o')?.env).toEqual(['A=1', 'B=2'])
+  // The value dbt runs with: the command's own prefix overrides an earlier export.
+  expect(dbtCommand('export DBT_TARGET=dev; DBT_TARGET=prod dbt run -s o')?.env).toEqual(['DBT_TARGET=prod'])
+  expect(dbtCommand('export DBT_TARGET=prod; DBT_TARGET=dev dbt run -s o')?.env).toEqual(['DBT_TARGET=dev'])
+  // An installed package's model at the same path is not the project's.
+  const shared = { metadata: { project_name: 'shop' }, nodes: { 'model.pkg.orders': { resource_type: 'model', package_name: 'pkg', original_file_path: 'models/orders.sql' }, 'model.shop.orders': { resource_type: 'model', package_name: 'shop', original_file_path: 'models/orders.sql' } } }
+  expect(nodeForFile(shared, 'models/orders.sql')?.id).toBe('model.shop.orders')
+  // dbt show's two other output forms: text preview in JSON logs, and a JSON block in text logs.
+  expect(showPreview(JSON.stringify({ data: { output_format: 'text', node_name: 'm', preview: '| a | b |\n| - | - |\n| 1 | 2 |' }, info: { code: 'Q041' } }))?.rows).toEqual([['1', '2']])
+  expect(showPreview('06:00:00  Previewing node \'m\':\n{\n  "node": "m",\n  "show": [\n    {"a": 1}\n  ]\n}\n')?.columns).toEqual(['a'])
   // A prefix applies only to its own command.
   expect(dbtCommand('A=1 echo hi; dbt run -s o')?.env).toEqual([])
   expect(targetPath("target-path: \"{{ env_var('T', 'target') }}\"\n")).toBe('target')
@@ -800,7 +810,7 @@ test('a manifest over 4 MiB is read through the project\'s Python for the model 
   const { clock, runs } = await start($, on, { manifestSize: 9 * 1024 * 1024 })
   const result: any = await $.tool.call({ tool: 'Read', file_path: ORDERS })
   await clock.settle()
-  expect(runs.find(argv => argv[1] === '-c')?.slice(0, 1).concat(runs.find(argv => argv[1] === '-c')!.slice(3))).toEqual(['/proj/.venv/bin/python', '/proj/target/manifest.json', 'models/orders.sql'])
+  expect(runs.find(argv => argv[1] === '-c')?.slice(0, 1).concat(runs.find(argv => argv[1] === '-c')!.slice(3))).toEqual(['/proj/.venv/bin/python', '/proj/target/manifest.json', 'models/orders.sql', 'shop'])
   expect(result.context?.[0]).toContain('dbt model context for orders')
   // The slice is kept for that file and manifest revision: reading it again starts no Python.
   await $.tool.call({ tool: 'Read', file_path: ORDERS })
@@ -1209,5 +1219,54 @@ test('a relative DBT_PROFILES_DIR is read from the project folder', async ($, on
   await clock.settle()
   const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^duckdb 1\.10\.1$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a deleted schema file makes its check run again, and the doctor finds a deleted macro or schema file', async ($, on) => {
+  const { clock, runs, files, setBash } = await start($, on, { files: { 'macros/cents.sql': '' } })
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  delete files['models/schema.yml']
+  setBash({ stdout: 'ok' })
+  await $.tool.call({ tool: 'Bash', command: 'rm models/schema.yml' })
+  await clock.settle()
+  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /models\/schema\.yml \(deleted\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('queries Claude ran under different DBT_TARGET values are two history entries', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'DBT_TARGET=prod dbt show -s orders' })
+  await $.tool.call({ tool: 'Bash', command: 'DBT_TARGET=dev dbt show -s orders' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[]).length).toBe(2)
+})
+
+test('an unrelated edit while a check runs does not replace a pending recheck', async ($, on) => {
+  let release!: () => void
+  const { clock, runs } = await start($, on, { holdShow: new Promise<void>(go => (release = go)), files: { 'macros/cents.sql': '' } })
+  const edit = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  await clock.advance(31_000)
+  await edit
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/macros/cents.sql`, old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Edit', file_path: '/elsewhere/.github/workflows/ci.yml', old_string: 'a', new_string: 'b' })
+  release()
+  await clock.settle()
+  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+})
+
+test('Claude\'s plain `dbt show` (dbt\'s text table, as dbt prints it) lands in the pane', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: "\u001b[0m06:36:55  Running with dbt=1.11.6\n\u001b[0m06:36:55  Previewing node 'customers':\n| customer_id | first_name |\n| ----------- | ---------- |\n|           1 | Michael    |\n|           2 | Shawn      |\n" })
+  await $.tool.call({ tool: 'Bash', command: '.venv/bin/dbt show -s customers --limit 2' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /2 rows · 2 columns/ })).toBeDefined()
   await ui.unmount()
 })

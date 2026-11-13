@@ -25,6 +25,11 @@ export function showPreview(stdout: string): { columns: string[]; rows: unknown[
   for (const line of stdout.split('\n').reverse()) {
     const one = logLine(line)
     if (one?.code !== 'Q041' || typeof one.data?.preview !== 'string') continue
+    // `--output text` with JSON logs: the preview is dbt's text table.
+    if (one.data.output_format && one.data.output_format !== 'json') {
+      const table = textTable(one.data.preview)
+      return table ? { ...table, node: typeof one.data.node_name === 'string' && !one.data.is_inline ? one.data.node_name : null } : null
+    }
     let records: Record<string, unknown>[]
     try {
       records = JSON.parse(one.data.preview)
@@ -37,6 +42,18 @@ export function showPreview(stdout: string): { columns: string[]; rows: unknown[
     const rows = records.map(record => columns.map(column => record?.[column] ?? null))
     const node = typeof one.data.node_name === 'string' && !one.data.is_inline ? one.data.node_name : null
     return { columns, rows, node }
+  }
+  // `--output json` with text logs: dbt prints `{"node": …, "show": [rows]}` over many lines.
+  const block = /^\s*\{\s*\n\s*"(?:node|show)":[\s\S]*?\n\}/m.exec(stripAnsi(stdout).replace(/^\s*\d\d:\d\d:\d\d\s+/gm, ''))
+  if (block) {
+    try {
+      const parsed = JSON.parse(block[0])
+      if (Array.isArray(parsed?.show)) {
+        const columns: string[] = []
+        for (const record of parsed.show) for (const key of Object.keys(record ?? {})) if (!columns.includes(key)) columns.push(key)
+        return { columns, rows: parsed.show.map((record: any) => columns.map(column => record?.[column] ?? null)), node: typeof parsed.node === 'string' ? parsed.node : null }
+      }
+    } catch {}
   }
   return null
 }
@@ -221,7 +238,8 @@ export function dbtCommand(written: string): DbtCommand | null {
   }
   // Variables set for it in the same command: a prefix, `env X=…`, or an export before it.
   // Only real assignments count: words that open a command (`X=1 dbt …`) or follow `export`/`env`.
-  const env: string[] = []
+  // The value each variable has when dbt runs: a later export or the command's own prefix overrides an earlier one.
+  const env = new Map<string, string>()
   const parts = [...bare.slice(0, start).matchAll(/[^;&|(\n]+/g)]
   for (const [i, part] of parts.entries()) {
     const words = shellWords(command.slice(part.index!, part.index! + part[0].length))
@@ -232,10 +250,10 @@ export function dbtCommand(written: string): DbtCommand | null {
     const from = exported || words[0] === 'env' ? 1 : 0
     for (const word of words.slice(from)) {
       if (!/^[A-Za-z_]\w*=/.test(word)) break
-      env.push(word)
+      env.set(word.slice(0, word.indexOf('=')), word)
     }
   }
-  const context = [...new Set(env)].sort()
+  const context = [...env.values()].sort()
   return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, at: start, argv: words, replayable, env: context }
 }
 
@@ -399,11 +417,16 @@ export function fixPrompt(command: string, failures: DbtFailure[]): string {
   ].join('\n')
 }
 
-/** The manifest node a project-relative SQL file is: a model, snapshot or analysis. */
-export function nodeForFile(manifest: any, relPath: string): { id: string; node: any } | null {
+/**
+ * The manifest node a project-relative SQL file is: a model, snapshot or analysis. An installed package can
+ * have a file at the same relative path; the project's own node (`project`, the project's name) wins.
+ */
+export function nodeForFile(manifest: any, relPath: string, project?: string | null): { id: string; node: any } | null {
+  const name = project ?? manifest?.metadata?.project_name ?? null
   for (const [id, node] of Object.entries<any>(manifest?.nodes ?? {})) {
-    if (node?.resource_type === 'test') continue
-    if (node?.original_file_path === relPath) return { id, node }
+    if (node?.resource_type === 'test' || node?.original_file_path !== relPath) continue
+    // A package's file at the same path is not the project's model.
+    if (!name || !node.package_name || node.package_name === name) return { id, node }
   }
   return null
 }
