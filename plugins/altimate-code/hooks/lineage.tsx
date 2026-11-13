@@ -274,7 +274,7 @@ function sqlFilesIn(command: string, cwd: string): string[] {
 }
 
 // Where a shell command reads from: the session folder, moved by each `cd` in the command.
-const CD = /(?:^|[;&|(\n]\s*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
+const CD = /(?:^|[;&|(\n][ \t]*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
 function commandDir(command: string, cwd: string): string {
   let dir = cwd
   for (const match of command.matchAll(CD)) {
