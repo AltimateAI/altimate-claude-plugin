@@ -83,7 +83,7 @@ test('a dbt build is recorded once; the same unchanged file is ignored; the line
 
   const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
   expect(first.context).toEqual(['build: 2 ok, 1 error: fct_sales'])
-  expect(kept(stored).map(run => [run.id, run.commandLine, run.total, run.passed, run.failed])).toEqual([['inv-1', 'dbt build -s orders', 3, 2, 1]])
+  expect(kept(stored).map(run => [run.id, run.commandLine, run.total, run.passed, run.failed])).toEqual([['inv-1', 'cd /repo && dbt build -s orders', 3, 2, 1]])
   expect(kept(stored)[0]!.rows[0]!.name).toBe('fct_sales')
 
   // Run again: dbt wrote nothing new (its invocation id is the one recorded).
@@ -129,7 +129,7 @@ test('a command in another folder reads that folder, and Re-run goes back there'
   await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir ../other' })
   expect(cli).toEqual([{ project_dir: '/repo/transform' }, { project_dir: '/other' }])
   expect(kept(stored).map(run => [run.project, run.commandLine])).toEqual([
-    ['/other', 'dbt build --project-dir ../other'],
+    ['/other', 'cd /repo && dbt build --project-dir ../other'],
     ['/repo/transform', 'cd /repo/transform && dbt build --target prod'],
   ])
 })
@@ -141,11 +141,18 @@ test('a folder an earlier Bash call moved the session to is where the command ru
   expect(kept(stored)[0]!.commandLine).toBe('cd /repo/transform && dbt build')
 })
 
+test('a command that ran in the session folder is replayed there, even when the shell has moved since', async ($, on) => {
+  const { stored } = await start($, on, args => view('inv-home', undefined, 'build', AFTER, String(args.project_dir)), { cwd: '/repo/transform' })
+  await $.tool.call({ tool: 'Bash', command: 'cd /repo && dbt build' })
+  expect(kept(stored)[0]!.commandLine).toBe('cd /repo && dbt build')
+  expect(kept(stored)[0]!.retryLine).toBe('cd /repo && dbt retry')
+})
+
 test('environment, folder and project flags are kept for Re-run and Re-run failed; a secret is not', () => {
   expect(resultsInvocations('DBT_PROFILES_DIR=. dbt build -s x --target prod', ROOT)[0]).toEqual({
     subcommand: 'build',
-    commandLine: 'DBT_PROFILES_DIR=. dbt build -s x --target prod',
-    retryLine: 'DBT_PROFILES_DIR=. dbt retry --target prod',
+    commandLine: 'cd /repo && DBT_PROFILES_DIR=. dbt build -s x --target prod',
+    retryLine: 'cd /repo && DBT_PROFILES_DIR=. dbt retry --target prod',
     projectDir: ROOT,
   })
   expect(resultsInvocations('cd a && dbt run --project-dir sub -s x | tee log', ROOT)[0]).toEqual({
@@ -155,14 +162,14 @@ test('environment, folder and project flags are kept for Re-run and Re-run faile
     projectDir: '/repo/a/sub',
   })
   const secret = resultsInvocations('SNOWFLAKE_PASSWORD=hunter2 DBT_TARGET=dev dbt test', ROOT)[0]!
-  expect(resultsInvocations('SNOWFLAKE_PWD=x dbt test', ROOT)[0]!.commandLine).toBe('SNOWFLAKE_PWD="$SNOWFLAKE_PWD" dbt test')
-  expect(secret.commandLine).toBe('SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt test')
-  expect(secret.retryLine).toBe('SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt retry')
+  expect(resultsInvocations('SNOWFLAKE_PWD=x dbt test', ROOT)[0]!.commandLine).toBe('cd /repo && SNOWFLAKE_PWD="$SNOWFLAKE_PWD" dbt test')
+  expect(secret.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt test')
+  expect(secret.retryLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt retry')
   expect(JSON.stringify(secret)).not.toContain('hunter2')
   expect(resultsInvocations('dbt build --profile prod --project-dir "my dir" -s x --target-path=\'t 1\'', ROOT)[0]!.retryLine).toBe(
-    'dbt retry --profile prod --project-dir "my dir" --target-path=\'t 1\'',
+    'cd /repo && dbt retry --profile prod --project-dir "my dir" --target-path=\'t 1\'',
   )
-  expect(resultsInvocations('uv run dbt build', ROOT)[0]!.retryLine).toBe('uv run dbt retry')
+  expect(resultsInvocations('uv run dbt build', ROOT)[0]!.retryLine).toBe('cd /repo && uv run dbt retry')
   expect(resultsInvocations('dbt deps', ROOT)).toEqual([])
   expect(resultsInvocations('echo "unclosed', ROOT)).toEqual([])
 })
@@ -172,13 +179,13 @@ test('of several dbt commands in one call, the one that wrote the file is record
   const { stored } = await start($, on, () => view('inv-run', [['model.shop.a', 'error', 'boom']], 'run'))
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt run && dbt test' })
   expect(result.context).toEqual(['run: 0 ok, 1 error: a'])
-  expect(kept(stored)[0]!.commandLine).toBe('dbt run')
+  expect(kept(stored)[0]!.commandLine).toBe('cd /repo && dbt run')
 
   const chain = resultsInvocations('dbt run && dbt test', ROOT)
-  expect(writer(chain, 'test')?.commandLine).toBe('dbt test')
+  expect(writer(chain, 'test')?.commandLine).toBe('cd /repo && dbt test')
   expect(writer(chain, 'build')).toBeNull()
   expect(writer(resultsInvocations('dbt retry', ROOT), 'build')?.subcommand).toBe('retry')
-  expect(writer(chain, null)?.commandLine).toBe('dbt test')
+  expect(writer(chain, null)?.commandLine).toBe('cd /repo && dbt test')
 })
 
 test('two dbt calls finishing together both keep their runs', async ($, on) => {
@@ -206,7 +213,7 @@ for (const surface of ['terminal', 'desktop'] as const) {
 
     await ui.press({ key: 'runs-rerun' })
     await ui.press({ key: 'runs-retry' })
-    expect(filled).toEqual(['Run this command:\n```\nuv run dbt build -s fct_sales\n```', 'Run this command:\n```\nuv run dbt retry\n```'])
+    expect(filled).toEqual(['Run this command:\n```\ncd /repo && uv run dbt build -s fct_sales\n```', 'Run this command:\n```\ncd /repo && uv run dbt retry\n```'])
     await ui.unmount()
   })
 }

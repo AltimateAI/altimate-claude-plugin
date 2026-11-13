@@ -106,7 +106,7 @@ const PROJECT_DIR_FLAG = /(?:^|\s)--project-dir(?:=|\s+)("[^"]+"|'[^']+'|\S+)/
 /** One dbt invocation that may have written the results. */
 export type Invocation = {
   subcommand: string
-  /** What Re-run fills in: the folder it ran in, the command as written, a secret's value left out. */
+  /** What Re-run fills in: `cd` to the folder it ran in, the command as written, a secret's value left out. */
   commandLine: string
   /** `dbt retry` with the launcher, the environment and the folder flags the command had. */
   retryLine: string
@@ -124,7 +124,8 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
       const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
       const flagged = PROJECT_DIR_FLAG.exec(body)?.[1]?.replace(/^['"]|['"]$/g, '')
       const projectDir = flagged ? normalize(flagged.startsWith('/') ? flagged : `${dir}/${flagged}`) : dir
-      const where = dir !== root ? `cd ${quote(dir)} && ` : ''
+      // Always the folder: the session's shell may have moved by the time Re-run is pressed.
+      const where = `cd ${quote(dir)} && `
       const head = redact(command.slice(one.start, one.subcommandEnd - subcommand.length))
       const kept = [...body.matchAll(KEPT_FLAGS)].map(match => match[1]!.trim())
       return {
