@@ -236,7 +236,7 @@ export interface CteRow {
   /** Offset of the WITH keyword the CTE belongs to: CTEs of one WITH clause build on each other. */
   clause: number
   status: 'pending' | 'running' | 'done' | 'failed'
-  /** Wall time of the count query, which includes every earlier CTE of its clause. */
+  /** Wall time of the count query, which holds every earlier CTE of its clause (a warehouse may skip those the CTE does not use). */
   queryMs?: number
   rows?: number
   /** Time this CTE adds over the one before it. */

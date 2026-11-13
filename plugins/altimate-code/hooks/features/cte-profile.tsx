@@ -1,5 +1,6 @@
 // Profile CTEs: /profile-ctes [model] times each CTE of a dbt model, one count query per CTE (each
-// recomputes the CTEs before it), and lists them slowest first in a pane.
+// holds the CTEs before it, though a warehouse may skip any the CTE does not use), and lists them
+// slowest first in a pane.
 //
 // altimate-code's `dbt_cte_profile` does one thing per call: without `cte` it lists the CTEs, with
 // `cte` it times one. This file drives the loop, so the pane fills live and Stop works between
@@ -47,17 +48,18 @@ export function classifyTiers(marginals: readonly number[]): CteTier[] {
 
 /**
  * Marginal times and tiers for the rows timed so far. A row's marginal time is what it adds over the
- * last timed row of its clause; after a failed row of the clause the previous time is unknown, so
- * the rows after it keep their total but get no marginal time or tier.
+ * last timed row of its clause; right after a failed row the previous time is unknown, so that one
+ * row keeps its total but gets no marginal time or tier, and the rows after it measure from it again.
  */
 export function withTiers(rows: readonly CteRow[]): CteRow[] {
   const previous = new Map<number, number>()
-  const broken = new Set<number>()
+  const unknown = new Set<number>()
   const marginals = new Map<number, number>()
   rows.forEach((row, i) => {
-    if (row.status === 'failed') broken.add(row.clause)
+    if (row.status === 'failed') unknown.add(row.clause)
     if (row.status !== 'done' || row.queryMs === undefined) return
-    if (!broken.has(row.clause)) marginals.set(i, Math.max(0, row.queryMs - (previous.get(row.clause) ?? 0)))
+    if (!unknown.has(row.clause)) marginals.set(i, Math.max(0, row.queryMs - (previous.get(row.clause) ?? 0)))
+    unknown.delete(row.clause)
     previous.set(row.clause, row.queryMs)
   })
   const timed = [...marginals.keys()]
@@ -186,11 +188,17 @@ async function profile($: EngineInterface, model: string, generation: number) {
       if (!current()) return
       await setState($, prev => ({ ...prev, rows: prev.rows.map((row, at) => (at === i ? { ...row, status: 'running' as const } : row)) }))
       const until = (await $.clock.now()) + QUERY_BUDGET_MS
+      // Stop and a session end can arrive during the awaits above: ask once more right before the query starts.
+      const heard = (await read($, stateAtom))?.status
+      if (!current()) return
+      if (heard !== 'running') break
       const args = { model, cte: list[i]!.name, position: list[i]!.position ?? i }
       const timed = await runTool($, TOOL, args, { write: true, until }).catch(failedCall)
       if (!current()) return
       const queryMs = timed.ok && typeof timed.metadata?.queryMs === 'number' ? (timed.metadata.queryMs as number) : undefined
       const refused = queryMs === undefined && (missingTool(timed.text) || typeof timed.metadata?.refusal === 'string')
+      // No usable answer (the tool's query timed out, the call hit its deadline, or altimate-code failed): the query may still be running, and every later CTE would only add to it.
+      const unanswered = queryMs === undefined && !missingTool(timed.text) && (timed.metadata?.timedOut === true || typeof timed.metadata?.success !== 'boolean')
       await setState($, prev => ({
         ...prev,
         rows: withTiers(
@@ -204,18 +212,26 @@ async function profile($: EngineInterface, model: string, generation: number) {
         ),
       }))
       // A refusal (no write permission, another project, an adapter that did not start) or a missing tool would meet every later CTE too.
-      if (refused) break
+      const last = i === list.length - 1
+      if (refused) {
+        if (!last) await setState($, prev => ({ ...prev, message: 'Ended early: the next CTE cannot be timed (see the reason above).' }))
+        break
+      }
+      if (unanswered) {
+        if (!last) await setState($, prev => ({ ...prev, message: 'Ended early: a query timed out or got no usable answer and may still be running on the warehouse, so no more are started.' }))
+        break
+      }
     }
   } catch (error) {
     if (current()) await say($, `Profiling stopped: ${String(error)}`).catch(() => {})
     return
   } finally {
     // The run's own end: clear what it showed, and leave a state no press can mistake for a running one.
-    if (current()) await finish($)
+    if (current()) await finish($, current)
   }
 }
 
-async function finish($: EngineInterface) {
+async function finish($: EngineInterface, current: () => boolean) {
   active = false
   await setStatusPart($, 'cteProfile', null).catch(() => {})
   const final = await read($, stateAtom)
@@ -224,8 +240,9 @@ async function finish($: EngineInterface) {
   const rows = final.rows.map(row => (row.status === 'running' ? { ...row, status: 'pending' as const } : row))
   const status = rows.some(row => row.status === 'pending') ? 'stopped' : rows.every(row => row.status === 'failed') ? 'failed' : 'done'
   const finished: CteProfileState = { ...final, status, rows }
-  await update($, stateAtom, () => finished)
-  if (timedAny) {
+  // The session may end while this waits: the end's own clean-up then stands.
+  await update($, stateAtom, prev => (current() ? finished : prev))
+  if (timedAny && current()) {
     pendingContext = summaryOf(finished)
     const slowest = slowestFirst(finished.rows.filter(row => row.marginalMs !== undefined))[0]
     if (slowest) $.ui.toast(`◆ profile-ctes · ${finished.model}: slowest is ${slowest.name} (+${ms(slowest.marginalMs)})`, { timeoutMs: 8000 })
@@ -294,7 +311,7 @@ export function register(on: On, context: FeatureContext) {
         </Box>
         <Box>
           {running && <Button key="cte-stop" label="Stop" onPress={() => later($, () => requestStop($))} />}
-          {!running && timed > 0 && (
+          {!running && state.status !== 'stopping' && timed > 0 && (
             <Button key="cte-send" label="Tell Claude" onPress={() =>
                 later($, async () => {
                   // Claude has it now: the next tool result does not carry it again.
@@ -380,7 +397,9 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {
   // This only remembers the model a bare /profile-ctes means; it never starts a profile.
-  if (/\.sql$/i.test(file.path)) lastModelPath = file.path
+  // A subagent's reads are not the user's model, and a build or package file is not one to profile.
+  const own = !(e as { agentId?: string }).agentId
+  if (own && /\.sql$/i.test(file.path) && !/[\\/](target|dbt_packages|dbt_modules)[\\/]/.test(file.path)) lastModelPath = file.path
   return handOver(e as { agentId?: string })
 }
 

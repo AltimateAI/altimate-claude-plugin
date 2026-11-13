@@ -31,6 +31,11 @@ test('marginal time is the time over the CTE before it in the same WITH clause, 
   expect(slowestFirst(rows).map(one => one.name)).toEqual(['b', 'a', 'd', 'c', 'e'])
 })
 
+test('after a failed CTE only the next row loses its own part: the one after it measures from it', () => {
+  const rows = withTiers([row('a', { queryMs: 100 }), row('b', { status: 'failed' }), row('c', { queryMs: 400 }), row('d', { queryMs: 450 })])
+  expect(rows.map(one => one.marginalMs)).toEqual([100, undefined, undefined, 50])
+})
+
 test('the summary for Claude lists timed CTEs slowest first and names the failed ones', () => {
   const text = summaryOf({
     model: 'customers',
@@ -53,12 +58,15 @@ type Setup = {
   fail?: string
   failText?: string
   refuse?: boolean
+  crash?: string
+  timeout?: string
   openFails?: boolean
 }
 
 async function start($: any, on: any, setup: Setup = {}) {
   const clock = mock.clock(on)
   const calls: { cte?: string; position?: number; write: boolean }[] = []
+  const models: string[] = []
   const toasts: string[] = []
   const prompts: string[] = []
   on('prompt.submit', (_: unknown, e: { text: string }) => {
@@ -84,6 +92,7 @@ async function start($: any, on: any, setup: Setup = {}) {
     const [, command, , tool] = e.argv
     if (command !== 'tool' || tool !== 'dbt_cte_profile') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
+    models.push(args.model)
     calls.push({ cte: args.cte, ...(args.position !== undefined && { position: args.position }), write: e.argv.includes('--allow-write') })
     const reply = (body: unknown, exitCode = 0) => ({ value: { exitCode, stdout: JSON.stringify(body), stderr: '' } })
     if (setup.missing) return reply({ status: 'error', output: `Unknown tool: ${tool}. Run \`altimate-code tool list\` to see the available tools.`, metadata: {} }, 1)
@@ -91,6 +100,8 @@ async function start($: any, on: any, setup: Setup = {}) {
       if (setup.holdList) await setup.holdList
       return reply({ status: 'ok', output: '', metadata: { success: true, ctes: ctes.map((name, index) => ({ name, line: index + 2, index, clause: 0, position: index })) } })
     }
+    if (setup.timeout === args.cte) return reply({ status: 'error', output: 'timed out and may still be running', metadata: { success: false, timedOut: true } }, 1)
+    if (setup.crash === args.cte) return { value: { exitCode: 1, stdout: '', stderr: 'killed at the deadline' } }
     if (setup.refuse) return reply({ status: 'error', output: 'the dbt adapter is set up for another project', metadata: { success: false, refusal: 'other_project' } }, 1)
     if (setup.fail === args.cte) return reply({ status: 'error', output: setup.failText ?? 'Catalog Error: table does not exist', metadata: { success: false } }, 1)
     if (setup.hold && setup.hold.cte === args.cte) await setup.hold.until
@@ -99,7 +110,7 @@ async function start($: any, on: any, setup: Setup = {}) {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
   const run = (args: string) => $.command.run({ command: 'profile-ctes', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
-  return { clock, calls, toasts, prompts, run }
+  return { clock, calls, models, toasts, prompts, run }
 }
 
 test('/profile-ctes lists the CTEs read-only, then times each with write permission, slowest first', async ($, on) => {
@@ -144,6 +155,8 @@ test('the pane fills live and Stop ends the run between queries', async ($, on) 
 
   await ui.press({ key: 'cte-stop' })
   await clock.settle()
+  // While the running query is still being waited for, nothing can be sent to Claude yet.
+  expect(await ui.find({ key: 'cte-send' })).toBeUndefined()
   release()
   await clock.settle()
 
@@ -217,6 +230,34 @@ test('a refusal ends the run at the first CTE instead of repeating it for every 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /another project/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('a call that gets no answer from the tool ends the run: the query may still be running, so no more are started', async ($, on) => {
+  const { clock, calls, run } = await start($, on, { crash: 'payments', times: { orders: 100 } })
+  await run('customers')
+  await clock.settle()
+  expect(calls.map(call => call.cte)).toEqual([undefined, 'orders', 'payments'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Ended early: a query timed out or got no usable answer/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a query the tool reports as timed out ends the run too', async ($, on) => {
+  const { clock, calls, run } = await start($, on, { timeout: 'orders' })
+  await run('customers')
+  await clock.settle()
+  expect(calls.map(call => call.cte)).toEqual([undefined, 'orders'])
+})
+
+test('a bare /profile-ctes means the model the main conversation read last: not a subagent\'s, not a build or package file', async ($, on) => {
+  const { clock, models, run } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: '/repo/models/main.sql' } as any)
+  await $.tool.call({ tool: 'Read', file_path: '/repo/models/sub.sql', agentId: 'agent-1' } as any)
+  await $.tool.call({ tool: 'Read', file_path: '/repo/target/compiled/p/models/main.sql' } as any)
+  await $.tool.call({ tool: 'Read', file_path: '/repo/dbt_packages/x/models/pkg.sql' } as any)
+  await run('')
+  await clock.settle()
+  expect(models[0]).toBe('/repo/models/main.sql')
 })
 
 test('a warehouse error that says "not implemented" is that CTE\'s error, not an old altimate-code', async ($, on) => {
