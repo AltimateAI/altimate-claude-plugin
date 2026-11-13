@@ -176,6 +176,97 @@ export type ImpactView = {
   truncated: boolean
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Runs (/runs): the dbt commands Claude ran and their results.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface RunsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Defer and target: the target and defer state dbt commands run with.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface DeferState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Raw SQL to model: the SQL being turned into a dbt model.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface ToModelState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Team comments: the shared docs' comments on the project's models.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CommentsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Cost check: the last scan estimate and any scan allowed once.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CostState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Project health: the health check issues on the changed models.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface HealthState {}
+
+// ---------------------------------------------------------------------------------------------------
+// SQL graph: the edited model's SQL graph.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface SqlGraphState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Docs coverage and propagation: what the project documents.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+/** A downstream column that can take a description: the traced column reaches it unchanged (Original) or only renamed (Alias). */
+export interface DocsCandidate {
+  model: string
+  /** The model's unique_id: names repeat across packages and versions. */
+  id?: string
+  column: string
+  lens: 'Original' | 'Alias'
+}
+
+/** A description Claude wrote, and the downstream columns that can take it. */
+export interface DocsGroup {
+  model: string
+  column: string
+  description: string
+  manifest: string
+  /** The YAML file the description was written in. */
+  file: string
+  candidates: DocsCandidate[]
+}
+
+/** The documentation coverage of the model whose SQL Claude last edited. */
+export interface DocsCoverageView {
+  model: string
+  percent: number
+  documented: number
+  total: number
+  /** Output columns without a description. */
+  missing: string[]
+  hasDescription: boolean
+}
+
+export interface DocsState {
+  /** Written descriptions with candidates, oldest first. */
+  groups: DocsGroup[]
+  /** Candidates the person unticked in the pane, keyed `manifest|model.column>unique_id.column`. */
+  skipped: string[]
+  coverage: DocsCoverageView | null
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Profile CTEs: each CTE's row count and timing.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CteProfileState {}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -217,6 +308,26 @@ declare module 'claude-code' {
       lineageStale: string | null
       lineageLoading: boolean
       isLineageBandHidden: boolean
+      /** The status line's parts by owner, `integrations` and each feature's id (hooks/status-line.ts). */
+      statusParts: Record<string, string>
+      /** hooks/features/: RunsState. */
+      runs: RunsState | null
+      /** hooks/features/: DeferState. */
+      defer: DeferState | null
+      /** hooks/features/: ToModelState. */
+      toModel: ToModelState | null
+      /** hooks/features/: CommentsState. */
+      comments: CommentsState | null
+      /** hooks/features/: CostState. */
+      cost: CostState | null
+      /** hooks/features/: HealthState. */
+      health: HealthState | null
+      /** hooks/features/: SqlGraphState. */
+      sqlGraph: SqlGraphState | null
+      /** hooks/features/: DocsState. */
+      docs: DocsState | null
+      /** hooks/features/: CteProfileState. */
+      cteProfile: CteProfileState | null
     }
   }
 }
