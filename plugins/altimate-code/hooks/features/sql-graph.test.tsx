@@ -44,7 +44,7 @@ async function start($: any, on: any, options: Options = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: !options.noProject && e.path === `${ROOT}/dbt_project.yml` }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: !options.noProject && (e.path === `${ROOT}/dbt_project.yml` || e.path === `${ROOT}/dbt_packages/pkg/dbt_project.yml`) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     reads.push(e.path)
     return { value: e.path === `${ROOT}/dbt_project.yml` ? (options.yml ?? "name: 'shop'\n") : (options.sql ?? 'select 1') }
@@ -63,9 +63,9 @@ async function start($: any, on: any, options: Options = {}) {
     const nth = cli.length
     if (options.holdFirst && nth === 1) {
       await options.holdFirst
-      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, model: asked, nodes: [{ name: 'stale', type: 'cte', sql: '', columns: [] }], edges: [] } }), stderr: '' } }
+      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, model: asked, nodes: [{ id: 'stale', name: 'stale', type: 'cte', sql: '', columns: [] }], edges: [] } }), stderr: '' } }
     }
-    if (options.ok === false) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'Not available: this needs the dbt adapter', metadata: { success: false, reason: 'read-only' } }), stderr: '' } }
+    if (options.ok === false) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'Not available: this needs the dbt adapter', metadata: { success: false, reason: 'read-only', error: 'Not available: this needs the dbt adapter' } }), stderr: '' } }
     if (options.fail) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: options.fail, metadata: { success: false } }), stderr: '' } }
     const metadata = { success: true, model: asked, ...(options.answer ?? GRAPH) }
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'SQL graph for fct_orders', metadata }), stderr: '' } }
@@ -104,6 +104,9 @@ test('a model is the .sql file in a dbt project\'s model folders: by file name, 
   expect(await reads(`${ROOT}/target/compiled/shop/models/x.sql`)).toContain('dim_a')
   expect(await reads(`${ROOT}/db/migrations/001.sql`)).toContain('dim_a')
   expect(await reads(`${ROOT}/models/fct_orders.sql`)).toContain('fct_orders')
+  // A folder inside a model path keeps its name; a package's own models are not the project's.
+  expect(await reads(`${ROOT}/models/tests/in_models.sql`)).toContain('in_models')
+  expect(await reads(`${ROOT}/dbt_packages/pkg/models/p.sql`)).toContain('in_models')
 })
 
 test('outside a dbt project a .sql read sets no default model and an edit adds no line', async ($, on) => {
@@ -175,10 +178,37 @@ test('two nodes with one name stay two rows, each with its own inputs and SQL', 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ key: 'node-analytics.customers_1' })).toBeDefined()
   expect(await ui.find({ key: 'node-raw.customers_2' })).toBeDefined()
-  expect(await ui.find({ type: 'Button', label: /LEFT_JOIN_9 \(LEFT_JOIN\) · 0 columns · from customers, customers$/ })).toBeDefined()
+  expect(inputsOf(answer as any, 'LEFT_JOIN_9')).toEqual(['analytics.customers_1', 'raw.customers_2'])
   await ui.press({ key: 'node-raw.customers_2' })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: 'raw.customers' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('text from the CLI, the repo and the backend is drawn without escape or control characters, and a long statement is cut', async ($, on) => {
+  const esc = String.fromCharCode(27)
+  const bad = `bad${esc}]0;owned\u0007${esc}[31mred${esc}[0m\u2028end`
+  const { clock } = await start($, on, { fail: bad })
+  const reply = await $.command.run({ command: 'sql-graph', args: `m${esc}]0;x\u0007odel`, ...composer } as any)
+  await clock.settle()
+  expect(reply.text).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(JSON.stringify(await ui.find({ type: 'Text', text: /bad/ }))).not.toMatch(/u001b|u0007|u2028/)
+  await ui.unmount()
+})
+
+test('the SQL of a selected node is cut at a limit and says how much was left out', async ($, on) => {
+  const answer = {
+    nodes: [{ id: 'big', name: 'big', type: 'cte', sql: 'x'.repeat(25_000), columns: [] }],
+    edges: [],
+  }
+  const { clock } = await start($, on, { answer })
+  await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'node-big' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /… 5000 more characters not shown$/ })).toBeDefined()
   await ui.unmount()
 })
 

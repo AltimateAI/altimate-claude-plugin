@@ -27,8 +27,11 @@ const stateAtom = atom({ plugin: 'altimate-code', key: 'sqlGraph' } as const, nu
 
 const EMPTY: SqlGraphState = { lastModel: null, shown: null }
 
-// Folders of a dbt project that hold no model, wherever model-paths points.
-const NOT_MODEL_DIRS = /^(macros|tests|analyses|analysis|snapshots|seeds|target|dbt_packages|dbt_modules)$/i
+// Folders at the top of a dbt project that hold no model, and build or package folders at any depth. A folder inside a model path keeps its name: `models/tests/orders.sql` is a model.
+const NOT_MODEL_TOP = /^(macros|tests|analyses|analysis|snapshots|seeds)$/i
+const NOT_MODEL_ANYWHERE = /^(target|dbt_packages|dbt_modules)$/i
+// The most of a node's SQL the pane draws; a larger statement is cut, and says so.
+const SQL_LIMIT = 20_000
 
 /** The model a SQL file holds, by its file name; null for a file outside a dbt project's model folders. */
 export async function modelOf($: EngineInterface, file: string): Promise<string | null> {
@@ -45,9 +48,11 @@ export async function modelOf($: EngineInterface, file: string): Promise<string 
     if (cut <= 0) break
     dir = dir.slice(0, cut)
   }
-  if (!root) return null
+  // An installed package has a dbt_project.yml of its own: its models are not this project's.
+  if (!root || NOT_MODEL_ANYWHERE.test(root.split('/').slice(-2, -1)[0] ?? '')) return null
   const relative = path.slice(root.length).replace(/^\/+/, '')
-  if (relative.split('/').slice(0, -1).some(part => NOT_MODEL_DIRS.test(part))) return null
+  const folders = relative.split('/').slice(0, -1)
+  if (folders.some(part => NOT_MODEL_ANYWHERE.test(part)) || NOT_MODEL_TOP.test(folders[0] ?? '')) return null
   const layout = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
   const inside = layout.models.some(folder => {
     const own = folder.replace(/^\.\/+/, '').replace(/^\.$/, '').replace(/\/+$/, '')
@@ -67,9 +72,18 @@ export function cteCount(sql: string): number {
   ].length
 }
 
-/** Text from the repo or the backend drawn as one line of plain characters: control characters and escapes out. */
+/** Text from the repo, the CLI or the backend drawn as one line of plain characters: escape sequences and control characters out. */
 function plain(text: string): string {
-  return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ' ')
+  return text
+    .replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, ' ')
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, ' ')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
+}
+
+/** A node's SQL as drawn: lines kept, escape sequences and other control characters out, and cut at SQL_LIMIT. */
+function sqlText(sql: string): string {
+  const kept = sql.slice(0, SQL_LIMIT).split('\n').map(plain).join('\n')
+  return sql.length > SQL_LIMIT ? `${kept}\n… ${sql.length - SQL_LIMIT} more characters not shown` : kept
 }
 
 /** The graph's nodes in dependency order: a node comes after everything that feeds it; ties keep the backend's order. */
@@ -124,15 +138,15 @@ async function load($: EngineInterface, model: string): Promise<'shown' | 'faile
     const until = (await $.clock.now()) + TOOL_BUDGET_MS
     // The tool starts the dbt adapter, so it needs write permission: it goes through the CLI.
     const result = await runTool($, 'dbt_sql_graph', { model }, { write: true, until })
-    const meta = result.metadata as { success?: boolean; nodes?: SqlGraphView['nodes']; edges?: SqlGraphView['edges'] } | null
+    const meta = result.metadata as { success?: boolean; error?: string; nodes?: SqlGraphView['nodes']; edges?: SqlGraphView['edges'] } | null
     if (!result.ok || !meta?.success || !Array.isArray(meta.nodes) || !Array.isArray(meta.edges)) {
-      await showing($, request, { loading: false, message: result.text || `No SQL graph for ${model}.` })
+      await showing($, request, { loading: false, message: plain(result.text || String((meta as { error?: unknown } | null)?.error ?? '') || `No SQL graph for ${model}.`) })
     } else {
       await showing($, request, { loading: false, graph: { nodes: meta.nodes, edges: meta.edges } })
       outcome = 'shown'
     }
   } catch (error) {
-    await showing($, request, { loading: false, message: `No SQL graph for ${model}: ${String(error)}` })
+    await showing($, request, { loading: false, message: plain(`No SQL graph for ${model}: ${String(error)}`) })
   }
   return (await read($, stateAtom))?.shown?.request === request ? outcome : 'replaced'
 }
@@ -143,16 +157,17 @@ export function register(on: On, context: FeatureContext) {
     const asked = e.args.trim()
     const model = asked || (await read($, stateAtom))?.lastModel || ''
     if (!model) return { text: 'Read or edit a dbt model, or run /sql-graph <model>.' }
+    const shownModel = plain(model)
     try {
       await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
     } catch (error) {
-      return { text: `Could not open the SQL graph: ${String(error)}` }
+      return { text: plain(`Could not open the SQL graph: ${String(error)}`) }
     }
     // One backend call and one warehouse metadata read, per command, never per edit.
     const landed = await within($, COMMAND_WAIT_MS, load($, model))
-    if (landed === null) return { text: `The SQL graph for ${model} is loading; the pane shows it when it is ready.` }
-    if (landed === 'replaced') return { text: `The SQL graph for ${model} was replaced by a newer /sql-graph.` }
-    return { text: landed === 'shown' ? `The SQL graph for ${model} is open.` : ((await read($, stateAtom))?.shown?.message ?? `No SQL graph for ${model}.`) }
+    if (landed === null) return { text: `The SQL graph for ${shownModel} is loading; the pane shows it when it is ready.` }
+    if (landed === 'replaced') return { text: `The SQL graph for ${shownModel} was replaced by a newer /sql-graph.` }
+    return { text: landed === 'shown' ? `The SQL graph for ${shownModel} is open.` : ((await read($, stateAtom))?.shown?.message ?? `No SQL graph for ${shownModel}.`) }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -169,7 +184,7 @@ export function register(on: On, context: FeatureContext) {
     if (shown.loading) {
       return (
         <Box key="sql-graph" flexDirection="column">
-          <Text key="title" bold>SQL graph · {shown.model}</Text>
+          <Text key="title" bold>{`SQL graph · ${plain(shown.model)}`}</Text>
           <Text key="hint" dimColor>Compiling the model and asking the Altimate backend…</Text>
         </Box>
       )
@@ -177,8 +192,8 @@ export function register(on: On, context: FeatureContext) {
     if (!shown.graph) {
       return (
         <Box key="sql-graph" flexDirection="column">
-          <Text key="title" bold>SQL graph · {shown.model}</Text>
-          <Text key="hint" dimColor>{shown.message ?? `No SQL graph for ${shown.model}.`}</Text>
+          <Text key="title" bold>{`SQL graph · ${plain(shown.model)}`}</Text>
+          <Text key="hint" dimColor>{plain(shown.message ?? `No SQL graph for ${shown.model}.`)}</Text>
         </Box>
       )
     }
@@ -200,7 +215,7 @@ export function register(on: On, context: FeatureContext) {
         {chosen ? (
           <Box key="sql" flexDirection="column" marginTop={1}>
             <Text key="node" bold>{plain(chosen.name)}</Text>
-            <Text key="text">{chosen.sql ? chosen.sql.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, ' ') : '(no SQL)'}</Text>
+            <Text key="text">{chosen.sql ? sqlText(chosen.sql) : '(no SQL)'}</Text>
           </Box>
         ) : (
           <Text key="hint" dimColor>Press a row to see its SQL.</Text>
