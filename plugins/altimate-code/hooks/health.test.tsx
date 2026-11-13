@@ -362,6 +362,13 @@ test('with the push gate on, a push with no model changed this session goes thro
   expect(allowed?.deny).toBeUndefined()
 })
 
+test('with the push gate on, a push before the baseline lands, with no model changed, is not held for it', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const never = new Promise<void>(() => {})
+  await start($, on, { runs: [[OLD_STG]], hold: { at: 0, until: never } })
+  const allowed: any = await $.tool.call(command('git push'))
+  expect(allowed?.deny).toBeUndefined()
+})
+
 test('with the push gate on, a command that edits a model and pushes is held: the edit is not checked before it runs', { options: { healthBlocksPush: true } }, async ($, on) => {
   await start($, on, { runs: [[]] })
   const denied: any = await $.tool.call(command(`sed -i 's/a/b/' models/staging/stg_orders.sql && git push`))
@@ -460,6 +467,15 @@ test('shell syntax: a redirect without spaces, bash -c, cd before the edit, back
   expect(isGitPush('cat <<EOF\n$(git push)\nEOF')).toBe(true)
   expect(isGitPush("cat <<'EOF'\nnote\nEOF\ngit push")).toBe(true)
   expect(isGitPush('cat <<-EOF\n\tgit push\n\tEOF\ngit status')).toBe(false)
+  // A commit message with an unbalanced paren, then the push.
+  expect(isGitPush('git commit -m "$(cat <<\'EOF\'\nfix: handle (a\nEOF\n)" && git push')).toBe(true)
+  expect(isGitPush('git commit -m "$(cat <<\'EOF\'\n1) use `git push`\nEOF\n)"')).toBe(false)
+  // A here-string and a shift are not heredocs.
+  expect(isGitPush('grep y <<< "x"\ngit push')).toBe(true)
+  expect(isGitPush('echo $((1<<2))\ngit push')).toBe(true)
+  // A shell reads its heredoc as its script.
+  expect(isGitPush("bash <<'EOF'\ngit push\nEOF")).toBe(true)
+  expect(filesWrittenBy("sh <<'EOF'\nsed -i s/a/b/ models/x.sql\nEOF")).toEqual(['models/x.sql'])
 })
 
 test('models match by their own files, so a model of another package is never matched', () => {

@@ -110,18 +110,77 @@ const LEADER_VALUE_OPTIONS: Record<string, readonly string[]> = {
 const GIT_VALUE_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix', '--config-env'])
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
 
+/** Where the heredoc started by `<<` at `i` ends: its delimiter, whether it was quoted, and `<<` at `i` is one at all (not `<<<`, not a shift in `$((x<<2))`). */
+function heredocAt(text: string, i: number): { delimiter: string; quoted: boolean; strip: boolean; end: number } | null {
+  if (text[i] !== '<' || text[i + 1] !== '<' || text[i + 2] === '<' || text[i - 1] === '<') return null
+  let j = i + 2
+  const strip = text[j] === '-'
+  if (strip) j++
+  while (text[j] === ' ' || text[j] === '\t') j++
+  if (!/[A-Za-z_'"\\]/.test(text[j] ?? '')) return null
+  let delimiter = ''
+  let quoted = false
+  for (; j < text.length && !/[\s;&|()<>]/.test(text[j]!); j++) {
+    if (text[j] === "'" || text[j] === '"') {
+      quoted = true
+      const close = text.indexOf(text[j]!, j + 1)
+      delimiter += text.slice(j + 1, close < 0 ? text.length : close)
+      j = close < 0 ? text.length : close
+    } else if (text[j] === '\\') {
+      quoted = true
+      delimiter += text[++j] ?? ''
+    } else delimiter += text[j]
+  }
+  return { delimiter, quoted, strip, end: j - 1 }
+}
+
+/** The body of a heredoc whose line ends at `eol`: its text, and where the line after its delimiter line starts. */
+function heredocBody(text: string, eol: number, doc: { delimiter: string; strip: boolean }): { body: string; next: number } {
+  let at = eol + 1
+  let body = ''
+  while (at < text.length) {
+    const end = text.indexOf('\n', at)
+    const line = text.slice(at, end < 0 ? text.length : end)
+    at = end < 0 ? text.length : end + 1
+    if ((doc.strip ? line.replace(/^\t+/, '') : line) === doc.delimiter) break
+    body += line + '\n'
+  }
+  return { body, next: at }
+}
+
+/** The index of the `)` that closes the `$(` at `open`, skipping quotes and heredoc bodies; text.length when it never closes. */
+function substitutionEnd(text: string, open: number): number {
+  let depth = 1
+  const pending: { delimiter: string; strip: boolean }[] = []
+  for (let j = open + 1; j < text.length; j++) {
+    const c = text[j]!
+    if (c === '\\') j++
+    else if (c === "'") {
+      const close = text.indexOf("'", j + 1)
+      j = close < 0 ? text.length : close
+    } else if (c === '"') {
+      for (j++; j < text.length && text[j] !== '"'; j++) if (text[j] === '\\') j++
+    } else if (c === '<') {
+      const doc = heredocAt(text, j)
+      if (doc) {
+        pending.push(doc)
+        j = doc.end
+      }
+    } else if (c === '\n' && pending.length) {
+      for (const doc of pending.splice(0)) j = heredocBody(text, j, doc).next - 1
+    } else if (c === '(') depth++
+    else if (c === ')' && --depth === 0) return j
+  }
+  return text.length
+}
+
 /** The inner text of each `$(...)` and backtick substitution in `text`. */
 function substitutionsIn(text: string): string[] {
   const out: string[] = []
   for (let i = 0; i < text.length; i++) {
     if (text[i] === '\\') i++
     else if (text[i] === '$' && text[i + 1] === '(') {
-      let depth = 0
-      let j = i + 1
-      for (; j < text.length; j++) {
-        if (text[j] === '(') depth++
-        else if (text[j] === ')' && --depth === 0) break
-      }
+      const j = substitutionEnd(text, i + 1)
       out.push(text.slice(i + 2, j))
       i = j
     } else if (text[i] === '`') {
@@ -133,7 +192,7 @@ function substitutionsIn(text: string): string[] {
   return out
 }
 
-/** The simple commands of a shell line, each as its words with quotes removed; a quoted word stays one word. A redirect is its own word (`>`, `>>`, `2>`) before its target; a heredoc body is text, not commands. */
+/** The simple commands of a shell line, each as its words with quotes removed; a quoted word stays one word. A redirect is its own word (`>`, `>>`, `2>`) before its target; a heredoc body is text, not commands, unless a shell reads it as its script or an unquoted body substitutes commands. */
 export function simpleCommands(line: string): string[][] {
   const commands: string[][] = []
   const nested: string[][] = []
@@ -168,14 +227,7 @@ export function simpleCommands(line: string): string[][] {
           if (line[i] === '`') {
             j = line.indexOf('`', i + 1)
             if (j < 0) j = line.length
-          } else {
-            let depth = 0
-            j = i + 1
-            for (; j < line.length; j++) {
-              if (line[j] === '(') depth++
-              else if (line[j] === ')' && --depth === 0) break
-            }
-          }
+          } else j = substitutionEnd(line, i + 1)
           nested.push(...substitutionsIn(line.slice(i, j + 1)).flatMap(simpleCommands))
           word += line.slice(i, j + 1)
           i = j
@@ -192,42 +244,23 @@ export function simpleCommands(line: string): string[][] {
     } else if (c === '$' && line[i + 1] === '(') {
       endCommand()
       i++
-    } else if (c === '<' && line[i + 1] === '<' && line[i + 2] !== '<') {
-      let j = i + 2
-      const strip = line[j] === '-'
-      if (strip) j++
-      while (line[j] === ' ' || line[j] === '\t') j++
-      let delimiter = ''
-      let quoted = false
-      for (; j < line.length && !/[\s;&|()<>]/.test(line[j]!); j++) {
-        if (line[j] === "'" || line[j] === '"') {
-          quoted = true
-          const close = line.indexOf(line[j]!, j + 1)
-          delimiter += line.slice(j + 1, close < 0 ? line.length : close)
-          j = close < 0 ? line.length : close
-        } else if (line[j] === '\\') {
-          quoted = true
-          delimiter += line[++j] ?? ''
-        } else delimiter += line[j]
-      }
-      heredocs.push({ delimiter, quoted, strip })
-      i = j - 1
+    } else if (c === '<' && heredocAt(line, i)) {
+      const doc = heredocAt(line, i)!
+      heredocs.push(doc)
+      i = doc.end
     } else if (c === '\n' && heredocs.length) {
       endCommand()
-      let at = i + 1
+      let at = i
+      // A heredoc fed to a shell is that shell's script; an unquoted body's substitutions run either way.
+      const target = commands[commands.length - 1]
+      const bin = target ? (target[leaderEnd(target)] ?? '').split('/').pop() ?? '' : ''
       for (const doc of heredocs.splice(0)) {
-        let body = ''
-        while (at < line.length) {
-          const eol = line.indexOf('\n', at)
-          const text = line.slice(at, eol < 0 ? line.length : eol)
-          at = eol < 0 ? line.length : eol + 1
-          if ((doc.strip ? text.replace(/^\t+/, '') : text) === doc.delimiter) break
-          body += text + '\n'
-        }
-        // Only an unquoted delimiter lets the body's substitutions run.
-        if (!doc.quoted) nested.push(...substitutionsIn(body).flatMap(simpleCommands))
+        const { body, next } = heredocBody(line, at, doc)
+        at = next - 1
+        if (SHELLS.has(bin) && !target!.some(w => /^-[a-z]*c$/.test(w))) nested.push(...simpleCommands(body))
+        else if (!doc.quoted) nested.push(...substitutionsIn(body).flatMap(simpleCommands))
       }
-      i = at - 1
+      i = at
     } else if (c === '>') {
       if (!(inWord && /^\d+$/.test(word))) endWord()
       word += '>'
@@ -299,7 +332,7 @@ export function filesWrittenBy(command: string): string[] {
     const at = leaderEnd(words)
     const bin = (words[at] ?? '').split('/').pop() ?? ''
     const args = words.slice(at + 1)
-    if (bin === 'cd') cwd = args[0] && !args[0].startsWith('-') && args[0] !== '~' ? from(args[0]) : ''
+    if (bin === 'cd') cwd = args[0] && !args[0].startsWith('-') && !args[0].startsWith('~') ? from(args[0]) : ''
     else if (SHELLS.has(bin)) {
       const c = args.findIndex(w => /^-[a-z]*c$/.test(w))
       if (c >= 0 && c + 1 < args.length) out.push(...filesWrittenBy(args[c + 1]!).map(from))
@@ -449,7 +482,7 @@ function kick($: EngineInterface): Promise<void> {
 
 /**
  * Whether the state wants a check: changes not yet checked, or no baseline yet. After a failed check it is
- * asked for again only by a new change or by `retry` (the person asking with /health), not at every turn.
+ * asked for again only by a new change or by `retry` (/health, or a `git push` held by the gate), not at every turn.
  */
 async function wantsCheck($: EngineInterface, retry = false): Promise<boolean> {
   const state = await read($, healthAtom)
@@ -541,10 +574,12 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   // An edit in the same command would run before any check of it.
   const root = await $.session.root().catch(() => '')
   for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
+  // With nothing changed this session there is nothing to wait for or hold.
+  if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return null
   if ((await wantsCheck($, true)) || running?.generation === generation) await within($, CHECK_MS, kick($))
   const state = await read($, healthAtom)
   // A check that failed or did not finish leaves the changes unchecked: a gate that fails open is no gate.
-  if (state && enabled && (state.running || state.pending.length > 0 || (state.baseline === null && state.touched.length > 0)))
+  if (state && enabled && (state.running || state.pending.length > 0 || state.baseline === null))
     return hold(`the check of the models changed this session ${state.running ? 'did not finish in time' : `could not run (${state.problem ?? 'no answer'})`}.`)
   return pushRefusal(options.healthBlocksPush, e.command, state?.issues ?? [])
 }
