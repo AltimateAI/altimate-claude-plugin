@@ -216,7 +216,18 @@ export interface HealthState {}
 // SQL graph: the edited model's SQL graph.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface SqlGraphState {}
+export interface SqlGraphState {
+  /** The model Claude last read or edited, which /sql-graph shows when it is given no name. */
+  lastModel: string | null
+  /** The model the pane shows, with its graph once the tool answered. */
+  shown: { model: string; graph: SqlGraphView | null; loading: boolean; message: string | null; selected: string | null } | null
+}
+
+/** What `dbt_sql_graph` returns: one node per CTE, relation or select, and the edges between them (input, then consumer). */
+export interface SqlGraphView {
+  nodes: { name: string; type: string; nodeId?: string; sql: string; columns: { name: string; datatype?: string; expression?: string }[] }[]
+  edges: [string, string][]
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Docs coverage and propagation: what the project documents.
