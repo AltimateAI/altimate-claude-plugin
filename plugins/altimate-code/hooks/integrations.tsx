@@ -1,9 +1,12 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
+import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
 import { lineageBand, registerLineage, startLineage } from './lineage'
+import { setStatusPart } from './status-line'
+import { installToolChain } from './tool-chain'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -102,7 +105,7 @@ async function refresh($: EngineInterface, subcommand: 'status' | 'detect' = 'st
     const next = parseStatus(result.stdout)
     if (next) {
       await update($, status, () => next)
-      showStatusLine($, next)
+      await showStatusLine($, next)
     } else {
       const failure = parseJson<{ message?: string }>(result.stdout)?.message ?? firstLine(result.stderr.replace(ANSI, ''))
       await update($, message, () => failure ?? 'altimate returned no integrations status.')
@@ -115,7 +118,8 @@ async function refresh($: EngineInterface, subcommand: 'status' | 'detect' = 'st
   }
 }
 
-function showStatusLine($: EngineInterface, current: IntegrationsStatus) {
+/** The integrations part of the plugin's status line (status-line.ts adds the features' parts). */
+async function showStatusLine($: EngineInterface, current: IntegrationsStatus) {
   const linked = current.providers.filter(one => one.state === 'connected')
   const synced = linked.filter(one => one.sync === 'synced').length
   const waiting = current.providers.filter(one => one.state === 'detected' || one.found || one.state === 'available').length
@@ -124,7 +128,7 @@ function showStatusLine($: EngineInterface, current: IntegrationsStatus) {
   if (attention > 0) parts.push(`${attention} needs attention`)
   if (synced > 0) parts.push(`${synced} synced`)
   if (waiting > 0) parts.push(`${waiting} found`)
-  $.ui.status(parts.join(' · '))
+  await setStatusPart($, 'integrations', parts.join(' · '))
 }
 
 /** The timeout that fits what the command runs: one provider's sync or disconnect. */
@@ -551,7 +555,7 @@ function nameOf(id: ProviderId): string {
   return { github: 'GitHub', jira: 'Jira', linear: 'Linear' }[id]
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     await $.command.register({
@@ -560,6 +564,8 @@ export const register: Register = on => {
     })
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
+    // Each feature's own start (its commands); one failing is logged and the rest go on.
+    await featuresSessionStart($, e)
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
@@ -580,10 +586,24 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    // One band per plugin: the lineage impact line rides under the integrations one, or alone.
+    // One band per plugin: the lineage impact line rides under the integrations one, or alone; each
+    // feature's line rides under the lineage one.
     if (e.props.hasSurvey) return next(e)
     const lineage = await lineageBand($, $.ui.resolve(e))
-    const pass = async () => lineage ?? next(e)
+    const ui = $.ui.resolve(e)
+    const extra = await featureBandLines($, ui)
+    const tail =
+      extra.length === 0 ? (
+        lineage
+      ) : (
+        <ui.Box flexDirection="column">
+          {lineage}
+          {extra.map(one => (
+            <ui.Box key={`feature-${one.id}`}>{one.line}</ui.Box>
+          ))}
+        </ui.Box>
+      )
+    const pass = async () => tail ?? next(e)
     const current = await read($, status)
     if (!current || (await read($, isBandHidden))) return pass()
 
@@ -639,7 +659,7 @@ export const register: Register = on => {
             <Button key="hide" label="Later" onPress={() => update($, isBandHidden, () => true)} />
           </Box>
         )}
-        {lineage}
+        {tail}
       </Box>
     )
   })
@@ -796,6 +816,11 @@ export const register: Register = on => {
   })
 
   registerLineage(on)
+
+  // The features after the lineage half; their Bash and file-edit handlers run through one ordered
+  // tool.call hook (tool-chain.ts).
+  registerFeatures(on, { options })
+  installToolChain(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added
