@@ -197,15 +197,22 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
     text = text.slice(0, at) + ' '.repeat(span) + text.slice(at + span)
   }
   // The dbt invocation itself: after a `cd x &&`, a venv's `bin/dbt`, `uv run dbt`, `python -m dbt`.
+  // Every dbt subcommand is found, so a command's invocations line up with the output each one printed;
   // `run-operation` is not `run`.
   // The first invocation at or after `searchFrom`; what comes before it (exports, `cd`s) is still read.
-  const found = /(?:^|[\s;&|(]|\/)dbt(?:\.exe)?\s+((?:--?[\w-]+(?:[ =](?!-)\S+)?\s+)*)(run|test|build|seed|snapshot|show|compile|parse)(?![\w-])/m.exec(bare.slice(searchFrom))
+  const found = /(?:^|[\s;&|(]|\/)dbt(?:\.exe)?[ \t]+((?:--?[\w-]+(?:[ =](?!-)\S+)?[ \t]+)*)(run-operation|run|test|build|seed|snapshot|show|compile|parse|retry|deps|ls|list|debug|docs|source|clean|init|clone|environment)(?![\w-])/m.exec(bare.slice(searchFrom))
   if (!found) return null
   const match = Object.assign([...found], { index: found.index + searchFrom }) as unknown as RegExpExecArray
   // The executable's word starts after the last separator before `dbt` (`.venv/bin/dbt` is one word).
   const dbtAt = match.index + match[0].search(/dbt(?:\.exe)?\s/)
   const head = bare.slice(0, dbtAt)
   const start = Math.max(head.search(/[^\s;&|(]*$/), 0)
+  // The subcommands that are not runs, shows or compiles count only where a command starts (after `;`, `&&`,
+  // `|`, a newline, or a wrapper such as `uv run`): `git diff -- dbt docs/` runs no dbt.
+  if (/^(?:run-operation|deps|ls|list|debug|docs|source|clean|init|clone|environment)$/.test(match[2]!)) {
+    const lead = /(?:^|[;&|(\n])([^;&|(\n]*)$/.exec(head.slice(0, start))?.[1] ?? ''
+    if (!/^\s*(?:(?:[A-Za-z_]\w*=\S*|env|time|sudo|exec|nohup|command)\s+|(?:uv|poetry|pipenv|pdm|hatch|rye)\s+run\s+(?:--?[\w-]+(?:[ =](?!-)\S+)?\s+)*|python3?\s+-m\s+)*$/.test(lead)) return dbtCommand(written, match.index + match[0].length)
+  }
   // Its own arguments end where the shell starts the next command, puts this one in the background, or a comment starts.
   const stop = bare.slice(start).search(/;|&&|\|\||\||&|\n|\)|\s#/)
   const end = stop < 0 ? undefined : start + stop
@@ -375,19 +382,25 @@ export function failuresFrom(runResults: unknown, manifest?: { nodes?: Record<st
   return out
 }
 
-/** dbt's output as text: a `--log-format json` run's messages one per line, else the output as it is. */
+/** dbt's output as text, in the order it was printed: a `--log-format json` line becomes its message, a plain line stays. */
 function logText(output: string): string {
-  const messages: string[] = []
+  const lines: string[] = []
+  let json = false
   for (const line of output.split('\n')) {
     const text = line.trim()
-    if (!text.startsWith('{')) continue
-    try {
-      const msg = JSON.parse(text)?.info?.msg
-      if (typeof msg === 'string') messages.push(msg)
-    } catch {}
+    if (text.startsWith('{')) {
+      try {
+        const msg = JSON.parse(text)?.info?.msg
+        if (typeof msg === 'string') {
+          json = true
+          lines.push(msg)
+          continue
+        }
+      } catch {}
+    }
+    lines.push(line)
   }
-  // Mixed output (a JSON log and plain lines) keeps both.
-  return messages.length ? [...messages, ...output.split('\n').filter(line => !line.trim().startsWith('{'))].join('\n') : output
+  return json ? lines.join('\n') : output
 }
 
 /** The failed nodes a dbt command's own text names, for a run that wrote no run_results.json (a parse error). */
@@ -413,13 +426,49 @@ export function failuresFromText(output: string): DbtFailure[] {
   return out
 }
 
-/** Whether a dbt command's output says it failed, when the exit code is not known. */
-export function saysFailed(output: string): boolean {
-  const text = stripAnsi(logText(output))
-  const done = /Done\.\s+PASS=\d+\s+WARN=\d+\s+ERROR=(\d+)/.exec(text)
-  if (done) return Number(done[1]) > 0
-  return /Completed with \d+ errors?|Encountered an error|(Compilation|Database|Runtime|Parsing) Error/.test(text)
+export const RUN_VERBS = ['run', 'test', 'build', 'seed', 'snapshot', 'retry']
+const SUMMARY = /Done\.\s+PASS=\d+\s+WARN=\d+\s+ERROR=(\d+)/g
+const ERROR_TEXT = /Completed with [1-9]\d* errors?|Encountered an error|(Compilation|Database|Runtime|Parsing) Error/
+
+/**
+ * What one dbt invocation's text says: `failed` (a summary with errors, or dbt's error text after its last
+ * summary, or anywhere when it has none), `passed` (a summary with no errors and no error text after it), else
+ * `unknown` (a run killed before its summary).
+ */
+function pieceVerdict(text: string): 'failed' | 'passed' | 'unknown' {
+  const summaries = [...text.matchAll(SUMMARY)]
+  if (summaries.some(one => Number(one[1]) > 0)) return 'failed'
+  const last = summaries.at(-1)
+  if (ERROR_TEXT.test(last ? text.slice(last.index! + last[0].length) : text)) return 'failed'
+  return last ? 'passed' : 'unknown'
 }
+
+/**
+ * What a dbt command's output says about it, when the exit code is not known. `verbs` are the dbt
+ * invocations the command ran, in order. Each one's output starts at its "Running with dbt=" line (text
+ * before the first belongs to the first, text after the last header to the last).
+ * - Mapped (one piece per invocation): only run-type pieces (RUN_VERBS) count. `failed`: one failed. `passed`:
+ *   every one passed, positive evidence that nothing failed; a piece that is neither leaves both false.
+ * - Unmapped (no headers, a log tail, a command an `||` skipped): the order cannot be trusted, so it failed
+ *   when any summary has errors or the output has dbt's error text anywhere (a log tail of an old error is a
+ *   false alarm that is accepted), and it never passes: nothing is cleared by it.
+ */
+export function dbtVerdict(output: string, verbs: string[] = []): { failed: boolean; passed: boolean; mapped: boolean } {
+  const text = stripAnsi(logText(output))
+  const pieces: string[] = []
+  let before = ''
+  for (const line of text.split('\n')) {
+    if (/Running with dbt=/.test(line)) pieces.push('')
+    if (pieces.length) pieces[pieces.length - 1] += `${line}\n`
+    else before += `${line}\n`
+  }
+  if (!pieces.length || pieces.length !== verbs.length) return { failed: [...text.matchAll(SUMMARY)].some(one => Number(one[1]) > 0) || ERROR_TEXT.test(text), passed: false, mapped: false }
+  pieces[0] = before + pieces[0]
+  const counted = pieces.filter((_, i) => RUN_VERBS.includes(verbs[i]!)).map(pieceVerdict)
+  return { failed: counted.includes('failed'), passed: counted.length > 0 && counted.every(one => one === 'passed'), mapped: true }
+}
+
+export const saysFailed = (output: string, verbs: string[] = []): boolean => dbtVerdict(output, verbs).failed
 
 // dbt Power User's failure prompts, kept to the words that carry the ask.
 export function explainPrompt(command: string, failures: DbtFailure[]): string {

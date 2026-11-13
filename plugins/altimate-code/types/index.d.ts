@@ -194,11 +194,11 @@ export type DbtFailure = {
 export type FailureView = {
   command: string
   root: string
-  /** run, test, build, seed or snapshot. */
+  /** run, test, build, seed, snapshot or retry; a command that ran several joins them (`run+test`). */
   verb: string
   /** The context flags it ran with (target, profile, vars, …): a passing run in another context clears nothing. */
   options: string[]
-  /** The failed command's --select; null when it ran the whole project. */
+  /** The failed command's --select; null when it ran the whole project. A compound command's selections are joined (`a | b`, `*` for a whole-project one). */
   select: string | null
   failures: DbtFailure[]
   at: number
@@ -347,7 +347,7 @@ declare module 'claude-code' {
       isLineageBandHidden: boolean
       /** Compile-and-validate's answer for the last model Claude edited. */
       dbtCheck: CheckView | null
-      /** The last failed dbt run, test or build Claude ran; null once one passes or it is dismissed. */
+      /** The last failed dbt run, test, build, seed, snapshot or retry Claude ran; null once a passing run of the same kind, selection, project and context (or a whole-project build, or a build with the same selection) clears it or it is dismissed. A passing `dbt retry` never clears it, and neither does a run whose output shows no passing summary or cannot be split per command (piped through `tail`, headers cut off). A compound command (`run+test`) is cleared only by the same command again or a whole-project build. */
       dbtFailure: FailureView | null
       /** The environment doctor's answer for the session's dbt project. */
       dbtDoctor: DoctorView | null

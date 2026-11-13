@@ -5,6 +5,7 @@ import {
   columnWidths,
   dbtCommand,
   dbtCommands,
+  dbtVerdict,
   debugInfo,
   failuresFrom,
   failuresFromText,
@@ -21,6 +22,7 @@ import {
   textTable,
   versionInfo,
 } from './dbt-mods-core'
+import { MANIFEST_SLICE } from './dbt-mods'
 
 // The dbt helpers on; the lineage half reads no manifest in these tests that it would draw.
 // The kit's `$` and `on`, loosely typed: the tests drive engine events with only the fields the helpers read.
@@ -139,8 +141,14 @@ type Options = {
   files?: Record<string, string>
   /** No manifest until dbt show writes this one. */
   manifestAfterShow?: unknown
+  /** The first Edit waits for this before its result returns. */
+  holdEdit?: Promise<void>
+  /** The first read of Claude's shell folder waits for this. */
+  holdCwd?: Promise<void>
   /** The first dbt show waits for this. */
   holdShow?: Promise<void>
+  /** The dbt shows that run before the held one. */
+  holdShowAfter?: number
   /** Folders that exist but cannot be listed. */
   unreadable?: string[]
   /** Runs while Claude's shell command is running, before its result returns. */
@@ -192,7 +200,14 @@ async function start($: any, on: any, options: Options = {}) {
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('session.root', () => ({ value: options.sessionRoot ?? ROOT }))
   // Where Claude's shell is: the session folder unless a test moved it.
-  on('session.cwd', () => ({ value: options.cwd ?? ROOT }))
+  let cwdHeld = false
+  on('session.cwd', async () => {
+    if (options.holdCwd && !cwdHeld) {
+      cwdHeld = true
+      await options.holdCwd
+    }
+    return { value: options.cwd ?? ROOT }
+  })
   const opened: string[] = []
   on('ui.open', (_: unknown, e: { id: string; focus?: boolean }) => {
     opened.push(`${e.id}${e.focus ? ':focus' : ''}`)
@@ -249,11 +264,12 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: [...names].map(([name, kind]) => ({ name, kind })) }
   })
   let held = false
+  let shows = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string } }) => {
     runs.push([...e.argv])
     cwds.push(e.init?.cwd ?? '')
     // The first dbt show waits until the test lets it go.
-    if (options.holdShow && !held && e.argv.includes('show')) {
+    if (options.holdShow && !held && e.argv.includes('show') && shows++ >= (options.holdShowAfter ?? 0)) {
       held = true
       await options.holdShow
     }
@@ -289,9 +305,14 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { exitCode: 0, stdout: '', stderr: '' } }
   })
   // The tool itself, beneath the plugin: Bash answers what the test gives it.
+  let editHeld = false
   let bash: { stdout: string; isError?: boolean } = { stdout: '' }
   on('tool.call', async (_: unknown, e: { tool: string }) => {
     if (e.tool === 'Bash' && options.duringBash) await options.duringBash()
+    if (e.tool === 'Edit' && options.holdEdit && !editHeld) {
+      editHeld = true
+      await options.holdEdit
+    }
     if (e.tool === 'Bash') return { result: { stdout: bash.stdout, stderr: '', interrupted: false }, ...(bash.isError ? { isError: true, text: bash.stdout } : {}) }
     return { result: { ok: true } }
   })
@@ -399,8 +420,9 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommands('dbt run -s a && dbt test -s a').map(one => one.verb)).toEqual(['run', 'test'])
   // An export before the first invocation applies to every later one.
   expect(dbtCommands('export DBT_TARGET=prod; dbt run -s a; dbt show -s a').map(one => one.env)).toEqual([['DBT_TARGET=prod'], ['DBT_TARGET=prod']])
-  // run-operation is not a run.
-  expect(dbtCommand('dbt run-operation grant_select')).toBeNull()
+  // run-operation is its own subcommand, not a run.
+  expect(dbtCommand('dbt run-operation grant_select')?.verb).toBe('run-operation')
+  expect(dbtCommands('dbt deps; dbt run -s a; dbt test -s a').map(one => one.verb)).toEqual(['deps', 'run', 'test'])
   expect(dbtCommand('echo dbt is great')).toBeNull()
   // A dbt command inside another command's quoted argument is not run.
   expect(dbtCommand('altimate run "Fix the failing test, then re-run `dbt build -s orders`" --agent builder')).toBeNull()
@@ -504,7 +526,7 @@ test('a dbt command that only rewrites the manifest starts no check; a change to
   expect(shows()).toBe(1)
   // Claude's own build rewrites the manifest: no warehouse query for that.
   mtimes['target/manifest.json'] = 90_000
-  setBash({ stdout: 'Done. PASS=11 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=11' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=11 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=11` })
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
   await clock.settle()
   expect(shows()).toBe(1)
@@ -525,7 +547,7 @@ test('a passing run clears the failed run only when it ran what failed, in the s
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
   await clock.settle()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  setBash({ stdout: 'Done. PASS=2 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=2' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=2 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=2` })
   // Another model's build, and a build in another project, leave it.
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s customers' })
   await $.tool.call({ tool: 'Bash', command: 'cd /elsewhere && dbt build -s orders' })
@@ -638,7 +660,7 @@ test('Fix with Altimate Code hands the failure to altimate-code; a later passing
 
   setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'dbt test' })
-  setBash({ stdout: 'Done. PASS=11 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=11' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=11 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=11` })
   await $.tool.call({ tool: 'Bash', command: 'dbt test' })
   await clock.settle()
   const after = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -915,7 +937,7 @@ test('model-paths of "." checks a model in the project folder; a passing seed do
   expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
   setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
-  setBash({ stdout: 'Done. PASS=3 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=3' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=3 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=3` })
   await $.tool.call({ tool: 'Bash', command: 'dbt seed' })
   await clock.settle()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -927,7 +949,7 @@ test('a run that excludes the failed model does not clear its failure', async ($
   const { clock, setBash } = await start($, on)
   setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
-  setBash({ stdout: 'Done. PASS=3 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=3' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=3 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=3` })
   await $.tool.call({ tool: 'Bash', command: 'dbt run --exclude orders' })
   await clock.settle()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -1014,7 +1036,7 @@ test('a passing run against another target leaves a failed run as it is', async 
   const { clock, setBash } = await start($, on)
   setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders -t prod' })
-  setBash({ stdout: 'Done. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1` })
   await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders -t dev' })
   await clock.settle()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -1121,7 +1143,7 @@ test('runs with different DBT_TARGET in the environment do not clear each other\
   const { clock, setBash } = await start($, on)
   setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'DBT_TARGET=prod dbt run -s orders' })
-  setBash({ stdout: 'Done. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1` })
   await $.tool.call({ tool: 'Bash', command: 'DBT_TARGET=dev dbt run -s orders' })
   await clock.settle()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
@@ -1286,11 +1308,11 @@ test('Claude\'s plain `dbt show` (dbt\'s text table, as dbt prints it) lands in 
   await ui.unmount()
 })
 
-test('compound dbt commands: a run then a test is one compound result, and the last dbt show\'s rows are its own', async ($, on) => {
+test('compound dbt commands: a run then a test is one compound result, and different shows in one command save no rows', async ($, on) => {
   const { clock, store, setBash } = await start($, on)
   setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders && dbt test -s orders' })
-  setBash({ stdout: 'Done. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=1 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=1` })
   // A passing run alone did not rerun the failing test: the failure stays.
   await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
   await clock.settle()
@@ -1300,7 +1322,8 @@ test('compound dbt commands: a run then a test is one compound result, and the l
   setBash({ stdout: showLog([{ customer_id: 1 }], 'customers') })
   await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders; dbt show -s customers' })
   await clock.settle()
-  expect((store.get('dbt-results-history') as any[])[0].title).toBe('customers')
+  // Different shows in one command: which rows are whose cannot be told, so none are saved.
+  expect((store.get('dbt-results-history') as any[] | undefined) ?? []).toEqual([])
 })
 
 test('a dbt command run where Claude\'s shell is (a subfolder project after a cd) is found there', async ($, on) => {
@@ -1336,10 +1359,391 @@ test('a compound run with the same target on each part is cleared by a whole-pro
   const { clock, setBash } = await start($, on)
   setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'dbt run -t prod -s orders && dbt test -t prod -s orders' })
-  setBash({ stdout: 'Done. PASS=11 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=11' })
+  setBash({ stdout: `${HEADER}\nDone. PASS=11 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=11` })
   await $.tool.call({ tool: 'Bash', command: 'dbt build -t prod' })
   await clock.settle()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
   await band.unmount()
+})
+
+// ─── Failure recording, show attribution, check ordering, manifest slice ─────────────────────────
+
+const RUN_PASSED = 'Done. PASS=3 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=3'
+const TEST_FAILED = BUILD_FAILED.replace('PASS=10 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=11', 'PASS=0 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=1')
+
+kitTest('output with several summaries has failed when any of them has errors', () => {
+  expect(saysFailed(`${RUN_PASSED}\n${TEST_FAILED}`)).toBe(true)
+  expect(saysFailed(`${TEST_FAILED}\n${RUN_PASSED}`)).toBe(true)
+  expect(saysFailed(`${RUN_PASSED}\n${RUN_PASSED}`)).toBe(false)
+})
+
+test('a passing run followed by a failing test in one command still posts the failure band', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: `${RUN_PASSED}\n${TEST_FAILED}\nfinished` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders; dbt test -s orders; echo finished' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await band.unmount()
+})
+
+test('a /clear while the shell folder is being read does not let the failed run back in', async ($, on) => {
+  let release!: () => void
+  const { clock, setBash } = await start($, on, { holdCwd: new Promise<void>(go => (release = go)) })
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  const call = $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  await call
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('different shows in one command save nothing, named node or not; one show is saved', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  const table = (head: string, cell: string) => `06:36:55  Previewing node '${head}':\n| id |\n| -- |\n| ${cell} |\n`
+  setBash({ stdout: `${table('orders', 'o1')}${table('customers', 'c1')}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders && dbt show -s customers' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[] | undefined) ?? []).toEqual([])
+  // With JSON logs that name each node it is the same: nothing is saved.
+  setBash({ stdout: `${showLog([{ id: 'o1' }], 'orders')}\n${showLog([{ id: 'c1' }], 'customers')}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders && dbt show -s customers' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders -t prod || dbt show -s path:models/orders.sql -t dev' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[] | undefined) ?? []).toEqual([])
+  // One show with plain text is still saved.
+  setBash({ stdout: table('orders', 'o1') })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[]).map(one => one.select)).toContain('orders')
+})
+
+kitTest('the manifest slice bounds the direct tests by the same node cap as the graph walk', () => {
+  // Python cannot run in a hooks test: the script is read for its bound on the tests it adds.
+  expect(MANIFEST_SLICE).not.toContain('keep.update(tests)')
+  expect(MANIFEST_SLICE).toMatch(/for t in tests:\n\s+if len\(keep\) >= 20000:\n\s+break\n\s+keep\.add\(t\)/)
+  // The tests go in before the walk, so the cap on the walk never drops them.
+  expect(MANIFEST_SLICE.indexOf('keep.add(t)')).toBeLessThan(MANIFEST_SLICE.indexOf('for graph in (pm, cm)'))
+})
+
+test('a failing dbt retry posts the failure band; a passing retry never clears it', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt retry' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  // Output with a header per invocation proves the retry passed; it still clears nothing.
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt retry' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  // Nor does it clear the failure of another run.
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt retry' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  // A compound with a retry fails and passes as one command: passing again does not clear it either.
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders && dbt retry' })
+  await clock.settle()
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}\n${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders && dbt retry' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await band.unmount()
+})
+
+test('an older check of one file landing after a newer check of another file does not open its pane or toast; the newest lands in the band', async ($, on) => {
+  let release!: () => void
+  const { clock, opened, toasts } = await start($, on, { holdShow: new Promise<void>(go => (release = go)), show: { rows: [{ order_id: 1, order_total: 10 }] } })
+  // orders.sql drifts from schema.yml (a pane opens for it); revenue.sql documents no columns (it does not).
+  const first = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  const second = $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/revenue.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  release()
+  await Promise.all([first, second])
+  await clock.settle()
+  expect(opened.filter(one => one.startsWith('altimate-check'))).toEqual([])
+  expect(toasts.filter(one => /orders ·/.test(one))).toEqual([])
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /revenue/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^(✓|✖|⚠|◦) orders/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('an edit from a conversation that ended while it waited does not keep the next conversation\'s check from landing', async ($, on) => {
+  let release!: () => void
+  let releaseShow!: () => void
+  const { clock } = await start($, on, { show: { rows: [{ order_id: 1, order_total: 10 }] }, holdEdit: new Promise<void>(go => (release = go)), holdShow: new Promise<void>(go => (releaseShow = go)) })
+  const old = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  // The new conversation's check is running (its dbt show is held) when the old edit resumes.
+  const fresh = $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/revenue.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  release()
+  await clock.settle()
+  releaseShow()
+  await Promise.all([old, fresh])
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /revenue/ })).toBeDefined()
+  // The finished check shows its Details button; a check left running has none.
+  expect(await band.find({ key: 'dbt-check-details' })).toBeDefined()
+  await band.unmount()
+})
+
+test('a passing run summary does not hide a compilation error from a later command', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}\n${HEADER}\n06:45:43  Encountered an error:\nCompilation Error\n  Model 'model.shop.orders' depends on a node named 'x' which was not found\nfinished` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders; dbt test -s orders; echo finished' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await band.unmount()
+})
+
+test('the same plain-text preview run twice is attributed to that show', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: "06:36:55  Previewing node 'orders':\n| id |\n| -- |\n| o1 |\n" })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders || dbt show -s orders' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[]).map(one => [one.select, one.rows])).toEqual([['orders', [['o1']]]])
+})
+
+const HEADER = '06:45:40  Running with dbt=1.11.6'
+const COMPILE_ERROR = "06:45:43  Encountered an error:\nCompilation Error\n  Model 'broken' depends on a node named 'x' which was not found"
+const PASSED_AFTER_ERROR = `06:45:43  Encountered an error:\nCompilation Error\n  Model 'broken' depends on a node named 'x' which was not found\n${RUN_PASSED}`
+
+kitTest('an invocation is judged from its own piece of output: a later passing summary does not hide its error, an earlier error does not fail a later pass', () => {
+  // Without headers the order cannot be trusted: an error anywhere is a failure.
+  expect(saysFailed(PASSED_AFTER_ERROR)).toBe(true)
+  // With one piece of output per invocation, an error after a passing run's summary is the next one's.
+  expect(saysFailed(`${HEADER}\n${RUN_PASSED}\n${HEADER}\nCompilation Error\n  broken`, ['run', 'test'])).toBe(true)
+})
+
+test('a passing run after an earlier error, each with its own header, posts no band and clears a matching failure', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  setBash({ stdout: `${HEADER}\n${COMPILE_ERROR}\n${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile -s broken; dbt build -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('output that does not split per invocation never clears a failure, and an error anywhere in it is one', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  // An error with no header before a later passing header, a passing summary then a kill: nothing is cleared.
+  for (const stdout of [`${COMPILE_ERROR}\n${HEADER}\n${RUN_PASSED}`, `${RUN_PASSED}\nKilled: 9`, `${HEADER}\n${RUN_PASSED}`]) {
+    setBash({ stdout })
+    await $.tool.call({ tool: 'Bash', command: stdout.startsWith('Done') ? 'dbt build -s orders' : 'dbt compile -s b; dbt build -s orders' })
+    await clock.settle()
+    expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  }
+  await band.unmount()
+})
+
+test('a header-less compile error after a passing summary is a failure', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  setBash({ stdout: `${RUN_PASSED}\n${COMPILE_ERROR}\nfinished` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders; dbt --quiet test -s orders; echo finished' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await band.unmount()
+})
+
+kitTest('a subcommand named in an argument of another command is not a dbt invocation', () => {
+  expect(dbtCommands('git diff -- dbt docs/')).toEqual([])
+  expect(dbtCommands('git diff -- dbt docs/ && dbt run -s a').map(one => one.verb)).toEqual(['run'])
+  expect(dbtCommands('uv run dbt deps; DBT_X=1 dbt docs generate').map(one => one.verb)).toEqual(['deps', 'docs'])
+})
+
+test('shows that differ only in a flag such as --limit are not attributed', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: "06:36:55  Previewing node 'orders':\n| id |\n| -- |\n| o1 |\n" })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders --limit 1 || dbt show -s orders --limit 2' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[] | undefined) ?? []).toEqual([])
+})
+
+test('a recheck that waited on a file while a newer check of another file ran does not take the band back', async ($, on) => {
+  const gate: Options['statGate'] = { path: 'models/orders.sql' }
+  const { clock, mtimes, setBash } = await start($, on, { statGate: gate })
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  mtimes['models/orders.sql'] = 50_000
+  let release!: () => void
+  gate!.until = new Promise<void>(go => (release = go))
+  setBash({ stdout: 'ok' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
+  // Another model's check starts and finishes while the recheck waits on its stat.
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/revenue.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  release()
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /revenue/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /match schema\.yml/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a recheck that lands after a newer check started says nothing about the band', async ($, on) => {
+  let release!: () => void
+  const { clock, mtimes, toasts, setBash } = await start($, on, { holdShow: new Promise<void>(go => (release = go)), holdShowAfter: 1 })
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  mtimes['models/orders.sql'] = 50_000
+  setBash({ stdout: 'ok' })
+  // The recheck's dbt show is held; another model's edit starts its check behind it.
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
+  const second = $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/revenue.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  release()
+  await second
+  await clock.settle()
+  expect(toasts.filter(one => one.includes('checked again'))).toEqual([])
+})
+
+const jsonLine = (msg: string) => JSON.stringify({ info: { code: 'Z', level: 'info', msg } })
+
+kitTest('a run that failed before writing a summary fails the command even when a later run passes', () => {
+  const output = `${HEADER}\n${COMPILE_ERROR}\n${HEADER}\n${RUN_PASSED}`
+  expect(saysFailed(output, ['run', 'run'])).toBe(true)
+})
+
+kitTest('plain and JSON log lines keep the order they were printed in', () => {
+  // A plain passing summary, then a JSON-logged compilation error from the next invocation.
+  const output = [HEADER, RUN_PASSED, jsonLine(HEADER), jsonLine('Encountered an error:\nCompilation Error\n  broken')].join('\n')
+  expect(saysFailed(output, ['run', 'test'])).toBe(true)
+  // The JSON error first, then a plain passing run: the error belongs to the first invocation.
+  expect(saysFailed([jsonLine(HEADER), jsonLine('Compilation Error\n  broken'), HEADER, RUN_PASSED].join('\n'), ['run', 'run'])).toBe(true)
+})
+
+kitTest('a failed compile, show or parse does not make a run failed', () => {
+  expect(saysFailed(`${HEADER}\n${RUN_PASSED}\n${HEADER}\n${COMPILE_ERROR}`, ['run', 'compile'])).toBe(false)
+})
+
+kitTest('when the output does not split per invocation, a summary with errors, or error text with no summary, fails', () => {
+  // `dbt run -s a || dbt run -s b`: only the first ran.
+  expect(saysFailed(`${HEADER}\n${RUN_PASSED}`, ['run', 'run'])).toBe(false)
+  expect(saysFailed(`${HEADER}\n${COMPILE_ERROR}`, ['run', 'run'])).toBe(true)
+  expect(saysFailed(`${HEADER}\n${BUILD_FAILED}`, ['build', 'build'])).toBe(true)
+  expect(saysFailed(PASSED_AFTER_ERROR)).toBe(true)
+  expect(dbtVerdict(PASSED_AFTER_ERROR, ['compile', 'run'])).toEqual({ failed: true, passed: false, mapped: false })
+})
+
+test('a failed run followed by a passing one in one command posts the band; a failed compile after a passing run does not', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  setBash({ stdout: `${HEADER}\n${COMPILE_ERROR}\n${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s broken; dbt run -s ok' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  setBash({ stdout: `${HEADER}\n${COMPILE_ERROR}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s broken' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  // The compile that failed after a passing run is not the run's failure: it clears the matching one.
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}\n${HEADER}\n${COMPILE_ERROR}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s broken; dbt compile -s b | tail' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+kitTest('when the headers do not match the invocations, any failed piece fails the command, whatever its verb', () => {
+  // `dbt run -s broken && dbt test -s broken; dbt run -s ok`: the first failed, so the test never ran.
+  expect(saysFailed(`${HEADER}\n${COMPILE_ERROR}\n${HEADER}\n${RUN_PASSED}`, ['run', 'test', 'run'])).toBe(true)
+  // `dbt deps; dbt run -s a; dbt test -s a`: three headers, and the failing piece is the last.
+  expect(saysFailed(`${HEADER}\nInstalled\n${HEADER}\n${RUN_PASSED}\n${HEADER}\n${TEST_FAILED}`, ['run', 'test'])).toBe(true)
+  expect(saysFailed(`${HEADER}\nInstalled\n${HEADER}\n${RUN_PASSED}\n${HEADER}\n${RUN_PASSED}`, ['run', 'test'])).toBe(false)
+})
+
+test('a run followed by a compile that sets the exit code is not a failed run; a compile error before a passing run is', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}\n${HEADER}\n${COMPILE_ERROR}`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders; dbt compile -s broken' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  setBash({ stdout: `${HEADER}\n${COMPILE_ERROR}\n${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s broken && dbt test -s broken; dbt run -s ok; echo finished' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await band.unmount()
+})
+
+test('a preview naming a node that no show selects is not given to the last of several different shows', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ id: 'o1' }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s path:models/orders.sql && dbt show -s customers' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[] | undefined) ?? []).toEqual([])
+  // A single show keeps its rows, whatever name dbt gives the node.
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s path:models/orders.sql' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[]).map(one => one.select)).toEqual(['path:models/orders.sql'])
+})
+
+test('a run killed before its summary is a failure when the shell says so, and never clears one', async ($, on) => {
+  const { clock, setBash } = await start($, on)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // Killed, and the shell reports it: a failure (the band reads the run's own results).
+  setBash({ stdout: `${HEADER}\nKilled: 9`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  // Killed, and the shell says nothing: not a failure, and the failure that is there stays.
+  setBash({ stdout: `${HEADER}\nKilled: 9` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  // A run that shows its passing summary clears it.
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+kitTest('a piece with no summary and no error text proves nothing; a passing summary does', () => {
+  expect(dbtVerdict(`${HEADER}\nKilled: 9`, ['run'])).toEqual({ failed: false, passed: false, mapped: true })
+  expect(dbtVerdict(`${HEADER}\n${RUN_PASSED}\n${HEADER}\nKilled: 9`, ['run', 'test'])).toEqual({ failed: false, passed: false, mapped: true })
+  expect(dbtVerdict(`${HEADER}\n${RUN_PASSED}`, ['run'])).toEqual({ failed: false, passed: true, mapped: true })
+  expect(dbtVerdict('Killed: 9', [])).toEqual({ failed: false, passed: false, mapped: false })
+})
+
+test('shows of one selection that differ in target are not attributed, even when the preview names the node', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ id: 'prod' }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders -t prod --limit 1 || dbt show -s orders -t dev --limit 50' })
+  await clock.settle()
+  expect((store.get('dbt-results-history') as any[] | undefined) ?? []).toEqual([])
+})
+
+kitTest('a `dbt` at a line end and `source` on the next line are not a dbt subcommand', () => {
+  expect(dbtCommands('cd dbt\nsource .venv/bin/activate')).toEqual([])
+  expect(dbtCommands('cd dbt\nsource .venv/bin/activate && dbt show -s a').map(one => one.verb)).toEqual(['show'])
 })
