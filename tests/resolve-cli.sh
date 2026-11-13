@@ -8,7 +8,7 @@ cd "$(dirname "$0")/.."
 FILES=(
   plugins/altimate-code/commands/altimate.md:2
   plugins/altimate-code/commands/review.md:1
-  plugins/altimate-code/commands/rules.md:2
+  plugins/altimate-code/commands/rules.md:3
   plugins/altimate-code/skills/altimate-code/SKILL.md:5
   plugins/altimate-code/skills/review/SKILL.md:1
 )
