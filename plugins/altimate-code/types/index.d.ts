@@ -219,8 +219,8 @@ export interface HealthState {}
 export interface SqlGraphState {
   /** The model Claude last read or edited, which /sql-graph shows when it is given no name. */
   lastModel: string | null
-  /** The model the pane shows, with its graph once the tool answered. */
-  shown: { model: string; graph: SqlGraphView | null; loading: boolean; message: string | null; selected: string | null } | null
+  /** The model the pane shows, with its graph once the tool answered; `request` is the ask that owns it, so an older ask's answer is dropped. */
+  shown: { model: string; request: number; graph: SqlGraphView | null; loading: boolean; message: string | null; selected: string | null } | null
 }
 
 /** What `dbt_sql_graph` returns: one node per CTE, relation or select, and the edges between them (input, then consumer). */
@@ -297,7 +297,7 @@ declare module 'claude-code' {
       /** hooks/features/: HealthState. */
       health: HealthState | null
       /** hooks/features/: SqlGraphState. */
-      sqlGraph: SqlGraphState | null
+      sqlGraph: Shaped<SqlGraphState | null>
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */

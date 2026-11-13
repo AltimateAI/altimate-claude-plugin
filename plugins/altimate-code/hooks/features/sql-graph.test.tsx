@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { cteCount, inputsOf, modelOfPath, orderNodes } from './sql-graph'
+import { cteCount, inputsOf, orderNodes } from './sql-graph'
 
 const ROOT = '/repo'
 const FILE = `${ROOT}/models/fct_orders.sql`
@@ -25,7 +25,7 @@ const GRAPH = {
   ],
 }
 
-type Options = { answer?: Record<string, unknown>; fail?: string; sql?: string }
+type Options = { answer?: Record<string, unknown>; fail?: string; sql?: string; noProject?: boolean; ok?: boolean; hold?: Record<string, Promise<void>>; holdFirst?: Promise<void>; yml?: string }
 
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
@@ -44,20 +44,30 @@ async function start($: any, on: any, options: Options = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', () => ({ value: false }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: !options.noProject && e.path === `${ROOT}/dbt_project.yml` }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     reads.push(e.path)
-    return { value: options.sql ?? 'select 1' }
+    return { value: e.path === `${ROOT}/dbt_project.yml` ? (options.yml ?? "name: 'shop'\n") : (options.sql ?? 'select 1') }
   })
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const [, command] = e.argv
     // The integrations half of the plugin asks the CLI for its status at session start.
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     cli.push([...e.argv])
+    const asked = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}')).model as string
+    // A test can hold one model's answer to make it arrive after a newer ask's.
+    if (options.hold?.[asked]) await options.hold[asked]
+    // The first ask is held and answers with a graph of its own; later asks answer at once.
+    const nth = cli.length
+    if (options.holdFirst && nth === 1) {
+      await options.holdFirst
+      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, model: asked, nodes: [{ name: 'stale', type: 'cte', sql: '', columns: [] }], edges: [] } }), stderr: '' } }
+    }
+    if (options.ok === false) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'Not available: this needs the dbt adapter', metadata: { success: false, reason: 'read-only' } }), stderr: '' } }
     if (options.fail) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: options.fail, metadata: { success: false } }), stderr: '' } }
-    const metadata = { success: true, model: 'fct_orders', ...(options.answer ?? GRAPH) }
+    const metadata = { success: true, model: asked, ...(options.answer ?? GRAPH) }
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'SQL graph for fct_orders', metadata }), stderr: '' } }
   })
   on('tool.call', () => ({ result: { ok: true } }))
@@ -81,12 +91,29 @@ test('orderNodes keeps the listed order for nodes with no edges and survives a c
   expect(orderNodes(cycle).map(node => node.name).sort()).toEqual(['a', 'b'])
 })
 
-test('modelOfPath names a model by its file and leaves out macros, tests, snapshots and build output', () => {
-  expect(modelOfPath('/repo/models/marts/fct_orders.sql')).toBe('fct_orders')
-  expect(modelOfPath('C:\\repo\\models\\fct_orders.SQL')).toBe('fct_orders')
-  expect(modelOfPath('/repo/macros/cents.sql')).toBeNull()
-  expect(modelOfPath('/repo/target/compiled/shop/models/a.sql')).toBeNull()
-  expect(modelOfPath('/repo/models/schema.yml')).toBeNull()
+test('a model is the .sql file in a dbt project\'s model folders: by file name, not by an ancestor folder, and never a macro, test, snapshot or build file', async ($, on) => {
+  const { clock } = await start($, on, { yml: "name: 'shop'\nmodel-paths: ['models', 'more_models']\n" })
+  const reads = async (file: string) => {
+    await $.tool.call({ tool: 'Read', file_path: file })
+    await clock.settle()
+    return (await $.command.run({ command: 'sql-graph', args: '', ...composer } as any)).text
+  }
+  expect(await reads(`${ROOT}/more_models/marts/dim_a.sql`)).toContain('dim_a')
+  expect(await reads(`${ROOT}/macros/cents.sql`)).toContain('dim_a')
+  expect(await reads(`${ROOT}/tests/t.sql`)).toContain('dim_a')
+  expect(await reads(`${ROOT}/target/compiled/shop/models/x.sql`)).toContain('dim_a')
+  expect(await reads(`${ROOT}/db/migrations/001.sql`)).toContain('dim_a')
+  expect(await reads(`${ROOT}/models/fct_orders.sql`)).toContain('fct_orders')
+})
+
+test('outside a dbt project a .sql read sets no default model and an edit adds no line', async ($, on) => {
+  const { clock, cli } = await start($, on, { noProject: true, sql: 'with a as (select 1) select * from a' })
+  const edit: any = await $.tool.call({ tool: 'Edit', file_path: '/other/models/x.sql', old_string: '1', new_string: '2' })
+  await clock.settle()
+  expect(JSON.stringify(edit.context ?? [])).not.toContain('/sql-graph')
+  const reply = await $.command.run({ command: 'sql-graph', args: '', ...composer } as any)
+  expect(reply.text).toBe('Read or edit a dbt model, or run /sql-graph <model>.')
+  expect(cli).toHaveLength(0)
 })
 
 test('cteCount counts the CTEs a model defines, not words in comments or strings', () => {
@@ -94,6 +121,9 @@ test('cteCount counts the CTEs a model defines, not words in comments or strings
   expect(cteCount('with recursive r as (select 1) select * from r')).toBe(1)
   expect(cteCount("-- with x as (\nselect ', y as (' as s from t")).toBe(0)
   expect(cteCount('select cast(a as int), b as c from t')).toBe(0)
+  expect(cteCount("with a as (select '--' as marker), b as (select 1) select * from b")).toBe(2)
+  expect(cteCount('{# with fake as (select 1) #}\nselect 1')).toBe(0)
+  expect(cteCount('with a (id) as (select 1), b(x, y) as (select 2, 3) select * from a')).toBe(2)
 })
 
 test('/sql-graph <model> asks the tool once, with write permission, and the pane lists the nodes in dependency order', async ($, on) => {
@@ -108,9 +138,9 @@ test('/sql-graph <model> asks the tool once, with write permission, and the pane
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /SQL graph · fct_orders · 3 nodes/ })).toBeDefined()
-  expect(await ui.find({ type: 'Button', label: /orders \(model\) · 3 columns$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Button', label: /paid \(cte\) · 2 columns · from orders$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Button', label: /fct_orders \(model\) · 2 columns · from paid$/ })).toBeDefined()
+  expect(await ui.find({ key: 'node-orders' })).toBeDefined()
+  expect(await ui.find({ key: 'node-paid' })).toBeDefined()
+  expect(await ui.find({ key: 'node-fct_orders' })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: 'Press a row to see its SQL.' })).toBeDefined()
   await ui.unmount()
 })
@@ -167,4 +197,44 @@ test('an edit to a model with no CTEs, or to a file that is no model, adds no li
   expect((plain as any).context ?? []).not.toContain('0 CTEs · /sql-graph')
   expect(JSON.stringify((plain as any).context ?? [])).not.toContain('/sql-graph')
   expect(JSON.stringify((macro as any).context ?? [])).not.toContain('/sql-graph')
+})
+
+test('an older ask for the same model that answers after a newer one does not replace it, and says so', async ($, on) => {
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const { clock } = await start($, on, { holdFirst: held })
+  const older = $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.advance(3_000)
+  expect((await older).text).toBe('The SQL graph for fct_orders is loading; the pane shows it when it is ready.')
+  // The second ask answers at once; the first answers after it.
+  const newer = await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.settle()
+  expect(newer.text).toBe('The SQL graph for fct_orders is open.')
+  release()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /SQL graph · fct_orders · 3 nodes/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an answer that lands after a new conversation started is dropped', async ($, on) => {
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const { clock } = await start($, on, { hold: { fct_orders: held } })
+  const reply = $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.advance(3_000)
+  await reply
+  await $.session.end({ sessionId: 'test' } as any)
+  release()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'Run /sql-graph <model>.' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a tool answer of status ok with success false is the failure it says, not an empty graph', async ($, on) => {
+  const { clock } = await start($, on, { ok: false })
+  const reply = await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.settle()
+  expect(reply.text).toBe('Not available: this needs the dbt adapter')
 })
