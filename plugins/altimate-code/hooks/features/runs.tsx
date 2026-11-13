@@ -46,6 +46,7 @@ const runsAtom = atom({ plugin: 'altimate-code', key: 'runs' } as const, null, {
 /** What `dbt_run_results` returns, as the plugin reads it. */
 export type RunView = {
   found?: boolean
+  projectDir?: string | null
   invocationId: string | null
   command: string | null
   elapsedSec: number | null
@@ -94,12 +95,12 @@ function moved(command: string, from: string): string {
 const quote = (path: string) => (/^[\w./-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`)
 
 /** A leading `NAME=value` that holds a secret is replayed as `NAME="$NAME"`: the value is never stored. */
-const SECRET_ASSIGNMENT = /(^|\s)([A-Za-z_][A-Za-z0-9_]*(?:SECRET|TOKEN|PASS|PASSWORD|KEY|CREDENTIAL)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S*)/gi
+const SECRET_ASSIGNMENT = /(^|\s)([A-Za-z_][A-Za-z0-9_]*(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S*)/gi
 const redact = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 
 /** The flags `dbt retry` does not take from the run it retries. */
 const VALUE = `"[^"]*"|'[^']*'|\\S+`
-const KEPT_FLAGS = new RegExp(`(?:^|\\s)((?:--(?:project-dir|profiles-dir|target-path|target)(?:=(?:${VALUE})|\\s+(?:${VALUE})))|(?:-t\\s+(?:${VALUE})))`, 'g')
+const KEPT_FLAGS = new RegExp(`(?:^|\\s)((?:--(?:project-dir|profiles-dir|target-path|target|profile)(?:=(?:${VALUE})|\\s+(?:${VALUE})))|(?:-t\\s+(?:${VALUE})))`, 'g')
 const PROJECT_DIR_FLAG = /(?:^|\s)--project-dir(?:=|\s+)("[^"]+"|'[^']+'|\S+)/
 
 /** One dbt invocation that may have written the results. */
@@ -109,20 +110,20 @@ export type Invocation = {
   commandLine: string
   /** `dbt retry` with the launcher, the environment and the folder flags the command had. */
   retryLine: string
-  /** The folder to read results from when it is not the session's; null for the session's own. */
-  projectDir: string | null
+  /** A folder of the project the command ran in: where it ran, or the one `--project-dir` names. */
+  projectDir: string
 }
 
 /** The dbt invocations of `command` that write run_results.json, in order. */
-export function resultsInvocations(command: string, root: string): Invocation[] {
+export function resultsInvocations(command: string, root: string, cwd: string = root): Invocation[] {
   return parseDbtCommand(command)
     .filter(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
     .map(one => {
       const subcommand = one.subcommand!
-      const dir = moved(command.slice(0, one.start), root)
+      const dir = moved(command.slice(0, one.start), cwd)
       const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
       const flagged = PROJECT_DIR_FLAG.exec(body)?.[1]?.replace(/^['"]|['"]$/g, '')
-      const projectDir = flagged ? normalize(flagged.startsWith('/') ? flagged : `${dir}/${flagged}`) : dir !== root ? dir : null
+      const projectDir = flagged ? normalize(flagged.startsWith('/') ? flagged : `${dir}/${flagged}`) : dir
       const where = dir !== root ? `cd ${quote(dir)} && ` : ''
       const head = redact(command.slice(one.start, one.subcommandEnd - subcommand.length))
       const kept = [...body.matchAll(KEPT_FLAGS)].map(match => match[1]!.trim())
@@ -156,6 +157,7 @@ export function toRecord(view: RunView, invocation: Pick<Invocation, 'commandLin
   const rows = [...view.results.filter(row => isFailure(row.status)), ...view.results.filter(row => !isFailure(row.status))]
   return {
     id,
+    project: view.projectDir ?? '',
     commandLine: invocation.commandLine,
     retryLine: invocation.retryLine,
     command: view.command ?? 'dbt',
@@ -234,7 +236,7 @@ async function load($: EngineInterface, root: string, open: string | null = null
 }
 
 /** The Bash calls in flight that run dbt: when each started, by tool-use id (else the command). */
-const started = new Map<string, number>()
+const started = new Map<string, { at: number; cwd: string }>()
 const startKey = (e: BashCall) => (e as { tool_use_id?: string }).tool_use_id ?? e.command
 
 /** Store updates one after another, so two recordings never overwrite each other's runs. */
@@ -255,17 +257,18 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   const began = started.get(startKey(e))
   started.delete(startKey(e))
   const root = await $.session.root()
-  const invocations = resultsInvocations(e.command, root)
+  if (began === undefined) return null
+  const invocations = resultsInvocations(e.command, root, began.cwd)
   const last = invocations[invocations.length - 1]
-  if (began === undefined || !last) return null
+  if (!last) return null
   const here = invocations.filter(one => one.projectDir === last.projectDir)
   const until = (await $.clock.now()) + READ_MS
   // The CLI's answer carries the rows: the plugin's MCP server offers only a fixed set of tools.
-  const result = await runTool($, 'dbt_run_results', last.projectDir ? { project_dir: last.projectDir } : {}, { until, cliOnly: true })
+  const result = await runTool($, 'dbt_run_results', { project_dir: last.projectDir }, { until, cliOnly: true })
   const view = result.ok ? readable(result.metadata) : null
   if (!view || view.found === false) return null
   // A file older than the call is one this call did not write (dbt stopped before it ran anything).
-  if (!view.completedAt || Date.parse(view.completedAt) < began - CLOCK_SLACK_MS) return null
+  if (!view.completedAt || Date.parse(view.completedAt) < began.at - CLOCK_SLACK_MS) return null
   const written = writer(here, view.command)
   if (!written) return null
   const run = toRecord(view, written)
@@ -274,7 +277,7 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
     const all = await held($)
     const runs = all[root] ?? []
     // The same file as the last recording: nothing new was written.
-    if (runs[0]?.id === run.id) return null
+    if (runs.find(one => one.project === run.project)?.id === run.id) return null
     const next = fitStore({ ...all, [root]: withRun(runs, run) })
     await $.store.set(STORE_KEY, next)
     await update($, runsAtom, prev => (prev?.root === root ? { ...prev, runs: next[root] ?? [] } : prev))
@@ -324,7 +327,7 @@ export function register(on: On, context: FeatureContext) {
 
     const failed = open.rows.filter(row => isFailure(row.status))
     const rows = open.rows.slice(0, SHOWN_ROWS)
-    const latest = runs[0]?.id === open.id
+    const latest = runs.find(one => one.project === open.project)?.id === open.id
     return (
       <Box key="runs" flexDirection="column">
         <Box>
@@ -373,7 +376,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
 /** The command to run in place of `e.command`; null keeps it. */
 export async function bashRewrite($: EngineInterface, e: BashCall): Promise<string | null> {
   if (resultsInvocations(e.command, '').length === 0) return null
-  started.set(startKey(e), await $.clock.now())
+  started.set(startKey(e), { at: await $.clock.now(), cwd: await $.session.cwd() })
   // A call that never reaches bashAfter (refused, cancelled) leaves its entry: only the newest are kept.
   while (started.size > 50) started.delete(started.keys().next().value as string)
   return null

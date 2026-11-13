@@ -192,6 +192,8 @@ export type RunRow = {
 export type RunRecord = {
   /** The artifact's invocation id; its completion time when the artifact has none. */
   id: string
+  /** The dbt project folder the run was read from. */
+  project: string
   /** The command as Claude ran it, with the folder it ran in and a secret's value left out; what Re-run fills in. */
   commandLine: string
   /** `dbt retry` with the launcher, environment and folder flags the command had; what Re-run failed fills in. */

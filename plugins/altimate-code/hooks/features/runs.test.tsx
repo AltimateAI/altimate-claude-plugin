@@ -17,8 +17,9 @@ const PANE = {
 type Row = [string, string, string | null]
 
 /** What dbt_run_results answers for an artifact written at `completedAt`. */
-const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_orders', 'success', null]], command = 'build', completedAt = AFTER) => ({
+const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_orders', 'success', null]], command = 'build', completedAt = AFTER, project = ROOT) => ({
   found: true,
+  projectDir: project,
   invocationId,
   command,
   elapsedSec: 4.2,
@@ -31,7 +32,7 @@ const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_order
 })
 
 /** The session beneath the plugin: a store in memory, and the CLI answering `dbt_run_results` with `answer(args)`. */
-async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean } = {}) {
+async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string } = {}) {
   const clock = mock.clock(on, { now: T0 })
   const stored = new Map<string, unknown>()
   const filled: string[] = []
@@ -40,6 +41,7 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
   on('command.register', () => ({ value: { command: 'runs' } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
+  on('session.cwd', () => ({ value: options.cwd ?? ROOT }))
   on('store.get', (_: unknown, e: { key: string }) => ({ value: stored.get(e.key) }))
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
     stored.set(e.key, JSON.parse(JSON.stringify(e.value)))
@@ -88,7 +90,7 @@ test('a dbt build is recorded once; the same unchanged file is ignored; the line
   const again: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
   expect(again.context ?? []).toEqual([])
   expect(kept(stored)).toHaveLength(1)
-  expect(cli).toEqual([{}, {}])
+  expect(cli).toEqual([{ project_dir: ROOT }, { project_dir: ROOT }])
 })
 
 test('the rows come from the CLI even while the plugin MCP server is connected, which does not offer this tool', async ($, on) => {
@@ -122,11 +124,21 @@ test('a file older than the call is not this call\'s run: dbt stopped before it 
 })
 
 test('a command in another folder reads that folder, and Re-run goes back there', async ($, on) => {
-  const { stored, cli } = await start($, on, () => view('inv-sub'))
+  const { stored, cli } = await start($, on, args => view(`inv-${args.project_dir}`, undefined, 'build', AFTER, String(args.project_dir)))
   await $.tool.call({ tool: 'Bash', command: 'cd transform && dbt build --target prod' })
-  await $.tool.call({ tool: 'Bash', command: 'dbt run --project-dir ../other' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir ../other' })
   expect(cli).toEqual([{ project_dir: '/repo/transform' }, { project_dir: '/other' }])
-  expect(kept(stored)[0]).toMatchObject({ id: 'inv-sub' })
+  expect(kept(stored).map(run => [run.project, run.commandLine])).toEqual([
+    ['/other', 'dbt build --project-dir ../other'],
+    ['/repo/transform', 'cd /repo/transform && dbt build --target prod'],
+  ])
+})
+
+test('a folder an earlier Bash call moved the session to is where the command runs', async ($, on) => {
+  const { stored, cli } = await start($, on, args => view('inv-moved', undefined, 'build', AFTER, String(args.project_dir)), { cwd: '/repo/transform' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build' })
+  expect(cli).toEqual([{ project_dir: '/repo/transform' }])
+  expect(kept(stored)[0]!.commandLine).toBe('cd /repo/transform && dbt build')
 })
 
 test('environment, folder and project flags are kept for Re-run and Re-run failed; a secret is not', () => {
@@ -134,7 +146,7 @@ test('environment, folder and project flags are kept for Re-run and Re-run faile
     subcommand: 'build',
     commandLine: 'DBT_PROFILES_DIR=. dbt build -s x --target prod',
     retryLine: 'DBT_PROFILES_DIR=. dbt retry --target prod',
-    projectDir: null,
+    projectDir: ROOT,
   })
   expect(resultsInvocations('cd a && dbt run --project-dir sub -s x | tee log', ROOT)[0]).toEqual({
     subcommand: 'run',
@@ -143,11 +155,12 @@ test('environment, folder and project flags are kept for Re-run and Re-run faile
     projectDir: '/repo/a/sub',
   })
   const secret = resultsInvocations('SNOWFLAKE_PASSWORD=hunter2 DBT_TARGET=dev dbt test', ROOT)[0]!
+  expect(resultsInvocations('SNOWFLAKE_PWD=x dbt test', ROOT)[0]!.commandLine).toBe('SNOWFLAKE_PWD="$SNOWFLAKE_PWD" dbt test')
   expect(secret.commandLine).toBe('SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt test')
   expect(secret.retryLine).toBe('SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt retry')
   expect(JSON.stringify(secret)).not.toContain('hunter2')
-  expect(resultsInvocations('dbt build --project-dir "my dir" -s x --target-path=\'t 1\'', ROOT)[0]!.retryLine).toBe(
-    'dbt retry --project-dir "my dir" --target-path=\'t 1\'',
+  expect(resultsInvocations('dbt build --profile prod --project-dir "my dir" -s x --target-path=\'t 1\'', ROOT)[0]!.retryLine).toBe(
+    'dbt retry --profile prod --project-dir "my dir" --target-path=\'t 1\'',
   )
   expect(resultsInvocations('uv run dbt build', ROOT)[0]!.retryLine).toBe('uv run dbt retry')
   expect(resultsInvocations('dbt deps', ROOT)).toEqual([])
@@ -169,7 +182,7 @@ test('of several dbt commands in one call, the one that wrote the file is record
 })
 
 test('two dbt calls finishing together both keep their runs', async ($, on) => {
-  const { stored } = await start($, on, args => view(args.project_dir === '/repo/a' ? 'inv-a' : 'inv-b'))
+  const { stored } = await start($, on, args => view(args.project_dir === '/repo/a' ? 'inv-a' : 'inv-b', undefined, 'build', AFTER, String(args.project_dir)))
   await Promise.all([$.tool.call({ tool: 'Bash', command: 'cd a && dbt build', tool_use_id: 'one' }), $.tool.call({ tool: 'Bash', command: 'cd b && dbt build', tool_use_id: 'two' })])
   expect(kept(stored).map(run => run.id).sort()).toEqual(['inv-a', 'inv-b'])
 })
