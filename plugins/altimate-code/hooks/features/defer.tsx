@@ -17,8 +17,10 @@ import type { BandUi, FeatureContext } from './index'
 
 const deferAtom = atom({ plugin: 'altimate-code', key: 'defer' } as const, null as DeferState | null)
 
-/** dbt commands that read no project graph: they get neither the defer flags nor a target. */
-const NO_FLAGS = new Set(['deps', 'clean', 'debug', 'init', 'retry', 'docs', 'source'])
+// Commands that do not defer (dbt before 1.8 refuses the option on some of them, and `retry` reads the
+// previous run's results from `--state`, which would point at the wrong ones) and commands that take no target.
+const NO_DEFER = new Set(['deps', 'clean', 'debug', 'init', 'retry', 'docs', 'source'])
+const NO_TARGET = new Set(['deps', 'clean', 'init', 'retry'])
 
 const quote = (text: string) => (/^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`)
 
@@ -42,10 +44,10 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
   let out = command
   // From the last invocation to the first, so the offsets of those before stay right.
   for (const one of parseDbtCommand(command).reverse()) {
-    if (!one.subcommand || NO_FLAGS.has(one.subcommand)) continue
+    if (!one.subcommand) continue
     const flags: string[] = []
-    if (stateDir && !one.hasDefer && !one.hasState) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
-    if (target && target !== defaultTarget && one.target === null) flags.push('--target', quote(target))
+    if (stateDir && !NO_DEFER.has(one.subcommand) && !one.hasDefer && !one.hasState) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
+    if (target && !NO_TARGET.has(one.subcommand) && target !== defaultTarget && one.target === null && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
     if (flags.length === 0) continue
     out = `${out.slice(0, one.subcommandEnd)} ${flags.join(' ')}${out.slice(one.subcommandEnd)}`
   }
@@ -53,6 +55,7 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
 }
 
 type DeferAnswer = {
+  success?: boolean
   enabled?: boolean
   favorState?: boolean
   mode?: 'local' | 'remote' | 'none'
@@ -80,6 +83,54 @@ async function findProject($: EngineInterface): Promise<string | null> {
     if (await $.fs.exists(`${root}/${entry.name}/dbt_project.yml`).catch(() => false)) below.push(`${root}/${entry.name}`)
   }
   return below.length === 1 ? below[0]! : null
+}
+
+// Where a command runs from: the session folder, moved by each `cd` or `pushd` in the command.
+const CD = /(?:^|[;&|(\n{!]\s*|\b(?:if|elif|while|until|then|do|else|time)\s+)(?:cd|pushd)\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
+const PROJECT_DIR = /(?:--project-dir[ =]|\bDBT_PROJECT_DIR=)("[^"]+"|'[^']+'|[^\s;&|)]+)/g
+const UNQUOTE = /^['"]|['"]$/g
+
+/** `target` seen from `base`, as an absolute path with forward slashes (a drive letter kept); null when it cannot be known. */
+function resolvePath(base: string, target: string): string | null {
+  if (/^[~$]/.test(target)) return null
+  const from = base.replace(/\\/g, '/')
+  const to = target.replace(/\\/g, '/')
+  const drive = /^[A-Za-z]:/.exec(to)?.[0] ?? /^[A-Za-z]:/.exec(from)?.[0] ?? ''
+  const path = /^[A-Za-z]:\//.test(to) ? to.slice(2) : to.startsWith('/') ? to : `${from.slice(drive.length)}/${to}`
+  const out: string[] = []
+  for (const part of path.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') out.pop()
+    else out.push(part)
+  }
+  return `${drive}/${out.join('/')}`
+}
+
+/**
+ * Whether the command's dbt runs in the project the settings were read for: not when it moves to another
+ * folder (`cd`, `pushd`, `--project-dir`, `DBT_PROJECT_DIR`, uv's `--directory`) or one it cannot work out.
+ */
+export function runsInProject(command: string, root: string, projectDir: string): boolean {
+  if (/\s--(?:directory|project)[\s=]/.test(command)) return false
+  const first = parseDbtCommand(command)[0]
+  const project = resolvePath(projectDir, '.')
+  if (!first || !project) return false
+  const inside = (dir: string | null) => !!dir && (dir === project || dir.startsWith(`${project.replace(/\/+$/, '')}/`))
+  let dir = resolvePath(root, '.')
+  let before = dir
+  for (const match of command.matchAll(CD)) {
+    if (!dir) return false
+    const word = match[1]!.replace(UNQUOTE, '')
+    // `cd -P dir`, `cd -`: not a folder this can work out.
+    dir = word.startsWith('-') ? null : resolvePath(dir, word)
+    if (match.index < first.start) before = dir
+    else if (!inside(dir)) return false
+  }
+  // A project named outright is the one to judge; otherwise the folder the command runs from.
+  const named = [...command.matchAll(PROJECT_DIR)]
+  if (named.length === 0) return inside(before)
+  if (!before) return false
+  return named.every(match => inside(resolvePath(before!, match[1]!.replace(UNQUOTE, ''))))
 }
 
 /** The flags the state's override and answer lead to: the state dir only while defer is on. */
@@ -118,11 +169,12 @@ async function load($: EngineInterface, previous: DeferState | null): Promise<De
     defaultTarget: null,
     targets: [],
     target: previous?.target ?? null,
+    failedAt: null,
   }
   if (!projectDir) return state
   const answer = await runTool($, 'dbt_defer_state', { project_dir: projectDir }, { cliOnly: true }).catch(() => null)
-  const data = answer?.ok ? (answer.metadata as DeferAnswer | null) : null
-  if (!data) return { ...state, reason: answer?.text ?? 'altimate-code did not answer' }
+  const data = answer?.ok && (answer.metadata as DeferAnswer | null)?.success !== false ? (answer.metadata as DeferAnswer | null) : null
+  if (!data) return { ...state, reason: answer?.text || 'altimate-code did not answer', failedAt: await $.clock.now() }
   return {
     ...state,
     enabled: data.enabled === true && typeof data.stateDir === 'string',
@@ -135,20 +187,26 @@ async function load($: EngineInterface, previous: DeferState | null): Promise<De
   }
 }
 
-// The first answer of the session, shared by whoever needs it first.
+// The read in flight, shared by whoever needs the answer first.
 let loading: Promise<DeferState> | null = null
+// Counts the sessions: an answer read for an earlier one is dropped.
+let generation = 0
+// A read that failed (the CLI timed out or was not ready) is tried again after this long.
+const RETRY_MS = 60_000
 
-/** The state the project's setting gives, read once per session on first need; /defer reset reads it again. */
+/** The state the project's setting gives, read on first need and kept for the session (a failed read is tried again after a minute); /defer reset reads it again. */
 async function ensure($: EngineInterface): Promise<DeferState> {
   const have = await read($, deferAtom)
-  if (have) return have
-  loading ??= load($, null).then(async state => {
-    await publish($, state)
+  if (have && (have.failedAt === null || (await $.clock.now()) - have.failedAt < RETRY_MS)) return have
+  const mine = generation
+  const started = (loading ??= load($, have).then(async state => {
+    if (mine === generation) await publish($, state)
     return state
-  })
-  const state = await loading
-  // A session that ended and began again while this read ran must not keep its answer.
-  return (await read($, deferAtom)) ?? state
+  }))
+  const state = await started
+  // Another session's read must not be dropped by a caller that was waiting on this one.
+  if (loading === started) loading = null
+  return mine === generation ? state : await ensure($)
 }
 
 async function publish($: EngineInterface, state: DeferState) {
@@ -222,8 +280,10 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   await $.command.register({ name: 'defer', description: "Show or set whether dbt commands defer to the production manifest", argumentHint: '[status|on|off|reset]' })
   await $.command.register({ name: 'target', description: "Set the dbt target for this session's dbt commands", argumentHint: '[<name>|reset]' })
   // A new session starts from the project's own settings, not from the last one's overrides.
+  generation++
   loading = null
   await update($, deferAtom, () => null)
+  await setStatusPart($, 'defer', null)
 }
 
 export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
@@ -244,6 +304,8 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   if (!/\bdbt\b/.test(e.command)) return null
   const state = await ensure($)
   if (!state.projectDir) return null
+  const root = await $.session.root().catch(() => null)
+  if (!root || !runsInProject(e.command, root, state.projectDir)) return null
   const command = rewriteDeferCommand(e.command, effective(state))
   return command === e.command ? null : command
 }

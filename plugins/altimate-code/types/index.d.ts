@@ -204,6 +204,8 @@ export interface DeferState {
   targets: string[]
   /** /target for this session; null leaves the command's own or the profile's default. */
   target: string | null
+  /** When reading the setting failed (engine clock, ms); null when it was read. */
+  failedAt: number | null
 }
 
 // ---------------------------------------------------------------------------------------------------
