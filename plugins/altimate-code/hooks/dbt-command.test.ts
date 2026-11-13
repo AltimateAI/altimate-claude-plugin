@@ -91,3 +91,42 @@ test('env options that take a value; DBT_TARGET and DBT_TARGET_PATH in front of 
   expect(shape('DBT_TARGET=prod DBT_TARGET_PATH=tgt dbt run')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'prod', targetPath: 'tgt' }])
   expect(shape('DBT_TARGET=prod dbt run -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev' }])
 })
+
+test('subshells after a keyword, case patterns, process substitution, arrays and arithmetic are read', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('time (dbt build)')).toEqual([{ ...base, binary: 'dbt', subcommand: 'build' }])
+  for (const line of [
+    'if (cd proj && dbt run); then echo ok; fi',
+    '! (dbt run)',
+    '{ (dbt run); }',
+    'dbt run 2> >(tee err.log)',
+    'for ((i=0;i<3;i++)); do dbt run; done',
+    'f() ( dbt run )',
+    'case $t in\n  a|b) dbt run;;\nesac',
+  ])
+    expect(shape(line)).toEqual([run])
+  expect(shape('case $t in prod) dbt run -t prod;; *) dbt run;; esac')).toEqual([{ ...run, target: 'prod' }, run])
+  expect(shape('case $t in (prod) dbt run -t prod;; esac')).toEqual([{ ...run, target: 'prod' }])
+  expect(shape('models=(orders users); for m in "${models[@]}"; do dbt run -s $m; done')).toEqual([{ ...run, select: ['$m'] }])
+  const line = 'diff <(dbt ls -s a) <(dbt ls -s b)'
+  const found = parseDbtCommand(line)
+  expect(found.map(({ start, end }) => line.slice(start, end))).toEqual(['dbt ls -s a', 'dbt ls -s b'])
+})
+
+test('a function definition takes one name: `dbt run ()` is unreadable and a function named dbt is no invocation', () => {
+  expect(parseDbtCommand('dbt run ()')).toEqual([])
+  expect(parseDbtCommand('case x in a) dbt run')).toEqual([])
+  expect(shape('dbt() { echo hi; }; dbt test')).toEqual([{ ...base, binary: 'dbt', subcommand: 'test' }])
+  expect(shape('function f() { dbt run; }')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run' }])
+})
+
+test('a case pattern named dbt is no invocation', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  for (const line of ['case $t in a) x;; dbt) dbt run;; esac', 'case $t in a|dbt) dbt run;; esac', 'case $t in (dbt) dbt run;; esac'])
+    expect(shape(line)).toEqual([run])
+})
+
+test("quotes in a heredoc inside a substitution are text, so Claude's commit form stays readable", () => {
+  const line = `dbt run -s a && git commit -m "$(cat <<'EOF'\nfix "foo it's\nEOF\n)"`
+  expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
+})
