@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, RenderElement } from 'claude-code'
+import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
@@ -589,8 +589,8 @@ export const register: Register = (on, options) => {
     // One band per plugin: the lineage impact line rides under the integrations one, or alone; each
     // feature's line rides under the lineage one.
     if (e.props.hasSurvey) return next(e)
-    const lineage = await lineageBand($, $.ui.resolve(e))
     const ui = $.ui.resolve(e)
+    const lineage = await lineageBand($, ui)
     const extra = await featureBandLines($, ui)
     const tail =
       extra.length === 0 ? (
