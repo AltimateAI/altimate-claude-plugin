@@ -59,7 +59,7 @@ async function start($: any, on: any, options: Options = {}) {
   return { clock, estimates, ran, statuses }
 }
 
-const bq = (bytes: number, display: string) => ({ success: true, supported: true, adapter: 'bigquery', bytes, display })
+const bq = (bytes: number, display: string, maxBytes = bytes) => ({ success: true, supported: true, adapter: 'bigquery', bytes, maxBytes, display })
 const OVER = bq(20 * GIB, '20.0 GiB')
 const UNDER = bq(2 * GIB, '2.0 GiB')
 
@@ -179,10 +179,96 @@ test('/scan-cost estimates a model on demand and says how it stands against the 
   expect(ran).toEqual([])
 })
 
+test('a command naming two models over the limit is held whole, and one /allow-scan lets all of it through once', async ($, on) => {
+  const { clock, ran } = await start($, on, { answers: { orders: OVER, customers: bq(30 * GIB, '30.0 GiB') } })
+  const command = 'dbt run -s orders && dbt run -s customers'
+  expect(((await $.tool.call(bash(command))) as any).deny).toContain('30.0 GiB')
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  const through: any = await $.tool.call(bash(command))
+  await clock.settle()
+
+  expect(through.deny).toBeUndefined()
+  expect(through.context).toEqual([
+    'cost · orders would scan 20.0 GiB, over the 10.0 GiB limit: allowed once',
+    'cost · customers would scan 30.0 GiB, over the 10.0 GiB limit: allowed once',
+  ])
+  expect(ran).toEqual([command])
+  expect(((await $.tool.call(bash(command))) as any).deny).toBeDefined()
+})
+
+test('/allow-scan with nothing held allows nothing', async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: OVER } })
+  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('Nothing is held')
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  await clock.settle()
+})
+
+test('the allowance is for the command that was held: another over-limit command is held, and the allowance is gone', async ($, on) => {
+  const { clock, ran } = await start($, on, { answers: { orders: OVER, customers: OVER } })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+
+  expect(((await $.tool.call(bash('dbt run -s customers'))) as any).deny).toBeDefined()
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  await clock.settle()
+  expect(ran).toEqual([])
+})
+
+test('an estimate whose rounded size is within the limit but whose upper bound is over it is held', async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: bq(10 * GIB, '10.0 GiB', 10 * GIB + 52 * 1024 ** 2) } })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('10.0 GiB')
+  await clock.settle()
+})
+
+test('a command that sets its own target, defer state, vars or project is not estimated', async ($, on) => {
+  const { clock, estimates, ran } = await start($, on, { answers: { orders: OVER } })
+  const commands = [
+    'dbt run -s orders --target prod',
+    'dbt run -s orders --defer --state prod-run',
+    `dbt run -s orders --vars '{a: 1}'`,
+    'dbt run -s orders --project-dir other',
+    'DBT_PROFILES_DIR=ci dbt run -s orders',
+    'cd other && dbt run -s orders',
+  ]
+  for (const command of commands) {
+    const result: any = await $.tool.call(bash(command))
+    expect(result.deny).toBeUndefined()
+    expect(result.context[0]).toContain('it sets its own target, defer state, vars or project')
+  }
+  await clock.settle()
+  expect(estimates).toEqual([])
+  expect(ran).toEqual(commands)
+})
+
+test('dbt show --inline with its SQL on the next line after a backslash is estimated', async ($, on) => {
+  const { clock, estimates } = await start($, on, { answers: { 'select * from big': OVER } })
+  const result: any = await $.tool.call(bash(`dbt show --inline \\\n  'select * from big'`))
+  await clock.settle()
+  expect(estimates).toEqual(['select * from big'])
+  expect(result.deny).toContain('20.0 GiB')
+})
+
+test('letting a later command through clears the hold from the status line', async ($, on) => {
+  const { clock, statuses } = await start($, on, { answers: { orders: OVER } })
+  await $.tool.call(bash('dbt run -s orders'))
+  await $.tool.call(bash('dbt run -s +orders'))
+  await clock.settle()
+  expect(statuses.filter(Boolean).at(-1)).not.toContain('held')
+})
+
+test('two calls of the same command each get their own lines under the row', async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: UNDER } })
+  const [first, second]: any[] = await Promise.all([$.tool.call(bash('dbt run -s orders')), $.tool.call(bash('dbt run -s orders'))])
+  await clock.settle()
+  expect(first.context).toEqual(['cost · orders would scan 2.0 GiB'])
+  expect(second.context).toEqual(['cost · orders would scan 2.0 GiB'])
+})
+
 test('inlineSql reads the query as the shell would', () => {
   expect(inlineSql(`dbt show --inline "select 'a' as x"`)).toBe(`select 'a' as x`)
   expect(inlineSql(`dbt show --inline='select 1'`)).toBe('select 1')
   expect(inlineSql(`dbt show --inline select\\ 1 --limit 5`)).toBe('select 1')
+  expect(inlineSql(`dbt show --inline \\\n 'select 1'`)).toBe('select 1')
   expect(inlineSql('dbt show -s orders')).toBeNull()
 })
 
