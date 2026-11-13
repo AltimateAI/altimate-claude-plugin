@@ -228,7 +228,29 @@ export interface DocsState {}
 // Profile CTEs: each CTE's row count and timing.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface CteProfileState {}
+export type CteTier = 'hot' | 'warm' | 'cool'
+
+export interface CteRow {
+  name: string
+  line: number
+  /** Offset of the WITH keyword the CTE belongs to: CTEs of one WITH clause build on each other. */
+  clause: number
+  status: 'pending' | 'running' | 'done' | 'failed'
+  /** Wall time of the count query, which includes every earlier CTE of its clause. */
+  queryMs?: number
+  rows?: number
+  /** Time this CTE adds over the one before it. */
+  marginalMs?: number
+  tier?: CteTier
+  error?: string
+}
+
+export interface CteProfileState {
+  model: string
+  status: 'listing' | 'running' | 'stopping' | 'done' | 'stopped' | 'failed'
+  rows: CteRow[]
+  message?: string
+}
 
 declare module 'claude-code' {
   interface PluginState {
