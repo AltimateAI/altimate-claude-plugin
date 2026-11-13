@@ -35,7 +35,7 @@ const docsAtom = atom({ plugin: 'altimate-code', key: 'docs' } as const, null as
 let saidOldReach = false
 let saidOldCoverage = false
 
-const empty = (): DocsState => ({ groups: [], skipped: [], coverage: null, message: null })
+const empty = (): DocsState => ({ groups: [], skipped: [], coverage: null })
 
 // ---------------------------------------------------------------------------------------------------
 // Reading descriptions out of a model YAML file
@@ -144,7 +144,7 @@ export function columnDescriptions(yaml: string): Map<string, string> {
     const item = /^-\s+name\s*:\s*(.*)$/.exec(body)
     if (item && (modelDash < 0 || indent === modelDash)) {
       modelDash = indent
-      model = valueAt(lines, i, indent, item[1]!).value
+      model = inlineValue(item[1]!)
       modelKey = raw.indexOf('name')
       inColumns = false
       column = null
@@ -152,7 +152,7 @@ export function columnDescriptions(yaml: string): Map<string, string> {
     }
     if (item && model !== null && inColumns && indent > modelDash && (columnDash < 0 || indent === columnDash)) {
       columnDash = indent
-      column = valueAt(lines, i, indent, item[1]!).value
+      column = inlineValue(item[1]!)
       columnKey = raw.indexOf('name')
       continue
     }
@@ -347,7 +347,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   const model = normal(file.path).split('/').pop()!.replace(/\.sql$/i, '')
   if (!(await $.fs.exists(project.manifest).catch(() => false))) return []
   const until = (await $.clock.now()) + ROUND_MS
-  const result = await runTool($, 'dbt_docs_coverage', { model, manifest_path: project.manifest }, { until }).catch(() => null)
+  const result = await runTool($, 'dbt_docs_coverage', { model, manifest_path: project.manifest }, { until, cliOnly: true }).catch(() => null)
   if (!result) return []
   const meta = result.metadata
   if (!result.ok || !meta || meta.success !== true) {
@@ -427,13 +427,13 @@ export function register(on: On, context: FeatureContext) {
             </Text>
             {group.candidates.map(one => {
               const key = candidateKey(group, one)
-              const on = !state.skipped.includes(key)
+              const ticked = !state.skipped.includes(key)
               return (
                 <Button
                   key={`docs-pick-${key}`}
                   plain
-                  label={`${on ? '[x]' : '[ ]'} ${one.model}.${one.column} (${one.lens === 'Alias' ? 'renamed' : 'as is'})`}
-                  onPress={() => update($, docsAtom, prev => ({ ...(prev ?? empty()), skipped: on ? [...(prev?.skipped ?? []), key] : (prev?.skipped ?? []).filter(k => k !== key) }))}
+                  label={`${ticked ? '[x]' : '[ ]'} ${one.model}.${one.column} (${one.lens === 'Alias' ? 'renamed' : 'as is'})`}
+                  onPress={() => update($, docsAtom, prev => ({ ...(prev ?? empty()), skipped: ticked ? [...(prev?.skipped ?? []), key] : (prev?.skipped ?? []).filter(k => k !== key) }))}
                 />
               )
             })}

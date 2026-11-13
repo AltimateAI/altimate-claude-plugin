@@ -222,7 +222,42 @@ export interface SqlGraphState {}
 // Docs coverage and propagation: what the project documents.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface DocsState {}
+/** A downstream column that can take a description: the traced column reaches it unchanged (Original) or only renamed (Alias). */
+export interface DocsCandidate {
+  model: string
+  /** The model's unique_id: names repeat across packages and versions. */
+  id?: string
+  column: string
+  lens: 'Original' | 'Alias'
+}
+
+/** A description Claude wrote, and the downstream columns that can take it. */
+export interface DocsGroup {
+  model: string
+  column: string
+  description: string
+  manifest: string
+  candidates: DocsCandidate[]
+}
+
+/** The documentation coverage of the model whose SQL Claude last edited. */
+export interface DocsCoverageView {
+  model: string
+  percent: number
+  documented: number
+  total: number
+  /** Output columns without a description. */
+  missing: string[]
+  hasDescription: boolean
+}
+
+export interface DocsState {
+  /** Written descriptions with candidates, oldest first. */
+  groups: DocsGroup[]
+  /** Candidates the person unticked in the pane, keyed `model.column>model.column`. */
+  skipped: string[]
+  coverage: DocsCoverageView | null
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Profile CTEs: each CTE's row count and timing.
