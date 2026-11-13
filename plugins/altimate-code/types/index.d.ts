@@ -198,7 +198,39 @@ export interface ToModelState {}
 // Team comments: the shared docs' comments on the project's models.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface CommentsState {}
+/** One open comment thread on a shared docs page, as the docs_share_comments tool lists it. */
+export interface CommentsThread {
+  shareId: number
+  shareName: string
+  groupId: number
+  /** The model file, relative to the dbt project folder. */
+  filePath?: string
+  uniqueId?: string
+  column?: string
+  field?: string
+  /** The text the comment was made on. */
+  highlight?: string
+  /** 0-based lines the comment was made on, when the page stored a range. */
+  range?: { start: { line: number }; end: { line: number } }
+  messages: { id: number; author: string; text: string }[]
+}
+
+export interface CommentsState {
+  /** The dbt project folder the threads belong to. */
+  root: string | null
+  project: string | null
+  threads: CommentsThread[]
+  loadedAt: number | null
+  loading: boolean
+  /** Set when the installed altimate-code has no docs_share_comments tool: what to tell the person. */
+  needs: string | null
+  /** One line about the last load or post. */
+  note: string | null
+  /** Reply text typed so far, by `shareId:groupId`. */
+  drafts: Record<string, string>
+  /** `shareId:groupId` of the thread being posted to. */
+  posting: string | null
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Cost check: the last scan estimate and any scan allowed once.
