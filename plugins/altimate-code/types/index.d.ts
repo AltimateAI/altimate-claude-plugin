@@ -186,7 +186,25 @@ export interface RunsState {}
 // Defer and target: the target and defer state dbt commands run with.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface DeferState {}
+export interface DeferState {
+  /** The dbt project the session works in; null when there is none (nothing is rewritten). */
+  projectDir: string | null
+  /** The project's Power User setting turns defer on and gives a usable state directory. */
+  enabled: boolean
+  favorState: boolean
+  mode: 'local' | 'remote' | 'none'
+  /** The directory passed as `--state`; null when there is none to use. */
+  stateDir: string | null
+  /** Why defer is configured but cannot be applied. */
+  reason: string | null
+  /** /defer on or off for this session; null follows the project's setting. */
+  override: boolean | null
+  /** The profile's default target and its output names. */
+  defaultTarget: string | null
+  targets: string[]
+  /** /target for this session; null leaves the command's own or the profile's default. */
+  target: string | null
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Raw SQL to model: the SQL being turned into a dbt model.
