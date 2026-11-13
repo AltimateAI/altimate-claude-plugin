@@ -57,3 +57,37 @@ test('a bare dbt has no subcommand; quoted selections are unquoted', () => {
     { ...base, binary: 'dbt', subcommand: 'ls', select: ['tag:nightly', 'path:models/staging'] },
   ])
 })
+
+test('a heredoc, or an operator or redirection with nothing after it, makes the line unreadable', () => {
+  expect(parseDbtCommand('cat > run.sh <<EOF\ndbt run -s a\nEOF')).toEqual([])
+  expect(parseDbtCommand("cat <<'EOF' > x.sh\ndbt build\nEOF\nbash x.sh")).toEqual([])
+  expect(parseDbtCommand('cat <<-EOF\n\tdbt run\n\tEOF')).toEqual([])
+  for (const line of ['dbt run >', 'dbt run &&', 'dbt run |', '&& dbt run', '; dbt run', 'dbt run )', 'dbt run (', '(dbt run', 'dbt run ; ;'])
+    expect(parseDbtCommand(line)).toEqual([])
+  // A here-string is no heredoc; a subshell, a function and a trailing ; or & are fine.
+  expect(shape('dbt run <<< y')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run' }])
+  expect(shape('(cd a && dbt run); f() { dbt test; }; dbt ls &')).toEqual([
+    { ...base, binary: 'dbt', subcommand: 'run' },
+    { ...base, binary: 'dbt', subcommand: 'test' },
+    { ...base, binary: 'dbt', subcommand: 'ls' },
+  ])
+})
+
+test('parentheses inside a quoted string in a substitution are text', () => {
+  expect(shape('dbt run $(printf "(") -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev' }])
+  expect(shape('dbt run "$(printf ")")" -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev' }])
+})
+
+test('short options joined to their value, and global options that take one before the subcommand', () => {
+  expect(shape('dbt run -tprod -sorders -musers')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['orders', 'users'], target: 'prod' }])
+  expect(shape(`dbt --warn-error-options '{"include":"all"}' -r timing.txt run -s a`)).toEqual([
+    { ...base, binary: 'dbt', subcommand: 'run', select: ['a'] },
+  ])
+  expect(shape('dbt build --indirect-selection cautious -s a')).toEqual([{ ...base, binary: 'dbt', subcommand: 'build', select: ['a'] }])
+})
+
+test('env options that take a value; DBT_TARGET and DBT_TARGET_PATH in front of dbt, which the flags override', () => {
+  expect(shape('env -i -u FOO dbt run')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run' }])
+  expect(shape('DBT_TARGET=prod DBT_TARGET_PATH=tgt dbt run')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'prod', targetPath: 'tgt' }])
+  expect(shape('DBT_TARGET=prod dbt run -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev' }])
+})
