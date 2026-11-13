@@ -180,7 +180,46 @@ export type ImpactView = {
 // Runs (/runs): the dbt commands Claude ran and their results.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface RunsState {}
+export type RunRow = {
+  uniqueId: string
+  name: string
+  status: string
+  executionTimeSec: number | null
+  /** Cut to a few hundred characters. */
+  message: string | null
+}
+
+export type RunRecord = {
+  /** The artifact's invocation id; its completion time when the artifact has none. */
+  id: string
+  /** The command line as Claude ran it (`dbt build -s orders`), what Re-run fills in. */
+  commandLine: string
+  /** The launcher with `retry` (`dbt retry`, `uv run dbt retry`), what Re-run failed fills in. */
+  retryLine: string
+  /** The dbt subcommand the artifact names (`build`, `run`…). */
+  command: string
+  elapsedSec: number | null
+  completedAt: string
+  /** Every node dbt reported. */
+  total: number
+  /** Nodes that succeeded, passed or warned. */
+  passed: number
+  /** Nodes that errored or failed. */
+  failed: number
+  /** Nodes dbt skipped. */
+  skipped: number
+  /** The rows kept: failures first, then the rest, at most as many as the plugin holds. */
+  rows: RunRow[]
+}
+
+export interface RunsState {
+  /** The dbt project folder the runs below belong to. */
+  root: string
+  /** Newest first, at most 50. */
+  runs: RunRecord[]
+  /** The run the pane shows in full; null for the list. */
+  open: string | null
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Defer and target: the target and defer state dbt commands run with.
