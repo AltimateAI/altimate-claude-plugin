@@ -1996,7 +1996,7 @@ test('a passing run that differs only in display flags clears the failure', asyn
 
 kitTest('a command\'s identity is every flag but the selection and display-only ones', () => {
   expect(dbtCommand('dbt build -s orders --log-format json --threads 8')?.identity).toEqual([])
-  expect(dbtCommand('dbt --warn-error -t prod build --select orders --full-refresh --vars \'{"a": 1}\'')?.identity).toEqual(['--warn-error', '--target prod', '--full-refresh', '--vars {"a": 1}'])
+  expect(dbtCommand('dbt --warn-error -t prod build --select orders --full-refresh --vars \'{"a": 1}\'')?.identity).toEqual(['--full-refresh', '--target prod', '--vars {"a": 1}', '--warn-error'])
   // History and replay keep reading the context flags alone.
   expect(dbtCommand('dbt build -s orders --full-refresh -t prod')?.options).toEqual(['--target', 'prod'])
 })
@@ -2063,4 +2063,56 @@ test('-t dev and --target=dev are the same context, and -x is --fail-fast', asyn
   await clock.settle()
   expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
   await band.unmount()
+})
+
+test('the same command from another folder is not the same run: a dev pass leaves a prod failure', async ($, on) => {
+  const command = (dir: string) => `cd /proj/profiles/${dir} && dbt build -s orders --project-dir /proj --profiles-dir .`
+  const { clock, setBash, band } = await failedBuild($, on, command('prod'))
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: command('dev') })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await $.tool.call({ tool: 'Bash', command: command('prod') })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('flags written in another order are the same run', async ($, on) => {
+  const { clock, setBash, band } = await failedBuild($, on, 'dbt build -s orders --target prod --full-refresh')
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders --full-refresh --target prod' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('two versions of one model that both failed are both offered, though the artifact holds only one', async ($, on) => {
+  const manifest = shopManifest()
+  manifest.nodes['model.shop.orders.v2'] = { name: 'orders', resource_type: 'model', package_name: 'shop', version: 2, original_file_path: 'models/orders_v2.sql', config: {}, columns: {}, depends_on: { nodes: [] } }
+  const results = { results: [{ unique_id: 'model.shop.orders.v2', status: 'error', message: 'Compilation Error in model orders (models/orders_v2.sql)\n  artifact v2' }] }
+  const { clock, prompts, setBash } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(manifest), 'target/run_results.json': JSON.stringify(results) } })
+  const block = (file: string, why: string) => `${HEADER}\n06:45:43  Compilation Error in model orders (models/${file})\n  ${why}\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=1`
+  setBash({ stdout: `${block('orders_v1.sql', 'text v1')}\n${block('orders_v2.sql', 'text v2')}`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders.v1; dbt run -s orders.v2' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts[0]).toContain('(models/orders_v1.sql)')
+  expect(prompts[0]).toContain('(models/orders_v2.sql)')
+  await band.unmount()
+})
+
+kitTest('failures in dbt\'s text are one per resource: the same name in another file, or another kind, is another failure', () => {
+  const text = [
+    '06:45:43  Compilation Error in model orders (models/orders_v1.sql)',
+    '  one',
+    '06:45:43  Compilation Error in model orders (models/orders_v2.sql)',
+    '  two',
+    '06:45:43  Compilation Error in model orders (models/orders_v2.sql)',
+    '  two again',
+    '06:45:43  Failure in test orders (models/schema.yml)',
+  ].join('\n')
+  expect(failuresFromText(text).map(one => [one.kind, one.name, one.path])).toEqual([['model', 'orders', 'models/orders_v1.sql'], ['model', 'orders', 'models/orders_v2.sql'], ['test', 'orders', 'models/schema.yml']])
 })

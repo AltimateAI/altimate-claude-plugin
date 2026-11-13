@@ -15,6 +15,7 @@ import {
   explainPrompt,
   failuresFrom,
   failuresFromText,
+  sameFailure,
   fixPrompt,
   logErrors,
   modelContext,
@@ -489,7 +490,7 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
     const manifest = await readManifest($, root)
     failures = failuresFrom(runResults, manifest?.manifest)
   }
-  for (const one of failuresFromText(output)) if (!failures.some(known => known.kind === one.kind && known.name === one.name)) failures.push(one)
+  for (const one of failuresFromText(output)) if (!failures.some(known => sameFailure(known, one))) failures.push(one)
   // Nothing dbt itself reported (a command the permission check refused, a missing binary): no band.
   if (failures.length === 0) return null
   const view: FailureView = { command, root, verb, select, options, failures, at: await $.clock.now() }
@@ -1085,7 +1086,8 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
       const verb = runs.map(one => one.verb).join('+')
       const select = runs.length === 1 ? runs[0]!.select : runs.map(one => one.select ?? '*').join(' | ')
       // One context when every run shares it (`-t prod` on each), else each run's in turn.
-      const contexts = runs.map(one => [...one.identity, ...one.env.map(env => `env:${env}`)])
+      // The folder it ran in too: relative `--profiles-dir .`, `--state` and the environment's paths depend on it.
+      const contexts = runs.map((one, i) => [...one.identity, ...one.env.map(env => `env:${env}`), `cwd:${places[i]!.dir.replace(/\/+$/, '')}`])
       const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts
       // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
       await recordRun($, command.trim(), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked).catch(() => null)

@@ -115,7 +115,8 @@ export type DbtCommand = {
   /**
    * What the invocation ran with, for deciding whether a later run did the same work: every flag and its
    * values except the selection (compared as `select`) and display-only flags, `-t` read as `--target`,
-   * in the order written (the last `--target` wins, so order matters). `--exclude-resource-types test` or `--full-refresh` make it a different run; `--threads 8` does not.
+   * one entry per flag in a fixed order, a repeated flag's values in the order written (the last `--target`
+   * wins, so that order matters). `--exclude-resource-types test` or `--full-refresh` make it a different run; `--threads 8` does not.
    */
   identity: string[]
   /** Where the dbt invocation starts in the command: a `cd` after it does not move where it ran. */
@@ -288,7 +289,7 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
     }
   }
   const context = [...env.values()].sort()
-  const identity: string[] = []
+  const byFlag = new Map<string, string[]>()
   const rest = [...words.slice(1, words.indexOf(verb) < 0 ? undefined : words.indexOf(verb)), ...(words.indexOf(verb) < 0 ? [] : words.slice(words.indexOf(verb) + 1))]
   for (let i = 0; i < rest.length; ) {
     const word = rest[i]!
@@ -300,8 +301,11 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
     const { values, next } = flagValues(rest, i)
     i = next
     if (SELECT_FLAGS[flag] || DISPLAY_FLAGS.has(flag)) continue
-    identity.push(`${CONTEXT_FLAGS[flag] ?? (flag === '-x' ? '--fail-fast' : flag)} ${values.join(' ')}`.trim())
+    const key = CONTEXT_FLAGS[flag] ?? (flag === '-x' ? '--fail-fast' : flag)
+    byFlag.set(key, [...(byFlag.get(key) ?? []), values.join(' ')])
   }
+  // Each flag once, its values in the order written (the last wins), the flags in a fixed order.
+  const identity = [...byFlag].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([key, values]) => `${key} ${values.join(' | ')}`.trim())
   return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: start, end: match.index + match[0].length, argv: words, replayable, env: context }
 }
 
@@ -445,6 +449,12 @@ function logText(output: string): string {
   return json ? lines.join('\n') : output
 }
 
+/**
+ * Whether two failures are one node: the same unique id, else the same kind and name and, when both know
+ * their file, the same file (two versions of a model share a name and not a file).
+ */
+export const sameFailure = (a: DbtFailure, b: DbtFailure): boolean => a.id === b.id || (a.kind === b.kind && a.name === b.name && (!a.path || !b.path || a.path === b.path))
+
 /** The failed nodes a dbt command's own text names: what the run_results.json the command wrote does not hold (another invocation's failures, a parse error that wrote none). */
 export function failuresFromText(output: string): DbtFailure[] {
   const text = stripAnsi(logText(output))
@@ -458,12 +468,13 @@ export function failuresFromText(output: string): DbtFailure[] {
       .map(line => line.replace(/^\s*\d\d:\d\d:\d\d\s+/, '').trim())
       .filter(Boolean)
       .join('\n')
-    if (!out.some(one => one.name === name && one.kind === kind))
-      out.push({ id: `${kind}.${name}`, name, kind, status: 'error', message: `${match[1]} Error\n${message}`.slice(0, 2000), path: match[4] ?? null, failures: null })
+    const failure: DbtFailure = { id: `${kind}.${name}${match[4] ? `@${match[4]}` : ''}`, name, kind, status: 'error', message: `${match[1]} Error\n${message}`.slice(0, 2000), path: match[4] ?? null, failures: null }
+    if (!out.some(one => sameFailure(one, failure))) out.push(failure)
   }
   const failedTest = /^\s*(?:\d\d:\d\d:\d\d\s+)?Failure in test (\S+) \(([^)]+)\)/gm
   for (let match = failedTest.exec(text); match; match = failedTest.exec(text)) {
-    if (!out.some(one => one.name === match![1])) out.push({ id: `test.${match[1]}`, name: match[1]!, kind: 'test', status: 'fail', message: 'Test failed', path: match[2] ?? null, failures: null })
+    const failure: DbtFailure = { id: `test.${match[1]}${match[2] ? `@${match[2]}` : ''}`, name: match[1]!, kind: 'test', status: 'fail', message: 'Test failed', path: match[2] ?? null, failures: null }
+    if (!out.some(one => sameFailure(one, failure))) out.push(failure)
   }
   return out
 }
