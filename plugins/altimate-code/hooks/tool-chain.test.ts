@@ -72,7 +72,7 @@ test('without context lines the result is passed on as it came; the features run
   expect(FEATURE_IDS).toEqual(['runs', 'defer', 'toModel', 'comments', 'cost', 'health', 'sqlGraph', 'docs', 'cteProfile'])
 })
 
-test('through the plugin, a Bash call passes unchanged while every feature is a stub', async ($, on) => {
+test('through the plugin, a Bash call passes unchanged, and only the features that are built add to its context', async ($, on) => {
   const calls: any[] = []
   on('tool.call', (_: unknown, e: any) => {
     calls.push(e)
@@ -80,5 +80,5 @@ test('through the plugin, a Bash call passes unchanged while every feature is a 
   })
   const bash: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
   expect(calls.map(one => one.command ?? one.tool)).toEqual(['dbt run -s orders'])
-  expect(bash.context ?? []).toEqual([])
+  expect((bash.context ?? []).filter((line: string) => !line.startsWith('cost · '))).toEqual([])
 })
