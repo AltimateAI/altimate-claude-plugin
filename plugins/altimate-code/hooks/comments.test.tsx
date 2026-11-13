@@ -27,7 +27,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -59,6 +59,7 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
     if (args.action === 'list') {
       const call = cli.filter(c => c.args.action === 'list').length - 1
       const threads = options.listThreads?.(call) ?? options.threads ?? [RAW]
+      if (options.failListFrom !== undefined && call >= options.failListFrom) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'service unavailable', metadata: {} }), stderr: '' } }
       if (options.holdListCall && options.holdListCall.n === call) {
         return options.holdListCall.until.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }))
       }
@@ -127,7 +128,7 @@ test('the list is fetched again every commentsPollSeconds', async ($, on) => {
   expect(cli.filter(c => c.args.action === 'list').length).toBe(2)
 })
 
-test('the pane shows threads by model; Reply and Resolve go through the CLI with write permission', async ($, on) => {
+test('the pane shows threads by model; Resolve goes through the CLI with write permission', async ($, on) => {
   const { clock, cli } = await start($, on)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await clock.settle()
@@ -282,5 +283,39 @@ test('Reply with nothing typed asks for text and sends nothing', async ($, on) =
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /Type a reply first/ })).toBeDefined()
   expect(cli.filter(c => c.args.action === 'reply')).toEqual([])
+  await ui.unmount()
+})
+
+test('a post still running when a new session starts does not block the new session’s posts', async ($, on) => {
+  const { clock, cli } = await start($, on, { holdPost: new Promise<void>(() => {}) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  await clock.advance(10)
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  // /clear: the old post never finishes, the new session must still be able to post.
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await clock.advance(10)
+  await ui.press({ key: '7:11-resolve' })
+  await clock.advance(10)
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('a Resolve during a poll whose follow-up list fails still leaves the thread out of the pane and Claude’s context', async ($, on) => {
+  let release!: () => void
+  const { clock } = await start($, on, {
+    holdListCall: { n: 1, until: new Promise<void>(resolve => (release = resolve)) },
+    failListFrom: 2,
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await clock.advance(900_000)
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 5; i++) await clock.advance(10)
+  release()
+  for (let i = 0; i < 3; i++) await clock.settle()
+  const read: any = await $.tool.call({ tool: 'Read', file_path: FILE })
+  expect(read.context ?? []).toEqual([])
   await ui.unmount()
 })

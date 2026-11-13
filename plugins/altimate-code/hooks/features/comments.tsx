@@ -56,6 +56,8 @@ let loadAgain = false
 let posting = false
 // A load that began in an earlier session must not write into this one.
 let generation = 0
+// Counts the posts that changed the shared docs: a list requested before one is out of date once it is done.
+let writes = 0
 // Folders already searched for a dbt project in vain.
 const searched = new Set<string>()
 
@@ -175,6 +177,9 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   poll = null
   loadAgain = false
   generation++
+  // Work still running when an earlier session ended can never finish, so it must not block this one.
+  loadRun = null
+  posting = false
   searched.clear()
   interactive = e.isInteractive !== false
   // Nothing of an earlier session is shown in this one.
@@ -231,9 +236,10 @@ export const editReadsBefore = false
 
 /** The open threads on a file Claude read or edited, as one context block. */
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {
-  if (!inContext) return null
-  // The project may sit below the folder the session started in: it is found from the file too.
+  // The project may sit below the folder the session started in: it is found from the file too, whether or not
+  // the threads go into Claude's context (the pane needs it either way).
   await attach($, dirOf(file.path))
+  if (!inContext) return null
   let current = await get($)
   if (!current.root || current.needs) return null
   // The first read can come before the first load is done: wait for it, briefly, so the review is seen before an edit.
@@ -310,10 +316,11 @@ async function load($: EngineInterface): Promise<void> {
     loadAgain = true
     return loadRun
   }
-  loadRun = fetchThreads($).finally(() => {
-    loadRun = null
+  const run: Promise<void> = fetchThreads($).finally(() => {
+    if (loadRun === run) loadRun = null
   })
-  await loadRun
+  loadRun = run
+  await run
   if (loadAgain) {
     loadAgain = false
     await load($)
@@ -322,13 +329,15 @@ async function load($: EngineInterface): Promise<void> {
 
 async function fetchThreads($: EngineInterface) {
   const mine = generation
+  const wrote = writes
   const before = await get($)
   if (before.needs || !before.project) return
   await change($, current => ({ ...current, loading: true }))
   try {
     const out = await runTool($, TOOL, { action: 'list', project: before.project }, { cliOnly: true, until: (await $.clock.now()) + LIST_TIMEOUT_MS })
     const listed = out.metadata as Listed
-    if (mine !== generation) return
+    // An answer from an earlier session, or one asked for before a post changed the docs, is not shown: a fresh list follows.
+    if (mine !== generation || wrote !== writes) return
     if (!out.ok || !Array.isArray(listed?.threads)) {
       if (lacksTool(out.text)) {
         await change($, current => ({ ...current, needs: NEEDS_NEWER_CLI, loading: false }))
@@ -340,8 +349,10 @@ async function fetchThreads($: EngineInterface) {
     }
     const threads = listed.threads.map(toThread).filter((one): one is CommentsThread => one !== null)
     const now = await $.clock.now()
-    await change($, current => ({ ...current, threads, loadedAt: now, loading: false, error: null }))
+    // A post may have finished while this answer was being applied: the fresh list that follows it decides.
+    await change($, current => (wrote !== writes ? { ...current, loading: false } : { ...current, threads, loadedAt: now, loading: false, error: null }))
   } catch (error) {
+    if (mine !== generation) return
     const missing = /ENOENT|not found|no such file/i.test(String(error))
     await change($, current => ({
       ...current,
@@ -355,6 +366,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
   const key = `${thread.shareId}:${thread.groupId}`
   if (posting) return
   posting = true
+  const mine = generation
   await change($, current => ({ ...current, posting: key, note: null }))
   try {
     // Posting speaks for the person and changes the shared docs: write permission, CLI route.
@@ -364,17 +376,28 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       { share_id: thread.shareId, group_id: thread.groupId, ...args },
       { write: true, until: (await $.clock.now()) + POST_TIMEOUT_MS },
     )
+    if (mine !== generation) return
     const sent = out.ok && (out.metadata as { success?: boolean } | null)?.success !== false
     if (!sent) {
       await change($, current => ({ ...current, posting: null, note: oneLine(out.text) || 'The comment service did not accept that.' }))
       return
     }
-    await change($, current => ({ ...current, posting: null, note: done, drafts: { ...current.drafts, [key]: '' } }))
+    writes++
+    // A resolved thread is no longer open: it leaves the list now, whatever the refresh finds.
+    const resolved = args.action === 'resolve'
+    await change($, current => ({
+      ...current,
+      posting: null,
+      note: done,
+      drafts: { ...current.drafts, [key]: '' },
+      threads: resolved ? current.threads.filter(one => one.shareId !== thread.shareId || one.groupId !== thread.groupId) : current.threads,
+    }))
     await load($)
   } catch (error) {
+    if (mine !== generation) return
     await change($, current => ({ ...current, posting: null, note: `Could not post: ${oneLine(String(error))}` }))
   } finally {
-    posting = false
+    if (mine === generation) posting = false
   }
 }
 
