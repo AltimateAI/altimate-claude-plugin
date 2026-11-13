@@ -60,6 +60,11 @@ async function start($: any, on: any, setup: Setup = {}) {
   const clock = mock.clock(on)
   const calls: { cte?: string; position?: number; write: boolean }[] = []
   const toasts: string[] = []
+  const prompts: string[] = []
+  on('prompt.submit', (_: unknown, e: { text: string }) => {
+    prompts.push(e.text)
+    return { text: e.text } as any
+  })
   const ctes = setup.ctes ?? ['orders', 'payments', 'final']
   on('command.register', () => ({ value: { command: 'profile-ctes' } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
@@ -94,7 +99,7 @@ async function start($: any, on: any, setup: Setup = {}) {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await clock.settle()
   const run = (args: string) => $.command.run({ command: 'profile-ctes', args, origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } })
-  return { clock, calls, toasts, run }
+  return { clock, calls, toasts, prompts, run }
 }
 
 test('/profile-ctes lists the CTEs read-only, then times each with write permission, slowest first', async ($, on) => {
@@ -277,5 +282,37 @@ test('a run left at running by an earlier session is stopped when the next sessi
   await clock.settle()
   // The old run issued no further query once its session was gone.
   expect(calls.map(call => call.cte)).toEqual([undefined, 'orders'])
+  await ui.unmount()
+})
+
+test('a /clear in the middle of a run (session end alone) leaves nothing showing as running and no result for the next conversation', async ($, on) => {
+  let release!: () => void
+  const until = new Promise<void>(resolve => (release = resolve))
+  const { clock, calls, run } = await start($, on, { hold: { cte: 'orders', until } })
+  await run('customers')
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /session ended before this finished/ })).toBeDefined()
+  expect(await ui.find({ key: 'cte-stop' })).toBeUndefined()
+  release()
+  await clock.settle()
+  expect(calls.map(call => call.cte)).toEqual([undefined, 'orders'])
+  const next: any = await $.tool.call({ tool: 'Read', file_path: '/repo/models/other.md' } as any)
+  expect(JSON.stringify(next.context ?? [])).not.toContain('CTE profile')
+  await ui.unmount()
+})
+
+test('Tell Claude sends the profile as a prompt and the next tool result does not carry it a second time', async ($, on) => {
+  const { clock, run, prompts } = await start($, on, { times: { orders: 100 } })
+  await run('customers')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'cte-send' })
+  await clock.settle()
+  expect(prompts.some(text => text.includes('CTE profile of "customers"'))).toBe(true)
+  const next: any = await $.tool.call({ tool: 'Read', file_path: '/repo/models/other.md' } as any)
+  expect(JSON.stringify(next.context ?? [])).not.toContain('CTE profile')
   await ui.unmount()
 })

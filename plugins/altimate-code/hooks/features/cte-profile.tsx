@@ -21,7 +21,7 @@ const COMMAND = 'profile-ctes'
 const TOOL = 'dbt_cte_profile'
 /** A count query can run long on a big model; each call gets this much before it is given up on. */
 const QUERY_BUDGET_MS = 300_000
-/** The listing is a file read; it gets the default budget. */
+const NO_ANSWER = `altimate-code gave no answer: if it is older than the release with the dbt_cte_profile tool, update it with \`npm i -g @altimateai/altimate-code\`.`
 const NEEDS_NEWER = 'Profile CTEs needs a newer altimate-code (one with the dbt_cte_profile tool): update it with `npm i -g @altimateai/altimate-code`.'
 
 const stateAtom = atom({ plugin: 'altimate-code', key: 'cteProfile' } as const, null as CteProfileState | null)
@@ -107,7 +107,7 @@ export function summaryOf(state: CteProfileState): string {
     ...lines,
     ...(failed.length ? ['Failed:', ...failed] : []),
   ].join('\n')
-  return text.length > MAX_NOTE ? `${text.slice(0, MAX_NOTE)}…` : text
+  return text.length > MAX_NOTE ? `${text.slice(0, text.lastIndexOf('\n', MAX_NOTE))}\n…` : text
 }
 
 async function setState($: EngineInterface, change: (prev: CteProfileState) => CteProfileState) {
@@ -117,6 +117,16 @@ async function setState($: EngineInterface, change: (prev: CteProfileState) => C
 /** Stop is heard only while a run is going: a press that arrives after the end changes nothing. */
 async function requestStop($: EngineInterface) {
   await update($, stateAtom, (prev): CteProfileState | null => (prev && (prev.status === 'running' || prev.status === 'listing') ? { ...prev, status: 'stopping' } : prev))
+}
+
+/** A run that ended with its session (a reload, a /clear) leaves nothing showing as running. */
+async function interrupt($: EngineInterface) {
+  await update($, stateAtom, (prev): CteProfileState | null =>
+    prev && (prev.status === 'running' || prev.status === 'listing' || prev.status === 'stopping')
+      ? { ...prev, status: 'stopped', rows: prev.rows.map(row => (row.status === 'running' ? { ...row, status: 'pending' as const } : row)), message: 'The session ended before this finished.' }
+      : prev,
+  )
+  await setStatusPart($, 'cteProfile', null)
 }
 
 async function say($: EngineInterface, message: string) {
@@ -150,7 +160,7 @@ async function profile($: EngineInterface, model: string, generation: number) {
     const list = Array.isArray(listed.metadata?.ctes) ? (listed.metadata.ctes as { name: string; line: number; clause: number; position: number }[]) : null
     if (!listed.ok || !list) {
       // An altimate-code too old for `tool run` prints nothing at all.
-      await say($, missingTool(listed.text) || listed.text.trim() === '' ? NEEDS_NEWER : listed.text)
+      await say($, missingTool(listed.text) ? NEEDS_NEWER : listed.text.trim() === '' ? NO_ANSWER : listed.text)
       return
     }
     if (list.length === 0) {
@@ -158,18 +168,22 @@ async function profile($: EngineInterface, model: string, generation: number) {
       return
     }
     // A Stop pressed while the list was coming ends the run before any query.
-    const asked = (await read($, stateAtom))?.status === 'stopping'
-    await update($, stateAtom, (): CteProfileState => ({
-      model,
-      status: asked ? 'stopping' : 'running',
-      rows: list.map(one => ({ name: one.name, line: one.line, clause: one.clause, status: 'pending' as const })),
-    }))
+    let asked = false
+    await update($, stateAtom, (prev): CteProfileState => {
+      asked = prev?.status === 'stopping'
+      return {
+        model,
+        status: asked ? 'stopping' : 'running',
+        rows: list.map(one => ({ name: one.name, line: one.line, clause: one.clause, status: 'pending' as const })),
+      }
+    })
 
     for (let i = 0; i < list.length && !asked; i++) {
       // Stop ends the run between queries; one already running is waited for.
       if ((await read($, stateAtom))?.status === 'stopping') break
       if (!current()) return
       await setStatusPart($, 'cteProfile', `profiling CTEs ${i + 1}/${list.length}`)
+      if (!current()) return
       await setState($, prev => ({ ...prev, rows: prev.rows.map((row, at) => (at === i ? { ...row, status: 'running' as const } : row)) }))
       const until = (await $.clock.now()) + QUERY_BUDGET_MS
       const args = { model, cte: list[i]!.name, position: list[i]!.position ?? i }
@@ -230,8 +244,8 @@ export function register(on: On, context: FeatureContext) {
     if (!model) return { text: 'Name a model: /profile-ctes <model>, or read or edit one first.' }
     active = true
     const generation = sessionGeneration
-    await update($, stateAtom, (): CteProfileState => ({ model, status: 'listing', rows: [] }))
     try {
+      await update($, stateAtom, (): CteProfileState => ({ model, status: 'listing', rows: [] }))
       await openPane($)
     } catch (error) {
       active = false
@@ -267,8 +281,8 @@ export function register(on: On, context: FeatureContext) {
         </Box>
         {state.message && <Text color="suggestion">{state.message}</Text>}
         <Box flexDirection="column">
-          {slowestFirst(state.rows).map((row, at) => (
-            <Text key={`${row.clause}-${row.name}-${row.line}-${at}`} color={row.tier ? colour[row.tier] : row.status === 'failed' ? 'error' : undefined} dimColor={row.status === 'pending'}>
+          {slowestFirst(state.rows).map(row => (
+            <Text key={`${row.clause}-${row.name}-${row.line}`} color={row.tier ? colour[row.tier] : row.status === 'failed' ? 'error' : undefined} dimColor={row.status === 'pending'}>
               {row.status === 'running' && '… '}
               {row.status === 'failed' && '✗ '}
               {row.name} · line {row.line}
@@ -281,7 +295,13 @@ export function register(on: On, context: FeatureContext) {
         <Box>
           {running && <Button key="cte-stop" label="Stop" onPress={() => later($, () => requestStop($))} />}
           {!running && timed > 0 && (
-            <Button key="cte-send" label="Tell Claude" onPress={() => later($, () => $.prompt.submit({ text: `${summaryOf(state)}\n\nWhich CTE is worth optimizing first, and how?` }))} />
+            <Button key="cte-send" label="Tell Claude" onPress={() =>
+                later($, async () => {
+                  // Claude has it now: the next tool result does not carry it again.
+                  pendingContext = null
+                  await $.prompt.submit({ text: `${summaryOf(state)}\n\nWhich CTE is worth optimizing first, and how?` })
+                })
+              } />
           )}
         </Box>
       </Box>
@@ -296,12 +316,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   lastModelPath = null
   pendingContext = null
   // The state outlives a reload, the run that was filling it does not.
-  await update($, stateAtom, (prev): CteProfileState | null =>
-    prev && (prev.status === 'running' || prev.status === 'listing' || prev.status === 'stopping')
-      ? { ...prev, status: 'stopped', rows: prev.rows.map(row => (row.status === 'running' ? { ...row, status: 'pending' as const } : row)), message: 'The session ended before this finished.' }
-      : prev,
-  )
-  await setStatusPart($, 'cteProfile', null)
+  await interrupt($)
   await $.command.register({ name: COMMAND, description: 'Time each CTE of a dbt model, slowest first (one warehouse query per CTE)' })
 }
 
@@ -315,7 +330,7 @@ export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   active = false
   lastModelPath = null
   pendingContext = null
-  await setStatusPart($, 'cteProfile', null)
+  await interrupt($)
 }
 
 /** This feature's line in the band, under the lineage line; null when there is nothing to say. */
