@@ -15,18 +15,18 @@ The CLI mode is what keeps the plugin useful for an organisation that disallows 
 
 ## Install
 
-From Anthropic's plugin directory:
+```bash
+claude plugin install altimate-code --marketplace AltimateAI/altimate-claude-plugin
+```
+
+## Update
 
 ```bash
-claude plugin install altimate-code
+claude plugin marketplace update altimate-claude-plugin
+claude plugin update altimate-code@altimate-claude-plugin
 ```
 
-Or from this repository's marketplace:
-
-```
-/plugin marketplace add AltimateAI/altimate-claude-plugin
-/plugin install altimate-code@altimate-claude-plugin
-```
+Then restart Claude Code.
 
 ## Prerequisites
 
@@ -49,7 +49,7 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 
 ## How it works
 
-1. A **SessionStart hook** adds a description of the available tools and both modes to the session, and copies the linked workspace's skills (see below). It does not start the MCP server.
+1. A **SessionStart hook** adds a description of the available tools and both modes to the session, and copies the linked workspace's skills (see below). It does not start the MCP server. In a linked project, the [team rules](#team-rules) hooks add the workspace's rules too.
 2. **MCP mode.** Claude calls `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns columns and value profiles; large results spill to a local file), `sql_materialize` (session-local `scratch` DuckDB for cross-database joins), `answer_commit`, and `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence`, `sql_translate`.
 3. **CLI mode.** The **skill** has Claude run `altimate tool context` once (connections, schema listing, analyst method), then `altimate tool run <name> --args '<json>'` through Bash and reason over the structured output. `altimate tool list --json` shows every tool and its input schema. A warm process per project starts automatically.
 4. Calls are read-only unless you approve `--allow-write` (CLI mode); `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are always blocked. Read-only is enforced by the database on Postgres, SQLite and DuckDB and by SQL classification elsewhere, so use a read-only DB user for the strongest boundary.
@@ -102,16 +102,32 @@ The side pane and band need a Claude Code build with hooks modules and `altimate
 
 The plugin's lineage pane follows the dbt model Claude reads or edits (by Read, Edit, a shell command that names or finds its `.sql` file, or a `dbt_lineage` call), read from `target/manifest.json` with no model calls. A project with no manifest still gets its graph, read from the models' `ref()` and `source()` calls; columns, dashboards and column reach then need `dbt parse` or `dbt compile`. From a monorepo's root, `/lineage <model>` finds the dbt project below it that has the model:
 
-- **The graph.** The model's whole lineage as boxes and arrows, like dbt-lineage-viewer: every level upstream on the left and downstream on the right, every model, every name in full, dashboards (exposures) marked ◆. Nothing is folded or cut: the pane is a window onto the drawing. Scroll it up and down with the mouse, touchpad or arrow keys, pan it with `h` and `l` (or ◀ ▶), and `f` brings the model back to the middle. Links between models on the same level, or that skip a level, are not drawn. Press a model to follow it. With a column picked, the models and dashboards that read it are highlighted and the rest dimmed.
+- **The graph.** The model's whole lineage as boxes and arrows, like dbt-lineage-viewer: every level upstream on the left and downstream on the right, every model, every name in full, dashboards (exposures) marked ◆. The pane is a window onto the drawing. A graph too big for Claude Code to draw in a pane is shown as folders instead, and the header says so; `v` switches to the other views. Scroll it up and down with the mouse, touchpad or arrow keys, pan it with `h` and `l` (or ◀ ▶), and `f` brings the model back to the middle. Links between models on the same level, or that skip a level, are not drawn. Press a model to follow it. With a column picked, the models and dashboards that read it are highlighted and the rest dimmed.
 - **Views for big projects.** `v` cycles the graph, **ends only** (the sources and dashboards the model sits between; "via N" counts the models between them on the shortest path), **folders** (sources, staging, intermediate, marts and dashboards as one box each, with counts, in dbt layer order: a source-to-mart chain on one screen) and the text **list** of upstream and downstream. A pane narrower than 48 columns shows the list. The pane keeps up to 500 models upstream, and through altimate-code (a manifest over 4 MiB) up to 500 downstream too; past that the header says which side was cut.
 - **What the answer is about.** Once the session has seen a dbt project, after each answer the models Claude named are listed under the header (IN THE ANSWER), each a press away. When Claude answered without reading any model that turn (from what it read earlier), the pane follows the first model it named, so the lineage shown matches the answer.
 - **Columns.** Each output column with its source columns and how it is derived, from altimate-code's `dbt_lineage`, read from the compiled manifest (`dbt compile`). The plugin's calls are read-only, so altimate-code never starts the project's dbt adapter for them.
 - **Column reach.** `c` picks a column; the pane shows the downstream models whose SQL reads it and the dashboards on them, from `impact_analysis` (it traces each downstream model's compiled SQL, renames included). Models that name the column only in a filter or join, or that could not be traced (no compiled SQL), are listed apart, and the count is then a lower bound.
-- **Impact first.** Before an edit to a model's SQL lands, the plugin checks what reads the model and the reach of every column the edit touches (up to three, merged). It shows the result as a toast, adds it to Claude's context with the edit's result, and leaves a band above the prompt with the severity (impact_analysis' thresholds) and counts.
+- **Impact first.** Before an edit to a model's SQL lands, the plugin checks what reads the model and the reach of every column the edit touches (up to three, merged). It tells a touched column from the model's own lineage (what the pane already read, or `dbt_lineage` through the CLI), so a column `schema.yml` leaves out still counts. It shows the result as a toast, adds it to Claude's context with the edit's result, and leaves a band above the prompt with the severity (impact_analysis' thresholds) and counts.
 - **Warehouse lineage.** When a connected MCP server offers Altimate's `table_lineage` (Snowflake) or `databricks_table_lineage`, the pane adds what the warehouse's query history shows for the model's table. The plugin calls a tool of that name on whichever connected server offers it, itself and without a permission prompt, and sends it the model's `database.schema.table`. It does so only when you ask for the model (`/lineage`, a press in the pane, or `r`), never when the pane follows one of Claude's reads.
 - **Claude's own lineage calls.** A `dbt_lineage` result is drawn as a list of edges colored by how each column is derived; ctrl+o keeps the original output under it.
 
-`/lineage <model>[.column]` opens the pane on a model. Lineage calls go to the plugin's MCP server without a permission prompt, or to `altimate tool run` when the server is not available. A manifest over 4 MiB is read through altimate-code (`dbt_lineage` with `include_graph`). Run `dbt parse` or `dbt compile` first; column lineage and reach need compiled SQL.
+`/lineage <model>[.column]` opens the pane on a model, at any width. When the pane follows Claude's reads on its own, Claude Code draws it only in a terminal at least 144 columns wide (110 once you have opened it yourself); in a narrower one it waits, and a toast says so once. Lineage calls go to the plugin's MCP server without a permission prompt, or to `altimate tool run` when the server is not available. A manifest over 4 MiB is read through altimate-code (`dbt_lineage` with `include_graph`). Run `dbt parse` or `dbt compile` first; column lineage and reach need compiled SQL. When the shown model's `.sql` file changed after the manifest was written, the pane and the edit note say so: run `dbt compile`, then `r`.
+
+### Team rules
+
+In a project linked to an Altimate workspace, the workspace's approved **team rules** apply to Claude Code itself, not only to the tasks it hands over. With learning on (`altimate learn enable` in the project, or the workspace's "Learn from sessions" if you have made no choice of your own), your corrections can become proposed rules too:
+
+- **At session start** the plugin gives Claude the team rules for this repository, tells it how many proposed rules are waiting for you, and reports the owner's reviews of your proposals since your last session (approved, or rejected with the reason).
+- **When you correct Claude** ("no, we never use FLOAT for money") the correction is recorded locally. When you correct it on the same topic in two sessions, or correct a team rule it was given, altimate-code words a proposed rule after the turn, in the background.
+- **"Remember this as a team rule: …"**, said to Claude, waits as a proposal the same way. It needs "as a rule" or "team rule" followed by ":" or "-": "remember to run the tests", a question, or "don't remember this as a team rule" is just part of the conversation. A task handed to altimate-code decides this as an altimate-code session does.
+- **`/altimate-code:rules`** shows the proposals waiting for you, the team rules, and the status of the rules you proposed. For each proposal you choose: send it to the workspace owner's review (or approve it, if you are the owner), edit the wording, save it as a memory, or "Not a rule". Nothing reaches teammates until the owner approves it.
+
+Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gateway, or set a provider in altimate-code): if it has none it can use, the next session start says the check failed. The same commands work in a terminal: `altimate learn proposals`, `altimate learn proposals reply <id> --send`. Proposals from Claude Code sessions are answered only there or with `/altimate-code:rules`: altimate-code's own `/rules` and its VS Code chat panel don't list them. This needs an altimate-code release with workspace rules.
+
+- **Start the session in the linked folder**, or a folder below it. If only a folder inside the repository is linked (a dbt project), a session started at the repository root gets no team rules.
+- **A new clone or worktree** gets no team rules until altimate-code has been linked, or run, in that checkout: the link is remembered per folder.
+- **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds). All of them run only in a linked folder (or below it), as recorded in altimate-code's link cache in your own state directory: nothing in the repository turns them on.
+- **`ALTIMATE_LEARN=0`** turns all of it off: the hooks start nothing.
 
 ## Example prompts
 
@@ -144,6 +160,7 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 | Answers ignore your workspace's skills or knowledge | Run `altimate workspace status` in the project. If it isn't linked, ask Claude to link it, or run `altimate link` in a terminal. If it is linked, check that your CLI has `tool run --workspace-tools` (`altimate upgrade`). |
 | `Altimate account or workspace changed` | The sign-in or link changed since Claude read the workspace. Claude re-reads `workspace_context` and retries once; if it repeats, ask Claude to check `altimate workspace status`. |
 | Workspace engine `needs_engine` | Let Claude run `altimate workspace-client engine-install`, or run it yourself. |
+| Team rules don't appear at session start | Check `altimate learn status` in the project: it needs a linked workspace and an Altimate sign-in, and `ALTIMATE_LEARN` not set to `0`. Start Claude Code in the linked folder (or below it), not at the repository root when only a subfolder is linked. Update altimate-code if `altimate learn rules` is an unknown command. |
 | Plugin installed but never delegates | Confirm it's enabled: `claude plugin enable altimate-code@altimate-claude-plugin`. |
 
 Still stuck? See [Support](#support).
@@ -154,7 +171,8 @@ Still stuck? See [Support](#support).
 - **Skill** — `skills/altimate-code/SKILL.md` — MCP and `tool run` guidance, delegation for long jobs, workspace guidance
 - **Agent** — `agents/analyst.md` — read-only data analyst (MCP or CLI)
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
-- **Hooks** — `hooks/hooks.json` — SessionStart capability description and workspace skill copy; Stop hook hourly background skill refresh; opt-in PreToolUse `warehouse-guard.sh` (needs `ALTIMATE_ROUTE_GUARD=1`)
+- **Command** — `commands/rules.md` — `/altimate-code:rules` to answer proposed team rules
+- **Hooks** — `hooks/hooks.json` — SessionStart capability description and workspace skill copy; Stop hook hourly background skill refresh; the team rules hooks (`hooks-handlers/workspace-rules.sh`): SessionStart, UserPromptSubmit and Stop, which call `altimate learn hook <event>` and never fail the session (the per-turn hooks run in the background; session start waits at most 15 seconds); opt-in PreToolUse `warehouse-guard.sh` (needs `ALTIMATE_ROUTE_GUARD=1`)
 
 ## Support
 
