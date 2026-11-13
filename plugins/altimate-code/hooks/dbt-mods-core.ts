@@ -2,6 +2,7 @@
 // lines, run_results.json, the manifest, `dbt --version` and `dbt debug`. Kept apart from the hooks so
 // each reading is tested on dbt's real output.
 import type { DbtFailure, DoctorCheck, ModelContext, QueryResult } from '../types'
+import { withoutComment } from './lineage-graph'
 
 const ANSI = /\u001b\[[0-9;]*m/g
 
@@ -96,8 +97,10 @@ export type DbtCommand = {
   at: number
   /** The dbt invocation as the shell passes it: the executable as written, then every argument, quotes decoded, redirections left out. */
   argv: string[]
-  /** False when the shell gave it more than its words: a `VAR=…` prefix or a `$VAR` the plugin cannot expand. */
+  /** False when it depended on its shell (variables, `~`, globs, other commands before it): no Re-run. */
   replayable: boolean
+  /** Environment set for it in the same command (`VAR=x dbt …`, `export VAR=x; dbt …`): part of where it ran. */
+  env: string[]
 }
 
 // Flags that decide where and how a command runs: two runs differing in them are not the same run.
@@ -161,7 +164,8 @@ export function dbtCommand(written: string): DbtCommand | null {
   const command = written.replace(/\\\r?\n/g, m => ' '.repeat(m.length))
   // Quoted text is an argument, not the command: `altimate run "fix it, then dbt build"` runs no dbt.
   // Each quoted string is masked to the same length, so positions in it match the command's own.
-  const masked = command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'/g, quoted => `${quoted[0]}${'x'.repeat(quoted.length - 2)}${quoted[0]}`)
+  // An escaped character outside quotes (`\\;`) is a literal too, masked the same way.
+  const masked = command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'|\\[^\n]/g, quoted => (quoted[0] === '\\' ? 'xx' : `${quoted[0]}${'x'.repeat(quoted.length - 2)}${quoted[0]}`))
   // Redirections (`2>&1`, `> out.txt`, `&> log`) are the shell's, found outside quotes and blanked in both.
   let bare = masked
   let text = command
@@ -215,7 +219,24 @@ export function dbtCommand(written: string): DbtCommand | null {
       i += word.includes('=') && word.startsWith('--') ? 1 : 2
     } else i++
   }
-  return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, at: start, argv: words, replayable }
+  // Variables set for it in the same command: a prefix, `env X=…`, or an export before it.
+  // Only real assignments count: words that open a command (`X=1 dbt …`) or follow `export`/`env`.
+  const env: string[] = []
+  const parts = [...bare.slice(0, start).matchAll(/[^;&|(\n]+/g)]
+  for (const [i, part] of parts.entries()) {
+    const words = shellWords(command.slice(part.index!, part.index! + part[0].length))
+    // An export lasts for the rest of the command; a `X=1` prefix only for its own command, dbt's when last.
+    const exported = words[0] === 'export'
+    const own = i === parts.length - 1 && part.index! + part[0].length === start
+    if (!exported && !own) continue
+    const from = exported || words[0] === 'env' ? 1 : 0
+    for (const word of words.slice(from)) {
+      if (!/^[A-Za-z_]\w*=/.test(word)) break
+      env.push(word)
+    }
+  }
+  const context = [...new Set(env)].sort()
+  return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, at: start, argv: words, replayable, env: context }
 }
 
 /** The argv that runs a captured `dbt show` again with JSON output and `limit` rows, every other argument as it was. */
@@ -236,18 +257,20 @@ export function replayArgv(argv: string[], limit: number): string[] {
 
 /** The folders some dbt_project.yml keys name, each key's fallback when absent; inline and block lists. */
 function pathsOf(yml: string, keys: [string, string[]][]): string[] {
-  const lines = yml.replace(/\r\n?/g, '\n').split('\n')
+  // Comments out the way the lineage half reads dbt_project.yml: a `#` inside quotes is part of the path.
+  const lines = yml.replace(/\r\n?/g, '\n').split('\n').map(line => withoutComment(line).trimEnd())
+  const unquote = (item: string) => item.trim().replace(/^['"]|['"]$/g, '')
   const read = (key: string, fallback: string[]) => {
     const at = lines.findIndex(line => line.startsWith(`${key}:`))
     if (at < 0) return fallback
-    const inline = lines[at]!.slice(key.length + 1).replace(/#.*$/, '').trim()
-    const unquote = (item: string) => item.trim().replace(/^['"]|['"]$/g, '')
+    const inline = lines[at]!.slice(key.length + 1).trim()
     if (inline.startsWith('[')) return inline.replace(/^\[|\]$/g, '').split(',').map(unquote).filter(Boolean)
+    if (inline) return [unquote(inline)]
     const items: string[] = []
     for (const line of lines.slice(at + 1)) {
-      // Comments and blank lines inside the list are skipped; the next key ends it.
-      if (/^\s*(#.*)?$/.test(line)) continue
-      const item = /^\s*-\s*(.+)$/.exec(line.replace(/\s#.*$/, ''))
+      // Blank and comment-only lines inside the list are skipped; the next key ends it.
+      if (line.trim() === '') continue
+      const item = /^\s*-\s*(.+)$/.exec(line)
       if (!item) break
       items.push(unquote(item[1]!))
     }
@@ -256,6 +279,14 @@ function pathsOf(yml: string, keys: [string, string[]][]): string[] {
   const paths = keys.flatMap(([key, fallback]) => read(key, fallback))
   // `.` is the project folder itself (''); a path outside the project (`../shared`) is not this project's.
   return [...new Set(paths.map(one => (one === '.' ? '' : one.replace(/^\.\/|\/+$/g, ''))).filter(one => !one.startsWith('..') && !one.startsWith('/')))]
+}
+
+/** Where dbt writes its artifacts (manifest, run results): `target-path` in dbt_project.yml as written, `target` when absent. */
+export function targetPath(yml: string): string {
+  // A top-level key only; a Jinja value (`{{ env_var(…) }}`) is dbt's to render, so dbt's default stands in.
+  const line = yml.replace(/\r\n?/g, '\n').split('\n').map(one => withoutComment(one).trimEnd()).find(one => one.startsWith('target-path:'))
+  const value = line?.slice('target-path:'.length).trim().replace(/^['"]|['"]$/g, '')
+  return value && !value.includes('{{') ? value : 'target'
 }
 
 /**
@@ -305,9 +336,24 @@ export function failuresFrom(runResults: unknown, manifest?: { nodes?: Record<st
   return out
 }
 
+/** dbt's output as text: a `--log-format json` run's messages one per line, else the output as it is. */
+function logText(output: string): string {
+  const messages: string[] = []
+  for (const line of output.split('\n')) {
+    const text = line.trim()
+    if (!text.startsWith('{')) continue
+    try {
+      const msg = JSON.parse(text)?.info?.msg
+      if (typeof msg === 'string') messages.push(msg)
+    } catch {}
+  }
+  // Mixed output (a JSON log and plain lines) keeps both.
+  return messages.length ? [...messages, ...output.split('\n').filter(line => !line.trim().startsWith('{'))].join('\n') : output
+}
+
 /** The failed nodes a dbt command's own text names, for a run that wrote no run_results.json (a parse error). */
 export function failuresFromText(output: string): DbtFailure[] {
-  const text = stripAnsi(output)
+  const text = stripAnsi(logText(output))
   const out: DbtFailure[] = []
   const block = /^\s*(?:\d\d:\d\d:\d\d\s+)?(Compilation|Database|Runtime|Parsing) Error(?: in (\w+) (\w+) \(([^)]+)\))?\s*$/gm
   for (let match = block.exec(text); match; match = block.exec(text)) {
@@ -330,7 +376,7 @@ export function failuresFromText(output: string): DbtFailure[] {
 
 /** Whether a dbt command's output says it failed, when the exit code is not known. */
 export function saysFailed(output: string): boolean {
-  const text = stripAnsi(output)
+  const text = stripAnsi(logText(output))
   const done = /Done\.\s+PASS=\d+\s+WARN=\d+\s+ERROR=(\d+)/.exec(text)
   if (done) return Number(done[1]) > 0
   return /Completed with \d+ errors?|Encountered an error|(Compilation|Database|Runtime|Parsing) Error/.test(text)

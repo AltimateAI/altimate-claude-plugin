@@ -24,6 +24,7 @@ import {
   projectPaths,
   replayArgv,
   saysFailed,
+  targetPath,
   showPreview,
   stripAnsi,
   textTable,
@@ -103,9 +104,20 @@ function within<T>($: EngineInterface, ms: number, work: Promise<T>): Promise<T 
   })
 }
 
-/** The closest folder above a file or folder that holds dbt_project.yml. */
+/** `a/./b/../c` → `a/c`: two spellings of one folder are one project, one queue, one identity. */
+function normalize(path: string): string {
+  const out: string[] = []
+  for (const part of path.replace(/\\/g, '/').split('/')) {
+    if (part === '.' || (part === '' && out.length > 0)) continue
+    if (part === '..' && out.length > 1 && out[out.length - 1] !== '..') out.pop()
+    else out.push(part)
+  }
+  return out.join('/') || '/'
+}
+
+/** The closest folder above a file or folder that holds dbt_project.yml, spelled one way. */
 async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {
-  let dir = isFile ? dirname(start) : start
+  let dir = normalize(isFile ? dirname(start) : start)
   for (let i = 0; i < 40; i++) {
     if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) return dir
     const parent = dirname(dir)
@@ -208,6 +220,12 @@ for k in keep:
 print(json.dumps(out))
 `
 
+/** The project's artifact folder (`target-path` in dbt_project.yml): absolute, or under the project. */
+async function targetOf($: EngineInterface, root: string): Promise<string> {
+  const path = targetPath(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
+  return normalize(path.startsWith('/') ? path : `${root}/${path}`)
+}
+
 /** The Python beside the project's dbt, else the one on PATH. */
 async function pythonFor($: EngineInterface, root: string): Promise<string> {
   const dbt = await dbtBinary($, root)
@@ -224,7 +242,7 @@ async function pythonFor($: EngineInterface, root: string): Promise<string> {
  * project's Python, as the lineage half reads one through altimate-code.
  */
 async function readManifest($: EngineInterface, root: string, rel?: string): Promise<{ manifest: any; mtimeMs: number } | null> {
-  const path = `${root}/target/manifest.json`
+  const path = `${await targetOf($, root)}/manifest.json`
   const stat = await $.fs.stat(path).catch(() => null)
   if (!stat || stat.kind !== 'file') return null
   try {
@@ -320,6 +338,12 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   const status: CheckView['status'] = errors.length ? 'error' : reason ? 'partial' : drift.missing.length || drift.undocumented.length ? 'warn' : 'ok'
   const view: CheckView = { ...blank, model: named ?? model, schema: schemaOf(node?.node) ?? blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
   await setCheck($, view, current)
+  // An edit of a schema file or macro that came while this ran checks it again now.
+  if (forcedWhileBusy && current() && !rechecking) {
+    const waiting = forcedWhileBusy
+    forcedWhileBusy = null
+    later($, () => recheck($, waiting))
+  }
   // A problem opens the whole answer beside the chat: the band has room for one line of dbt's error.
   if ((view.status === 'warn' || view.status === 'error') && current()) await openCheck($, false).catch(() => null)
   return { view, note: checkNote(view), current }
@@ -332,25 +356,44 @@ async function setCheck($: EngineInterface, view: CheckView, current: () => bool
 
 // A recheck in flight: a burst of shell commands starts one.
 let rechecking = false
+// A forced recheck asked for while one ran: it runs once that one ends.
+let forcedWhileBusy: string | null = null
 
 /**
- * The model the band reports on, or the schema file that documents it, changed since its check (a fix
- * altimate-code or another process made): check it again, so the band never shows a stale answer. A dbt
- * command that only rewrote the manifest changes neither, and starts no warehouse query.
+ * Checks the model the band reports on again when its file or its schema file changed since its check (a
+ * fix altimate-code made), or when `edited` names a .yml or .sql of its project that Claude just edited (a
+ * schema file documenting it for the first time, a macro). A deleted model drops its check. A dbt command
+ * that only rewrote the manifest changes nothing here, and starts no warehouse query.
  */
-async function recheck($: EngineInterface) {
+async function recheck($: EngineInterface, edited: string | null = null) {
+  // The conversation that asked: one that ends while this waits gets nothing from it.
+  const asked = generation
   const check = await read($, checkAtom)
-  if (!check || check.status === 'running' || rechecking) return
+  if (!check) return
+  // Busy (a check or recheck running): a forced recheck waits for it, so a schema.yml written meanwhile is not missed.
+  if (check.status === 'running' || rechecking) {
+    if (edited) forcedWhileBusy = edited
+    return
+  }
   const files = [check.file, ...(check.schema ? [check.schema] : [])]
   const stats = await Promise.all(files.map(one => $.fs.stat(`${check.root}/${one}`).catch(() => null)))
-  if (!stats.some(stat => !!stat && stat.mtimeMs > check.at)) return
+  if (generation !== asked) return
+  // The model's file is gone: there is nothing left to check, and its old answer is not shown.
+  if (!stats[0]) return void (await update($, checkAtom, current => (current === check ? null : current)))
+  // An edited .yml or .sql of the checked model's own project (not its build output) checks it again.
+  const target = edited ? await targetOf($, check.root) : null
+  const force = !!edited && edited.startsWith(`${check.root}/`) && !edited.startsWith(`${target}/`)
+  if (!force && !stats.some(stat => !!stat && stat.mtimeMs > check.at)) return
   rechecking = true
   try {
-    const { view, current } = await compileAndValidate($, check.root, `${check.root}/${check.file}`)
+    const { view, current } = await compileAndValidate($, check.root, `${check.root}/${check.file}`, asked)
     if (!current()) return
     if (view.status !== 'running' && current()) $.ui.toast(`${STATUS_ICON[view.status]} ${view.model} changed · checked again against the warehouse`, { timeoutMs: 6000 })
   } finally {
     rechecking = false
+    const waiting = forcedWhileBusy
+    forcedWhileBusy = null
+    if (waiting && generation === asked) later($, () => recheck($, waiting))
   }
 }
 
@@ -381,12 +424,13 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
     return null
   }
   // run_results.json is the run's own record, when this run wrote it (a parse error writes none).
-  const stat = await $.fs.stat(`${root}/target/run_results.json`).catch(() => null)
+  const results = `${await targetOf($, root)}/run_results.json`
+  const stat = await $.fs.stat(results).catch(() => null)
   let failures = [] as FailureView['failures']
   if (stat && stat.mtimeMs >= startedAt - 2_000) {
-    const results = await $.fs.read(`${root}/target/run_results.json`).then(JSON.parse).catch(() => null)
+    const runResults = await $.fs.read(results).then(JSON.parse).catch(() => null)
     const manifest = await readManifest($, root)
-    failures = failuresFrom(results, manifest?.manifest)
+    failures = failuresFrom(runResults, manifest?.manifest)
   }
   if (failures.length === 0) failures = failuresFromText(output)
   // Nothing dbt itself reported (a command the permission check refused, a missing binary): no band.
@@ -515,9 +559,8 @@ async function modelNote($: EngineInterface, file: string, agentId?: string): Pr
 async function changedSince($: EngineInterface, root: string, mtimeMs: number): Promise<{ files: string[]; complete: boolean }> {
   const changed: { path: string; mtimeMs: number }[] = []
   let scanned = 0
-  // A folder that exists but could not be listed leaves the answer unknown, never "current".
+  // A folder that exists but could not be read leaves the answer unknown, never "current".
   let complete = true
-  const folders: { path: string; mtimeMs: number }[] = []
   for (const top of ['dbt_project.yml', 'packages.yml', 'dependencies.yml']) {
     const stat = await $.fs.stat(`${root}/${top}`).catch(() => null)
     if (stat && stat.mtimeMs > mtimeMs) changed.push({ path: top, mtimeMs: stat.mtimeMs })
@@ -530,13 +573,8 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
   while (level.length && scanned <= MAX_SCANNED) {
     const next: string[] = []
     for (const dir of level) {
-      const folder = await $.fs.stat(dir).catch(() => null)
       // A default folder the project does not have is not a source.
-      if (!folder || folder.kind !== 'dir') continue
-      // A file added, removed or renamed changes its folder's time: a deleted model makes the manifest stale too.
-      // A folder newer than the manifest had a file added, removed or renamed: counted at the end, only when
-      // nothing under it is counted, so one new file is not two changes.
-      if (dir !== root && folder.mtimeMs > mtimeMs) folders.push({ path: `${relative(root, dir)}/`, mtimeMs: folder.mtimeMs })
+      if (!(await $.fs.exists(dir).catch(() => false))) continue
       const entries = await $.fs.list(dir).catch(() => null)
       if (!entries) {
         complete = false
@@ -552,12 +590,27 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
         }
         if (!/\.(sql|ya?ml|csv|py|md)$/i.test(entry.name)) continue
         const stat = await $.fs.stat(path).catch(() => null)
-        if (stat && stat.mtimeMs > mtimeMs && !seen.has(relative(root, path))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
+        if (!stat) complete = false
+        else if (stat.mtimeMs > mtimeMs && !seen.has(relative(root, path))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
       }
     }
     level = next
   }
-  for (const folder of folders) if (!changed.some(one => one.path.startsWith(folder.path)) && !folders.some(other => other !== folder && other.path.startsWith(folder.path))) changed.push(folder)
+  // A file of this project the manifest lists that is gone (a deleted model, a whole deleted folder) makes it
+  // stale too. Installed packages' files live under dbt_packages, so only the project's own nodes are looked at.
+  // A manifest over 4 MiB is not read here: deletions are then not looked for (changed files still are).
+  const manifest = await readManifest($, root)
+  if (manifest) {
+    // The project's name from the manifest, else dbt_project.yml's (older manifests do not record it).
+    const project = manifest.manifest.metadata?.project_name ?? /^name:\s*['"]?([\w-]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1]
+    const listed = Object.values<any>(manifest.manifest.nodes ?? {})
+      .filter(node => ['model', 'seed', 'snapshot', 'analysis'].includes(node?.resource_type) && typeof node?.original_file_path === 'string')
+      .filter(node => !project || !node.package_name || node.package_name === project)
+      .map(node => node.original_file_path as string)
+    for (const path of [...new Set(listed)].slice(0, MAX_SCANNED)) {
+      if (!(await $.fs.exists(`${root}/${path}`).catch(() => true))) changed.push({ path: `${path} (deleted)`, mtimeMs: Number.MAX_SAFE_INTEGER })
+    }
+  }
   return { files: changed.sort((a, b) => b.mtimeMs - a.mtimeMs).map(one => one.path), complete: complete && scanned <= MAX_SCANNED }
 }
 
@@ -567,30 +620,33 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   const profile = /^profile:\s*['"]?([\w-]+)/m.exec(project)?.[1]
   if (!profile) return null
   const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
+  // dbt reads one profiles.yml: DBT_PROFILES_DIR's, else the project folder's when it has one, else ~/.dbt's.
   const home = await env('HOME')
-  // dbt's own order: DBT_PROFILES_DIR, then the project folder, then ~/.dbt.
-  const profilesDir = await env('DBT_PROFILES_DIR')
-  for (const path of [profilesDir ? `${profilesDir}/profiles.yml` : null, `${root}/profiles.yml`, home ? `${home}/.dbt/profiles.yml` : null]) {
-    if (!path) continue
-    const text = await $.fs.read(path).catch(() => null)
-    if (!text) continue
-    const at = text.search(new RegExp(`^['"]?${profile}['"]?:\\s*$`, 'm'))
-    if (at < 0) continue
-    const body = text.slice(at).split('\n').slice(1)
-    const end = body.findIndex(line => /^\S/.test(line))
-    const block = (end < 0 ? body : body.slice(0, end)).join('\n')
-    const target = /^\s+target:\s*['"]?([\w-]+)/m.exec(block)?.[1]
-    const types = [...block.matchAll(/^\s+type:\s*['"]?([\w-]+)/gm)].map(one => one[1]!)
-    if (target) {
-      const output = new RegExp(`^(\\s+)${target}:\\s*$`, 'm').exec(block)
-      if (output) {
-        const type = /^\s+type:\s*['"]?([\w-]+)/m.exec(block.slice(output.index + output[0].length))?.[1]
-        if (type) return type
-      }
+  // A relative DBT_PROFILES_DIR is the project's (dbt runs there); `~` is the home folder.
+  const rawDir = await env('DBT_PROFILES_DIR')
+  const expanded = rawDir.startsWith('~') && home ? `${home}${rawDir.slice(1)}` : rawDir
+  const profilesDir = expanded && !expanded.startsWith('/') ? normalize(`${root}/${expanded}`) : expanded
+  const local = `${root}/profiles.yml`
+  const path = profilesDir ? `${profilesDir}/profiles.yml` : (await $.fs.exists(local).catch(() => false)) ? local : home ? `${home}/.dbt/profiles.yml` : null
+  if (!path) return null
+  const text = await $.fs.read(path).catch(() => null)
+  if (!text) return null
+  const at = text.search(new RegExp(`^['"]?${profile}['"]?:\\s*$`, 'm'))
+  // The profile is not in the file dbt reads: dbt fails there too.
+  if (at < 0) return null
+  const body = text.slice(at).split('\n').slice(1)
+  const end = body.findIndex(line => /^\S/.test(line))
+  const block = (end < 0 ? body : body.slice(0, end)).join('\n')
+  const target = /^\s+target:\s*['"]?([\w-]+)/m.exec(block)?.[1]
+  const types = [...block.matchAll(/^\s+type:\s*['"]?([\w-]+)/gm)].map(one => one[1]!)
+  if (target) {
+    const output = new RegExp(`^(\\s+)${target}:\\s*$`, 'm').exec(block)
+    if (output) {
+      const type = /^\s+type:\s*['"]?([\w-]+)/m.exec(block.slice(output.index + output[0].length))?.[1]
+      if (type) return type
     }
-    return types[0] ?? null
   }
-  return null
+  return types[0] ?? null
 }
 
 async function runDoctor($: EngineInterface, root: string, connection = false): Promise<DoctorView> {
@@ -640,9 +696,11 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   }
 
   // Manifest freshness.
-  const stat = await $.fs.stat(`${root}/target/manifest.json`).catch(() => null)
+  const target = await targetOf($, root)
+  const stat = await $.fs.stat(`${target}/manifest.json`).catch(() => null)
   let staleFiles: string[] = []
-  if (!stat) checks.push({ id: 'manifest', label: 'Manifest', status: 'warn', detail: 'target/manifest.json is missing: lineage, model context and docs need it', fix: 'dbt parse' })
+  const shown = target.startsWith(`${root}/`) ? relative(root, target) : target
+  if (!stat) checks.push({ id: 'manifest', label: 'Manifest', status: 'warn', detail: `${shown}/manifest.json is missing: lineage, model context and docs need it`, fix: 'dbt parse' })
   else {
     const scan = await changedSince($, root, stat.mtimeMs)
     staleFiles = scan.files
@@ -837,7 +895,8 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
 
 /** Claude's reads, edits and dbt commands: model context, compile-and-validate, failed runs, results. */
 async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise<any>): Promise<any> {
-  const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? String((e as any).file_path) : null
+  // One spelling of the file (`a/../b` → `b`), so its path inside the project is read right.
+  const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? normalize(String((e as any).file_path)) : null
   const isSql = !!file && /\.sql$/i.test(file)
   const command = e.tool === 'Bash' && 'command' in e ? String((e as any).command) : null
   const dbt = command ? dbtCommand(command) : null
@@ -887,7 +946,10 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   }
 
   // A shell command, or an edit of another file (schema.yml), may have changed the checked model.
-  if (command || (file && EDIT_TOOLS.has(e.tool))) later($, () => recheck($))
+  // An edit of a .yml (a schema file documenting the model for the first time) or of another .sql (a macro
+  // the model calls) can change its answer though neither watched file did: check it again regardless.
+  const forced = !!file && EDIT_TOOLS.has(e.tool) && !result.isError && /\.(ya?ml|sql)$/i.test(file)
+  if (command || forced) later($, () => recheck($, forced ? file : null))
 
   // 08 and 09 · Claude's own dbt commands.
   if (command && dbt) {
@@ -901,7 +963,8 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
     const root = await projectRoot($, projectDir ? (projectDir.startsWith('/') ? projectDir : `${dir.replace(/\/+$/, '')}/${projectDir}`) : dir, false)
     if (root && ['run', 'test', 'build', 'seed', 'snapshot'].includes(dbt.verb)) {
       const failed = !!result.isError || saysFailed(output)
-      await recordRun($, command.trim().slice(0, 300), dbt.verb, dbt.select, dbt.options, root, output, failed, startedAt, asked).catch(() => null)
+      // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
+      await recordRun($, command.trim().slice(0, 300), dbt.verb, dbt.select, [...dbt.options, ...dbt.env.map(one => `env:${one}`)], root, output, failed, startedAt, asked).catch(() => null)
     }
     if (root && dbt.verb === 'show' && !result.isError) {
       const table = showPreview(output) ?? textTable(output)
@@ -1179,5 +1242,5 @@ function cdTarget(command: string, cwd: string): string | null {
     if (/^~|[$`]/.test(target)) return null
     dir = target.startsWith('/') ? target : `${dir.replace(/\/+$/, '')}/${target}`
   }
-  return dir
+  return normalize(dir)
 }
