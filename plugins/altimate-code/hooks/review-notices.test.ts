@@ -111,7 +111,7 @@ test('a running session asks again later', async ($, on) => {
   expect(toasts).toHaveLength(1)
 })
 
-test('a CLI without the command, or a project that is not linked, is not asked again', async ($, on) => {
+test('a CLI without the command is not asked again', async ($, on) => {
   const old = await session($, on, [{ exitCode: 1, stdout: 'Unknown argument: decisions' }])
   await old.clock.advance(POLL_MS)
   await old.clock.settle()
