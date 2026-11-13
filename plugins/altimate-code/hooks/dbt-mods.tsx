@@ -465,12 +465,12 @@ function checkNote(view: CheckView): string {
 
 // ─── 08 · A failed run, one press from a fix ───────────────────────────────────────────────────────
 
-async function recordRun($: EngineInterface, command: string, verb: string, select: string | null, options: string[], root: string, output: string, failed: boolean, proven: boolean, startedAt: number, mineGeneration = generation) {
+async function recordRun($: EngineInterface, command: string, verb: string, select: string | null, options: string[] | string[][], root: string, output: string, failed: boolean, proven: boolean, startedAt: number, mineGeneration = generation) {
   if (generation !== mineGeneration) return null
   if (!failed) {
     // A passing run clears the failure only when its output shows it passed, it ran what failed, where it
-    // failed: the same kind (or a build), the same selection or the whole project, and the same target,
-    // profile and vars. A retry never clears: what it re-ran may not be what failed.
+    // failed: the same kind (or a build), the same selection or the whole project, and the same flags (every
+    // flag except the selection and display-only ones, per invocation when they differ). A retry never clears: what it re-ran may not be what failed.
     if (!proven || verb.split('+').includes('retry')) return null
     const current = await read($, failureAtom)
     const sameContext = !!current && JSON.stringify(current.options ?? []) === JSON.stringify(options)
@@ -1086,7 +1086,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
       const select = runs.length === 1 ? runs[0]!.select : runs.map(one => one.select ?? '*').join(' | ')
       // One context when every run shares it (`-t prod` on each), else each run's in turn.
       const contexts = runs.map(one => [...one.identity, ...one.env.map(env => `env:${env}`)])
-      const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts.flat()
+      const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts
       // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
       await recordRun($, command.trim(), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked).catch(() => null)
     }

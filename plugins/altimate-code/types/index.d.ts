@@ -196,8 +196,12 @@ export type FailureView = {
   root: string
   /** run, test, build, seed, snapshot or retry; a command that ran several joins them (`run+test`). */
   verb: string
-  /** The context flags it ran with (target, profile, vars, …): a passing run in another context clears nothing. */
-  options: string[]
+  /**
+   * The flags it ran with, in the order written: every flag but the selection and display-only ones (target,
+   * vars, `--full-refresh`, …), then its environment. A passing run with other flags clears nothing. A command
+   * that ran several invocations with different flags keeps each one's list, in order.
+   */
+  options: string[] | string[][]
   /** The failed command's --select; null when it ran the whole project. A compound command's selections are joined (`a | b`, `*` for a whole-project one). */
   select: string | null
   failures: DbtFailure[]

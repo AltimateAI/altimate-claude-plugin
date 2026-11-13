@@ -115,7 +115,7 @@ export type DbtCommand = {
   /**
    * What the invocation ran with, for deciding whether a later run did the same work: every flag and its
    * values except the selection (compared as `select`) and display-only flags, `-t` read as `--target`,
-   * sorted. `--exclude-resource-types test` or `--full-refresh` make it a different run; `--threads 8` does not.
+   * in the order written (the last `--target` wins, so order matters). `--exclude-resource-types test` or `--full-refresh` make it a different run; `--threads 8` does not.
    */
   identity: string[]
   /** Where the dbt invocation starts in the command: a `cd` after it does not move where it ran. */
@@ -133,9 +133,9 @@ export type DbtCommand = {
 // Flags that decide where and how a command runs: two runs differing in them are not the same run.
 const CONTEXT_FLAGS: Record<string, string> = { '--target': '--target', '-t': '--target', '--profile': '--profile', '--profiles-dir': '--profiles-dir', '--project-dir': '--project-dir', '--vars': '--vars' }
 const SELECT_FLAGS: Record<string, string> = { '--select': '--select', '-s': '--select', '--models': '--select', '-m': '--select', '--exclude': '--exclude', '--selector': '--selector' }
-// Flags a re-run of Claude's dbt show replaces: the pane reads JSON, and keeps the limit itself.
 // Flags that change how dbt reports or how fast it runs, never what it runs.
 const DISPLAY_FLAGS = new Set(['--log-format', '--log-format-file', '--log-level', '--log-level-file', '--log-path', '--quiet', '-q', '--debug', '-d', '--no-print', '--print', '--use-colors', '--no-use-colors', '--printer-width', '--threads', '--no-version-check', '--version-check', '--write-json', '--no-write-json', '--send-anonymous-usage-stats', '--no-send-anonymous-usage-stats', '--log-cache-events', '--record-timing-info'])
+// Flags a re-run of Claude's dbt show replaces: the pane reads JSON, and keeps the limit itself.
 const OUTPUT_FLAGS = new Set(['--output', '-o', '--log-format', '--limit', '--log-level'])
 const BARE_OUTPUT_FLAGS = new Set(['--quiet', '-q'])
 
@@ -300,9 +300,8 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
     const { values, next } = flagValues(rest, i)
     i = next
     if (SELECT_FLAGS[flag] || DISPLAY_FLAGS.has(flag)) continue
-    identity.push(`${CONTEXT_FLAGS[flag] ?? flag} ${values.join(' ')}`.trim())
+    identity.push(`${CONTEXT_FLAGS[flag] ?? (flag === '-x' ? '--fail-fast' : flag)} ${values.join(' ')}`.trim())
   }
-  identity.sort()
   return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: start, end: match.index + match[0].length, argv: words, replayable, env: context }
 }
 
@@ -396,10 +395,10 @@ export function modelPaths(yml: string): string[] {
   return named.length ? named : ['models']
 }
 
-/** A node's name from its unique id: a versioned model's id ends in its version (`model.shop.dim.v2`). */
+/** A node's name from its unique id: a model's is the third part, whatever version follows it (`model.shop.dim.v1.1`). */
 const versionedName = (id: string) => {
   const parts = id.split('.')
-  return parts.length >= 4 && /^v\d+$/.test(parts.at(-1)!) ? parts.at(-2) : parts.pop()
+  return id.startsWith('model.') && parts.length >= 4 ? parts[2] : parts.pop()
 }
 
 /** The failed nodes of a run_results.json: errors, failed tests and failed snapshots, first failed first. */

@@ -1996,7 +1996,7 @@ test('a passing run that differs only in display flags clears the failure', asyn
 
 kitTest('a command\'s identity is every flag but the selection and display-only ones', () => {
   expect(dbtCommand('dbt build -s orders --log-format json --threads 8')?.identity).toEqual([])
-  expect(dbtCommand('dbt --warn-error -t prod build --select orders --full-refresh --vars \'{"a": 1}\'')?.identity).toEqual(['--full-refresh', '--target prod', '--vars {"a": 1}', '--warn-error'])
+  expect(dbtCommand('dbt --warn-error -t prod build --select orders --full-refresh --vars \'{"a": 1}\'')?.identity).toEqual(['--warn-error', '--target prod', '--full-refresh', '--vars {"a": 1}'])
   // History and replay keep reading the context flags alone.
   expect(dbtCommand('dbt build -s orders --full-refresh -t prod')?.options).toEqual(['--target', 'prod'])
 })
@@ -2026,4 +2026,41 @@ test('a doc block file the manifest lists that is gone makes it stale', async ($
 kitTest('a versioned model in a large manifest is named without its version', () => {
   const results = { results: [{ unique_id: 'model.shop.dim.v2', status: 'error', message: 'boom' }, { unique_id: 'model.shop.plain', status: 'error', message: 'boom' }] }
   expect(failuresFrom(results, null).map(one => one.name)).toEqual(['dim', 'plain'])
+})
+
+test('the last --target wins: a passing run with the targets in the other order leaves the failure', async ($, on) => {
+  const { clock, setBash, band } = await failedBuild($, on, 'dbt build -s orders --target dev --target prod')
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders --target prod --target dev' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await band.unmount()
+})
+
+test('flags that moved between the invocations of a compound command are not the same command', async ($, on) => {
+  const { clock, setBash, band } = await failedBuild($, on, 'dbt run -s orders --full-refresh; dbt test -s orders --target prod')
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}\n${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders --full-refresh --target prod; dbt test -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  // The same command again clears it.
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders --full-refresh; dbt test -s orders --target prod' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
+})
+
+kitTest('a model is named by the third part of its id, whatever follows', () => {
+  const results = { results: ['model.shop.dim.v1.1', 'model.shop.dim.vstable', 'model.shop.dim.v2'].map(unique_id => ({ unique_id, status: 'error', message: 'boom' })) }
+  expect(failuresFrom(results, null).map(one => one.name)).toEqual(['dim', 'dim', 'dim'])
+})
+
+test('-t dev and --target=dev are the same context, and -x is --fail-fast', async ($, on) => {
+  expect(dbtCommand('dbt build -x')?.identity).toEqual(['--fail-fast'])
+  const { clock, setBash, band } = await failedBuild($, on, 'dbt build -s orders -t dev')
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders --target=dev' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
 })
