@@ -192,6 +192,9 @@ export interface DeferState {}
 // Raw SQL to model: the SQL being turned into a dbt model.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
+/** How a table of the SQL matched a model or source: every part the same, the same but for case, fewer parts written, or none. */
+export type RelationMatch = 'exact' | 'case_insensitive' | 'partial' | 'none'
+
 export interface ToModelState {
   /** The model to write. */
   name: string
@@ -203,8 +206,8 @@ export interface ToModelState {
   rows: {
     raw: string
     replaceWith: string
-    match: 'exact' | 'case_insensitive' | 'partial' | 'none'
-    candidates: { replaceWith: string; kind: string; name: string; relationName: string; match: 'exact' | 'case_insensitive' | 'partial' | 'none' }[]
+    match: RelationMatch
+    candidates: { replaceWith: string; kind: string; name: string; relationName: string; match: RelationMatch }[]
   }[]
   /** The SQL, kept so the prompt can quote it. */
   sql: string
