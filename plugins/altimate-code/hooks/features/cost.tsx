@@ -71,9 +71,10 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   await $.command.register({ name: 'scan-cost', description: 'Estimate the BigQuery scan of a dbt model before running it', argumentHint: '<model>' })
 }
 
+/** Also called for a subagent's turns, which carry `e.agentId`. */
 export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 
-/** After the turn's answer; `out` is what the turn ended with. */
+/** After the turn's answer; `out` is what the turn ended with. Also called for a subagent's turns (`e.agentId`). */
 export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {}
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {}
@@ -90,7 +91,10 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   return null
 }
 
-/** `{ deny }` refuses the Bash call; null lets it run. */
+/**
+ * `{ deny }` refuses the Bash call; null lets it run. A gate that throws is logged and the call runs:
+ * a gate that must hold the call when its own check fails catches that failure and returns `{ deny }`.
+ */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   notes.delete(e.command)
   if (limitBytes <= 0) return null

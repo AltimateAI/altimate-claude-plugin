@@ -136,9 +136,7 @@ import {
 } from './cte-profile'
 
 export type { FeatureId } from '../status-line'
-
-/** The features, in the order the plugin calls them. */
-export const FEATURE_IDS = ['runs', 'defer', 'toModel', 'comments', 'cost', 'health', 'sqlGraph', 'docs', 'cteProfile'] as const
+export { FEATURE_IDS } from '../status-line'
 
 /** The elements a band line draws with: what `$.ui.resolve(e)` gave the band's hook. */
 export type BandUi = { Box: any; Button: any; Text: any; [element: string]: any }
