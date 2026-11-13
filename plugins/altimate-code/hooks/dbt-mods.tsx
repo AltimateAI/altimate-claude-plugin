@@ -334,15 +334,27 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // name (`defined_in`) is still previewed, and the path keeps it to that one version.
   const pkg = await projectName($, root)
   const selector = [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(typeof known?.node?.name === 'string' ? [known.node.name] : [])].join(',')
-  const run = await runDbt($, root, ['show', '--select', selector, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  const show = (select: string) => runDbt($, root, ['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  let run = await show(selector)
   // A newer edit replaced this check before its turn: nothing ran, nothing to report.
   if (run === SKIPPED) return { view: { ...blank, status: 'partial', reason: 'a newer check replaced this one', ms: 0, at: started }, note: '', current, newest }
   // dbt show re-parsed the project: the manifest now holds the model and schema.yml as they are.
-  const after = await readManifest($, root, rel)
-  const node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
-  const named = typeof node?.node?.name === 'string' ? node.node.name : null
+  let after = await readManifest($, root, rel)
+  let node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
+  let named = typeof node?.node?.name === 'string' ? node.node.name : null
+  let preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
+  // No preview, and the fresh manifest names the model with a name the selector did not carry (the first run
+  // had no manifest, or its name was old): dbt prints a preview only for a selected name, so ask once more.
+  if (run.exitCode === 0 && !preview && named && !selector.split(',').includes(named)) {
+    const again = await show(`${selector},${named}`)
+    if (again === SKIPPED) return { view: { ...blank, status: 'partial', reason: 'a newer check replaced this one', ms: 0, at: started }, note: '', current, newest }
+    run = again
+    after = await readManifest($, root, rel)
+    node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
+    named = typeof node?.node?.name === 'string' ? node.node.name : null
+    preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
+  }
   const ms = (await $.clock.now()) - started
-  const preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
   const errors = run.exitCode === 0 ? [] : logErrors(run.stdout)
   if (run.exitCode !== 0 && errors.length === 0) errors.push(stripAnsi(run.stderr || run.stdout).trim().split('\n').slice(-6).join('\n') || `dbt exited ${run.exitCode}`)
   // dbt exited 0 but showed nothing. A model the manifest still lists is a failure; a file it does not
@@ -596,6 +608,9 @@ async function modelNote($: EngineInterface, file: string, agentId?: string): Pr
 
 // ─── 15 · An environment doctor at session start ───────────────────────────────────────────────────
 
+// The project's own configuration, never part of the manifest's file inventory.
+const ROOT_CONFIGS = new Set(['dbt_project.yml', 'packages.yml', 'profiles.yml', 'selectors.yml', 'package-lock.yml', 'dependencies.yml'])
+
 /** The project's files changed after its manifest was written, newest first. */
 async function changedSince($: EngineInterface, root: string, mtimeMs: number): Promise<{ files: string[]; complete: boolean }> {
   const changed: { path: string; mtimeMs: number }[] = []
@@ -621,10 +636,19 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
       ...files(manifest.manifest.nodes).map(one => (one?.resource_type === 'test' && one?.test_metadata ? null : one?.original_file_path)),
       ...files(manifest.manifest.nodes).map(one => (typeof one?.patch_path === 'string' ? one.patch_path.replace(/^[^:]*:\/\//, '') : null)),
       ...disabled.map(one => one?.original_file_path),
+      ...disabled.map(one => (typeof one?.patch_path === 'string' ? one.patch_path.replace(/^[^:]*:\/\//, '') : null)),
+      ...files(manifest.manifest.macros).map(one => (typeof one?.patch_path === 'string' ? one.patch_path.replace(/^[^:]*:\/\//, '') : null)),
       ...['sources', 'macros', 'exposures', 'metrics', 'groups', 'semantic_models', 'saved_queries', 'unit_tests'].flatMap(group => files(manifest.manifest[group]).map(one => one?.original_file_path)),
     ].filter((one): one is string => typeof one === 'string' && one.length > 0)
   }
   const inventory = manifest ? new Set(listed) : null
+  // A file the manifest does not list counts only when its folder changed since the manifest was written (an
+  // entry was added): a `dbt parse` then always clears it, which a file's own old timestamp never would.
+  const dirs = new Map<string, boolean>()
+  const dirChanged = async (dir: string) => {
+    if (!dirs.has(dir)) dirs.set(dir, ((await $.fs.stat(dir).catch(() => null))?.mtimeMs ?? 0) > mtimeMs)
+    return dirs.get(dir)!
+  }
   // The folders dbt_project.yml names (model-paths and the rest), not dbt's default names.
   const paths = projectPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
   // A path of '.' is the project folder itself, which holds every other: walk it once.
@@ -651,7 +675,7 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
         if (!/\.(sql|ya?ml|csv|py|md)$/i.test(entry.name)) continue
         const stat = await $.fs.stat(path).catch(() => null)
         if (!stat) complete = false
-        else if (!seen.has(relative(root, path)) && (stat.mtimeMs > mtimeMs || (!!inventory && /\.(sql|ya?ml)$/i.test(entry.name) && !inventory.has(relative(root, path))))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
+        else if (!seen.has(relative(root, path)) && (stat.mtimeMs > mtimeMs || (!!inventory && /\.(sql|ya?ml)$/i.test(entry.name) && !inventory.has(relative(root, path)) && !ROOT_CONFIGS.has(relative(root, path)) && (await dirChanged(dir))))) changed.push({ path: relative(root, path), mtimeMs: stat.mtimeMs })
       }
     }
     level = next
@@ -690,8 +714,11 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   const target = /^\s+target:\s*['"]?([\w-]+)/m.exec(block)?.[1]
   const types = [...block.matchAll(/^\s+type:\s*['"]?([\w-]+)/gm)].map(one => one[1]!)
   if (target) {
-    const output = new RegExp(`^(\\s+)${target}:\\s*$`, 'm').exec(block)
+    const output = new RegExp(`^(\\s+)['"]?${target}['"]?:[ \\t]*(\\{.*|#.*)?$`, 'm').exec(block)
     if (output) {
+      // Flow style: `prod: {type: snowflake, …}`.
+      const flow = output[2]?.startsWith('{') ? /\btype:\s*['"]?([\w-]+)/.exec(output[2])?.[1] : null
+      if (flow) return flow
       const type = /^\s+type:\s*['"]?([\w-]+)/m.exec(block.slice(output.index + output[0].length))?.[1]
       if (type) return type
     }

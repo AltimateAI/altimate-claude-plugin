@@ -187,13 +187,13 @@ async function start($: any, on: any, options: Options = {}) {
     '.venv/bin/python': '',
     ...options.files,
   }
-  if (options.manifestAfterShow) delete files['target/manifest.json']
+  if (options.manifestAfterShow && !options.files?.['target/manifest.json']) delete files['target/manifest.json']
   if (options.target) {
     files[`${options.target}/manifest.json`] = files['target/manifest.json']!
     delete files['target/manifest.json']
     mtimes[`${options.target}/manifest.json`] = mtimes['target/manifest.json']!
   }
-  const exists = (path: string) => path.startsWith(`${ROOT}/`) && (path.slice(ROOT.length + 1) in files || Object.keys(files).some(one => one.startsWith(`${path.slice(ROOT.length + 1)}/`)))
+  const exists = (path: string) => path === ROOT || (path.startsWith(`${ROOT}/`) && (path.slice(ROOT.length + 1) in files || Object.keys(files).some(one => one.startsWith(`${path.slice(ROOT.length + 1)}/`))))
   on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'test' }))
@@ -290,7 +290,10 @@ async function start($: any, on: any, options: Options = {}) {
     }
     if (verb === 'show') {
       const show = options.show ?? { rows: [{ order_id: 1, amount: 10 }] }
-      if (options.manifestAfterShow) files['target/manifest.json'] = JSON.stringify(options.manifestAfterShow)
+      if (options.manifestAfterShow) {
+        files['target/manifest.json'] = JSON.stringify(options.manifestAfterShow)
+        mtimes['target/manifest.json'] = (mtimes['target/manifest.json'] ?? 1_000) + 1
+      }
       // dbt selects a model by its name: the one the test's manifest gives the file, if it gave one.
       const asked = e.argv[e.argv.indexOf('--select') + 1]
       if (show.onlyName && asked !== show.onlyName) return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
@@ -1762,8 +1765,8 @@ test('a versioned model whose file has another name is selected by its name too,
   expect((result.context ?? []).some((note: string) => note.includes('FAILED'))).toBe(false)
 })
 
-test('a model file the manifest does not list makes it stale, whatever its timestamp', async ($, on) => {
-  const { clock } = await start($, on, { files: { 'models/copied.sql': 'select 1' }, mtimes: { 'models/copied.sql': 100 } })
+test('a model file the manifest does not list, added to a folder that changed since the manifest, makes it stale whatever its own timestamp', async ($, on) => {
+  const { clock } = await start($, on, { files: { 'models/copied.sql': 'select 1' }, mtimes: { 'models/copied.sql': 100, models: 2_000 } })
   await $.command.run({ command: 'dbt-doctor', args: '' })
   await clock.settle()
   const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
@@ -1807,3 +1810,76 @@ test('a dependencies.yml that declares packages is named when they are not insta
   expect(await ui.find({ type: 'Text', text: /dependencies\.yml is not installed/ })).toBeDefined()
   await ui.unmount()
 })
+
+// ─── Doctor inventory, versioned model retry, profile output spellings ───────────────────────────
+
+const shopManifest = () => {
+  const manifest = JSON.parse(JSON.stringify(MANIFEST))
+  manifest.metadata = { project_name: 'shop' }
+  for (const node of Object.values<any>(manifest.nodes)) node.package_name = 'shop'
+  return manifest
+}
+
+async function doctorIsCurrent($: any, clock: any) {
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  const current = await ui.find({ type: 'Text', text: /^current \(written/ })
+  await ui.unmount()
+  return !!current
+}
+
+test('YAML documenting a macro, and a macro file, do not make the manifest stale', async ($, on) => {
+  const manifest = shopManifest()
+  manifest.macros = { 'macro.shop.m': { name: 'm', package_name: 'shop', original_file_path: 'macros/m.sql', patch_path: 'shop://macros/schema.yml' } }
+  const { clock } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(manifest), 'macros/m.sql': '{% macro m() %}{% endmacro %}', 'macros/schema.yml': 'macros:\n  - name: m\n' }, mtimes: { macros: 2_000 } })
+  expect(await doctorIsCurrent($, clock)).toBe(true)
+})
+
+test('YAML documenting a disabled model does not make the manifest stale', async ($, on) => {
+  const manifest = shopManifest()
+  manifest.disabled = { 'model.shop.off': [{ name: 'off', resource_type: 'model', package_name: 'shop', original_file_path: 'models/off.sql', patch_path: 'shop://models/off.yml' }] }
+  const { clock } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(manifest), 'models/off.sql': 'select 1', 'models/off.yml': 'models:\n  - name: off\n' }, mtimes: { models: 2_000 } })
+  expect(await doctorIsCurrent($, clock)).toBe(true)
+})
+
+test('with model-paths of ".", the project\'s root config files are not unknown files', async ($, on) => {
+  const { clock } = await start($, on, { files: { 'dbt_project.yml': "name: 'shop'\nprofile: 'shop'\nmodel-paths: ['.']\n", 'packages.yml': 'packages: []', 'selectors.yml': 'selectors: []', 'package-lock.yml': 'packages: []' }, mtimes: { 'packages.yml': 100, 'selectors.yml': 100, 'package-lock.yml': 100, 'dbt_project.yml': 100, 'profiles.yml': 100 } })
+  expect(await doctorIsCurrent($, clock)).toBe(true)
+})
+
+test('an unlisted file with an old timestamp in a folder that is older than the manifest is current after a parse', async ($, on) => {
+  const { clock } = await start($, on, { files: { 'models/copied.sql': 'select 1' }, mtimes: { 'models/copied.sql': 100, models: 900 } })
+  expect(await doctorIsCurrent($, clock)).toBe(true)
+})
+
+test('a versioned model\'s first check, with no manifest yet, asks again with the name the new manifest gives it', async ($, on) => {
+  const manifest = { metadata: { project_name: 'shop' }, parent_map: {}, child_map: {}, nodes: { 'model.shop.orders': { name: 'orders', resource_type: 'model', package_name: 'shop', version: 1, original_file_path: 'models/legacy.sql', config: {}, columns: {}, depends_on: { nodes: [] } } } }
+  const { clock, runs, toasts } = await start($, on, { manifestAfterShow: manifest, files: { 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop', 'path:models/legacy.sql,package:shop,orders'])
+  expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
+  expect((result.context ?? []).some((note: string) => note.includes('FAILED'))).toBe(false)
+})
+
+test('a check whose manifest holds an old name for the model asks again with the name dbt now has', async ($, on) => {
+  const node = (name: string) => ({ name, resource_type: 'model', package_name: 'shop', version: 1, original_file_path: 'models/legacy.sql', config: {}, columns: {}, depends_on: { nodes: [] } })
+  const manifest = (name: string) => ({ metadata: { project_name: 'shop' }, parent_map: {}, child_map: {}, nodes: { 'model.shop.orders': node(name) } })
+  const { clock, runs, toasts } = await start($, on, { manifestAfterShow: manifest('orders'), files: { 'target/manifest.json': JSON.stringify(manifest('legacy_name')), 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,legacy_name', 'path:models/legacy.sql,package:shop,legacy_name,orders'])
+  expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
+})
+
+for (const [name, output] of [['a trailing comment', "    prod:   # production\n      type: snowflake\n"], ['quotes', "    'prod':\n      type: snowflake\n"], ['flow style', '    "prod": {type: snowflake, account: x}\n']] as const) {
+  test(`a profile's target output is found with ${name}`, async ($, on) => {
+    const { clock } = await start($, on, { profiles: `shop:\n  target: prod\n  outputs:\n    dev:\n      type: duckdb\n${output}` })
+    await $.command.run({ command: 'dbt-doctor', args: '' })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: 'the profile uses snowflake, but only duckdb is installed' })).toBeDefined()
+    await ui.unmount()
+  })
+}
