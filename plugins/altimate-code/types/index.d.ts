@@ -224,7 +224,9 @@ export interface CommentsState {
   loading: boolean
   /** Set when the installed altimate-code has no docs_share_comments tool: what to tell the person. */
   needs: string | null
-  /** One line about the last load or post. */
+  /** Why the last load failed. */
+  error: string | null
+  /** The outcome of the last post. */
   note: string | null
   /** Reply text typed so far, by `shareId:groupId`. */
   drafts: Record<string, string>
@@ -312,7 +314,7 @@ declare module 'claude-code' {
       /** hooks/features/: ToModelState. */
       toModel: ToModelState | null
       /** hooks/features/: CommentsState. */
-      comments: CommentsState | null
+      comments: Shaped<CommentsState | null>
       /** hooks/features/: CostState. */
       cost: CostState | null
       /** hooks/features/: HealthState. */
