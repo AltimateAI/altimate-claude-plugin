@@ -344,9 +344,10 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   let named = typeof node?.node?.name === 'string' ? node.node.name : null
   let preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
   // No preview, and the fresh manifest names the model with a name the selector did not carry (the first run
-  // had no manifest, or its name was old): dbt prints a preview only for a selected name, so ask once more.
+  // had no manifest, or its name was old): dbt prints a preview only for a selected name, so ask once more with the name
+  // replaced, not added: a comma intersects, and the old name and the new one select nothing together.
   if (run.exitCode === 0 && !preview && named && !selector.split(',').includes(named)) {
-    const again = await show(`${selector},${named}`)
+    const again = await show([`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), named].join(','))
     if (again === SKIPPED) return { view: { ...blank, status: 'partial', reason: 'a newer check replaced this one', ms: 0, at: started }, note: '', current, newest }
     run = again
     after = await readManifest($, root, rel)

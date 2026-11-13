@@ -299,6 +299,9 @@ async function start($: any, on: any, options: Options = {}) {
       if (show.onlyName && asked !== show.onlyName) return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
       // dbt prints a node's preview only when its name is in the selection string.
       if (show.mustInclude && !asked?.includes(show.mustInclude)) return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
+      // A comma is an intersection: every bare name in it must be the node's own name, or nothing is selected.
+      const nodeName = show.node === undefined ? (asked?.startsWith('path:') ? asked.slice(5).split(',')[0]!.split('/').pop()!.replace(/\.sql$/, '') : asked) : show.node
+      if (asked?.includes(',') && nodeName && asked.split(',').some(term => !term.includes(':') && term !== nodeName)) return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
       if (show.error) return { value: { exitCode: 2, stdout: errorLog(show.error), stderr: '' } }
       // A selection that matches no node: dbt exits 0 and previews nothing.
       if (show.node === 'none') return { value: { exitCode: 0, stdout: JSON.stringify({ info: { code: 'Q043', level: 'warn', msg: 'No nodes selected!' } }), stderr: '' } }
@@ -1869,7 +1872,7 @@ test('a check whose manifest holds an old name for the model asks again with the
   const { clock, runs, toasts } = await start($, on, { manifestAfterShow: manifest('orders'), files: { 'target/manifest.json': JSON.stringify(manifest('legacy_name')), 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,legacy_name', 'path:models/legacy.sql,package:shop,legacy_name,orders'])
+  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,legacy_name', 'path:models/legacy.sql,package:shop,orders'])
   expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
 })
 
