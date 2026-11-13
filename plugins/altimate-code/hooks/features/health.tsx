@@ -395,6 +395,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   later($, () => kick($))
 }
 
+/** Also called for a subagent's turns, which carry `e.agentId`. */
 export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 
 /** After the turn's answer: when model files changed, check again. */
