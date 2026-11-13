@@ -192,9 +192,9 @@ export type RunRow = {
 export type RunRecord = {
   /** The artifact's invocation id; its completion time when the artifact has none. */
   id: string
-  /** The command line as Claude ran it (`dbt build -s orders`), what Re-run fills in. */
+  /** The command as Claude ran it, with the folder it ran in and a secret's value left out; what Re-run fills in. */
   commandLine: string
-  /** The launcher with `retry` (`dbt retry`, `uv run dbt retry`), what Re-run failed fills in. */
+  /** `dbt retry` with the launcher, environment and folder flags the command had; what Re-run failed fills in. */
   retryLine: string
   /** The dbt subcommand the artifact names (`build`, `run`…). */
   command: string
@@ -213,7 +213,7 @@ export type RunRecord = {
 }
 
 export interface RunsState {
-  /** The dbt project folder the runs below belong to. */
+  /** The session folder the runs below were recorded for. */
   root: string
   /** Newest first, at most 50. */
   runs: RunRecord[]
@@ -313,7 +313,7 @@ declare module 'claude-code' {
       /** The status line's parts by owner, `integrations` and each feature's id (hooks/status-line.ts). */
       statusParts: Record<string, string>
       /** hooks/features/: RunsState. */
-      runs: RunsState | null
+      runs: Shaped<RunsState | null>
       /** hooks/features/: DeferState. */
       defer: DeferState | null
       /** hooks/features/: ToModelState. */
