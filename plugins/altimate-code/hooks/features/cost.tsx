@@ -196,6 +196,8 @@ export const editReadsBefore = false
 
 type Target = { model?: string; sql?: string; why: string }
 
+/** More dbt calls than this on one line are not estimated. */
+const MAX_INVOCATIONS = 20
 /** The dbt launchers whose project is the session's: nothing else on the line can move it. */
 const PLAIN_LAUNCHER = /^((uv|poetry) run )?(\S*\/)?dbt$/
 /** Flags with one value that leave the project, target and compiled SQL as they are. */
@@ -209,9 +211,13 @@ const PLAIN_FLAGS = new Set(['--fail-fast', '-x', '--quiet', '-q'])
  * Whether the estimate would be of what the invocation runs. It asks about the session's project at its
  * default target, so it is only so when the line moves neither: the dbt launcher is plain, nothing
  * precedes the invocation but other dbt invocations, and every flag is one known to leave the query
- * alone. Anything else (another target, defer state, vars, project, a full refresh) is not estimated.
+ * alone, with no expansion on the line. Anything else (another target, defer state, vars, project, a
+ * full refresh) is not estimated.
  */
 function isPlainInvocation(command: string, invocation: DbtInvocation, all: DbtInvocation[]): boolean {
+  // The shell expands `$` and backticks anywhere on the line (arguments, redirections, an earlier call) into
+  // flags or environment this check can't see; a line with many calls is not worth reading call by call.
+  if (/[$`]/.test(command) || all.length > MAX_INVOCATIONS) return false
   if (!PLAIN_LAUNCHER.test(invocation.binary)) return false
   let before = command.slice(0, invocation.start)
   for (const earlier of all.filter(one => one.end <= invocation.start).reverse()) {

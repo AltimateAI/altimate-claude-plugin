@@ -238,6 +238,10 @@ test('a command that sets its own target, defer state, vars or project is not es
     'if true; then cd other; fi; dbt run -s orders',
     'dbt --profiles-dir ci run -s orders',
     'FOO=1 dbt run -s orders',
+    "dbt run -s orders --threads $(printf '4 --target prod')",
+    'dbt run -s orders --threads `echo 4 --vars x`',
+    'dbt run -s orders 2>&${DBT_TARGET:=1}',
+    'dbt --log-path "${DBT_TARGET:=prod}" deps; dbt run -s orders',
   ]
   for (const command of commands) {
     const result: any = await $.tool.call(bash(command))
@@ -326,5 +330,15 @@ test('a very long run of blank lines before the command costs no noticeable time
   const began = Date.now()
   await $.tool.call(bash(`${'\n'.repeat(64000)}dbt run -s orders`))
   await clock.settle()
+  expect(Date.now() - began).toBeLessThan(3000)
+})
+
+test('a line with a great many dbt calls is not read call by call', async ($, on) => {
+  const { clock, estimates } = await start($, on, { answers: { orders: UNDER } })
+  const began = Date.now()
+  const result: any = await $.tool.call(bash('dbt run -s orders;'.repeat(4000)))
+  await clock.settle()
+  expect(estimates).toEqual([])
+  expect(result.context.every((line: string) => line.startsWith('cost · no estimate'))).toBe(true)
   expect(Date.now() - began).toBeLessThan(3000)
 })
