@@ -1,7 +1,7 @@
 // Runs: every dbt command Claude runs, with its results, in /runs.
 //
-// After a Bash call that ran dbt, the last run's `dbt_run_results` is read and recorded once per
-// invocation (up to 50 runs per session folder, in `$.store`); `/runs` lists them in a pane, where a run can be
+// After a Bash call that ran dbt, each project's last run is read with `dbt_run_results` and recorded once
+// (up to 50 runs per project, in `$.store`); `/runs` lists them in a pane, where a run can be
 // opened, re-run, or its failures re-run through the prompt.
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
@@ -18,7 +18,7 @@ const COMMAND = 'runs'
 const PANE_SIZE = { columns: 90, rows: 30 }
 const STORE_KEY = 'runs'
 
-/** Runs kept per project. */
+/** Runs kept for each project. */
 export const MAX_RUNS = 50
 /** Rows kept per run: failures first, then the rest. */
 export const MAX_ROWS = 50
@@ -70,9 +70,6 @@ const safeName = (name: string) => name.replace(/[^\w.-]/g, '_').slice(0, NAME_L
 // Which dbt command wrote the results, and where it ran
 // ---------------------------------------------------------------------------------------------------
 
-/** Where a shell command runs: the session folder, moved by each `cd` before the invocation. */
-const CD = /(?:^|[;&|(\n]\s*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
-
 function normalize(path: string): string {
   const out: string[] = []
   for (const part of path.replace(/\\/g, '/').split('/')) {
@@ -83,19 +80,62 @@ function normalize(path: string): string {
   return out.join('/') || '/'
 }
 
-function moved(command: string, from: string): string {
+/** What can move the shell: `cd`, `pushd`, `popd`, and what runs other text or scripts in the same shell. */
+const MOVERS = new Set(['cd', 'pushd', 'popd', 'builtin', 'command', 'eval', 'source', '.'])
+/** A mover anywhere in the text, also with its quotes and escapes taken out (`c\\d`, `"c"d`): without one the folder cannot have moved. */
+const MOVES = /(?:^|[^\w./-])(?:cd|pushd|popd|builtin|command|eval|source)(?![\w./-])|(?:^|[;&|(\n])[ \t]*\.[ \t]/
+const mayMove = (text: string) => MOVES.test(text) || MOVES.test(text.replace(/[\\'"]/g, ''))
+/** Anything that makes shell text more than plain words: quotes, expansions, grouping, redirections, pipes, comments, escapes. */
+const SHELL_SYNTAX = /['"`\\$(){}<>|#&~*?[\]!]/
+const KEYWORDS = new Set(['if', 'then', 'else', 'elif', 'fi', 'do', 'done', 'while', 'until', 'for', 'case', 'esac', 'time'])
+
+/**
+ * Where the command runs after the `cd`s in `text` (what came before the dbt invocation), from `from`.
+ * Only the plain form is read: statements split by `&&`, `;` or a new line, each either `cd <plain word>`
+ * or plain words that cannot move the folder. Anything else around a `cd` (quotes, `$VAR`, `~`, a subshell,
+ * a pipe or redirection, a comment, `if`, `cd -`, `pushd`) gives null: the folder is not guessed, the run is
+ * not recorded. A `cd` that follows another command with `&&` is trusted only when the dbt invocation is
+ * in the same `&&` chain, since the `cd` is skipped when that command fails.
+ */
+function moved(text: string, from: string): string | null {
+  if (!mayMove(text)) return from
   let dir = from
-  for (const match of command.matchAll(CD)) {
-    const target = match[1]!.replace(/^['"]|['"]$/g, '')
-    dir = normalize(target.startsWith('/') ? target : `${dir}/${target}`)
+  let pending = false
+  let previous: 'start' | 'cd' | 'other' = 'start'
+  const parts = text.split(/(&&|;|\n)/)
+  // A line may continue after `&&`: the separator before the next statement is then still `&&`.
+  let carried = ''
+  for (let at = 0; at < parts.length; at += 2) {
+    const statement = parts[at]!.trim()
+    const separator = carried || (at === 0 ? '' : parts[at - 1]!)
+    if (statement === '') {
+      if (separator === '&&') carried = '&&'
+      continue
+    }
+    carried = ''
+    if (separator !== '&&' && pending) return null
+    const words = statement.split(/\s+/)
+    const first = words[0]!
+    if (first === 'cd' || first === 'pushd' || first === 'popd') {
+      const target = words[1]
+      if (first !== 'cd' || words.length !== 2 || SHELL_SYNTAX.test(statement) || target!.startsWith('-')) return null
+      dir = normalize(target!.startsWith('/') ? target! : `${dir}/${target}`)
+      if (separator === '&&' && previous === 'other') pending = true
+      previous = 'cd'
+    } else {
+      if (SHELL_SYNTAX.test(statement) || KEYWORDS.has(first) || words.some(word => MOVERS.has(word))) return null
+      previous = 'other'
+    }
   }
+  // The invocation follows the last separator: after a `;` it is outside the `&&` chain a conditional `cd` is in.
+  if (pending && parts.length > 1 && parts[parts.length - 2] !== '&&') return null
   return dir
 }
 
 const quote = (path: string) => (/^[\w./-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`)
 
 /** A leading `NAME=value` that holds a secret is replayed as `NAME="$NAME"`: the value is never stored. */
-const SECRET_ASSIGNMENT = /(^|\s)([A-Za-z_][A-Za-z0-9_]*(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S*)/gi
+const SECRET_ASSIGNMENT = /(^|\s)((?=[A-Za-z_])[A-Za-z0-9_]*(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S*)/gi
 const redact = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 
 /** The flags `dbt retry` does not take from the run it retries. */
@@ -112,29 +152,36 @@ export type Invocation = {
   retryLine: string
   /** A folder of the project the command ran in: where it ran, or the one `--project-dir` names. */
   projectDir: string
+  /** Where the command sent its artifacts when it was not the project's own target folder (`--target-path`, `DBT_TARGET_PATH`). */
+  targetPath: string | null
 }
 
 /** The dbt invocations of `command` that write run_results.json, in order. */
 export function resultsInvocations(command: string, root: string, cwd: string = root): Invocation[] {
-  return parseDbtCommand(command)
-    .filter(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
-    .map(one => {
-      const subcommand = one.subcommand!
-      const dir = moved(command.slice(0, one.start), cwd)
-      const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
-      const flagged = PROJECT_DIR_FLAG.exec(body)?.[1]?.replace(/^['"]|['"]$/g, '')
-      const projectDir = flagged ? normalize(flagged.startsWith('/') ? flagged : `${dir}/${flagged}`) : dir
-      // Always the folder: the session's shell may have moved by the time Re-run is pressed.
-      const where = `cd ${quote(dir)} && `
-      const head = redact(command.slice(one.start, one.subcommandEnd - subcommand.length))
-      const kept = [...body.matchAll(KEPT_FLAGS)].map(match => match[1]!.trim())
-      return {
-        subcommand,
-        commandLine: `${where}${head}${body}`.trim(),
-        retryLine: `${where}${head}retry${kept.length ? ` ${kept.join(' ')}` : ''}`.trim(),
-        projectDir,
-      }
+  const found: Invocation[] = []
+  for (const one of parseDbtCommand(command)) {
+    const subcommand = one.subcommand
+    if (subcommand === null || !WRITES_RESULTS.has(subcommand)) continue
+    const dir = moved(command.slice(0, one.start), cwd)
+    const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
+    const flagged = PROJECT_DIR_FLAG.exec(body)?.[1]?.replace(/^['"]|['"]$/g, '')
+    // A folder that cannot be told, or a target folder the shell expands, is not guessed: the run is not recorded
+    // rather than recorded for another project or replayed from another folder.
+    if (dir === null || /[$`~*?[{]/.test(`${one.targetPath ?? ''}${flagged ?? ''}`)) continue
+    const projectDir = flagged ? normalize(flagged.startsWith('/') ? flagged : `${dir}/${flagged}`) : dir
+    // Always the folder: the session's shell may have moved by the time Re-run is pressed.
+    const where = `cd ${quote(dir)} && `
+    const head = redact(command.slice(one.start, one.subcommandEnd - subcommand.length))
+    const kept = [...body.matchAll(KEPT_FLAGS)].map(match => match[1]!.trim())
+    found.push({
+      subcommand,
+      commandLine: `${where}${head}${body}`.trim(),
+      retryLine: `${where}${head}retry${kept.length ? ` ${kept.join(' ')}` : ''}`.trim(),
+      projectDir,
+      targetPath: one.targetPath,
     })
+  }
+  return found
 }
 
 /**
@@ -175,9 +222,15 @@ export function toRecord(view: RunView, invocation: Pick<Invocation, 'commandLin
   }
 }
 
-/** `run` first, the older ones after it, at most MAX_RUNS; the same invocation is never kept twice. */
+/** Newest first by completion (a tie keeps `run` ahead), at most MAX_RUNS of each project; the same invocation is never kept twice. */
 export function withRun(runs: readonly RunRecord[], run: RunRecord): RunRecord[] {
-  return [run, ...runs.filter(one => one.id !== run.id)].slice(0, MAX_RUNS)
+  const kept = new Map<string, number>()
+  const newestFirst = [run, ...runs.filter(one => one.id !== run.id)].sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt) || 0)
+  return newestFirst.filter(one => {
+    const count = (kept.get(one.project) ?? 0) + 1
+    kept.set(one.project, count)
+    return count <= MAX_RUNS
+  })
 }
 
 /** The bytes `text` takes as UTF-8, which is what the store's limit counts. */
@@ -236,9 +289,16 @@ async function load($: EngineInterface, root: string, open: string | null = null
   await update($, runsAtom, () => ({ root, runs, open }))
 }
 
-/** The Bash calls in flight that run dbt: when each started, by tool-use id (else the command). */
-const started = new Map<string, { at: number; cwd: string }>()
-const startKey = (e: BashCall) => (e as { tool_use_id?: string }).tool_use_id ?? e.command
+/** The Bash calls in flight that run dbt: when each started, by tool-use id. */
+const started = new Map<string, { at: number; cwd: string; folders: string[] }>()
+/** The dbt calls that just ended, with the folders they wrote to: an artifact written while two calls overlap is not told apart. */
+const finished: Array<{ at: number; ended: number; folders: string[] }> = []
+/** The artifact folder a call writes to, as one string: the project's own `target` and an unnamed one are the same folder. */
+const folderOf = (one: Invocation) => {
+  const named = one.targetPath === null ? null : normalize(one.targetPath.startsWith('/') ? one.targetPath : `${one.projectDir}/${one.targetPath}`)
+  return named === null || named === normalize(`${one.projectDir}/target`) ? one.projectDir : named
+}
+const startKey = (e: BashCall) => e.tool_use_id
 
 /** Store updates one after another, so two recordings never overwrite each other's runs. */
 let storing: Promise<unknown> = Promise.resolve()
@@ -253,38 +313,72 @@ const readable = (metadata: unknown): RunView | null => {
   return view && Array.isArray(view.results) && typeof view.total === 'number' && typeof view.failed === 'number' ? view : null
 }
 
-/** Reads the last run's results and records it when this call wrote them; the line for Claude, or null. */
+/**
+ * Reads the last run of one project (and target folder) and keeps it when this call wrote it, else null.
+ * `invocations` are the call's own for that folder: the file on disk is the last one's.
+ */
+async function readRun($: EngineInterface, invocations: Invocation[], all: Invocation[], began: number, ended: number): Promise<{ run: RunRecord; order: number } | null> {
+  const last = invocations[invocations.length - 1]!
+  const args = { project_dir: last.projectDir, ...(last.targetPath ? { target_path: last.targetPath } : {}) }
+  // The CLI's answer carries the rows: the plugin's MCP server offers only a fixed set of tools.
+  const result = await runTool($, 'dbt_run_results', args, { until: ended + READ_MS, cliOnly: true })
+  const view = result.ok ? readable(result.metadata) : null
+  if (!view || view.found === false || !view.completedAt) return null
+  // A file older than the call is one this call did not write (dbt stopped before it ran anything);
+  // one newer than the call is another command's, which would be recorded with this call's command line.
+  const wrote = Date.parse(view.completedAt)
+  if (wrote < began - CLOCK_SLACK_MS || wrote > ended + CLOCK_SLACK_MS) return null
+  const written = writer(invocations, view.command)
+  const run = written ? toRecord(view, written) : null
+  return run && written ? { run, order: all.lastIndexOf(written) } : null
+}
+
+/** Reads each project's last run that this call wrote and records them; Claude gets one line each, or null. */
 async function record($: EngineInterface, e: BashCall): Promise<string | null> {
+  const ended = await $.clock.now()
   const began = started.get(startKey(e))
   started.delete(startKey(e))
-  const root = await $.session.root()
   if (began === undefined) return null
+  const root = await $.session.root()
   const invocations = resultsInvocations(e.command, root, began.cwd)
-  const last = invocations[invocations.length - 1]
-  if (!last) return null
-  const here = invocations.filter(one => one.projectDir === last.projectDir)
-  const until = (await $.clock.now()) + READ_MS
-  // The CLI's answer carries the rows: the plugin's MCP server offers only a fixed set of tools.
-  const result = await runTool($, 'dbt_run_results', { project_dir: last.projectDir }, { until, cliOnly: true })
-  const view = result.ok ? readable(result.metadata) : null
-  if (!view || view.found === false) return null
-  // A file older than the call is one this call did not write (dbt stopped before it ran anything).
-  if (!view.completedAt || Date.parse(view.completedAt) < began.at - CLOCK_SLACK_MS) return null
-  const written = writer(here, view.command)
-  if (!written) return null
-  const run = toRecord(view, written)
-  if (!run) return null
-  const line = await serially(async () => {
+  const mine = [...new Set(invocations.map(folderOf))]
+  // Another dbt call that ran at the same time in a folder may have written its file: whose it is cannot be told, so it is left out.
+  // A call still in flight counts only when it started after this one did: one that was cancelled or refused never ends.
+  const alone = (folder: string) =>
+    ![...started.values()].some(other => other.at >= began.at && other.folders.includes(folder)) &&
+    !finished.some(other => other.folders.includes(folder) && other.ended > began.at && other.at < ended)
+  const free = mine.filter(alone)
+  finished.push({ at: began.at, ended, folders: mine })
+  while (finished.length > 20) finished.shift()
+  // One read for each folder, at the same time: a slow one does not take the others' time, a failed one does not stop them.
+  const read = await Promise.all(
+    free.map(folder => readRun($, invocations.filter(one => folderOf(one) === folder), invocations, began.at, ended).catch(() => null)),
+  )
+  // Two spellings of one folder read one file: of its runs the later invocation's is the one that wrote it.
+  const latest = new Map<string, { run: RunRecord; order: number }>()
+  for (const one of read) {
+    if (one && (latest.get(one.run.id)?.order ?? -1) < one.order) latest.set(one.run.id, one)
+  }
+  // Oldest first, so the history stays newest first.
+  const runs = [...latest.values()].map(one => one.run).sort((a, b) => Date.parse(a.completedAt) - Date.parse(b.completedAt))
+  if (runs.length === 0) return null
+  const lines = await serially(async () => {
     const all = await held($)
-    const runs = all[root] ?? []
-    // The same file as the last recording: nothing new was written.
-    if (runs.find(one => one.project === run.project)?.id === run.id) return null
-    const next = fitStore({ ...all, [root]: withRun(runs, run) })
+    let kept = all[root] ?? []
+    const noted: string[] = []
+    for (const run of runs) {
+      // The same file as the last recording: nothing new was written.
+      if (kept.find(one => one.project === run.project)?.id === run.id) continue
+      kept = withRun(kept, run)
+      noted.push(summaryLine(run))
+    }
+    if (noted.length === 0) return noted
+    const next = fitStore({ ...all, [root]: kept })
     await $.store.set(STORE_KEY, next)
     await update($, runsAtom, prev => (prev?.root === root ? { ...prev, runs: next[root] ?? [] } : prev))
-    return summaryLine(run)
+    return noted
   })
-  return line
+  return lines.length > 0 ? lines.join('\n') : null
 }
 
 /** Adds this feature's own hooks. */
@@ -343,7 +437,7 @@ export function register(on: On, context: FeatureContext) {
           {open.command} · {seconds(open.elapsedSec)} · {open.passed}/{open.total} passed · {open.completedAt}
         </Text>
         {rows.map(row => (
-          <Box key={`row-${row.uniqueId}`} flexDirection="column">
+          <Box key={`row-${rows.indexOf(row)}-${row.uniqueId}`} flexDirection="column">
             <Text color={isFailure(row.status) ? 'error' : undefined}>
               {row.status} {row.name} {seconds(row.executionTimeSec)}
             </Text>
@@ -378,7 +472,8 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
 /** The command to run in place of `e.command`; null keeps it. */
 export async function bashRewrite($: EngineInterface, e: BashCall): Promise<string | null> {
   if (resultsInvocations(e.command, '').length === 0) return null
-  started.set(startKey(e), { at: await $.clock.now(), cwd: await $.session.cwd() })
+  const cwd = await $.session.cwd()
+  started.set(startKey(e), { at: await $.clock.now(), cwd, folders: resultsInvocations(e.command, cwd).map(folderOf) })
   // A call that never reaches bashAfter (refused, cancelled) leaves its entry: only the newest are kept.
   while (started.size > 50) started.delete(started.keys().next().value as string)
   return null

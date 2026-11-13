@@ -5,7 +5,7 @@ import { fitStore, MAX_MESSAGE, MAX_ROWS, MAX_RUNS, MAX_STORE_BYTES, resultsInvo
 
 const ROOT = '/repo'
 const T0 = Date.parse('2026-11-13T10:00:00.000Z')
-const AFTER = '2026-11-13T10:00:05.000Z'
+const AFTER = '2026-11-13T10:00:00.500Z'
 
 const PANE = {
   plugin: 'altimate-code',
@@ -32,7 +32,7 @@ const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_order
 })
 
 /** The session beneath the plugin: a store in memory, and the CLI answering `dbt_run_results` with `answer(args)`. */
-async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string } = {}) {
+async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string } = {}) {
   const clock = mock.clock(on, { now: T0 })
   const stored = new Map<string, unknown>()
   const filled: string[] = []
@@ -65,7 +65,12 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
     return { isFilled: true }
   })
   on('ui.open', () => ({ value: {} }))
-  on('tool.call', () => ({ result: { ok: true } }))
+  // A call takes time: the guard against overlapping calls must not take a call for its own overlap.
+  on('tool.call', async (_: unknown, e: { tool_use_id?: string }) => {
+    await clock.advance(100)
+    if (e.tool_use_id !== undefined && e.tool_use_id === options.denied) throw new Error('cancelled')
+    return { result: { ok: true } }
+  })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
   return { clock, stored, filled, cli, mcpCalls }
@@ -154,14 +159,19 @@ test('environment, folder and project flags are kept for Re-run and Re-run faile
     commandLine: 'cd /repo && DBT_PROFILES_DIR=. dbt build -s x --target prod',
     retryLine: 'cd /repo && DBT_PROFILES_DIR=. dbt retry --target prod',
     projectDir: ROOT,
+    targetPath: null,
   })
   expect(resultsInvocations('cd a && dbt run --project-dir sub -s x | tee log', ROOT)[0]).toEqual({
     subcommand: 'run',
     commandLine: 'cd /repo/a && dbt run --project-dir sub -s x',
     retryLine: 'cd /repo/a && dbt retry --project-dir sub',
     projectDir: '/repo/a/sub',
+    targetPath: null,
   })
   const secret = resultsInvocations('SNOWFLAKE_PASSWORD=hunter2 DBT_TARGET=dev dbt test', ROOT)[0]!
+  for (const name of ['TOKEN', 'PASSWORD', 'KEY', 'SECRET']) {
+    expect(resultsInvocations(`${name}=hunter2 dbt test`, ROOT)[0]!.commandLine).toBe(`cd /repo && ${name}="$${name}" dbt test`)
+  }
   expect(resultsInvocations('SNOWFLAKE_PWD=x dbt test', ROOT)[0]!.commandLine).toBe('cd /repo && SNOWFLAKE_PWD="$SNOWFLAKE_PWD" dbt test')
   expect(secret.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt test')
   expect(secret.retryLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt retry')
@@ -192,6 +202,157 @@ test('two dbt calls finishing together both keep their runs', async ($, on) => {
   const { stored } = await start($, on, args => view(args.project_dir === '/repo/a' ? 'inv-a' : 'inv-b', undefined, 'build', AFTER, String(args.project_dir)))
   await Promise.all([$.tool.call({ tool: 'Bash', command: 'cd a && dbt build', tool_use_id: 'one' }), $.tool.call({ tool: 'Bash', command: 'cd b && dbt build', tool_use_id: 'two' })])
   expect(kept(stored).map(run => run.id).sort()).toEqual(['inv-a', 'inv-b'])
+})
+
+test('where a command runs follows plain cds only; anything the shell could read differently is not guessed', () => {
+  const where = (command: string) => resultsInvocations(command, ROOT).map(one => one.projectDir)
+  // Plain words: followed.
+  expect(where('  cd a && dbt build')).toEqual(['/repo/a'])
+  expect(where('cd a; cd ../b\ndbt build')).toEqual(['/repo/b'])
+  expect(where('cd /abs/p && dbt build')).toEqual(['/abs/p'])
+  expect(where('echo hi; dbt build')).toEqual(['/repo'])
+  expect(where('cd a && dbt build && cd ../b && dbt build')).toEqual(['/repo/a', '/repo/b'])
+  expect(where('cd a && dbt build; cd ../b && dbt build')).toEqual(['/repo/a', '/repo/b'])
+  expect(where('dbt build --target-path out')).toEqual(['/repo'])
+  // A cd after another command with && is skipped when that command fails, so it counts only inside one chain.
+  expect(where('make && cd a && dbt build')).toEqual(['/repo/a'])
+  expect(where('make && cd a; dbt build')).toEqual([])
+  expect(where('false && cd /tmp; dbt build')).toEqual([])
+  expect(where('make &&\ncd a; dbt build')).toEqual([])
+  expect(where('make &&\ncd a && dbt build')).toEqual(['/repo/a'])
+  // Not plain: not guessed, not recorded.
+  for (const command of [
+    '(cd a && dbt build) && dbt test',
+    '(cd a && echo ok); dbt build',
+    "(cd a && echo ')'; dbt build); dbt test",
+    'echo "x; cd /etc" && dbt build',
+    'cat <<< "x; cd a"; dbt build',
+    '# ignored; cd /tmp\ndbt build',
+    "# Let's build\ncd a && dbt build",
+    'cd ~/proj && dbt build',
+    'cd $DBT_DIR && dbt build',
+    'cd $DBT_DIR && dbt build --project-dir /abs',
+    'cd "/repo/$PROJ"; dbt build',
+    'cd "/tmp/a\\q" && dbt build',
+    "cd '$LITERAL' && dbt build",
+    'cd - && dbt build',
+    'cd -P a && dbt build',
+    'cd && dbt build',
+    'pushd a && dbt build',
+    'cd a; popd; dbt build',
+    'x=`true; cd /tmp`; dbt build',
+    'if true; then cd a; fi; dbt build',
+    'if false; then cd /tmp; fi; dbt build',
+    '{ cd a; dbt build; }',
+    'cd /tmp | cat; dbt build',
+    '> /dev/null cd /tmp; dbt build',
+    'cat <<EOF\ncd /etc\nEOF\ndbt build',
+    'dbt build --target-path ~/out',
+    'dbt build --project-dir $DBT_DIR',
+    'c\\d /tmp; dbt build',
+    '"c"d /tmp; dbt build',
+    'builtin cd a && dbt build',
+    'FOO=1 cd a && dbt build',
+    'eval "cd a"; dbt build',
+    'source env.sh; dbt build',
+    '. env.sh; dbt build',
+  ]) {
+    expect({ command, where: where(command) }).toEqual({ command, where: [] })
+  }
+})
+
+test('a run that wrote to another target folder is read from that folder', async ($, on) => {
+  const { cli } = await start($, on, () => view('inv-t'))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --target-path ci-out', tool_use_id: 'one' })
+  await $.tool.call({ tool: 'Bash', command: 'DBT_TARGET_PATH=other dbt build', tool_use_id: 'two' })
+  expect(cli).toEqual([
+    { project_dir: ROOT, target_path: 'ci-out' },
+    { project_dir: ROOT, target_path: 'other' },
+  ])
+})
+
+test("one call that runs dbt in two projects records each project's run", async ($, on) => {
+  const { stored, cli } = await start($, on, args => view(`inv-${args.project_dir}`, undefined, 'build', AFTER, String(args.project_dir)))
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'cd a && dbt build; cd ../b && dbt build' })
+  expect(cli).toEqual([{ project_dir: '/repo/a' }, { project_dir: '/repo/b' }])
+  expect(kept(stored).map(run => run.project).sort()).toEqual(['/repo/a', '/repo/b'])
+  expect(result.context).toEqual(['build: 1 ok\nbuild: 1 ok'])
+})
+
+test('two target folders of one project are read apart, and one read that fails does not lose the other', async ($, on) => {
+  const { stored, cli } = await start($, on, args => {
+    if (args.target_path === 'b') throw new Error('no artifact')
+    return view(`inv-${args.target_path}`, undefined, 'build', AFTER, ROOT)
+  })
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build --target-path a; dbt build --target-path b' })
+  expect(cli.map(args => args.target_path).sort()).toEqual(['a', 'b'])
+  expect(kept(stored).map(run => run.id)).toEqual(['inv-a'])
+  expect(result.context).toEqual(['build: 1 ok'])
+})
+
+test('runs of several projects are kept newest first, whatever the order they were run in', async ($, on) => {
+  const done: Record<string, string> = { '/repo/a': '2026-11-13T10:00:00.900Z', '/repo/b': '2026-11-13T10:00:00.100Z' }
+  const { stored } = await start($, on, args => view(`inv-${args.project_dir}`, undefined, 'build', done[String(args.project_dir)], String(args.project_dir)))
+  await $.tool.call({ tool: 'Bash', command: 'cd a && dbt build; cd ../b && dbt build; cd ../a && dbt test' })
+  expect(kept(stored).map(run => run.project)).toEqual(['/repo/a', '/repo/b'])
+})
+
+test('a call takes time and is still recorded: the guard against overlapping calls does not take a call for its own overlap', async ($, on) => {
+  const { stored, clock } = await start($, on, () => view('inv-1'))
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'one' })
+  expect(clock.now()).toBeGreaterThan(T0)
+  expect(result.context).toEqual(['build: 1 ok'])
+  expect(kept(stored)).toHaveLength(1)
+})
+
+test('two dbt calls that overlap in one folder are not told apart: neither is recorded with the other\'s command line', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-second', undefined, 'build', AFTER))
+  await Promise.all([
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s first', tool_use_id: 'one' }),
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s second', tool_use_id: 'two' }),
+  ])
+  expect(stored.has('runs')).toBe(false)
+})
+
+test("the project's own target folder, named or not, is one folder: overlapping calls there are not recorded", async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-second', undefined, 'build', AFTER))
+  await Promise.all([
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s first', tool_use_id: 'one' }),
+    $.tool.call({ tool: 'Bash', command: 'dbt build --target-path target -s second', tool_use_id: 'two' }),
+  ])
+  expect(stored.has('runs')).toBe(false)
+})
+
+test('a call that never ended (refused or cancelled) does not stop the later calls in its folder', async ($, on) => {
+  const { stored, clock } = await start($, on, () => view('inv-1'), { denied: 'refused' })
+  // Its start is noted by bashRewrite; bashAfter never runs for it.
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s refused', tool_use_id: 'refused' }).catch(() => {})
+  expect(stored.has('runs')).toBe(false)
+  await clock.advance(50)
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s next', tool_use_id: 'next' })
+  expect(result.context).toEqual(['build: 1 ok'])
+  expect(kept(stored)).toHaveLength(1)
+})
+
+test('one call that runs dbt twice in one project from two folders records the later run once, with its own line', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-two'))
+  // Both read /repo/target/run_results.json: the tool answers with the project above the folder it is given.
+  await $.tool.call({ tool: 'Bash', command: 'dbt build; cd models && dbt build -s x' })
+  expect(kept(stored).map(run => [run.id, run.commandLine])).toEqual([['inv-two', 'cd /repo/models && dbt build -s x']])
+})
+
+test('a run kept later but finished earlier takes its place by completion time', () => {
+  const base: RunRecord = { id: 'x', project: '/p', commandLine: '', retryLine: '', command: 'build', elapsedSec: 1, completedAt: '', total: 0, passed: 0, failed: 0, skipped: 0, rows: [] }
+  const newer = { ...base, id: 'newer', completedAt: '2026-11-13T10:00:09.000Z' }
+  const older = { ...base, id: 'older', completedAt: '2026-11-13T10:00:01.000Z' }
+  expect(withRun([newer], older).map(run => run.id)).toEqual(['newer', 'older'])
+})
+
+test("a file written after the call ended is another command's and is not recorded for this call", async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-late', undefined, 'build', '2026-11-13T10:00:30.000Z'))
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s first' })
+  expect(result.context ?? []).toEqual([])
+  expect(stored.has('runs')).toBe(false)
 })
 
 for (const surface of ['terminal', 'desktop'] as const) {
@@ -245,6 +406,10 @@ test('a record keeps failures first, cuts long messages and rows; at most 50 run
   expect(runs).toHaveLength(MAX_RUNS)
   expect(runs[0]!.id).toBe(`r${MAX_RUNS + 4}`)
   expect(withRun(runs, { ...run, id: 'r10' }).map(one => one.id).filter(id => id === 'r10')).toHaveLength(1)
+  // The 50 are kept for each project: another project's run does not push one of this project's out.
+  const other = withRun(runs, { ...run, id: 'other', project: '/other' })
+  expect(other).toHaveLength(MAX_RUNS + 1)
+  expect(other.filter(one => one.project === run.project)).toHaveLength(MAX_RUNS)
 })
 
 test('the store is cut to its budget in bytes, the oldest run of the busiest project first', () => {
