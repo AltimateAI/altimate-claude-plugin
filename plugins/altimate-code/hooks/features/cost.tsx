@@ -241,7 +241,7 @@ async function rememberEstimate($: EngineInterface, target: string, bytes: numbe
   return (await read($, costAtom)) ?? FRESH
 }
 
-/** What an estimate means against the limit, as a sentence tail for /cost. */
+/** What an estimate means against the limit, as a sentence tail for /scan-cost. */
 function verdict(bytes: number, state: CostState): string {
   if (limitBytes <= 0) return '.'
   return bytes > limitBytes ? `, over the ${formatBytes(limitBytes)} limit: a dbt run of it is held until /allow-scan.` : `, within the ${formatBytes(limitBytes)} limit.`
