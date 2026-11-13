@@ -176,6 +176,94 @@ export type ImpactView = {
   truncated: boolean
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Runs (/runs): the dbt commands Claude ran and their results.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface RunsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Defer and target: the target and defer state dbt commands run with.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface DeferState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Raw SQL to model: the SQL being turned into a dbt model.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface ToModelState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Team comments: the shared docs' comments on the project's models.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+/** One open comment thread on a shared docs page, as the docs_share_comments tool lists it. */
+export interface CommentsThread {
+  shareId: number
+  shareName: string
+  groupId: number
+  /** The model file, relative to the dbt project folder. */
+  filePath?: string
+  uniqueId?: string
+  column?: string
+  field?: string
+  /** The text the comment was made on. */
+  highlight?: string
+  /** 0-based lines the comment was made on, when the page stored a range. */
+  range?: { start: { line: number }; end: { line: number } }
+  messages: { id: number; author: string; text: string }[]
+}
+
+export interface CommentsState {
+  /** The dbt project folder the threads belong to. */
+  root: string | null
+  project: string | null
+  threads: CommentsThread[]
+  loadedAt: number | null
+  loading: boolean
+  /** Set when the installed altimate-code has no docs_share_comments tool: what to tell the person. */
+  needs: string | null
+  /** Why the last load failed. */
+  error: string | null
+  /** The outcome of the last post. */
+  note: string | null
+  /** Reply text typed so far, by `shareId:groupId`. */
+  drafts: Record<string, string>
+  /** `shareId:groupId` of the thread being posted to. */
+  posting: string | null
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Cost check: the last scan estimate and any scan allowed once.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CostState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Project health: the health check issues on the changed models.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface HealthState {}
+
+// ---------------------------------------------------------------------------------------------------
+// SQL graph: the edited model's SQL graph.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface SqlGraphState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Docs coverage and propagation: what the project documents.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface DocsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Profile CTEs: each CTE's row count and timing.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CteProfileState {}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -217,6 +305,26 @@ declare module 'claude-code' {
       lineageStale: string | null
       lineageLoading: boolean
       isLineageBandHidden: boolean
+      /** The status line's parts by owner, `integrations` and each feature's id (hooks/status-line.ts). */
+      statusParts: Record<string, string>
+      /** hooks/features/: RunsState. */
+      runs: RunsState | null
+      /** hooks/features/: DeferState. */
+      defer: DeferState | null
+      /** hooks/features/: ToModelState. */
+      toModel: ToModelState | null
+      /** hooks/features/: CommentsState. */
+      comments: Shaped<CommentsState | null>
+      /** hooks/features/: CostState. */
+      cost: CostState | null
+      /** hooks/features/: HealthState. */
+      health: HealthState | null
+      /** hooks/features/: SqlGraphState. */
+      sqlGraph: SqlGraphState | null
+      /** hooks/features/: DocsState. */
+      docs: DocsState | null
+      /** hooks/features/: CteProfileState. */
+      cteProfile: CteProfileState | null
     }
   }
 }
