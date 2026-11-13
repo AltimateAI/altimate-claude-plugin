@@ -2,6 +2,11 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.5.1] — 2026-11-13
+
+### Fixed
+- Integrations pane: a failed discard of entered values is reported when the form opens and when it is cancelled, instead of ignored. A credential form without variants opens instead of failing. A failure reason is shown only when the CLI gives a non-empty one (`message`, or an `error` field as `altimate workspace` sends); otherwise the pane's own fallback text is shown.
+
 ## [1.5.0] — 2026-11-10
 
 ### Added
