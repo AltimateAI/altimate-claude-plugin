@@ -274,7 +274,7 @@ export function inlineSql(text: string): string | null {
   let found: string | null = null
   for (let i = 0; i < words.length; i++) {
     const word = words[i]!
-    if (word === '--inline') found = words[i + 1] ?? null
+    if (word === '--inline') found = words[++i] ?? null
     else if (word.startsWith('--inline=')) found = word.slice('--inline='.length)
   }
   return found

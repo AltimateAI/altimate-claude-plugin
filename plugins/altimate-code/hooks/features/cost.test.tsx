@@ -327,6 +327,8 @@ test('inlineSql reads the query as the shell would', () => {
   expect(inlineSql(`dbt show --inline \\\n 'select 1'`)).toBe('select 1')
   expect(inlineSql('dbt show -s orders')).toBeNull()
   expect(inlineSql(`dbt show --inline 'select 1' --inline='select 2'`)).toBe('select 2')
+  // The value of --inline is the query, even when it looks like an option.
+  expect(inlineSql(`dbt show --inline '--inline=comment select 1'`)).toBe('--inline=comment select 1')
 })
 
 test('formatBytes writes the units the dry run does', () => {
