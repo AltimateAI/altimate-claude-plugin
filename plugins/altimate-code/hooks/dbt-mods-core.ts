@@ -86,9 +86,14 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
     const header = clean(lines[i]!)
     const rule = clean(lines[i + 1]!)
     if (!/^\|.*\|$/.test(header) || !/^\|[\s\-|:]+\|$/.test(rule) || !rule.includes('-')) continue
-    const edges = [...rule].flatMap((char, at) => (char === '|' ? [at] : []))
+    // Positions are code points, as the table pads by them (an emoji is one cell wide, two UTF-16 units long).
+    const ruleChars = [...rule]
+    const edges = ruleChars.flatMap((char, at) => (char === '|' ? [at] : []))
     // A line fits when it is as long as the rule and has a `|` at every edge.
-    const cells = (line: string) => (line.length === rule.length && edges.every(at => line[at] === '|') ? edges.slice(1).map((end, k) => line.slice(edges[k]! + 1, end).trim()) : null)
+    const cells = (line: string) => {
+      const chars = [...line]
+      return chars.length === ruleChars.length && edges.every(at => chars[at] === '|') ? edges.slice(1).map((end, k) => chars.slice(edges[k]! + 1, end).join('').trim()) : null
+    }
     const columns = cells(header)
     if (!columns) return null
     const rows: string[][] = []
@@ -770,12 +775,17 @@ export function cellText(value: unknown, width: number): string {
 export function columnWidths(result: Pick<QueryResult, 'columns' | 'rows'>, columns: number): number[] {
   const natural = result.columns.map((name, i) => Math.min(200, Math.max(name.length, ...result.rows.slice(0, 50).map(row => cellText(row[i], 200).length), 4)))
   const room = Math.max(columns - (natural.length - 1) * 3, natural.length * 4)
-  let widths = natural.slice()
-  while (widths.reduce((a, b) => a + b, 0) > room) {
-    const widest = widths.indexOf(Math.max(...widths))
-    if (widths[widest]! <= 4) break
-    widths[widest]!--
-    widths = widths.slice()
+  // Shrink the widest columns to one cap that fits, then hand back what is spare to the columns it cut.
+  const total = (cap: number) => natural.reduce((sum, width) => sum + Math.min(width, cap), 0)
+  let cap = Math.max(...natural)
+  while (cap > 4 && total(cap) > room) cap--
+  const widths = natural.map(width => Math.min(width, cap))
+  let spare = room - total(cap)
+  for (let i = 0; i < widths.length && spare > 0; i++) {
+    if (natural[i]! > cap) {
+      widths[i]!++
+      spare--
+    }
   }
   return widths
 }

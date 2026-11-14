@@ -704,16 +704,56 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
   return { files: changed.sort((a, b) => b.mtimeMs - a.mtimeMs).map(one => one.path), complete: complete && scanned <= MAX_SCANNED }
 }
 
-/** Why the selected output's adapter could not be read: a templated target, no such output, an output with no type, or a type behind a YAML anchor. */
-type ProfileProblem = { problem: 'template' | 'no-output' | 'no-type' | 'anchor'; profile: string; target: string }
+/** Why the selected output's adapter could not be read. */
+type ProfileProblem = { problem: 'template' | 'no-output' | 'no-type' | 'error'; profile: string; target: string }
+
+/**
+ * Selects the output dbt would use, from the profiles.yml and dbt_project.yml given, and prints its adapter
+ * type as JSON. A real YAML parser, so anchors, aliases and `<<` merges are resolved as dbt resolves them.
+ * Profile: DBT_PROFILE, else the project's `profile:`. Target: DBT_TARGET, else the profile's `target`
+ * (a literal, or the plain `env_var('X', 'default')`; any other template is not settled here), else `default`.
+ */
+export const PROFILE_TYPE = `import json, os, re, sys
+import yaml
+def out(status, **rest):
+    print(json.dumps(dict(status=status, **rest)))
+    sys.exit(0)
+def load(path):
+    try:
+        with open(path) as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return None
+profiles = load(sys.argv[2])
+if profiles is None:
+    out('error')
+project = load(sys.argv[1]) or {}
+name = os.environ.get('DBT_PROFILE') or project.get('profile')
+profile = profiles.get(name) if isinstance(name, str) else None
+if not isinstance(profile, dict):
+    out('no_profile')
+target = os.environ.get('DBT_TARGET') or profile.get('target') or 'default'
+target = str(target)
+if '{{' in target:
+    call = re.fullmatch(r"\\s*\\{\\{\\s*env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)\\s*\\}\\}\\s*", target)
+    value = (os.environ.get(call.group(2)) or call.group(4)) if call else None
+    if not value:
+        out('template', profile=name, target=target)
+    target = value
+outputs = profile.get('outputs')
+output = outputs.get(target) if isinstance(outputs, dict) else None
+if not isinstance(output, dict):
+    out('no_output', profile=name, target=target)
+kind = output.get('type')
+if not isinstance(kind, str) or not kind:
+    out('no_type', profile=name, target=target)
+out('ok', profile=name, target=target, type=kind)
+`
 
 /** The adapter type the project's profile names, from the profiles.yml dbt itself would read; a problem when it cannot be read, null when there is no such profile. */
 async function profileType($: EngineInterface, root: string): Promise<string | null | ProfileProblem> {
-  const project = await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')
   const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
-  // dbt's selection: DBT_PROFILE over dbt_project.yml's `profile:`.
-  const profile = (await env('DBT_PROFILE')) || /^profile:\s*['"]?([\w-]+)/m.exec(project)?.[1]
-  if (!profile || !/^[\w-]+$/.test(profile)) return null
   // dbt reads one profiles.yml: DBT_PROFILES_DIR's, else the project folder's when it has one, else ~/.dbt's.
   const home = await env('HOME')
   // A relative DBT_PROFILES_DIR is the project's (dbt runs there); `~` is the home folder.
@@ -722,63 +762,20 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   const profilesDir = expanded && !expanded.startsWith('/') ? normalize(`${root}/${expanded}`) : expanded
   const local = `${root}/profiles.yml`
   const path = profilesDir ? `${profilesDir}/profiles.yml` : (await $.fs.exists(local).catch(() => false)) ? local : home ? `${home}/.dbt/profiles.yml` : null
-  if (!path) return null
-  const text = await $.fs.read(path).catch(() => null)
-  if (!text) return null
-  const at = text.search(new RegExp(`^['"]?${profile}['"]?:\\s*(?:#.*)?$`, 'm'))
-  // The profile is not in the file dbt reads: dbt fails there too.
-  if (at < 0) return null
-  const body = text.slice(at).split('\n').slice(1)
-  const end = body.findIndex(line => /^\S/.test(line))
-  const lines = end < 0 ? body : body.slice(0, end)
-  const block = lines.join('\n')
-  // The target: DBT_TARGET, else the profile's `target:` (a literal, or `env_var('X', 'default')`), else `default`.
-  let target = await env('DBT_TARGET')
-  if (!target) {
-    const raw = /^\s+target:\s*(.*)$/m.exec(block)?.[1]?.trim() ?? ''
-    if (!raw) target = 'default'
-    else if (raw.includes('{{')) {
-      const call = /^['"]?\{\{\s*env_var\(\s*(['"])([^'"]+)\1\s*(?:,\s*(['"])([^'"]*)\3\s*)?\)\s*\}\}['"]?\s*(?:#.*)?$/.exec(raw)
-      target = call ? ((await env(call[2]!)) || call[4] || '') : ''
-    } else target = /^['"]?([\w-]+)/.exec(raw)?.[1] ?? ''
+  if (!path || !(await $.fs.exists(path).catch(() => false))) return null
+  // Whatever stops the parser (no interpreter, no PyYAML, a file it cannot read) is "could not tell", never a guess.
+  const unread: ProfileProblem = { problem: 'error', profile: '', target: '' }
+  try {
+    const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_TYPE, `${root}/dbt_project.yml`, path], { cwd: root, timeoutMs: 30_000 })
+    if (run.exitCode !== 0) return unread
+    const answer = JSON.parse(run.stdout) as { status: string; profile?: string; target?: string; type?: string }
+    if (answer.status === 'ok' && answer.type) return answer.type
+    if (answer.status === 'no_profile') return null
+    const problem = ({ template: 'template', no_output: 'no-output', no_type: 'no-type' } as const)[answer.status as 'template']
+    return problem ? { problem, profile: answer.profile ?? '', target: answer.target ?? '' } : unread
+  } catch {
+    return unread
   }
-  if (!/^[\w-]+$/.test(target)) return { problem: 'template', profile, target }
-  // The selected output, and its own lines only: a missing output or one with no type says nothing, never the next one's.
-  const outputs = lines.findIndex(line => /^\s+outputs:\s*(?:#.*)?$/.test(line))
-  if (outputs < 0) return { problem: 'no-output', profile, target }
-  const entry = new RegExp(`^(\\s+)['"]?${target}['"]?:[ \\t]*(\\{.*|#.*)?$`)
-  const outputsIndent = /^\s*/.exec(lines[outputs]!)![0].length
-  for (let i = outputs + 1; i < lines.length; i++) {
-    if (lines[i]!.trim() && /^\s*/.exec(lines[i]!)![0].length <= outputsIndent) break
-    const found = entry.exec(lines[i]!)
-    if (!found) continue
-    // Flow style: `prod: {type: snowflake, …}`.
-    if (found[2]?.startsWith('{')) return /\btype:\s*['"]?([\w-]+)/.exec(found[2])?.[1] ?? { problem: 'no-type', profile, target }
-    const indent = found[1]!.length
-    let anchor: string | undefined
-    for (const next of lines.slice(i + 1)) {
-      if (next.trim() && /^\s*/.exec(next)![0].length <= indent) break
-      const type = /^\s+type:\s*['"]?([\w-]+)/.exec(next)?.[1]
-      if (type) return type
-      anchor ??= /^\s+<<:\s*\*([\w-]+)/.exec(next)?.[1]
-    }
-    if (!anchor) return { problem: 'no-type', profile, target }
-    // `<<: *base`: the type of the block `&base` names, when the same file defines it.
-    const all = text.split('\n')
-    const defined = all.findIndex(line => new RegExp(`&${anchor}(?![\\w-])`).test(line))
-    if (defined >= 0) {
-      const inline = /\btype:\s*['"]?([\w-]+)/.exec(all[defined]!.slice(all[defined]!.indexOf(`&${anchor}`)))?.[1]
-      if (inline) return inline
-      const base = /^\s*/.exec(all[defined]!)![0].length
-      for (const next of all.slice(defined + 1)) {
-        if (next.trim() && /^\s*/.exec(next)![0].length <= base) break
-        const type = /^\s+type:\s*['"]?([\w-]+)/.exec(next)?.[1]
-        if (type) return type
-      }
-    }
-    return { problem: 'anchor', profile, target }
-  }
-  return { problem: 'no-output', profile, target }
 }
 
 async function runDoctor($: EngineInterface, root: string, connection = false): Promise<DoctorView> {
@@ -816,7 +813,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
       template: `the profile's target is set by a template, so which adapter it uses could not be told${known}`,
       'no-output': `profile ${type.profile} has no output named ${type.target}`,
       'no-type': `output ${type.target} has no type:`,
-      anchor: `could not tell (uses a YAML anchor)${known}`,
+      error: `could not tell which adapter the profile uses (its profiles.yml could not be read here)${known}`,
     }[type.problem]
     // dbt itself refuses a profile with no such output.
     checks.push({ id: 'adapter', label: 'Adapter', status: type.problem === 'no-output' ? 'fail' : 'warn', detail, fix: type.problem === 'no-output' ? 'add the output to profiles.yml, or pick another target' : null })

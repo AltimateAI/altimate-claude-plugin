@@ -24,7 +24,7 @@ import {
   textTable,
   versionInfo,
 } from './dbt-mods-core'
-import { MANIFEST_SLICE } from './dbt-mods'
+import { MANIFEST_SLICE, PROFILE_TYPE } from './dbt-mods'
 
 // The dbt helpers on; the lineage half reads no manifest in these tests that it would draw.
 // The kit's `$` and `on`, loosely typed: the tests drive engine events with only the fields the helpers read.
@@ -137,6 +137,8 @@ type Options = {
   version?: string
   /** Environment variables `printenv` answers. */
   env?: Record<string, string>
+  /** What the project's Python prints for the profile script; the default is an ok duckdb output. */
+  profileAnswer?: { exitCode: number; stdout: string }
   /** What the plugin's store held from an earlier session. */
   stored?: Record<string, unknown>
   /** Extra project files, by project-relative path. */
@@ -285,6 +287,10 @@ async function start($: any, on: any, options: Options = {}) {
       return { value: { exitCode: value ? 0 : 1, stdout: value ? `${value}\n` : '', stderr: '' } }
     }
     // The project's Python: its version, or the slice of a manifest too big to read here.
+    if (bin === '/proj/.venv/bin/python' && verb === '-c' && e.argv[2] === PROFILE_TYPE) {
+      // The script itself is checked below; here the interpreter answers what it would print.
+      return { value: { ...(options.profileAnswer ?? { exitCode: 0, stdout: '{"status":"ok","profile":"shop","target":"dev","type":"duckdb"}' }), stderr: '' } }
+    }
     if (bin === '/proj/.venv/bin/python' && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
     if (bin === '/proj/.venv/bin/python') return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
     if (bin !== DBT) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
@@ -342,6 +348,8 @@ kitTest('a text table is cut at the rule\'s pipes, so a value with a pipe stays 
   const table = (...lines: string[]) => lines.join('\n')
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b   | c     |'))).toEqual({ columns: ['value', 'other'], rows: [['a|b', 'c']] })
   expect(textTable(table('| id | note  |', '| -- | ----- |', '| 1  | x|y|z |'))).toEqual({ columns: ['id', 'note'], rows: [['1', 'x|y|z']] })
+  // agate pads by code points: an emoji is one cell.
+  expect(textTable(table('| value | other |', '| ----- | ----- |', '| 🙂🙂    | c     |', '| a|🙂   | d     |'))).toEqual({ columns: ['value', 'other'], rows: [['🙂🙂', 'c'], ['a|🙂', 'd']] })
   // A line out of step with the rule is not guessed at: nothing is captured.
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b  | c     |'))).toBeNull()
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a     | c     |', '| a | b | c |'))).toBeNull()
@@ -483,6 +491,9 @@ kitTest('dbt --version and dbt debug give the core, adapters, Python and the con
   expect(columnDrift(['order_id', 'Amount'], ['ORDER_ID', 'order_total'])).toEqual({ missing: ['Amount'], undocumented: ['order_total'] })
   const widths = columnWidths({ columns: ['a', 'very_long_column_name'], rows: [['x', 'y'.repeat(80)]] }, 30)
   expect(widths.reduce((a, b) => a + b, 0) + 3).toBeLessThanOrEqual(30)
+  // Room to spare is used: a long value is cut only as far as the room needs.
+  expect(columnWidths({ columns: ['a', 'b', 'c'], rows: [['x'.repeat(30), 'y'.repeat(30), 'z'.repeat(30)]] }, 80)).toEqual([25, 25, 24])
+  expect(columnWidths({ columns: ['id', 'note'], rows: [['1', 'n'.repeat(70)]] }, 100)).toEqual([4, 70])
 })
 
 // ─── 12 · Model context on Read ───────────────────────────────────────────────────────────────────
@@ -883,7 +894,7 @@ test('/dbt-doctor tests the connection too and lists every check in its pane', a
 })
 
 test('a profile whose adapter is not installed fails the adapter check with the pip command', async ($, on) => {
-  const { clock } = await start($, on, { profiles: 'shop:\n  target: prod\n  outputs:\n    dev:\n      type: duckdb\n    prod:\n      type: snowflake\n' })
+  const { clock } = await start($, on, { profileAnswer: said({ status: 'ok', profile: 'shop', target: 'prod', type: 'snowflake' }) })
   await $.command.run({ command: 'dbt-doctor', args: '' })
   await clock.settle()
   const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
@@ -978,15 +989,18 @@ test('a subagent reading the model gets its context too; a /clear drops the chec
 })
 
 test('the doctor fails an adapter that is not installed at all, and reads the profile from DBT_PROFILES_DIR', async ($, on) => {
-  const { clock } = await start($, on, {
+  const { clock, runs } = await start($, on, {
     version: 'Core:\n  - installed: 1.11.6\n',
     env: { DBT_PROFILES_DIR: '/proj/conf' },
     files: { 'conf/profiles.yml': 'shop:\n  target: dev\n  outputs:\n    dev:\n      type: snowflake\n' },
+    profileAnswer: said({ status: 'ok', profile: 'shop', target: 'dev', type: 'snowflake' }),
   })
   await $.command.run({ command: 'dbt-doctor', args: '' })
   await clock.settle()
   const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: 'the profile uses snowflake, but no dbt adapter is installed beside dbt-core' })).toBeDefined()
+  // The script is handed the project file and the profiles.yml dbt reads.
+  expect(runs.find(argv => argv[2] === PROFILE_TYPE)?.slice(3)).toEqual(['/proj/dbt_project.yml', '/proj/conf/profiles.yml'])
   await ui.unmount()
 })
 
@@ -1269,7 +1283,7 @@ test('a compile failure Claude ran with --log-format json still offers Explain a
 })
 
 test('the doctor reads only the profiles.yml dbt reads: a profile missing from DBT_PROFILES_DIR is not found elsewhere', async ($, on) => {
-  const { clock } = await start($, on, { env: { DBT_PROFILES_DIR: '/proj/conf' }, files: { 'conf/profiles.yml': 'other:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n' } })
+  const { clock } = await start($, on, { env: { DBT_PROFILES_DIR: '/proj/conf' }, files: { 'conf/profiles.yml': 'other:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n' }, profileAnswer: said({ status: 'no_profile' }) })
   await $.command.run({ command: 'dbt-doctor', args: '' })
   await clock.settle()
   const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
@@ -1885,15 +1899,6 @@ kitTest('a flag before the verb never takes a subcommand word as its value', () 
   expect(dbtCommand('dbt --unknown-flag run')?.verb).toBe('run')
 })
 
-test('a profile name followed by a YAML comment is found', async ($, on) => {
-  const { clock } = await start($, on, { profiles: 'shop:  # dev\n  target: prod\n  outputs:\n    prod:\n      type: snowflake\n' })
-  await $.command.run({ command: 'dbt-doctor', args: '' })
-  await clock.settle()
-  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: 'the profile uses snowflake, but only duckdb is installed' })).toBeDefined()
-  await ui.unmount()
-})
-
 test('a dependencies.yml with only projects has no packages to install; one with packages is named in the check', async ($, on) => {
   const { clock } = await start($, on, { files: { 'dependencies.yml': 'projects:\n  - name: other\n' } })
   await $.command.run({ command: 'dbt-doctor', args: '' })
@@ -1973,17 +1978,6 @@ test('a check whose manifest holds an old name for the model asks again with the
   expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,legacy_name', 'path:models/legacy.sql,package:shop,orders'])
   expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
 })
-
-for (const [name, output] of [['a trailing comment', "    prod:   # production\n      type: snowflake\n"], ['quotes', "    'prod':\n      type: snowflake\n"], ['flow style', '    "prod": {type: snowflake, account: x}\n']] as const) {
-  test(`a profile's target output is found with ${name}`, async ($, on) => {
-    const { clock } = await start($, on, { profiles: `shop:\n  target: prod\n  outputs:\n    dev:\n      type: duckdb\n${output}` })
-    await $.command.run({ command: 'dbt-doctor', args: '' })
-    await clock.settle()
-    const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
-    expect(await ui.find({ type: 'Text', text: 'the profile uses snowflake, but only duckdb is installed' })).toBeDefined()
-    await ui.unmount()
-  })
-}
 
 // ─── Failures from the artifact and the text, the full command, deps ─────────────────────────────
 
@@ -2214,25 +2208,17 @@ test('with a manifest too large to read, one failed version is one entry', async
   await band.unmount()
 })
 
-const outputs = (...entries: string[]) => `  outputs:\n${entries.join('')}`
-const out = (name: string, type: string | null) => `    ${name}:\n${type ? `      type: ${type}\n` : ''}      path: x\n`
-const profileOf = (head: string, ...entries: string[]) => `shop:\n${head}${outputs(...entries)}`
-const adapterCases: [string, string, Record<string, string>, string | RegExp][] = [
-  ['an env_var default is the target when the variable is not set', profileOf(`  target: "{{ env_var('T', 'dev') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), {}, 'duckdb 1.10.1'],
-  ['an env_var that is set picks the target', profileOf(`  target: "{{ env_var('T', 'dev') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), { T: 'wh' }, 'the profile uses snowflake, but only duckdb is installed'],
-  ['any other template is not guessed at', profileOf(`  target: "{{ var('t') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), {}, "the profile's target is set by a template, so which adapter it uses could not be told; installed: duckdb"],
-  ['DBT_TARGET beats the profile\'s literal target', profileOf('  target: prod\n', out('prod', 'snowflake'), out('dev', 'duckdb')), { DBT_TARGET: 'dev' }, 'duckdb 1.10.1'],
-  ['DBT_PROFILE picks another profile', `shop:\n  target: dev\n${outputs(out('dev', 'snowflake'))}alternate:\n  target: dev\n${outputs(out('dev', 'duckdb'))}`, { DBT_PROFILE: 'alternate' }, 'duckdb 1.10.1'],
-  ['no target means the output named default', profileOf('', out('other', 'snowflake'), out('default', 'duckdb')), {}, 'duckdb 1.10.1'],
-  ['a literal target missing from the outputs cannot be told', profileOf('  target: prod\n', out('dev', 'duckdb')), {}, 'profile shop has no output named prod'],
-  ['an env_var target missing from the outputs cannot be told', profileOf(`  target: "{{ env_var('T', 'prod') }}"\n`, out('dev', 'duckdb')), {}, 'profile shop has no output named prod'],
-  ['an output with no type is not given the next one\'s', profileOf('  target: dev\n', out('dev', null), out('prod', 'duckdb')), {}, 'output dev has no type:'],
-  ['a type behind a YAML anchor defined in the file is followed', `base: &base\n  type: duckdb\nshop:\n  target: dev\n  outputs:\n    dev:\n      <<: *base\n      path: x\n`, {}, 'duckdb 1.10.1'],
-  ['a YAML anchor the file does not define is not guessed at', `shop:\n  target: dev\n  outputs:\n    dev:\n      <<: *elsewhere\n      path: x\n    prod:\n      type: snowflake\n`, {}, 'could not tell (uses a YAML anchor); installed: duckdb'],
+const said = (answer: Record<string, string>) => ({ exitCode: 0, stdout: JSON.stringify(answer) })
+const adapterCases: [string, { exitCode: number; stdout: string }, string][] = [
+  ['the output the script selected names the adapter', said({ status: 'ok', profile: 'shop', target: 'dev', type: 'duckdb' }), 'duckdb 1.10.1'],
+  ['an adapter that is not installed fails with the pip command', said({ status: 'ok', profile: 'shop', target: 'wh', type: 'snowflake' }), 'the profile uses snowflake, but only duckdb is installed'],
+  ['a templated target the script could not settle', said({ status: 'template', profile: 'shop', target: "{{ var('t') }}" }), "the profile's target is set by a template, so which adapter it uses could not be told; installed: duckdb"],
+  ['a target with no output fails', said({ status: 'no_output', profile: 'shop', target: 'prod' }), 'profile shop has no output named prod'],
+  ['an output with no type warns', said({ status: 'no_type', profile: 'shop', target: 'dev' }), 'output dev has no type:'],
 ]
-for (const [name, profiles, env, expected] of adapterCases) {
+for (const [name, answer, expected] of adapterCases) {
   test(`doctor adapter: ${name}`, async ($, on) => {
-    const { clock } = await start($, on, { env, profiles })
+    const { clock } = await start($, on, { profileAnswer: answer })
     await $.command.run({ command: 'dbt-doctor', args: '' })
     await clock.settle()
     const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
@@ -2240,6 +2226,46 @@ for (const [name, profiles, env, expected] of adapterCases) {
     await ui.unmount()
   })
 }
+
+for (const [name, answer, fixShown] of [['a no-output answer is a failure with a fix', { status: 'no_output', profile: 'shop', target: 'prod' }, true], ['an untyped output is only a warning', { status: 'no_type', profile: 'shop', target: 'dev' }, false]] as const) {
+  test(name, async ($, on) => {
+    const { clock } = await start($, on, { profileAnswer: said(answer) })
+    await $.command.run({ command: 'dbt-doctor', args: '' })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+    expect((await ui.find({ type: 'Text', text: /add the output to profiles\.yml, or pick another target/ })) !== undefined).toBe(fixShown)
+    await ui.unmount()
+  })
+}
+
+for (const [name, answer, expected] of [
+  ['a python that fails', { exitCode: 1, stdout: '' }, 'could not tell which adapter the profile uses (its profiles.yml could not be read here); installed: duckdb'],
+  ['an answer that says error', { exitCode: 0, stdout: '{"status":"error"}' }, 'could not tell which adapter the profile uses (its profiles.yml could not be read here); installed: duckdb'],
+  ['an answer that is not JSON', { exitCode: 0, stdout: 'Traceback' }, 'could not tell which adapter the profile uses (its profiles.yml could not be read here); installed: duckdb'],
+  ['a type the profile names', { exitCode: 0, stdout: '{"status":"ok","type":"snowflake"}' }, 'the profile uses snowflake, but only duckdb is installed'],
+  ['no profile', { exitCode: 0, stdout: '{"status":"no_profile"}' }, 'no profile found for this project; installed: duckdb'],
+] as const) {
+  test(`doctor adapter with the Python answering: ${name}`, async ($, on) => {
+    const { clock } = await start($, on, { profileAnswer: answer })
+    await $.command.run({ command: 'dbt-doctor', args: '' })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: expected })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
+// The script is checked for what it relies on; run for real, it answers the fixtures (anchored output key,
+// list merge, anchored profile and outputs keys, DBT_PROFILE, DBT_TARGET, `default`, env_var) as dbt does.
+kitTest('the profile script parses YAML for real and follows dbt\'s selection', () => {
+  expect(PROFILE_TYPE).toContain('yaml.safe_load')
+  expect(PROFILE_TYPE).toContain("os.environ.get('DBT_PROFILE') or project.get('profile')")
+  expect(PROFILE_TYPE).toContain("os.environ.get('DBT_TARGET') or profile.get('target') or 'default'")
+  expect(PROFILE_TYPE).toContain('env_var')
+  for (const status of ['no_profile', 'template', 'no_output', 'no_type', 'ok', 'error']) expect(PROFILE_TYPE).toContain(`'${status}'`)
+  // No hand-rolled reading of the YAML.
+  expect(PROFILE_TYPE).not.toMatch(/split\('\\n'\)|readlines/)
+})
 
 test('two versions of one model that both failed are both offered, though the artifact holds only one', async ($, on) => {
   const manifest = shopManifest()
