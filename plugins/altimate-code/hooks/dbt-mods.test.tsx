@@ -338,6 +338,19 @@ async function start($: any, on: any, options: Options = {}) {
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
 
+kitTest('a text table is cut at the rule\'s pipes, so a value with a pipe stays whole; one that does not fit is declined', () => {
+  const table = (...lines: string[]) => lines.join('\n')
+  expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b   | c     |'))).toEqual({ columns: ['value', 'other'], rows: [['a|b', 'c']] })
+  expect(textTable(table('| id | note  |', '| -- | ----- |', '| 1  | x|y|z |'))).toEqual({ columns: ['id', 'note'], rows: [['1', 'x|y|z']] })
+  // A line out of step with the rule is not guessed at: nothing is captured.
+  expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b  | c     |'))).toBeNull()
+  expect(textTable(table('| value | other |', '| ----- | ----- |', '| a     | c     |', '| a | b | c |'))).toBeNull()
+  // Through dbt's JSON logs, a text preview takes the same road.
+  const log = (preview: string) => JSON.stringify({ info: { code: 'Q041' }, data: { preview, output_format: 'text' } })
+  expect(showPreview(log(table('| value | other |', '| ----- | ----- |', '| a|b   | c     |')))?.rows).toEqual([['a|b', 'c']])
+  expect(showPreview(log(table('| value | other |', '| ----- | ----- |', '| a|b  | c     |')))).toBeNull()
+})
+
 kitTest('dbt show JSON logs give the rows in dbt\'s column order; the text table drops the elided column', () => {
   expect(showPreview(showLog([{ b: 1, a: 'x' }, { b: 2, a: null }], 'orders'))).toEqual({ columns: ['b', 'a'], rows: [[1, 'x'], [2, null]], node: 'orders' })
   expect(showPreview('no preview here')).toBeNull()
@@ -2207,13 +2220,15 @@ const profileOf = (head: string, ...entries: string[]) => `shop:\n${head}${outpu
 const adapterCases: [string, string, Record<string, string>, string | RegExp][] = [
   ['an env_var default is the target when the variable is not set', profileOf(`  target: "{{ env_var('T', 'dev') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), {}, 'duckdb 1.10.1'],
   ['an env_var that is set picks the target', profileOf(`  target: "{{ env_var('T', 'dev') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), { T: 'wh' }, 'the profile uses snowflake, but only duckdb is installed'],
-  ['any other template is not guessed at', profileOf(`  target: "{{ var('t') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), {}, /the profile's target is set by a template/],
+  ['any other template is not guessed at', profileOf(`  target: "{{ var('t') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), {}, "the profile's target is set by a template, so which adapter it uses could not be told; installed: duckdb"],
   ['DBT_TARGET beats the profile\'s literal target', profileOf('  target: prod\n', out('prod', 'snowflake'), out('dev', 'duckdb')), { DBT_TARGET: 'dev' }, 'duckdb 1.10.1'],
   ['DBT_PROFILE picks another profile', `shop:\n  target: dev\n${outputs(out('dev', 'snowflake'))}alternate:\n  target: dev\n${outputs(out('dev', 'duckdb'))}`, { DBT_PROFILE: 'alternate' }, 'duckdb 1.10.1'],
   ['no target means the output named default', profileOf('', out('other', 'snowflake'), out('default', 'duckdb')), {}, 'duckdb 1.10.1'],
-  ['a literal target missing from the outputs cannot be told', profileOf('  target: prod\n', out('dev', 'duckdb')), {}, /could not be told/],
-  ['an env_var target missing from the outputs cannot be told', profileOf(`  target: "{{ env_var('T', 'prod') }}"\n`, out('dev', 'duckdb')), {}, /could not be told/],
-  ['an output with no type is not given the next one\'s', profileOf('  target: dev\n', out('dev', null), out('prod', 'duckdb')), {}, /could not be told/],
+  ['a literal target missing from the outputs cannot be told', profileOf('  target: prod\n', out('dev', 'duckdb')), {}, 'profile shop has no output named prod'],
+  ['an env_var target missing from the outputs cannot be told', profileOf(`  target: "{{ env_var('T', 'prod') }}"\n`, out('dev', 'duckdb')), {}, 'profile shop has no output named prod'],
+  ['an output with no type is not given the next one\'s', profileOf('  target: dev\n', out('dev', null), out('prod', 'duckdb')), {}, 'output dev has no type:'],
+  ['a type behind a YAML anchor defined in the file is followed', `base: &base\n  type: duckdb\nshop:\n  target: dev\n  outputs:\n    dev:\n      <<: *base\n      path: x\n`, {}, 'duckdb 1.10.1'],
+  ['a YAML anchor the file does not define is not guessed at', `shop:\n  target: dev\n  outputs:\n    dev:\n      <<: *elsewhere\n      path: x\n    prod:\n      type: snowflake\n`, {}, 'could not tell (uses a YAML anchor); installed: duckdb'],
 ]
 for (const [name, profiles, env, expected] of adapterCases) {
   test(`doctor adapter: ${name}`, async ($, on) => {

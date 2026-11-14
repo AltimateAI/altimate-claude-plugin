@@ -75,26 +75,29 @@ export function logErrors(stdout: string): string[] {
 
 /**
  * The rows of dbt show's text table (`| a | b |` with a `| --- |` rule), for a `dbt show` Claude ran
- * without `--output json`. Null when the output holds no such table.
+ * without `--output json`. Null when the output holds no such table, or when a line of it does not fit
+ * the layout the rule draws: the cells are cut at the rule's `|` positions, so a value with a pipe in it
+ * stays whole, and a table that cannot be cut that way is declined rather than guessed at.
  */
 export function textTable(stdout: string): { columns: string[]; rows: unknown[][] } | null {
   const lines = stripAnsi(stdout).split('\n')
-  const cells = (line: string) =>
-    line
-      .trim()
-      .replace(/^\||\|$/g, '')
-      .split('|')
-      .map(cell => cell.trim())
+  const clean = (line: string) => line.replace(/^\s*\d\d:\d\d:\d\d\s+/, '').trim()
   for (let i = 0; i + 1 < lines.length; i++) {
-    const header = lines[i]!.replace(/^\s*\d\d:\d\d:\d\d\s+/, '')
-    const rule = lines[i + 1]!.replace(/^\s*\d\d:\d\d:\d\d\s+/, '')
-    if (!/^\s*\|.*\|\s*$/.test(header) || !/^\s*\|[\s\-|:]+\|\s*$/.test(rule) || !rule.includes('-')) continue
+    const header = clean(lines[i]!)
+    const rule = clean(lines[i + 1]!)
+    if (!/^\|.*\|$/.test(header) || !/^\|[\s\-|:]+\|$/.test(rule) || !rule.includes('-')) continue
+    const edges = [...rule].flatMap((char, at) => (char === '|' ? [at] : []))
+    // A line fits when it is as long as the rule and has a `|` at every edge.
+    const cells = (line: string) => (line.length === rule.length && edges.every(at => line[at] === '|') ? edges.slice(1).map((end, k) => line.slice(edges[k]! + 1, end).trim()) : null)
     const columns = cells(header)
-    const rows: unknown[][] = []
+    if (!columns) return null
+    const rows: string[][] = []
     for (const line of lines.slice(i + 2)) {
-      const body = line.replace(/^\s*\d\d:\d\d:\d\d\s+/, '')
-      if (!/^\s*\|.*\|\s*$/.test(body)) break
-      rows.push(cells(body))
+      const body = clean(line)
+      if (!/^\|.*\|$/.test(body)) break
+      const row = cells(body)
+      if (!row) return null
+      rows.push(row)
     }
     // dbt's text table elides the columns past its width as one `...` column.
     const keep = columns.map((name, i) => (name === '...' ? -1 : i)).filter(i => i >= 0)

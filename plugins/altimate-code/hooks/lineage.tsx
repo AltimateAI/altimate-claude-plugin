@@ -135,8 +135,8 @@ const MIN_GRAPH_COLUMNS = 48
 // the rows a very wide layer draws.
 const BOX_CAP = 4
 const UNFOLDED = 40
-// Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
-// surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
+// Rows asked for when the pane sits above the prompt (about four boxes high). Docked, its width is the
+// widest dock, which the surface caps at 45% of the terminal; a size the person set wins.
 const PANE_SIZES: PaneSpec = { rows: 34 }
 // The engine's label for a column it could not classify, which is every column read from a CTE or a
 // qualified table, so all of a dbt model's. It says nothing about the column, so the pane leaves it out.

@@ -704,8 +704,11 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
   return { files: changed.sort((a, b) => b.mtimeMs - a.mtimeMs).map(one => one.path), complete: complete && scanned <= MAX_SCANNED }
 }
 
-/** The adapter type the project's profile names, from the profiles.yml dbt itself would read; `'unknown'` when its target is a template this cannot settle. */
-async function profileType($: EngineInterface, root: string): Promise<string | null | 'unknown'> {
+/** Why the selected output's adapter could not be read: a templated target, no such output, an output with no type, or a type behind a YAML anchor. */
+type ProfileProblem = { problem: 'template' | 'no-output' | 'no-type' | 'anchor'; profile: string; target: string }
+
+/** The adapter type the project's profile names, from the profiles.yml dbt itself would read; a problem when it cannot be read, null when there is no such profile. */
+async function profileType($: EngineInterface, root: string): Promise<string | null | ProfileProblem> {
   const project = await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')
   const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
   // dbt's selection: DBT_PROFILE over dbt_project.yml's `profile:`.
@@ -739,10 +742,10 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
       target = call ? ((await env(call[2]!)) || call[4] || '') : ''
     } else target = /^['"]?([\w-]+)/.exec(raw)?.[1] ?? ''
   }
-  if (!/^[\w-]+$/.test(target)) return 'unknown'
+  if (!/^[\w-]+$/.test(target)) return { problem: 'template', profile, target }
   // The selected output, and its own lines only: a missing output or one with no type says nothing, never the next one's.
   const outputs = lines.findIndex(line => /^\s+outputs:\s*(?:#.*)?$/.test(line))
-  if (outputs < 0) return 'unknown'
+  if (outputs < 0) return { problem: 'no-output', profile, target }
   const entry = new RegExp(`^(\\s+)['"]?${target}['"]?:[ \\t]*(\\{.*|#.*)?$`)
   const outputsIndent = /^\s*/.exec(lines[outputs]!)![0].length
   for (let i = outputs + 1; i < lines.length; i++) {
@@ -750,16 +753,32 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
     const found = entry.exec(lines[i]!)
     if (!found) continue
     // Flow style: `prod: {type: snowflake, …}`.
-    if (found[2]?.startsWith('{')) return /\btype:\s*['"]?([\w-]+)/.exec(found[2])?.[1] ?? 'unknown'
+    if (found[2]?.startsWith('{')) return /\btype:\s*['"]?([\w-]+)/.exec(found[2])?.[1] ?? { problem: 'no-type', profile, target }
     const indent = found[1]!.length
+    let anchor: string | undefined
     for (const next of lines.slice(i + 1)) {
       if (next.trim() && /^\s*/.exec(next)![0].length <= indent) break
       const type = /^\s+type:\s*['"]?([\w-]+)/.exec(next)?.[1]
       if (type) return type
+      anchor ??= /^\s+<<:\s*\*([\w-]+)/.exec(next)?.[1]
     }
-    return 'unknown'
+    if (!anchor) return { problem: 'no-type', profile, target }
+    // `<<: *base`: the type of the block `&base` names, when the same file defines it.
+    const all = text.split('\n')
+    const defined = all.findIndex(line => new RegExp(`&${anchor}(?![\\w-])`).test(line))
+    if (defined >= 0) {
+      const inline = /\btype:\s*['"]?([\w-]+)/.exec(all[defined]!.slice(all[defined]!.indexOf(`&${anchor}`)))?.[1]
+      if (inline) return inline
+      const base = /^\s*/.exec(all[defined]!)![0].length
+      for (const next of all.slice(defined + 1)) {
+        if (next.trim() && /^\s*/.exec(next)![0].length <= base) break
+        const type = /^\s+type:\s*['"]?([\w-]+)/.exec(next)?.[1]
+        if (type) return type
+      }
+    }
+    return { problem: 'anchor', profile, target }
   }
-  return 'unknown'
+  return { problem: 'no-output', profile, target }
 }
 
 async function runDoctor($: EngineInterface, root: string, connection = false): Promise<DoctorView> {
@@ -791,7 +810,17 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   // Adapter: the profile's type, installed beside dbt-core.
   const type = await profileType($, root)
   const installed = info.adapters.map(one => one.name)
-  if (type === 'unknown') checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `the profile's target is set by a template, so which adapter it uses could not be told${installed.length ? `; installed: ${installed.join(', ')}` : ''}`, fix: null })
+  const known = installed.length ? `; installed: ${installed.join(', ')}` : ''
+  if (type && typeof type === 'object') {
+    const detail = {
+      template: `the profile's target is set by a template, so which adapter it uses could not be told${known}`,
+      'no-output': `profile ${type.profile} has no output named ${type.target}`,
+      'no-type': `output ${type.target} has no type:`,
+      anchor: `could not tell (uses a YAML anchor)${known}`,
+    }[type.problem]
+    // dbt itself refuses a profile with no such output.
+    checks.push({ id: 'adapter', label: 'Adapter', status: type.problem === 'no-output' ? 'fail' : 'warn', detail, fix: type.problem === 'no-output' ? 'add the output to profiles.yml, or pick another target' : null })
+  }
   else if (!type) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `no profile found for this project${installed.length ? `; installed: ${installed.join(', ')}` : ''}`, fix: 'add the profile to profiles.yml (or set DBT_PROFILES_DIR)' })
   // dbt-core's version unread (dbt Fusion bundles its adapters, a broken install): nothing to hold the profile to.
   else if (installed.length === 0 && !info.core) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `the profile uses ${type}; could not tell which adapters are installed`, fix: null })
