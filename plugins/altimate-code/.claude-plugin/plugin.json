@@ -20,5 +20,37 @@
     "databricks",
     "column-lineage"
   ],
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "maxScanBytes": {
+      "type": "number",
+      "title": "Largest BigQuery scan without asking",
+      "description": "A dbt run, build or show that BigQuery estimates would scan more bytes than this is held until you allow it with /allow-scan. 0 never holds one. Other warehouses are never held.",
+      "default": 10737418240
+    },
+    "healthBlocksPush": {
+      "type": "boolean",
+      "title": "Project health blocks git push",
+      "description": "When on, git push is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown.",
+      "default": false
+    },
+    "healthConfigPath": {
+      "type": "string",
+      "title": "Project health check config",
+      "description": "Path to a DataPilot health check config file, relative to the dbt project. Empty uses the default checks.",
+      "default": ""
+    },
+    "commentsPollSeconds": {
+      "type": "number",
+      "title": "Team comments refresh (seconds)",
+      "description": "How often the team's comments on shared docs are fetched again.",
+      "default": 900
+    },
+    "commentsInContext": {
+      "type": "boolean",
+      "title": "Team comments in Claude's context",
+      "description": "When on, the open comments on a model Claude reads or edits are added to its context. Off keeps them out of Claude's context.",
+      "default": true
+    }
+  }
 }

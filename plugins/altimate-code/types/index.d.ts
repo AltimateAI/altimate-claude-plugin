@@ -176,6 +176,101 @@ export type ImpactView = {
   truncated: boolean
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Runs (/runs): the dbt commands Claude ran and their results.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export type RunRow = {
+  uniqueId: string
+  name: string
+  status: string
+  executionTimeSec: number | null
+  /** Cut to a few hundred characters. */
+  message: string | null
+}
+
+export type RunRecord = {
+  /** The artifact's invocation id; its completion time when the artifact has none. */
+  id: string
+  /** The dbt project folder the run was read from. */
+  project: string
+  /** The command as Claude ran it, with the folder it ran in and a secret's value left out; what Re-run fills in. */
+  commandLine: string
+  /** `dbt retry` with the launcher, environment and folder flags the command had; what Re-run failed fills in. */
+  retryLine: string
+  /** The dbt subcommand the artifact names (`build`, `run`…). */
+  command: string
+  elapsedSec: number | null
+  completedAt: string
+  /** Every node dbt reported. */
+  total: number
+  /** Nodes that succeeded, passed or warned. */
+  passed: number
+  /** Nodes that errored or failed. */
+  failed: number
+  /** Nodes dbt skipped. */
+  skipped: number
+  /** The rows kept: failures first, then the rest, at most as many as the plugin holds. */
+  rows: RunRow[]
+}
+
+export interface RunsState {
+  /** The session folder the runs below were recorded for. */
+  root: string
+  /** Newest first, at most 50. */
+  runs: RunRecord[]
+  /** The run the pane shows in full; null for the list. */
+  open: string | null
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Defer and target: the target and defer state dbt commands run with.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface DeferState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Raw SQL to model: the SQL being turned into a dbt model.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface ToModelState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Team comments: the shared docs' comments on the project's models.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CommentsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Cost check: the last scan estimate and any scan allowed once.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CostState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Project health: the health check issues on the changed models.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface HealthState {}
+
+// ---------------------------------------------------------------------------------------------------
+// SQL graph: the edited model's SQL graph.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface SqlGraphState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Docs coverage and propagation: what the project documents.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface DocsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Profile CTEs: each CTE's row count and timing.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CteProfileState {}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -217,6 +312,26 @@ declare module 'claude-code' {
       lineageStale: string | null
       lineageLoading: boolean
       isLineageBandHidden: boolean
+      /** The status line's parts by owner, `integrations` and each feature's id (hooks/status-line.ts). */
+      statusParts: Record<string, string>
+      /** hooks/features/: RunsState. */
+      runs: Shaped<RunsState | null>
+      /** hooks/features/: DeferState. */
+      defer: DeferState | null
+      /** hooks/features/: ToModelState. */
+      toModel: ToModelState | null
+      /** hooks/features/: CommentsState. */
+      comments: CommentsState | null
+      /** hooks/features/: CostState. */
+      cost: CostState | null
+      /** hooks/features/: HealthState. */
+      health: HealthState | null
+      /** hooks/features/: SqlGraphState. */
+      sqlGraph: SqlGraphState | null
+      /** hooks/features/: DocsState. */
+      docs: DocsState | null
+      /** hooks/features/: CteProfileState. */
+      cteProfile: CteProfileState | null
     }
   }
 }
