@@ -135,3 +135,8 @@ test('a here-string inside a substitution is no heredoc', () => {
   const line = `dbt run -s a && echo "$(cat <<< text\n)"`
   expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
 })
+
+test('a heredoc right after an escaped < is still a heredoc, so its quotes are text', () => {
+  const line = `dbt run -s a && echo "$(cat \\<<<'EOF'\nit's\nEOF\n)"`
+  expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
+})

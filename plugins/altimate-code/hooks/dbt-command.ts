@@ -66,7 +66,10 @@ function substitutionEnd(line: string, at: number): number {
         j = heredocBodyEnd(line, j, delimiter, strip)
         if (j < 0) return -1
       }
-    } else if (c === '<' && line[j + 1] === '<' && line[j + 2] !== '<' && line[j - 1] !== '<') {
+    } else if (c === '<' && line[j + 1] === '<' && line[j + 2] === '<') {
+      // A here-string: its word is read as ordinary text, and its `<<` is no heredoc.
+      j += 2
+    } else if (c === '<' && line[j + 1] === '<') {
       // A heredoc's body is text: its quotes and parentheses are not read.
       const heredoc = HEREDOC.exec(line.slice(j))
       if (heredoc) {
