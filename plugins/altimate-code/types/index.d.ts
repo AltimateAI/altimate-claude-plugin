@@ -209,7 +209,7 @@ export interface CostState {
   unsupportedAdapter: string | null
   /** The newest estimate: what was estimated, in bytes, as the dry run wrote it. */
   lastEstimate: { target: string; bytes: number; display: string } | null
-  /** The command held for being over the limit, until it is allowed or a later dbt command is not held; `bytes` is its scan's upper bound. */
+  /** The command held for being over the limit, until it is allowed or a later dbt command is estimated under the limit; `bytes` is its scan's upper bound. */
   held: { command: string; target: string; bytes: number; display: string } | null
   /** /allow-scan was given for the held command: that same command runs once. */
   allowOnce: boolean

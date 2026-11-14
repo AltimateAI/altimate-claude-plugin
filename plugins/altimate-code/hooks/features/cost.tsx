@@ -90,7 +90,7 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {}
 
-/** This feature's line in the band: the command held, until it is allowed or a later dbt command is not held. */
+/** This feature's line in the band: the command held, until it is allowed or a later dbt command is estimated under the limit. */
 export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderElement | null> {
   const held = (await read($, costAtom))?.held
   if (!held) return null
