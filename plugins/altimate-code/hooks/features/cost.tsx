@@ -116,6 +116,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   if (state.unsupportedAdapter) return null
 
   const lines: string[] = []
+  let estimated = false
   const over: { label: string; bytes: number; display: string }[] = []
   // One budget for the whole command, however many queries it names.
   const until = (await $.clock.now()) + ESTIMATE_BUDGET_MS
@@ -136,6 +137,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       lines.push(`cost · no estimate for ${label}: ${answer.reason}`)
       continue
     }
+    estimated = true
     await update($, costAtom, prev => ({ ...(prev ?? FRESH), lastEstimate: { target: label, bytes: answer.bytes, display: answer.display } }))
     await setStatusPart($, 'cost', `scan ≈ ${answer.display}`)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}`)
@@ -164,8 +166,9 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       deny: `≈ ${worst.display} would be scanned, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
     }
   }
-  // Nothing held: an earlier hold is over, as the person has moved on, and so is its allowance.
-  if (state.held || state.allowOnce) {
+  // A command that was estimated and is under the limit ends an earlier hold, and its allowance. One that
+  // was not estimated says nothing, so the hold stays.
+  if (estimated && (state.held || state.allowOnce)) {
     await update($, costAtom, prev => (prev?.held || prev?.allowOnce ? { ...prev, held: null, allowOnce: false } : prev))
     const last = (await read($, costAtom))?.lastEstimate
     await setStatusPart($, 'cost', last ? `scan ≈ ${last.display}` : null)
@@ -267,12 +270,14 @@ function targetOf(command: string, invocation: DbtInvocation, all: DbtInvocation
 /** The SQL of `--inline` in a dbt command's text, unquoted as the shell would; null when there is none. */
 export function inlineSql(text: string): string | null {
   const words = shellWords(text)
+  // dbt keeps the last of a repeated option.
+  let found: string | null = null
   for (let i = 0; i < words.length; i++) {
     const word = words[i]!
-    if (word === '--inline') return words[i + 1] ?? null
-    if (word.startsWith('--inline=')) return word.slice('--inline='.length)
+    if (word === '--inline') found = words[i + 1] ?? null
+    else if (word.startsWith('--inline=')) found = word.slice('--inline='.length)
   }
-  return null
+  return found
 }
 
 /** The words of a command's text with their quotes and backslashes resolved. */

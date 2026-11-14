@@ -262,11 +262,30 @@ test('dbt show --inline with its SQL on the next line after a backslash is estim
 })
 
 test('letting a later command through clears the hold from the status line', async ($, on) => {
-  const { clock, statuses } = await start($, on, { answers: { orders: OVER } })
+  const { clock, statuses } = await start($, on, { answers: { orders: OVER, customers: UNDER } })
   await $.tool.call(bash('dbt run -s orders'))
-  await $.tool.call(bash('dbt run -s +orders'))
+  await $.tool.call(bash('dbt run -s customers'))
   await clock.settle()
   expect(statuses.filter(Boolean).at(-1)).not.toContain('held')
+})
+
+test('a variant of the held command that is not estimated leaves the hold in place', async ($, on) => {
+  const { clock, ran } = await start($, on, { answers: { orders: OVER } })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  await $.tool.call(bash('dbt run -s +orders'))
+  await $.tool.call(bash('dbt run -s orders --full-refresh'))
+  await clock.settle()
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeUndefined()
+  expect(ran.at(-1)).toBe('dbt run -s orders')
+})
+
+test('a repeated --inline is estimated from the last one, as dbt reads it', async ($, on) => {
+  const { clock, estimates } = await start($, on, { answers: { 'select * from big': OVER } })
+  const result: any = await $.tool.call(bash(`dbt show --inline 'select 1' --inline 'select * from big'`))
+  await clock.settle()
+  expect(estimates).toEqual(['select * from big'])
+  expect(result.deny).toContain('20.0 GiB')
 })
 
 test('the lines under a command are the latest estimate of it, never an earlier one', async ($, on) => {
@@ -307,6 +326,7 @@ test('inlineSql reads the query as the shell would', () => {
   expect(inlineSql(`dbt show --inline select\\ 1 --limit 5`)).toBe('select 1')
   expect(inlineSql(`dbt show --inline \\\n 'select 1'`)).toBe('select 1')
   expect(inlineSql('dbt show -s orders')).toBeNull()
+  expect(inlineSql(`dbt show --inline 'select 1' --inline='select 2'`)).toBe('select 2')
 })
 
 test('formatBytes writes the units the dry run does', () => {
