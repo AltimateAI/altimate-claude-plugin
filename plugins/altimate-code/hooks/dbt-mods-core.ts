@@ -525,7 +525,7 @@ export const sameFailure = (a: DbtFailure, b: DbtFailure): boolean => {
   return !isVersioned(a) && !isVersioned(b)
 }
 
-const isVersioned = (failure: DbtFailure): boolean => failure.kind === 'model' && !failure.id.includes('@') && failure.id.split('.').length >= 4
+export const isVersioned = (failure: DbtFailure): boolean => failure.kind === 'model' && !failure.id.includes('@') && failure.id.split('.').length >= 4
 
 /** The failed nodes a dbt command's own text names: what the run_results.json the command wrote does not hold (another invocation's failures, a parse error that wrote none). */
 export function failuresFromText(output: string): DbtFailure[] {

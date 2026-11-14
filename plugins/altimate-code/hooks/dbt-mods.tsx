@@ -6,7 +6,7 @@ import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later } from './altimate-cli'
-import { loadPaneSizes, paneRequest, sizeControls, sizesAround } from './pane-size'
+import { loadPaneSizes, noteTerminal, paneRequest, sizeControls, sizesAround } from './pane-size'
 import {
   cellText,
   columnDrift,
@@ -18,6 +18,7 @@ import {
   failuresFrom,
   failuresFromText,
   sameFailure,
+  isVersioned,
   fixPrompt,
   logErrors,
   modelContext,
@@ -39,7 +40,7 @@ import {
 const RESULTS_PANE = 'altimate-results'
 const RESULTS_TITLE = 'Query results'
 // Wide by default: a data grid needs more than the sidebar share a dbt check gets.
-const RESULTS_SIZES = sizesAround({ columns: 160, rows: 30 })
+const RESULTS_SIZES = sizesAround({ columns: 160, rows: 30, share: 0.35 })
 const DOCTOR_PANE = 'altimate-doctor'
 const DOCTOR_TITLE = 'dbt doctor'
 const CHECK_PANE = 'altimate-check'
@@ -494,7 +495,13 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
     const manifest = await readManifest($, root)
     failures = failuresFrom(runResults, manifest?.manifest)
   }
-  for (const one of failuresFromText(output)) if (!failures.some(known => sameFailure(known, one))) failures.push(one)
+  // A versioned artifact failure whose file is unknown (a manifest too large to read) stands for the text
+  // failure of its name when only one text failure carries that name, or when its own message names the file.
+  const texts = failuresFromText(output)
+  for (const one of texts) {
+    const lone = texts.filter(other => other.kind === one.kind && other.name === one.name).length === 1
+    if (!failures.some(known => sameFailure(known, one) || (isVersioned(known) && !known.path && known.kind === one.kind && known.name === one.name && (lone || (!!one.path && known.message.includes(`(${one.path})`)))))) failures.push(one)
+  }
   // Nothing dbt itself reported (a command the permission check refused, a missing binary): no band.
   if (failures.length === 0) return null
   const view: FailureView = { command, root, verb, select, options, failures, at: await $.clock.now() }
@@ -697,8 +704,8 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
   return { files: changed.sort((a, b) => b.mtimeMs - a.mtimeMs).map(one => one.path), complete: complete && scanned <= MAX_SCANNED }
 }
 
-/** The adapter type the project's profile names, from the profiles.yml dbt itself would read. */
-async function profileType($: EngineInterface, root: string): Promise<string | null> {
+/** The adapter type the project's profile names, from the profiles.yml dbt itself would read; `'unknown'` when its target is a template this cannot settle. */
+async function profileType($: EngineInterface, root: string): Promise<string | null | 'unknown'> {
   const project = await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')
   const profile = /^profile:\s*['"]?([\w-]+)/m.exec(project)?.[1]
   if (!profile) return null
@@ -720,7 +727,15 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   const body = text.slice(at).split('\n').slice(1)
   const end = body.findIndex(line => /^\S/.test(line))
   const block = (end < 0 ? body : body.slice(0, end)).join('\n')
-  const target = /^\s+target:\s*['"]?([\w-]+)/m.exec(block)?.[1]
+  let target = /^\s+target:\s*['"]?([\w-]+)/m.exec(block)?.[1]
+  // A Jinja target is settled only for `env_var('X', 'default')`: X's value when set, else the default. Never a guess.
+  const raw = /^\s+target:\s*(.*)$/m.exec(block)?.[1] ?? ''
+  if (raw.includes('{{')) {
+    const call = /^['"]?\{\{\s*env_var\(\s*(['"])([^'"]+)\1\s*(?:,\s*(['"])([^'"]*)\3\s*)?\)\s*\}\}['"]?\s*(?:#.*)?$/.exec(raw.trim())
+    const value = call ? ((await env(call[2]!)) || call[4] || '') : ''
+    if (!/^[\w-]+$/.test(value)) return 'unknown'
+    target = value
+  }
   const types = [...block.matchAll(/^\s+type:\s*['"]?([\w-]+)/gm)].map(one => one[1]!)
   if (target) {
     const output = new RegExp(`^(\\s+)['"]?${target}['"]?:[ \\t]*(\\{.*|#.*)?$`, 'm').exec(block)
@@ -764,7 +779,8 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   // Adapter: the profile's type, installed beside dbt-core.
   const type = await profileType($, root)
   const installed = info.adapters.map(one => one.name)
-  if (!type) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `no profile found for this project${installed.length ? `; installed: ${installed.join(', ')}` : ''}`, fix: 'add the profile to profiles.yml (or set DBT_PROFILES_DIR)' })
+  if (type === 'unknown') checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `the profile's target is set by a template, so which adapter it uses could not be told${installed.length ? `; installed: ${installed.join(', ')}` : ''}`, fix: null })
+  else if (!type) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `no profile found for this project${installed.length ? `; installed: ${installed.join(', ')}` : ''}`, fix: 'add the profile to profiles.yml (or set DBT_PROFILES_DIR)' })
   // dbt-core's version unread (dbt Fusion bundles its adapters, a broken install): nothing to hold the profile to.
   else if (installed.length === 0 && !info.core) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `the profile uses ${type}; could not tell which adapters are installed`, fix: null })
   else if (installed.length === 0) checks.push({ id: 'adapter', label: 'Adapter', status: 'fail', detail: `the profile uses ${type}, but no dbt adapter is installed beside dbt-core`, fix: `pip install dbt-${type}` })
@@ -1166,6 +1182,7 @@ export function registerDbtMods(on: On) {
     const root = await sessionProject($)
     if (!root) return { text: 'No dbt project here: start Claude Code in a dbt project (a folder with dbt_project.yml).' }
     const args = e.args.trim()
+    noteTerminal(e.presentation?.columns)
     try {
       await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...(await paneRequest($, RESULTS_PANE, RESULTS_SIZES)), focus: true, closeOnEscape: true })
     } catch (error) {
@@ -1205,7 +1222,7 @@ export function registerDbtMods(on: On) {
     const recent = history.filter(one => !one.bookmarked && one.id !== result?.id).slice(0, HISTORY_SHOWN)
     // Clear history is offered while any query that is not bookmarked is kept, the one shown included.
     const clearable = history.some(one => !one.bookmarked)
-    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, sizes: RESULTS_SIZES, keyPrefix: 'results' }, work => later($, work))
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, spec: RESULTS_SIZES, keyPrefix: 'results', terminal: e.viewport?.columns }, work => later($, work))
 
     const table = (() => {
       if (!result) return <Text dimColor>Run /dbt-show &lt;model&gt;, or ask Claude to `dbt show` a model.</Text>

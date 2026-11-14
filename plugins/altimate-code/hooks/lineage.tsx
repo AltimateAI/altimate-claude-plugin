@@ -13,7 +13,7 @@ import type {
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
 import { endDbtMods, newTurnDbtMods } from './dbt-mods'
-import { loadPaneSizes, paneRequest, sizeControls, sizesAround } from './pane-size'
+import { loadPaneSizes, noteTerminal, paneRequest, sizeControls, sizesAround } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
@@ -137,7 +137,7 @@ const BOX_CAP = 4
 const UNFOLDED = 40
 // Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
 // surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
-const PANE_SIZES = sizesAround({ columns: 110, rows: 34 })
+const PANE_SIZES = sizesAround({ columns: 110, rows: 34, share: 0.4 })
 // The engine's label for a column it could not classify, which is every column read from a CTE or a
 // qualified table, so all of a dbt model's. It says nothing about the column, so the pane leaves it out.
 const NOT_SURE = 'Not sure'
@@ -1293,6 +1293,7 @@ export function registerLineage(on: On) {
 
   on('command.run', { command: COMMAND }, async ($, e) => {
     const model = e.args.trim()
+    noteTerminal(e.presentation?.columns)
     const current = await read($, focusAtom)
     if (!model && !current) {
       await update($, messageAtom, () => 'Read or edit a dbt model, or run /lineage <model>[.column].')
@@ -1601,7 +1602,7 @@ export function registerLineage(on: On) {
       ) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
-    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, sizes: PANE_SIZES, keyPrefix: 'lineage' }, work => later($, work))
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, spec: PANE_SIZES, keyPrefix: 'lineage', terminal: e.viewport?.columns }, work => later($, work))
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">

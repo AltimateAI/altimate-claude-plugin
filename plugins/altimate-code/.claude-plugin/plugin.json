@@ -25,7 +25,7 @@
     "dbt_mods": {
       "type": "boolean",
       "title": "dbt helpers",
-      "description": "Compile and validate each model Claude edits, Explain and Fix on a failed dbt run, the dbt results pane, model context on read, and the dbt environment doctor at session start. They run the project's own dbt.",
+      "description": "Compile and validate each model Claude edits, Explain and Fix on a failed dbt run, the Query results pane, model context on read, and the dbt environment doctor at session start. They run the project's own dbt.",
       "default": true
     }
   }

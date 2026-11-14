@@ -772,6 +772,23 @@ test('the pane is titled Query results, opens wide, and Min / Default / Max resi
   expect(sizes.at(-1)).toMatchObject({ columns: 60, rows: 14 })
 })
 
+test('with the terminal width known, Min, Default and Max are shares of it and differ when docked', async ($, on) => {
+  const { clock, sizes } = await start($, on)
+  const width = { plugin: 'altimate-code', surface: 'terminal', viewport: { columns: 200, rows: 50, isFullscreen: true } } as const
+  await $.command.run({ command: 'dbt-show', args: 'orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  // 35% of 200 for Default.
+  expect(sizes.filter(one => one.id === 'altimate-results').at(-1)).toMatchObject({ columns: 70 })
+  const ui = await $.ui.mount({ ...RESULTS, ...width })
+  await ui.press({ key: 'results-size-max' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 90, rows: 60 })
+  await ui.press({ key: 'results-size-min' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 50, rows: 14 })
+  await ui.unmount()
+})
+
 test('a saved Max size opens the pane wide again in the next session, and a wide grid keeps long values whole', async ($, on) => {
   const { clock, sizes } = await start($, on, { stored: { 'pane-sizes': { 'altimate-results': 'max' } }, show: { rows: [{ order_id: 1, note: 'n'.repeat(70) }] } })
   await $.command.run({ command: 'dbt-show', args: 'orders' })
@@ -2139,10 +2156,43 @@ test('with a manifest too large to read, the artifact\'s versioned failure does 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   await band.press({ key: 'dbt-explain' })
   await clock.settle()
-  expect(prompts[0]).toContain('(models/orders_v1.sql)')
-  expect(prompts[0]).toContain('(models/orders_v2.sql)')
+  // Each version once: the artifact's v2 stands for the text's v2.
+  expect(prompts[0]!.split('\n- ').length - 1).toBe(2)
+  const entries = prompts[0]!.split('\n- ').slice(1)
+  expect(entries[0]).toContain('artifact v2')
+  expect(entries[1]).toMatch(/^model orders \(models\/orders_v1\.sql\)/)
   await band.unmount()
 })
+
+test('with a manifest too large to read, one failed version is one entry', async ($, on) => {
+  const results = { results: [{ unique_id: 'model.shop.orders.v2', status: 'error', message: 'Compilation Error in model orders\n  artifact v2' }] }
+  const { clock, prompts, setBash } = await start($, on, { manifestSize: 9 * 1024 * 1024, files: { 'target/run_results.json': JSON.stringify(results) } })
+  setBash({ stdout: `${HEADER}\n06:45:43  Compilation Error in model orders (models/orders_v2.sql)\n  text v2\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=1`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders.v2' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: 'orders' })).toBeDefined()
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts[0]!.split('\n- ').length - 1).toBe(1)
+  await band.unmount()
+})
+
+const jinjaProfile = (target: string) => `shop:\n  target: ${target}\n  outputs:\n    wh:\n      type: snowflake\n    dev:\n      type: duckdb\n`
+for (const [name, target, env, expected] of [
+  ['an env_var default is the target when the variable is not set', `"{{ env_var('DBT_TARGET', 'dev') }}"`, {}, 'duckdb 1.10.1'],
+  ['an env_var that is set picks the target', `"{{ env_var('DBT_TARGET', 'dev') }}"`, { DBT_TARGET: 'wh' }, 'the profile uses snowflake, but only duckdb is installed'],
+  ['any other template is not guessed at', `"{{ var('t') }}"`, {}, /the profile's target is set by a template/],
+] as const) {
+  test(`doctor adapter: ${name}`, async ($, on) => {
+    const { clock } = await start($, on, { env: env as any, profiles: jinjaProfile(target) })
+    await $.command.run({ command: 'dbt-doctor', args: '' })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: expected })).toBeDefined()
+    await ui.unmount()
+  })
+}
 
 test('two versions of one model that both failed are both offered, though the artifact holds only one', async ($, on) => {
   const manifest = shopManifest()
