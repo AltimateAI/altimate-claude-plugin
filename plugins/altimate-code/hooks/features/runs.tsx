@@ -290,13 +290,15 @@ async function load($: EngineInterface, root: string, open: string | null = null
 }
 
 /** The Bash calls in flight that run dbt, whatever folder they work in: when each started, by tool-use id. */
-const started = new Map<string, { at: number; cwd: string }>()
+const started = new Map<string, { at: number; cwd: string; writes: boolean }>()
 /** The dbt calls that just ended: a run is recorded only when no other dbt call overlapped it. */
 const finished: Array<{ at: number; ended: number }> = []
 /** A call in flight longer than this is taken as one that never ended (refused or cancelled), so it stops holding back later calls. */
 const IN_FLIGHT_MS = 60 * 60 * 1000
 /** What Claude is told when a run was left out because dbt commands overlapped. */
 export const OVERLAP_LINE = 'run not recorded: overlapping dbt commands'
+/** Whether the command runs dbt at all, with any subcommand. */
+export const runsDbt = (command: string) => parseDbtCommand(command).length > 0
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** The artifact folder a call writes to, as one string: the project's own `target` and an unnamed one are the same folder. */
@@ -342,20 +344,27 @@ async function readRun($: EngineInterface, invocations: Invocation[], all: Invoc
 /** Reads each project's last run that this call wrote and records them; Claude gets one line each, or null. */
 async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   const ended = await $.clock.now()
+  // The bookkeeping below is one block with no await in it: two calls ending together each see the other.
   const began = started.get(startKey(e))
   started.delete(startKey(e))
   if (began === undefined) return null
+  // Any other dbt call that ran at the same time, in any folder, may have written the file this call would read: whose
+  // artifact it is cannot be told, so nothing is recorded and Claude is told so. Never a guess.
+  const live = [...started.values()].filter(other => other.at > ended - IN_FLIGHT_MS && other.at <= ended)
+  const overlapped =
+    // One that ran longer than the limit is itself taken as never ended, so what ran meanwhile is no longer known.
+    ended - began.at > IN_FLIGHT_MS ||
+    live.length > 0 ||
+    finished.some(other => other.ended > began.at && other.at < ended)
+  finished.push({ at: began.at, ended })
+  // Kept back to the oldest call still running, never past the limit.
+  const cutoff = Math.max(ended - IN_FLIGHT_MS, Math.min(ended, ...live.map(other => other.at)))
+  while (finished.length > 500 || (finished[0] && finished[0].ended < cutoff)) finished.shift()
+  if (!began.writes) return null
+  if (overlapped) return OVERLAP_LINE
   const root = await $.session.root()
   const invocations = resultsInvocations(e.command, root, began.cwd)
   const mine = [...new Set(invocations.map(folderOf))]
-  // Any other dbt call that ran at the same time, in any folder, may have written the file this call would read: whose
-  // artifact it is cannot be told, so nothing is recorded and Claude is told so. Never a guess.
-  const overlapped =
-    [...started.values()].some(other => other.at > ended - IN_FLIGHT_MS) ||
-    finished.some(other => other.ended > began.at && other.at < ended)
-  finished.push({ at: began.at, ended })
-  while (finished.length > 200 || (finished[0] && finished[0].ended < ended - IN_FLIGHT_MS)) finished.shift()
-  if (overlapped) return OVERLAP_LINE
   const free = mine
   // One read for each folder, at the same time: a slow one does not take the others' time, a failed one does not stop them.
   const read = await Promise.all(
@@ -478,9 +487,10 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
 
 /** The command to run in place of `e.command`; null keeps it. */
 export async function bashRewrite($: EngineInterface, e: BashCall): Promise<string | null> {
-  if (!writesResults(e.command)) return null
+  // Every dbt call counts for the overlap rule, one that writes no results too: it is told apart only by `writes`.
+  if (!runsDbt(e.command)) return null
   const cwd = await $.session.cwd()
-  started.set(startKey(e), { at: await $.clock.now(), cwd })
+  started.set(startKey(e), { at: await $.clock.now(), cwd, writes: writesResults(e.command) })
   // A call that never reaches bashAfter (refused, cancelled) leaves its entry: only the newest are kept.
   while (started.size > 50) started.delete(started.keys().next().value as string)
   return null

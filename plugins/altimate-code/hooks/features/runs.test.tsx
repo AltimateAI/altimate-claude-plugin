@@ -32,7 +32,7 @@ const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_order
 })
 
 /** The session beneath the plugin: a store in memory, and the CLI answering `dbt_run_results` with `answer(args)`. */
-async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; slow?: string } = {}) {
+async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; slow?: string; slowMs?: number; rootDelay?: number } = {}) {
   const clock = mock.clock(on, { now: T0 })
   const stored = new Map<string, unknown>()
   const filled: string[] = []
@@ -40,7 +40,10 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
   const mcpCalls: string[] = []
   on('command.register', () => ({ value: { command: 'runs' } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
-  on('session.root', () => ({ value: ROOT }))
+  on('session.root', async () => {
+    if (options.rootDelay) await clock.advance(options.rootDelay)
+    return { value: ROOT }
+  })
   on('session.cwd', () => ({ value: options.cwd ?? ROOT }))
   on('store.get', (_: unknown, e: { key: string }) => ({ value: stored.get(e.key) }))
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
@@ -67,7 +70,7 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
   on('ui.open', () => ({ value: {} }))
   // A call takes time: the guard against overlapping calls must not take a call for its own overlap.
   on('tool.call', async (_: unknown, e: { tool_use_id?: string }) => {
-    await clock.advance(e.tool_use_id !== undefined && e.tool_use_id === options.slow ? 600 : 100)
+    await clock.advance(e.tool_use_id !== undefined && e.tool_use_id === options.slow ? (options.slowMs ?? 600) : 100)
     if (e.tool_use_id !== undefined && e.tool_use_id === options.denied) throw new Error('cancelled')
     return { result: { ok: true } }
   })
@@ -359,15 +362,46 @@ test('a call whose folder cannot be told, alone, records nothing and says nothin
 })
 
 test('dbt calls that follow one another do not overlap: each is recorded', async ($, on) => {
-  const ids = ['inv-1', 'inv-2']
-  const { stored, clock } = await start($, on, () => view(ids[0]!, undefined, 'build', AFTER))
+  let id = 'inv-1'
+  let at = AFTER
+  const { stored, clock } = await start($, on, () => view(id, undefined, 'build', at))
   const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a' })
   expect(first.context).toEqual(['build: 1 ok'])
   await clock.advance(1000)
+  id = 'inv-2'
+  at = new Date(clock.now()).toISOString()
   const second: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s b' })
-  // The same file again: its invocation id is already kept, so nothing new is recorded and nothing is said.
-  expect(second.context ?? []).toEqual([])
-  expect(kept(stored)).toHaveLength(1)
+  expect(second.context).toEqual(['build: 1 ok'])
+  expect(kept(stored).map(run => run.id)).toEqual(['inv-2', 'inv-1'])
+})
+
+test('calls that end in the same moment are both left out, even when the host answers slowly', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-x', undefined, 'build', AFTER), { rootDelay: 50 })
+  const both: any[] = await Promise.all([
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'one' }),
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s b', tool_use_id: 'two' }),
+  ])
+  expect(stored.has('runs')).toBe(false)
+  expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
+})
+
+test('a dbt call that writes no results still overlaps: the build is left out, the listing says nothing', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-x', undefined, 'build', AFTER))
+  const both: any[] = await Promise.all([
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'one' }),
+    $.tool.call({ tool: 'Bash', command: 'dbt ls', tool_use_id: 'two' }),
+  ])
+  expect(stored.has('runs')).toBe(false)
+  expect(both.map(one => one.context ?? [])).toEqual([[NOT_RECORDED], []])
+})
+
+test('a call that ran longer than an hour is not recorded: what ran meanwhile is no longer known', async ($, on) => {
+  let now = () => T0
+  const { stored, clock } = await start($, on, () => view('inv-x', undefined, 'build', new Date(now()).toISOString()), { slow: 'long', slowMs: 61 * 60 * 1000 })
+  now = clock.now
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build', tool_use_id: 'long' })
+  expect(result.context).toEqual([NOT_RECORDED])
+  expect(stored.has('runs')).toBe(false)
 })
 
 test('a call that never ended (refused or cancelled) overlaps what ran meanwhile, and stops counting after an hour', async ($, on) => {
