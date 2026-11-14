@@ -6,7 +6,7 @@ import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later } from './altimate-cli'
-import { loadPaneSizes, noteTerminal, paneRequest, sizeControls, sizesAround } from './pane-size'
+import { loadPaneSizes, noteTerminal, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
   cellText,
   columnDrift,
@@ -39,8 +39,8 @@ import {
 
 const RESULTS_PANE = 'altimate-results'
 const RESULTS_TITLE = 'Query results'
-// Wide by default: a data grid needs more than the sidebar share a dbt check gets.
-const RESULTS_SIZES = sizesAround({ columns: 160, rows: 30, share: 0.35 })
+// Wide by default: a data grid takes the widest dock.
+const RESULTS_SIZES: PaneSpec = { rows: 30 }
 const DOCTOR_PANE = 'altimate-doctor'
 const DOCTOR_TITLE = 'dbt doctor'
 const CHECK_PANE = 'altimate-check'
@@ -707,9 +707,10 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
 /** The adapter type the project's profile names, from the profiles.yml dbt itself would read; `'unknown'` when its target is a template this cannot settle. */
 async function profileType($: EngineInterface, root: string): Promise<string | null | 'unknown'> {
   const project = await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')
-  const profile = /^profile:\s*['"]?([\w-]+)/m.exec(project)?.[1]
-  if (!profile) return null
   const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
+  // dbt's selection: DBT_PROFILE over dbt_project.yml's `profile:`.
+  const profile = (await env('DBT_PROFILE')) || /^profile:\s*['"]?([\w-]+)/m.exec(project)?.[1]
+  if (!profile || !/^[\w-]+$/.test(profile)) return null
   // dbt reads one profiles.yml: DBT_PROFILES_DIR's, else the project folder's when it has one, else ~/.dbt's.
   const home = await env('HOME')
   // A relative DBT_PROFILES_DIR is the project's (dbt runs there); `~` is the home folder.
@@ -726,28 +727,39 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   if (at < 0) return null
   const body = text.slice(at).split('\n').slice(1)
   const end = body.findIndex(line => /^\S/.test(line))
-  const block = (end < 0 ? body : body.slice(0, end)).join('\n')
-  let target = /^\s+target:\s*['"]?([\w-]+)/m.exec(block)?.[1]
-  // A Jinja target is settled only for `env_var('X', 'default')`: X's value when set, else the default. Never a guess.
-  const raw = /^\s+target:\s*(.*)$/m.exec(block)?.[1] ?? ''
-  if (raw.includes('{{')) {
-    const call = /^['"]?\{\{\s*env_var\(\s*(['"])([^'"]+)\1\s*(?:,\s*(['"])([^'"]*)\3\s*)?\)\s*\}\}['"]?\s*(?:#.*)?$/.exec(raw.trim())
-    const value = call ? ((await env(call[2]!)) || call[4] || '') : ''
-    if (!/^[\w-]+$/.test(value)) return 'unknown'
-    target = value
+  const lines = end < 0 ? body : body.slice(0, end)
+  const block = lines.join('\n')
+  // The target: DBT_TARGET, else the profile's `target:` (a literal, or `env_var('X', 'default')`), else `default`.
+  let target = await env('DBT_TARGET')
+  if (!target) {
+    const raw = /^\s+target:\s*(.*)$/m.exec(block)?.[1]?.trim() ?? ''
+    if (!raw) target = 'default'
+    else if (raw.includes('{{')) {
+      const call = /^['"]?\{\{\s*env_var\(\s*(['"])([^'"]+)\1\s*(?:,\s*(['"])([^'"]*)\3\s*)?\)\s*\}\}['"]?\s*(?:#.*)?$/.exec(raw)
+      target = call ? ((await env(call[2]!)) || call[4] || '') : ''
+    } else target = /^['"]?([\w-]+)/.exec(raw)?.[1] ?? ''
   }
-  const types = [...block.matchAll(/^\s+type:\s*['"]?([\w-]+)/gm)].map(one => one[1]!)
-  if (target) {
-    const output = new RegExp(`^(\\s+)['"]?${target}['"]?:[ \\t]*(\\{.*|#.*)?$`, 'm').exec(block)
-    if (output) {
-      // Flow style: `prod: {type: snowflake, …}`.
-      const flow = output[2]?.startsWith('{') ? /\btype:\s*['"]?([\w-]+)/.exec(output[2])?.[1] : null
-      if (flow) return flow
-      const type = /^\s+type:\s*['"]?([\w-]+)/m.exec(block.slice(output.index + output[0].length))?.[1]
+  if (!/^[\w-]+$/.test(target)) return 'unknown'
+  // The selected output, and its own lines only: a missing output or one with no type says nothing, never the next one's.
+  const outputs = lines.findIndex(line => /^\s+outputs:\s*(?:#.*)?$/.test(line))
+  if (outputs < 0) return 'unknown'
+  const entry = new RegExp(`^(\\s+)['"]?${target}['"]?:[ \\t]*(\\{.*|#.*)?$`)
+  const outputsIndent = /^\s*/.exec(lines[outputs]!)![0].length
+  for (let i = outputs + 1; i < lines.length; i++) {
+    if (lines[i]!.trim() && /^\s*/.exec(lines[i]!)![0].length <= outputsIndent) break
+    const found = entry.exec(lines[i]!)
+    if (!found) continue
+    // Flow style: `prod: {type: snowflake, …}`.
+    if (found[2]?.startsWith('{')) return /\btype:\s*['"]?([\w-]+)/.exec(found[2])?.[1] ?? 'unknown'
+    const indent = found[1]!.length
+    for (const next of lines.slice(i + 1)) {
+      if (next.trim() && /^\s*/.exec(next)![0].length <= indent) break
+      const type = /^\s+type:\s*['"]?([\w-]+)/.exec(next)?.[1]
       if (type) return type
     }
+    return 'unknown'
   }
-  return types[0] ?? null
+  return 'unknown'
 }
 
 async function runDoctor($: EngineInterface, root: string, connection = false): Promise<DoctorView> {
@@ -1222,7 +1234,7 @@ export function registerDbtMods(on: On) {
     const recent = history.filter(one => !one.bookmarked && one.id !== result?.id).slice(0, HISTORY_SHOWN)
     // Clear history is offered while any query that is not bookmarked is kept, the one shown included.
     const clearable = history.some(one => !one.bookmarked)
-    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, spec: RESULTS_SIZES, keyPrefix: 'results', terminal: e.viewport?.columns }, work => later($, work))
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, spec: RESULTS_SIZES, keyPrefix: 'results', terminal: e.surface === 'terminal' ? e.viewport?.columns : undefined }, work => later($, work))
 
     const table = (() => {
       if (!result) return <Text dimColor>Run /dbt-show &lt;model&gt;, or ask Claude to `dbt show` a model.</Text>

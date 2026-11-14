@@ -15,34 +15,32 @@ const SIZES_KEY = 'pane-sizes'
 
 const sizeAtom = atom({ plugin: 'altimate-code', key: 'paneSizes' } as const, {} as Record<string, PaneSize>)
 
-/** What a pane asks for by default: columns (docked) and rows (inline), and the share of the terminal its Default takes where the width is known. */
-export type PaneSpec = { columns: number; rows: number; share: number }
-export const sizesAround = (spec: PaneSpec): PaneSpec => spec
+/** What a pane keeps of its own: the rows it asks for inline by default. Its width is the dock's, whatever the terminal. */
+export type PaneSpec = { rows: number }
 
-// The most a dock takes of the terminal, and the least a request can name.
+// The most a dock takes of the terminal, the least a request can name, and a width no terminal's 45% reaches.
 const DOCK_CAP = 0.45
 const DOCK_FLOOR = 24
-// The terminal's width as the last pane drawing or command saw it; null until one has.
+const WIDEST = 240
+// The terminal's width as the last terminal drawing or command saw it; null until one has.
 let terminalColumns: number | null = null
 
-/** Records the terminal's width, read from a drawing's viewport or a command's presentation. */
+/** Records the terminal's width, read from a terminal drawing's viewport or a command's presentation. */
 export const noteTerminal = (columns: number | undefined) => {
   if (typeof columns === 'number' && columns > 0) terminalColumns = columns
 }
 
 /**
- * A pane's three sizes. With the terminal's width known they are shares of it (a quarter, the pane's
- * own share, the dock's 45% cap), so they differ when docked; unknown, they are absolute requests that
- * the surface caps.
+ * A pane's three sizes. Default is the widest dock (the 45% the surface allows, or, before the width is
+ * known, a request wide enough that the surface caps it to the same), so it does not change when the width
+ * becomes known. Min is a quarter of the width. Max is as wide and as tall as an inline pane may be.
  */
 export function paneSizes(spec: PaneSpec): PaneSizes {
-  const width = terminalColumns
-  if (!width) return { min: { columns: 60, rows: 14 }, default: { columns: spec.columns, rows: spec.rows }, max: { columns: 240, rows: 60 } }
-  const share = (part: number) => Math.max(DOCK_FLOOR, Math.floor(width * part))
+  const widest = terminalColumns ? Math.max(DOCK_FLOOR, Math.floor(terminalColumns * DOCK_CAP)) : WIDEST
   return {
-    min: { columns: share(0.25), rows: 14 },
-    default: { columns: Math.min(spec.columns, share(spec.share)), rows: spec.rows },
-    max: { columns: share(DOCK_CAP), rows: 60 },
+    min: { columns: terminalColumns ? Math.max(DOCK_FLOOR, Math.floor(terminalColumns * 0.25)) : 60, rows: 14 },
+    default: { columns: widest, rows: spec.rows },
+    max: { columns: widest, rows: 60 },
   }
 }
 

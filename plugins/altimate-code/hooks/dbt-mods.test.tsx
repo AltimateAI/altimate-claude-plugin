@@ -750,8 +750,8 @@ test('the pane is titled Query results, opens wide, and Min / Default / Max resi
   const { clock, sizes, store } = await start($, on, { stored: { 'pane-sizes': { 'altimate-results': 'bogus' } } })
   await $.command.run({ command: 'dbt-show', args: 'orders' })
   await clock.settle()
-  // The default is a wide dock; a stored value that is no size is ignored.
-  expect(sizes.filter(one => one.id === 'altimate-results').at(-1)).toEqual({ id: 'altimate-results', title: 'Query results', columns: 160, rows: 30 })
+  // The default is the widest dock (a request the surface caps); a stored value that is no size is ignored.
+  expect(sizes.filter(one => one.id === 'altimate-results').at(-1)).toEqual({ id: 'altimate-results', title: 'Query results', columns: 240, rows: 30 })
 
   const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^Query results$|^orders$/ })).toBeDefined()
@@ -772,14 +772,25 @@ test('the pane is titled Query results, opens wide, and Min / Default / Max resi
   expect(sizes.at(-1)).toMatchObject({ columns: 60, rows: 14 })
 })
 
-test('with the terminal width known, Min, Default and Max are shares of it and differ when docked', async ($, on) => {
-  const { clock, sizes } = await start($, on)
-  const width = { plugin: 'altimate-code', surface: 'terminal', viewport: { columns: 200, rows: 50, isFullscreen: true } } as const
+test('with the terminal width known, Default is the widest dock, Min a quarter and Max is taller; Default does not change when the width becomes known', async ($, on) => {
+  const { clock, sizes, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ id: 1 }], 'orders') })
+  const results = () => sizes.filter(one => one.id === 'altimate-results')
+  // Claude's show before any width is known: a request wide enough that the surface caps it to the widest dock.
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders' })
+  await clock.settle()
+  expect(results().at(-1)).toMatchObject({ columns: 240, rows: 30 })
+  // A command from a 200-column terminal makes the width known; the widest dock is 45% of it, as the cap says.
   await $.command.run({ command: 'dbt-show', args: 'orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
   await clock.settle()
-  // 35% of 200 for Default.
-  expect(sizes.filter(one => one.id === 'altimate-results').at(-1)).toMatchObject({ columns: 70 })
-  const ui = await $.ui.mount({ ...RESULTS, ...width })
+  expect(results().at(-1)).toMatchObject({ columns: 90, rows: 30 })
+  // A second Claude show after that asks for the same widest dock, not a narrower one.
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders --limit 3' })
+  await clock.settle()
+  expect(results().at(-1)).toMatchObject({ columns: 90, rows: 30 })
+
+  const terminal = { plugin: 'altimate-code', surface: 'terminal', viewport: { columns: 200, rows: 50, isFullscreen: true } } as const
+  const ui = await $.ui.mount({ ...RESULTS, ...terminal })
   await ui.press({ key: 'results-size-max' })
   await clock.settle()
   expect(sizes.at(-1)).toMatchObject({ columns: 90, rows: 60 })
@@ -787,6 +798,18 @@ test('with the terminal width known, Min, Default and Max are shares of it and d
   await clock.settle()
   expect(sizes.at(-1)).toMatchObject({ columns: 50, rows: 14 })
   await ui.unmount()
+})
+
+test('a pane drawn on another surface does not change the recorded terminal width', async ($, on) => {
+  const { clock, sizes } = await start($, on)
+  await $.command.run({ command: 'dbt-show', args: 'orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  // The desktop app reports the pane's own width.
+  const desktop = await $.ui.mount({ ...RESULTS, plugin: 'altimate-code', surface: 'desktop', viewport: { columns: 50, rows: 30 } })
+  await desktop.press({ key: 'results-size-max' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 90, rows: 60 })
+  await desktop.unmount()
 })
 
 test('a saved Max size opens the pane wide again in the next session, and a wide grid keeps long values whole', async ($, on) => {
@@ -2178,14 +2201,23 @@ test('with a manifest too large to read, one failed version is one entry', async
   await band.unmount()
 })
 
-const jinjaProfile = (target: string) => `shop:\n  target: ${target}\n  outputs:\n    wh:\n      type: snowflake\n    dev:\n      type: duckdb\n`
-for (const [name, target, env, expected] of [
-  ['an env_var default is the target when the variable is not set', `"{{ env_var('DBT_TARGET', 'dev') }}"`, {}, 'duckdb 1.10.1'],
-  ['an env_var that is set picks the target', `"{{ env_var('DBT_TARGET', 'dev') }}"`, { DBT_TARGET: 'wh' }, 'the profile uses snowflake, but only duckdb is installed'],
-  ['any other template is not guessed at', `"{{ var('t') }}"`, {}, /the profile's target is set by a template/],
-] as const) {
+const outputs = (...entries: string[]) => `  outputs:\n${entries.join('')}`
+const out = (name: string, type: string | null) => `    ${name}:\n${type ? `      type: ${type}\n` : ''}      path: x\n`
+const profileOf = (head: string, ...entries: string[]) => `shop:\n${head}${outputs(...entries)}`
+const adapterCases: [string, string, Record<string, string>, string | RegExp][] = [
+  ['an env_var default is the target when the variable is not set', profileOf(`  target: "{{ env_var('T', 'dev') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), {}, 'duckdb 1.10.1'],
+  ['an env_var that is set picks the target', profileOf(`  target: "{{ env_var('T', 'dev') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), { T: 'wh' }, 'the profile uses snowflake, but only duckdb is installed'],
+  ['any other template is not guessed at', profileOf(`  target: "{{ var('t') }}"\n`, out('wh', 'snowflake'), out('dev', 'duckdb')), {}, /the profile's target is set by a template/],
+  ['DBT_TARGET beats the profile\'s literal target', profileOf('  target: prod\n', out('prod', 'snowflake'), out('dev', 'duckdb')), { DBT_TARGET: 'dev' }, 'duckdb 1.10.1'],
+  ['DBT_PROFILE picks another profile', `shop:\n  target: dev\n${outputs(out('dev', 'snowflake'))}alternate:\n  target: dev\n${outputs(out('dev', 'duckdb'))}`, { DBT_PROFILE: 'alternate' }, 'duckdb 1.10.1'],
+  ['no target means the output named default', profileOf('', out('other', 'snowflake'), out('default', 'duckdb')), {}, 'duckdb 1.10.1'],
+  ['a literal target missing from the outputs cannot be told', profileOf('  target: prod\n', out('dev', 'duckdb')), {}, /could not be told/],
+  ['an env_var target missing from the outputs cannot be told', profileOf(`  target: "{{ env_var('T', 'prod') }}"\n`, out('dev', 'duckdb')), {}, /could not be told/],
+  ['an output with no type is not given the next one\'s', profileOf('  target: dev\n', out('dev', null), out('prod', 'duckdb')), {}, /could not be told/],
+]
+for (const [name, profiles, env, expected] of adapterCases) {
   test(`doctor adapter: ${name}`, async ($, on) => {
-    const { clock } = await start($, on, { env: env as any, profiles: jinjaProfile(target) })
+    const { clock } = await start($, on, { env, profiles })
     await $.command.run({ command: 'dbt-doctor', args: '' })
     await clock.settle()
     const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })

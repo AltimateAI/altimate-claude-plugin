@@ -231,8 +231,8 @@ test('the lineage pane keeps its default size and Min / Default / Max resize it'
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await $.command.run({ command: 'lineage', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
   await clock.settle()
-  // Opened from a 200-column terminal: Default is 40% of it.
-  expect(opens.at(-1)).toEqual({ id: 'altimate-lineage', columns: 80, rows: 34 })
+  // Opened from a 200-column terminal: Default is the widest dock, 45% of it.
+  expect(opens.at(-1)).toEqual({ id: 'altimate-lineage', columns: 90, rows: 34 })
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Button', text: /● Default/ })).toBeDefined()
@@ -246,7 +246,7 @@ test('the lineage pane keeps its default size and Min / Default / Max resize it'
   expect(opens.at(-1)).toMatchObject({ columns: 50, rows: 14 })
   await ui.press({ key: 'lineage-size-default' })
   await clock.settle()
-  expect(opens.at(-1)).toMatchObject({ columns: 80, rows: 34 })
+  expect(opens.at(-1)).toMatchObject({ columns: 90, rows: 34 })
   await ui.unmount()
 })
 
