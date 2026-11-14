@@ -44,13 +44,13 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
   let out = command
   // DBT_STATE or DBT_TARGET exported in the line is the user's own choice: none of its dbt commands gets the flag
   // (a line with an `export` and the variable anywhere in it counts, whatever the quoting).
-  const exportedState = /\bexport\b/.test(command) && /\bDBT_STATE=/.test(command)
+  const exportedState = /\bexport\b/.test(command) && /\bDBT_(?:STATE|DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command)
   const exportedTarget = /\bexport\b/.test(command) && /\bDBT_TARGET=/.test(command)
   // From the last invocation to the first, so the offsets of those before stay right.
   for (const one of [...parseDbtCommand(command)].sort((a, b) => b.subcommandEnd - a.subcommandEnd)) {
     if (!one.subcommand) continue
     const flags: string[] = []
-    if (stateDir && !exportedState && !NO_DEFER.has(one.subcommand) && !one.hasDefer && !one.hasState) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
+    if (stateDir && !exportedState && !NO_DEFER.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command.slice(one.start, one.end))) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
     if (target && !NO_TARGET.has(one.subcommand) && target !== defaultTarget && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
     if (flags.length === 0) continue
     out = `${out.slice(0, one.subcommandEnd)} ${flags.join(' ')}${out.slice(one.subcommandEnd)}`
@@ -122,6 +122,8 @@ export function runsInProject(command: string, root: string, projectDir: string)
   if (/(?:^|[\s;&|(){}!])(?:popd|chdir)(?=[\s;&|)]|$)|\benv\s+(?:\S+\s+)*(?:-C|--chdir)\b/.test(plain)) return false
   const cdWords = plain.match(/(?:^|[\s;&|(){}!])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
   if (cdWords !== [...command.matchAll(CD)].length) return false
+  // A folder change inside a subshell or command substitution leaves the parent's folder unchanged or unknown.
+  if (cdWords > 0 && /[(`]/.test(plain)) return false
   const invocations = parseDbtCommand(command)
   // The outermost command that starts first, not an invocation inside a `<(...)` that ends up first in the list.
   const first = [...invocations].sort((a, b) => a.start - b.start)[0]
@@ -148,7 +150,8 @@ export function runsInProject(command: string, root: string, projectDir: string)
   // Only a single dbt invocation, with the project named inside it, is judged: elsewhere in the line it is another command's.
   if (invocations.length !== 1 || !before) return false
   if (named.some(match => match.index < first.start || match.index >= first.end)) return false
-  return named.every(match => inside(resolvePath(before!, match[1]!.replace(UNQUOTE, ''))))
+  // Exactly the project: a folder below it may be a separate dbt project with its own settings.
+  return named.every(match => resolvePath(before!, match[1]!.replace(UNQUOTE, '')) === project)
 }
 
 /** The flags the state's override and answer lead to: the state dir only while defer is on. */

@@ -64,6 +64,9 @@ test('a command for another project, by cd or --project-dir, is not rewritten', 
   // The project named with --project-dir is this one when it resolves to it.
   expect(runsInProject('dbt run --project-dir a', '/repo', '/repo/a')).toBe(true)
   expect(runsInProject('dbt run --project-dir b', '/repo', '/repo/a')).toBe(false)
+  expect(runsInProject('dbt run --project-dir nested', '/repo/a', '/repo/a')).toBe(false)
+  expect(runsInProject('cd ../b; (cd ../a); dbt run', '/repo/a', '/repo/a')).toBe(false)
+  expect(runsInProject('out=`cd ../b && dbt run`', '/repo/a', '/repo/a')).toBe(false)
   expect(runsInProject('cd a && dbt run --project-dir .', '/repo', '/repo/a')).toBe(true)
   expect(runsInProject('dbt run --project-dir ./models/..', '/repo/a', '/repo/a')).toBe(true)
 })
