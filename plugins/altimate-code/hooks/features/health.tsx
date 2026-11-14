@@ -70,10 +70,18 @@ const norm = (p: string) => {
 /** `norm`, with a symlinked folder resolved to the one the system names, as dbt_health names a model's files. */
 const canonical = (p: string) => {
   const n = norm(p)
-  try {
-    return norm(realpathSync(n))
-  } catch {
-    return n
+  // A deleted or renamed file has no real path of its own: resolve its nearest folder that exists and keep the rest.
+  let head = n
+  let tail = ''
+  for (;;) {
+    try {
+      return norm(realpathSync(head) + tail)
+    } catch {
+      const slash = head.lastIndexOf('/')
+      if (slash <= 0) return n
+      tail = head.slice(slash) + tail
+      head = head.slice(0, slash)
+    }
   }
 }
 
@@ -276,6 +284,16 @@ export function simpleCommands(line: string): string[][] {
         else if (!doc.quoted) nested.push(...substitutionsIn(body).flatMap(simpleCommands))
       }
       i = at
+    } else if (c === '<' && line[i + 1] !== '(') {
+      // An input redirect (`<`, `<<<`) is its own word before its target, as an output one is.
+      if (!(inWord && /^\d+$/.test(word))) endWord()
+      word += '<'
+      if (line.startsWith('<<', i + 1)) {
+        word += '<<'
+        i += 2
+      } else if (line[i + 1] === '>') word += line[++i]
+      inWord = true
+      endWord()
     } else if (c === '>') {
       if (!(inWord && /^\d+$/.test(word))) endWord()
       word += '>'
@@ -302,7 +320,7 @@ function leaderEnd(words: readonly string[]): number {
   while (i < words.length) {
     const w = words[i]!
     if (/^[A-Za-z_]\w*=/.test(w)) i++
-    else if (/^\d*>[>|&]?$/.test(w)) i += 2
+    else if (/^\d*(>[>|&]?|<(<<|>)?)$/.test(w)) i += 2
     else if (LEADERS.has(w)) leader = words[i++]!
     else if (leader && w.startsWith('-')) i += LEADER_VALUE_OPTIONS[leader]?.includes(w) ? 2 : 1
     else break

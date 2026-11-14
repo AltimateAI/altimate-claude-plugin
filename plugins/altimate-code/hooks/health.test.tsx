@@ -517,6 +517,24 @@ test('a model edited through a symlinked folder matches the files dbt_health nam
   }
 })
 
+test('a deleted or renamed model reached through a symlinked folder still matches the real path', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'health-'))
+  try {
+    mkdirSync(join(dir, 'real/models'), { recursive: true })
+    symlinkSync(join(dir, 'real'), join(dir, 'alias'))
+    const insight = { ...OLD_STG, file: join(realpathSync(dir), 'real/models/gone.sql'), properties: '' }
+    expect([...modelsOfFiles([join(dir, 'alias/models/gone.sql')], [insight])]).toEqual([OLD_STG.uniqueId])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a leading input redirect does not hide git push', () => {
+  for (const line of ['< in.txt git push', '<in.txt git push origin main', '<<< "x" git push', '&> /dev/null git push', '0< in git push', '<> f git push'])
+    expect([line, isGitPush(line)]).toEqual([line, true])
+  expect(isGitPush('< in.txt git status')).toBe(false)
+})
+
 test('models match by their own files, so a model of another package is never matched', () => {
   expect([...modelsOfFiles([STG], [OLD_STG, OLD_FCT, DEP])]).toEqual(['model.shop.stg_orders'])
   expect([...modelsOfFiles([STG_YML], [OLD_STG, OLD_FCT])]).toEqual(['model.shop.stg_orders'])
