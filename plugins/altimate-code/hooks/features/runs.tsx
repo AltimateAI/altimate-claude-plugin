@@ -289,10 +289,16 @@ async function load($: EngineInterface, root: string, open: string | null = null
   await update($, runsAtom, () => ({ root, runs, open }))
 }
 
-/** The Bash calls in flight that run dbt: when each started, by tool-use id. */
-const started = new Map<string, { at: number; cwd: string; folders: string[] }>()
-/** The dbt calls that just ended, with the folders they wrote to: an artifact written while two calls overlap is not told apart. */
-const finished: Array<{ at: number; ended: number; folders: string[] }> = []
+/** The Bash calls in flight that run dbt, whatever folder they work in: when each started, by tool-use id. */
+const started = new Map<string, { at: number; cwd: string }>()
+/** The dbt calls that just ended: a run is recorded only when no other dbt call overlapped it. */
+const finished: Array<{ at: number; ended: number }> = []
+/** A call in flight longer than this is taken as one that never ended (refused or cancelled), so it stops holding back later calls. */
+const IN_FLIGHT_MS = 60 * 60 * 1000
+/** What Claude is told when a run was left out because dbt commands overlapped. */
+export const OVERLAP_LINE = 'run not recorded: overlapping dbt commands'
+/** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
+export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** The artifact folder a call writes to, as one string: the project's own `target` and an unnamed one are the same folder. */
 const folderOf = (one: Invocation) => {
   const named = one.targetPath === null ? null : normalize(one.targetPath.startsWith('/') ? one.targetPath : `${one.projectDir}/${one.targetPath}`)
@@ -342,14 +348,15 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   const root = await $.session.root()
   const invocations = resultsInvocations(e.command, root, began.cwd)
   const mine = [...new Set(invocations.map(folderOf))]
-  // Another dbt call that ran at the same time in a folder may have written its file: whose it is cannot be told, so it is left out.
-  // A call still in flight counts only when it started after this one did: one that was cancelled or refused never ends.
-  const alone = (folder: string) =>
-    ![...started.values()].some(other => other.at >= began.at && other.folders.includes(folder)) &&
-    !finished.some(other => other.folders.includes(folder) && other.ended > began.at && other.at < ended)
-  const free = mine.filter(alone)
-  finished.push({ at: began.at, ended, folders: mine })
-  while (finished.length > 20) finished.shift()
+  // Any other dbt call that ran at the same time, in any folder, may have written the file this call would read: whose
+  // artifact it is cannot be told, so nothing is recorded and Claude is told so. Never a guess.
+  const overlapped =
+    [...started.values()].some(other => other.at > ended - IN_FLIGHT_MS) ||
+    finished.some(other => other.ended > began.at && other.at < ended)
+  finished.push({ at: began.at, ended })
+  while (finished.length > 200 || (finished[0] && finished[0].ended < ended - IN_FLIGHT_MS)) finished.shift()
+  if (overlapped) return OVERLAP_LINE
+  const free = mine
   // One read for each folder, at the same time: a slow one does not take the others' time, a failed one does not stop them.
   const read = await Promise.all(
     free.map(folder => readRun($, invocations.filter(one => folderOf(one) === folder), invocations, began.at, ended).catch(() => null)),
@@ -471,9 +478,9 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
 
 /** The command to run in place of `e.command`; null keeps it. */
 export async function bashRewrite($: EngineInterface, e: BashCall): Promise<string | null> {
-  if (resultsInvocations(e.command, '').length === 0) return null
+  if (!writesResults(e.command)) return null
   const cwd = await $.session.cwd()
-  started.set(startKey(e), { at: await $.clock.now(), cwd, folders: resultsInvocations(e.command, cwd).map(folderOf) })
+  started.set(startKey(e), { at: await $.clock.now(), cwd })
   // A call that never reaches bashAfter (refused, cancelled) leaves its entry: only the newest are kept.
   while (started.size > 50) started.delete(started.keys().next().value as string)
   return null
