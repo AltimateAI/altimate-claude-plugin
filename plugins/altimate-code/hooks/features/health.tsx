@@ -397,6 +397,11 @@ async function isModelFile($: EngineInterface, file: string): Promise<boolean> {
   // dbt's own folders are skipped by their place in the project, not by where the project sits on disk.
   const inside = project !== null && path.startsWith(`${norm(project)}/`) ? path.slice(norm(project).length + 1) : path
   if (SKIPPED_DIRS.test(inside)) return false
+  // An installed package carries its own dbt_project.yml: judge its place under the project that installed it.
+  if (project !== null) {
+    const outer = await projectAbove($, norm(project).replace(/\/[^/]*$/, ''))
+    if (outer !== null && norm(outer) !== norm(project) && path.startsWith(`${norm(outer)}/`) && SKIPPED_DIRS.test(path.slice(norm(outer).length + 1))) return false
+  }
   // dbt's own files are the ones at the project root; a `profiles.yml` in a model folder is a properties file.
   return project !== null && !(ROOT_FILES.has(path.split('/').pop() ?? '') && norm(project) === dir)
 }

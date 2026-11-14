@@ -131,6 +131,13 @@ test('two changed models give "2 new health issues" with the first model named',
   await band.unmount()
 })
 
+test('a model inside an installed package with its own dbt_project.yml is not a model file: no check runs', async ($, on) => {
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG]], projects: [ROOT, `${ROOT}/dbt_packages/dep`] })
+  await $.tool.call(edit(`${ROOT}/dbt_packages/dep/models/x.sql`))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(1)
+})
+
 test('README, dbt_project.yml, profiles, CI and dbt_packages files are not model files: no check runs', async ($, on) => {
   const { clock, calls, toasts } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG]] })
   for (const file of [NOTES, `${ROOT}/dbt_project.yml`, `${ROOT}/profiles.yml`, `${ROOT}/.github/workflows/ci.yml`, `${ROOT}/dbt_packages/dep/models/x.sql`, `${ROOT}/target/compiled/x.sql`])
