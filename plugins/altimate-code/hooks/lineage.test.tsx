@@ -185,6 +185,8 @@ async function start($: any, on: any, options: Options = {}) {
     if (command === 'tool' && tool === 'dbt_lineage' && options.holdCliLineage) await options.holdCliLineage
     // The integrations half of the plugin asks the CLI for its status at session start.
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    // The project health check the mod starts at session start is not part of these tests.
+    if (tool === 'dbt_health') return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, insights: [] } }), stderr: '' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}`)
     if (options.cliFailure) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'the dbt project could not start', metadata: {} }), stderr: '' } }
