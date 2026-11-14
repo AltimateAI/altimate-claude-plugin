@@ -66,7 +66,7 @@ function substitutionEnd(line: string, at: number): number {
         j = heredocBodyEnd(line, j, delimiter, strip)
         if (j < 0) return -1
       }
-    } else if (c === '<' && line[j + 1] === '<' && line[j + 2] !== '<') {
+    } else if (c === '<' && line[j + 1] === '<' && line[j + 2] !== '<' && line[j - 1] !== '<') {
       // A heredoc's body is text: its quotes and parentheses are not read.
       const heredoc = HEREDOC.exec(line.slice(j))
       if (heredoc) {
@@ -324,7 +324,7 @@ function readable(tokens: Token[]): Set<number> | null {
       waiting = false
       if (caseHead === 'case') caseHead = 'word'
       else if (caseHead === 'word') {
-        if (token.text !== 'in') return false
+        if (token.text !== 'in') return null
         caseHead = 'none'
         pattern = true
       } else if (!words.length && token.text === 'esac' && open.at(-1) === 'case') {
@@ -342,15 +342,15 @@ function readable(tokens: Token[]): Set<number> | null {
       continue
     }
     if (isRedirect(token)) {
-      if (/^\d*<<$/.test(token.text)) return false
-      if (tokens[k + 1]?.kind !== 'word') return false
+      if (/^\d*<<$/.test(token.text)) return null
+      if (tokens[k + 1]?.kind !== 'word') return null
       // The target is not the command's word, but a redirection alone is a command (`> out`).
       k++
       words.push(token.text)
       waiting = false
       continue
     }
-    if (caseHead !== 'none' && token.text !== '\n') return false
+    if (caseHead !== 'none' && token.text !== '\n') return null
     switch (token.text) {
       case '\n':
         if (!waiting && !pattern) words = []
@@ -369,28 +369,28 @@ function readable(tokens: Token[]): Set<number> | null {
           if (words.length === 2) notCommand.add(k - 2)
           k++
           words = []
-        } else return false
+        } else return null
         continue
       case ')':
         if (pattern) {
-          if (!words.length) return false
+          if (!words.length) return null
           pattern = false
           words = []
           continue
         }
-        if (open.at(-1) !== '(' || waiting) return false
+        if (open.at(-1) !== '(' || waiting) return null
         open.pop()
         words = [token.text]
         continue
       case ';;':
-        if (open.at(-1) !== 'case' || pattern) return false
+        if (open.at(-1) !== 'case' || pattern) return null
         words = []
         pattern = true
         continue
       case '|':
         // Alternatives in a pattern.
         if (pattern) {
-          if (!words.length) return false
+          if (!words.length) return null
           words = []
           continue
         }
@@ -398,13 +398,13 @@ function readable(tokens: Token[]): Set<number> | null {
       case '&&':
       case '||':
       case '|&':
-        if (!words.length || pattern) return false
+        if (!words.length || pattern) return null
         words = []
         waiting = true
         continue
       default:
         // `;` and `&` end the command before them.
-        if (!words.length || pattern) return false
+        if (!words.length || pattern) return null
         words = []
     }
   }

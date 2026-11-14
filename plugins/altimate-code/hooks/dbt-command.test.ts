@@ -130,3 +130,8 @@ test("quotes in a heredoc inside a substitution are text, so Claude's commit for
   const line = `dbt run -s a && git commit -m "$(cat <<'EOF'\nfix "foo it's\nEOF\n)"`
   expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
 })
+
+test('a here-string inside a substitution is no heredoc', () => {
+  const line = `dbt run -s a && echo "$(cat <<< text\n)"`
+  expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
+})
