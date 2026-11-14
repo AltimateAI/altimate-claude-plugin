@@ -6,11 +6,13 @@ import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later } from './altimate-cli'
+import { loadPaneSizes, paneRequest, sizeControls, sizesAround } from './pane-size'
 import {
   cellText,
   columnDrift,
   columnWidths,
   dbtCommands,
+  envNames,
   doctorNote,
   explainPrompt,
   failuresFrom,
@@ -35,7 +37,9 @@ import {
 } from './dbt-mods-core'
 
 const RESULTS_PANE = 'altimate-results'
-const RESULTS_TITLE = 'dbt results'
+const RESULTS_TITLE = 'Query results'
+// Wide by default: a data grid needs more than the sidebar share a dbt check gets.
+const RESULTS_SIZES = sizesAround({ columns: 160, rows: 30 })
 const DOCTOR_PANE = 'altimate-doctor'
 const DOCTOR_TITLE = 'dbt doctor'
 const CHECK_PANE = 'altimate-check'
@@ -545,7 +549,7 @@ const titleOf = (select: string | null, inline: string | null) => select ?? (inl
 async function showResult($: EngineInterface, result: QueryResult, open: boolean) {
   await update($, resultAtom, () => result)
   await remember($, result)
-  if (open) await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, columns: 110, rows: 30, closeOnEscape: true }).catch(() => null)
+  if (open) await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...(await paneRequest($, RESULTS_PANE, RESULTS_SIZES)), closeOnEscape: true }).catch(() => null)
 }
 
 /** Runs a dbt show and puts its rows in the pane: /dbt-show's query, or a re-run of one in the history. */
@@ -863,7 +867,8 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
   pendingNotes.splice(0)
   doctorNoteDue = null
   await loadHistory($)
-  await $.command.register({ name: SHOW_COMMAND, description: 'Run dbt show for a model or a SQL query and open the rows in the results pane', argumentHint: '<model> | <select …>' })
+  await loadPaneSizes($)
+  await $.command.register({ name: SHOW_COMMAND, description: 'Run dbt show for a model or a SQL query and open the rows in the Query results pane', argumentHint: '<model> | <select …>' })
   await $.command.register({ name: DOCTOR_COMMAND, description: 'Check the dbt environment: Python, dbt, adapter, packages, manifest freshness and the warehouse connection' })
   // The doctor at session start: a -p run or the SDK has nobody to show the band to, and no dbt to wait on.
   if (!isInteractive) return
@@ -1110,7 +1115,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
         const replay = replayArgv(show.argv, 0).slice(0, -6)
         await showResult(
           $,
-          { id: JSON.stringify([shown.root, shown.dir, replay, show.env]), title: titleOf(select, inline) || 'dbt show', root: shown.root, select, inline, options: show.options, argv: show.replayable ? show.argv : null, cwd: shown.dir, replayable: show.replayable, columns: table.columns, rows: table.rows, limit: show.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
+          { id: JSON.stringify([shown.root, shown.dir, replay, envNames(show.env)]), title: titleOf(select, inline) || 'dbt show', root: shown.root, select, inline, options: show.options, argv: show.replayable ? show.argv : null, cwd: shown.dir, replayable: show.replayable, columns: table.columns, rows: table.rows, limit: show.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
           true,
         ).catch(() => null)
       }
@@ -1162,14 +1167,14 @@ export function registerDbtMods(on: On) {
     if (!root) return { text: 'No dbt project here: start Claude Code in a dbt project (a folder with dbt_project.yml).' }
     const args = e.args.trim()
     try {
-      await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, columns: 110, rows: 30, focus: true, closeOnEscape: true })
+      await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...(await paneRequest($, RESULTS_PANE, RESULTS_SIZES)), focus: true, closeOnEscape: true })
     } catch (error) {
-      return { text: `Could not open the results pane: ${String(error)}` }
+      return { text: `Could not open the Query results pane: ${String(error)}` }
     }
-    if (!args) return { text: 'dbt results are open. Run /dbt-show <model> or /dbt-show select … to query.' }
+    if (!args) return { text: 'Query results are open. Run /dbt-show <model> or /dbt-show select … to query.' }
     const isSql = /\s/.test(args) || /^(select|with)\b/i.test(args)
     later($, () => runShow($, root, isSql ? null : args, isSql ? args : null))
-    return { text: `Running dbt show for ${isSql ? 'your query' : args}; the rows open in the results pane.` }
+    return { text: `Running dbt show for ${isSql ? 'your query' : args}; the rows open in the Query results pane.` }
   })
 
   on('command.run', { command: DOCTOR_COMMAND }, async ($, e) => {
@@ -1200,6 +1205,7 @@ export function registerDbtMods(on: On) {
     const recent = history.filter(one => !one.bookmarked && one.id !== result?.id).slice(0, HISTORY_SHOWN)
     // Clear history is offered while any query that is not bookmarked is kept, the one shown included.
     const clearable = history.some(one => !one.bookmarked)
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, sizes: RESULTS_SIZES, keyPrefix: 'results' }, work => later($, work))
 
     const table = (() => {
       if (!result) return <Text dimColor>Run /dbt-show &lt;model&gt;, or ask Claude to `dbt show` a model.</Text>
@@ -1222,7 +1228,7 @@ export function registerDbtMods(on: On) {
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
           <Text>
-            <Text bold>{result ? result.title : 'dbt results'}</Text>
+            <Text bold>{result ? result.title : RESULTS_TITLE}</Text>
             {result && !result.error ? (
               <Text dimColor>
                 {'  '}
@@ -1239,6 +1245,7 @@ export function registerDbtMods(on: On) {
             </Box>
           ) : null}
         </Box>
+        {sizes}
         {table}
         {marks.length ? (
           <Box flexDirection="column">

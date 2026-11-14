@@ -114,7 +114,7 @@ const RESULTS = {
   plugin: 'altimate-code',
   component: 'Pane',
   requestId: 'altimate-results',
-  props: { title: 'dbt results', isFocused: true, bodyColumns: 90, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+  props: { title: 'Query results', isFocused: true, bodyColumns: 90, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
 } as const
 
 const CHECK = { ...RESULTS, requestId: 'altimate-check', props: { ...RESULTS.props, title: 'dbt check' } } as const
@@ -213,8 +213,10 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: options.cwd ?? ROOT }
   })
   const opened: string[] = []
-  on('ui.open', (_: unknown, e: { id: string; focus?: boolean }) => {
+  const sizes: { id: string; title: string; columns?: number; rows?: number }[] = []
+  on('ui.open', (_: unknown, e: { id: string; title: string; columns?: number; rows?: number; focus?: boolean }) => {
     opened.push(`${e.id}${e.focus ? ':focus' : ''}`)
+    sizes.push({ id: e.id, title: e.title, columns: e.columns, rows: e.rows })
     return { value: { isPlaced: true } }
   })
   on('ui.log', () => ({ value: undefined }))
@@ -331,7 +333,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { clock, runs, cwds, toasts, prompts, store, mtimes, opened, files, setBash: (next: typeof bash) => void (bash = next) }
+  return { clock, runs, cwds, toasts, prompts, store, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -733,7 +735,7 @@ test('/dbt-show runs dbt show for a model, and Re-run runs it again; an error sh
   const { clock, runs } = await start($, on)
   const reply: any = await $.command.run({ command: 'dbt-show', args: 'orders' })
   await clock.settle()
-  expect(reply.text).toBe('Running dbt show for orders; the rows open in the results pane.')
+  expect(reply.text).toBe('Running dbt show for orders; the rows open in the Query results pane.')
   expect(runs.filter(argv => argv[1] === 'show')).toEqual([[DBT, 'show', '--select', 'orders', '--indirect-selection', 'empty', '--limit', '50', '--output', 'json', '--log-format', 'json']])
 
   const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
@@ -742,6 +744,43 @@ test('/dbt-show runs dbt show for a model, and Re-run runs it again; an error sh
   await clock.settle()
   expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
   await ui.unmount()
+})
+
+test('the pane is titled Query results, opens wide, and Min / Default / Max resize it and are remembered', async ($, on) => {
+  const { clock, sizes, store } = await start($, on, { stored: { 'pane-sizes': { 'altimate-results': 'bogus' } } })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  // The default is a wide dock; a stored value that is no size is ignored.
+  expect(sizes.filter(one => one.id === 'altimate-results').at(-1)).toEqual({ id: 'altimate-results', title: 'Query results', columns: 160, rows: 30 })
+
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Query results$|^orders$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /● Default/ })).toBeDefined()
+  await ui.press({ key: 'results-size-max' })
+  await clock.settle()
+  expect(sizes.at(-1)).toEqual({ id: 'altimate-results', title: 'Query results', columns: 240, rows: 60 })
+  expect(await ui.find({ type: 'Button', text: /● Max/ })).toBeDefined()
+  expect(store.get('pane-sizes')).toEqual({ 'altimate-results': 'max' })
+  await ui.press({ key: 'results-size-min' })
+  await clock.settle()
+  expect(sizes.at(-1)).toEqual({ id: 'altimate-results', title: 'Query results', columns: 60, rows: 14 })
+  await ui.unmount()
+
+  // A later query opens at the size chosen, not the default.
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 60, rows: 14 })
+})
+
+test('a saved Max size opens the pane wide again in the next session, and a wide grid keeps long values whole', async ($, on) => {
+  const { clock, sizes } = await start($, on, { stored: { 'pane-sizes': { 'altimate-results': 'max' } }, show: { rows: [{ order_id: 1, note: 'n'.repeat(70) }] } })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 240, rows: 60 })
+  const wide = columnWidths({ columns: ['id', 'note'], rows: [['1', 'n'.repeat(70)]] }, 120)
+  expect(wide[1]).toBe(70)
+  const narrow = columnWidths({ columns: ['id', 'note'], rows: [['1', 'n'.repeat(70)]] }, 30)
+  expect(narrow.reduce((a, b) => a + b, 0) + 3).toBeLessThanOrEqual(30)
 })
 
 test('/dbt-show with SQL runs it inline and keeps it in the history', async ($, on) => {
@@ -1288,11 +1327,12 @@ test('a deleted schema file makes its check run again, and the doctor finds a de
   await ui.unmount()
 })
 
-test('queries Claude ran under different DBT_TARGET values are two history entries', async ($, on) => {
+test('history entries tell environment names apart, not their values (a value is never persisted)', async ($, on) => {
   const { clock, store, setBash } = await start($, on)
   setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
   await $.tool.call({ tool: 'Bash', command: 'DBT_TARGET=prod dbt show -s orders' })
   await $.tool.call({ tool: 'Bash', command: 'DBT_TARGET=dev dbt show -s orders' })
+  await $.tool.call({ tool: 'Bash', command: 'DBT_SCHEMA=dev dbt show -s orders' })
   await clock.settle()
   expect((store.get('dbt-results-history') as any[]).length).toBe(2)
 })
@@ -2089,6 +2129,21 @@ test('flags written in another order are the same run', async ($, on) => {
   await band.unmount()
 })
 
+test('with a manifest too large to read, the artifact\'s versioned failure does not absorb the other version\'s', async ($, on) => {
+  const results = { results: [{ unique_id: 'model.shop.orders.v2', status: 'error', message: 'Compilation Error in model orders (models/orders_v2.sql)\n  artifact v2' }] }
+  const { clock, prompts, setBash } = await start($, on, { manifestSize: 9 * 1024 * 1024, files: { 'target/run_results.json': JSON.stringify(results) } })
+  const block = (file: string, why: string) => `${HEADER}\n06:45:43  Compilation Error in model orders (models/${file})\n  ${why}\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=1`
+  setBash({ stdout: `${block('orders_v1.sql', 'text v1')}\n${block('orders_v2.sql', 'text v2')}`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders.v1; dbt run -s orders.v2' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts[0]).toContain('(models/orders_v1.sql)')
+  expect(prompts[0]).toContain('(models/orders_v2.sql)')
+  await band.unmount()
+})
+
 test('two versions of one model that both failed are both offered, though the artifact holds only one', async ($, on) => {
   const manifest = shopManifest()
   manifest.nodes['model.shop.orders.v2'] = { name: 'orders', resource_type: 'model', package_name: 'shop', version: 2, original_file_path: 'models/orders_v2.sql', config: {}, columns: {}, depends_on: { nodes: [] } }
@@ -2156,6 +2211,30 @@ test('an environment value set for a show is not persisted with its history; one
   expect(JSON.stringify([...store])).not.toContain('hunter2')
   expect(store.get('dbt-results-history')).toBeDefined()
 })
+
+test('no environment value or hash is persisted with the history, while one session still tells values apart', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'DBT_PASSWORD=hunter2 dbt show -s orders' })
+  await clock.settle()
+  const saved = JSON.stringify([...store])
+  expect(saved).toContain('DBT_PASSWORD')
+  expect(saved).not.toContain(hashedEnv('DBT_PASSWORD=hunter2').split('#')[1]!)
+  expect(saved).not.toContain('#')
+  expect(hashedEnv('DBT_PASSWORD=hunter2')).not.toBe(hashedEnv('DBT_PASSWORD=other'))
+})
+
+for (const flag of ['debug', 'quiet', 'log-cache-events']) {
+  test(`a failed run with --no-${flag} is cleared by a plain passing run`, async ($, on) => {
+    expect(dbtCommand(`dbt build -s orders --no-${flag}`)?.identity).toEqual([])
+    const { clock, setBash, band } = await failedBuild($, on, `dbt build -s orders --no-${flag}`)
+    setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+    await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+    await clock.settle()
+    expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+    await band.unmount()
+  })
+}
 
 test('a failure under an environment value is cleared only by a run with the same value', async ($, on) => {
   const { clock, setBash, band } = await failedBuild($, on, 'DBT_PASSWORD=hunter2 dbt build -s orders')

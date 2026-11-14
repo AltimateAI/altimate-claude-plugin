@@ -288,8 +288,8 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
       env.set(word.slice(0, word.indexOf('=')), word)
     }
   }
-  // Values never leave this function in the clear: they are compared, stored with the history and kept in
-  // the failure's context, and a password set for one command must not end up on disk.
+  // Values never leave this function in the clear: they are compared in memory and kept in the failure's
+  // context only as a salted hash, and are never persisted (the history keeps the names alone).
   const context = [...env.values()].map(hashedEnv).sort()
   const byFlag = new Map<string, { value: string; bool: boolean }[]>()
   const rest = [...words.slice(1, words.indexOf(verb) < 0 ? undefined : words.indexOf(verb)), ...(words.indexOf(verb) < 0 ? [] : words.slice(words.indexOf(verb) + 1))]
@@ -305,6 +305,7 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
     if (SELECT_FLAGS[flag] || DISPLAY_FLAGS.has(flag)) continue
     // `--X` and `--no-X` are one boolean: the last one written is the value dbt uses.
     const off = /^--no-(.+)$/.exec(flag)
+    if (off && DISPLAY_FLAGS.has(`--${off[1]}`)) continue
     const bool = !!off || values.length === 0
     const key = off ? `--${off[1]}` : (CONTEXT_FLAGS[flag] ?? (flag === '-x' ? '--fail-fast' : flag))
     byFlag.set(key, [...(byFlag.get(key) ?? []), { value: off ? 'false' : values.join(' '), bool }])
@@ -317,11 +318,17 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
   return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: start, end: match.index + match[0].length, argv: words, replayable, env: context }
 }
 
-/** `NAME=value` as `NAME=#<first 8 hex of the value's sha256>`: the same value compares equal, and is not stored. */
+// Random for each session and never stored, so a hash cannot be guessed offline from anything on disk.
+const ENV_SALT = crypto.randomUUID()
+
+/** `NAME=value` as `NAME=#<first 8 hex of the salted sha256>`: within a session the same value compares equal; kept in memory only. */
 export const hashedEnv = (assignment: string): string => {
   const at = assignment.indexOf('=')
-  return `${assignment.slice(0, at)}=#${sha256Hex(assignment.slice(at + 1)).slice(0, 8)}`
+  return `${assignment.slice(0, at)}=#${sha256Hex(`${ENV_SALT}\0${assignment.slice(at + 1)}`).slice(0, 8)}`
 }
+
+/** The names of hashed assignments, the part that is safe to persist. */
+export const envNames = (env: string[]): string[] => env.map(one => one.slice(0, one.indexOf('=')))
 
 /** SHA-256 of a string's UTF-8 bytes, in hex (a hooks module has no `crypto` to import). */
 export function sha256Hex(text: string): string {
@@ -510,7 +517,15 @@ function logText(output: string): string {
  * Whether two failures are one node: the same unique id, else the same kind and name and, when both know
  * their file, the same file (two versions of a model share a name and not a file).
  */
-export const sameFailure = (a: DbtFailure, b: DbtFailure): boolean => a.id === b.id || (a.kind === b.kind && a.name === b.name && (!a.path || !b.path || a.path === b.path))
+export const sameFailure = (a: DbtFailure, b: DbtFailure): boolean => {
+  if (a.id === b.id) return true
+  if (a.kind !== b.kind || a.name !== b.name) return false
+  if (a.path && b.path) return a.path === b.path
+  // An unknown file cannot tell the versions of a model apart: an artifact's versioned id (`model.pkg.name.v2`) never absorbs a failure from the text.
+  return !isVersioned(a) && !isVersioned(b)
+}
+
+const isVersioned = (failure: DbtFailure): boolean => failure.kind === 'model' && !failure.id.includes('@') && failure.id.split('.').length >= 4
 
 /** The failed nodes a dbt command's own text names: what the run_results.json the command wrote does not hold (another invocation's failures, a parse error that wrote none). */
 export function failuresFromText(output: string): DbtFailure[] {
@@ -750,7 +765,7 @@ export function cellText(value: unknown, width: number): string {
 
 /** Column widths for a results table that fits `columns` characters, each at least 4 wide. */
 export function columnWidths(result: Pick<QueryResult, 'columns' | 'rows'>, columns: number): number[] {
-  const natural = result.columns.map((name, i) => Math.min(40, Math.max(name.length, ...result.rows.slice(0, 50).map(row => cellText(row[i], 200).length), 4)))
+  const natural = result.columns.map((name, i) => Math.min(200, Math.max(name.length, ...result.rows.slice(0, 50).map(row => cellText(row[i], 200).length), 4)))
   const room = Math.max(columns - (natural.length - 1) * 3, natural.length * 4)
   let widths = natural.slice()
   while (widths.reduce((a, b) => a + b, 0) > room) {

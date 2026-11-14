@@ -363,6 +363,8 @@ declare module 'claude-code' {
       dbtHistory: SavedQuery[]
       /** A /dbt-show or Re-run in flight: its label. */
       dbtResultBusy: string | null
+      /** The Min, Default or Max size chosen for a pane, by pane id; a pane without one opens at its default. */
+      paneSizes: Record<string, 'min' | 'default' | 'max'>
     }
   }
 }

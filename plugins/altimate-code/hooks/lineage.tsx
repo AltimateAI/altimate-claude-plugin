@@ -13,6 +13,7 @@ import type {
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
 import { endDbtMods, newTurnDbtMods } from './dbt-mods'
+import { loadPaneSizes, paneRequest, sizeControls, sizesAround } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
@@ -136,7 +137,7 @@ const BOX_CAP = 4
 const UNFOLDED = 40
 // Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
 // surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
-const PANE_SIZE = { columns: 110, rows: 34 }
+const PANE_SIZES = sizesAround({ columns: 110, rows: 34 })
 // The engine's label for a column it could not classify, which is every column read from a CTE or a
 // qualified table, so all of a dbt model's. It says nothing about the column, so the pane leaves it out.
 const NOT_SURE = 'Not sure'
@@ -735,7 +736,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   }
   if (input.open || (!paneOpened && input.auto)) {
     paneOpened = true
-    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
+    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
     if (opened && opened.isPlaced === false && !input.open) await narrowHint($, opened.reason)
   }
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
@@ -891,7 +892,7 @@ async function narrowHint($: EngineInterface, reason: string) {
 
 async function openPane($: EngineInterface) {
   paneOpened = true
-  await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
+  await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), focus: true, closeOnEscape: true })
 }
 
 /** The text an edit replaces and the text it writes: Edit's strings, MultiEdit's pairs, or a Write's whole file. */
@@ -1154,6 +1155,7 @@ export async function startLineage($: EngineInterface) {
   drawnCache = null
   contextGiven.clear()
   newConversation()
+  await loadPaneSizes($)
   // A new conversation's answers start empty.
   await update($, answerAtom, () => [])
   await $.command.register({
@@ -1599,6 +1601,7 @@ export function registerLineage(on: On) {
       ) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, sizes: PANE_SIZES, keyPrefix: 'lineage' }, work => later($, work))
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
@@ -1622,6 +1625,7 @@ export function registerLineage(on: On) {
             </Box>
           )}
           {columns?.note && <Text color="warning">⚠ {columns.note}</Text>}
+          {sizes}
         </Box>
 
         {view !== 'list' && foldedList('up')}
