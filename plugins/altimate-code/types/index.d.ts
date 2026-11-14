@@ -176,6 +176,80 @@ export type ImpactView = {
   truncated: boolean
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Runs (/runs): the dbt commands Claude ran and their results.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface RunsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Defer and target: the target and defer state dbt commands run with.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface DeferState {
+  /** The dbt project the session works in; null when there is none (nothing is rewritten). */
+  projectDir: string | null
+  /** The project's Power User setting turns defer on and gives a usable state directory. */
+  enabled: boolean
+  favorState: boolean
+  mode: 'local' | 'remote' | 'none'
+  /** The directory passed as `--state`; null when there is none to use. */
+  stateDir: string | null
+  /** Why defer is configured but cannot be applied. */
+  reason: string | null
+  /** /defer on or off for this session; null follows the project's setting. */
+  override: boolean | null
+  /** The profile's default target and its output names. */
+  defaultTarget: string | null
+  targets: string[]
+  /** /target for this session; null leaves the command's own or the profile's default. */
+  target: string | null
+  /** When reading the setting failed (engine clock, ms); null when it was read. */
+  failedAt: number | null
+}
+
+// ---------------------------------------------------------------------------------------------------
+// Raw SQL to model: the SQL being turned into a dbt model.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface ToModelState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Team comments: the shared docs' comments on the project's models.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CommentsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Cost check: the last scan estimate and any scan allowed once.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CostState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Project health: the health check issues on the changed models.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface HealthState {}
+
+// ---------------------------------------------------------------------------------------------------
+// SQL graph: the edited model's SQL graph.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface SqlGraphState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Docs coverage and propagation: what the project documents.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface DocsState {}
+
+// ---------------------------------------------------------------------------------------------------
+// Profile CTEs: each CTE's row count and timing.
+// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// ---------------------------------------------------------------------------------------------------
+export interface CteProfileState {}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -217,6 +291,26 @@ declare module 'claude-code' {
       lineageStale: string | null
       lineageLoading: boolean
       isLineageBandHidden: boolean
+      /** The status line's parts by owner, `integrations` and each feature's id (hooks/status-line.ts). */
+      statusParts: Record<string, string>
+      /** hooks/features/: RunsState. */
+      runs: RunsState | null
+      /** hooks/features/: DeferState. */
+      defer: DeferState | null
+      /** hooks/features/: ToModelState. */
+      toModel: ToModelState | null
+      /** hooks/features/: CommentsState. */
+      comments: CommentsState | null
+      /** hooks/features/: CostState. */
+      cost: CostState | null
+      /** hooks/features/: HealthState. */
+      health: HealthState | null
+      /** hooks/features/: SqlGraphState. */
+      sqlGraph: SqlGraphState | null
+      /** hooks/features/: DocsState. */
+      docs: DocsState | null
+      /** hooks/features/: CteProfileState. */
+      cteProfile: CteProfileState | null
     }
   }
 }
