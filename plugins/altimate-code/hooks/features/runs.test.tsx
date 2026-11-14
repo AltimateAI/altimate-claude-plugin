@@ -404,6 +404,18 @@ test('a call that ran longer than an hour is not recorded: what ran meanwhile is
   expect(stored.has('runs')).toBe(false)
 })
 
+test('a call that expires while a later call is running still overlapped it', async ($, on) => {
+  let now = () => T0
+  const { stored, clock } = await start($, on, () => view('inv-x', undefined, 'build', new Date(now()).toISOString()), { denied: 'lost', slow: 'later-slow', slowMs: 3 * 60 * 1000 })
+  now = clock.now
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s lost', tool_use_id: 'lost' }).catch(() => {})
+  await clock.advance(59 * 60 * 1000)
+  // This one starts at minute 59 and ends past minute 61: the first call's hour ran out in between.
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s later', tool_use_id: 'later-slow' })
+  expect(result.context).toEqual([NOT_RECORDED])
+  expect(stored.has('runs')).toBe(false)
+})
+
 test('a call that never ended (refused or cancelled) overlaps what ran meanwhile, and stops counting after an hour', async ($, on) => {
   let now = () => T0
   const { stored, clock } = await start($, on, () => view('inv-1', undefined, 'build', new Date(now()).toISOString()), { denied: 'refused' })

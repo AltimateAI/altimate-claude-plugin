@@ -350,7 +350,8 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   if (began === undefined) return null
   // Any other dbt call that ran at the same time, in any folder, may have written the file this call would read: whose
   // artifact it is cannot be told, so nothing is recorded and Claude is told so. Never a guess.
-  const live = [...started.values()].filter(other => other.at > ended - IN_FLIGHT_MS && other.at <= ended)
+  // One counts for as long as it could still have been running at some point of this call: from its start up to the limit after it.
+  const live = [...started.values()].filter(other => other.at > began.at - IN_FLIGHT_MS && other.at <= ended)
   const overlapped =
     // One that ran longer than the limit is itself taken as never ended, so what ran meanwhile is no longer known.
     ended - began.at > IN_FLIGHT_MS ||
