@@ -137,6 +137,8 @@ type Options = {
   version?: string
   /** Environment variables `printenv` answers. */
   env?: Record<string, string>
+  /** No project .venv: dbt is the one on PATH, its launcher naming this interpreter. */
+  pathDbtPython?: string
   /** What the project's Python prints for the profile script; the default is an ok duckdb output. */
   profileAnswer?: { exitCode: number; stdout: string }
   /** What the plugin's store held from an earlier session. */
@@ -193,6 +195,11 @@ async function start($: any, on: any, options: Options = {}) {
     '.venv/bin/python': '',
     ...options.files,
   }
+  if (options.pathDbtPython) {
+    delete files['.venv/bin/dbt']
+    delete files['.venv/bin/python']
+  }
+  const python = options.pathDbtPython ?? '/proj/.venv/bin/python'
   if (options.manifestAfterShow && !options.files?.['target/manifest.json']) delete files['target/manifest.json']
   if (options.target) {
     files[`${options.target}/manifest.json`] = files['target/manifest.json']!
@@ -256,6 +263,7 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: false } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
+    if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
     const rel = e.path.slice(ROOT.length + 1)
     if (!(rel in files)) throw new Error('ENOENT')
     return { value: files[rel] }
@@ -282,18 +290,19 @@ async function start($: any, on: any, options: Options = {}) {
       await options.holdShow
     }
     const [bin, verb] = e.argv
+    if (options.pathDbtPython && bin === 'which') return { value: { exitCode: 0, stdout: '/x/bin/dbt\n', stderr: '' } }
     if (bin === 'printenv') {
       const value = { HOME: '/home/me', ...options.env }[verb as string]
       return { value: { exitCode: value ? 0 : 1, stdout: value ? `${value}\n` : '', stderr: '' } }
     }
     // The project's Python: its version, or the slice of a manifest too big to read here.
-    if (bin === '/proj/.venv/bin/python' && verb === '-c' && e.argv[2] === PROFILE_TYPE) {
+    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_TYPE) {
       // The script itself is checked below; here the interpreter answers what it would print.
       return { value: { ...(options.profileAnswer ?? { exitCode: 0, stdout: '{"status":"ok","profile":"shop","target":"dev","type":"duckdb"}' }), stderr: '' } }
     }
-    if (bin === '/proj/.venv/bin/python' && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
-    if (bin === '/proj/.venv/bin/python') return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
-    if (bin !== DBT) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    if (bin === python && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
+    if (bin === python) return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
+    if (bin !== (options.pathDbtPython ? 'dbt' : DBT)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
     if (verb === 'debug') return { value: { exitCode: 0, stdout: DEBUG, stderr: '' } }
     if (verb === 'deps' && options.depsFails) return { value: { exitCode: 1, stdout: '', stderr: options.depsFails } }
@@ -2255,9 +2264,41 @@ for (const [name, answer, expected] of [
   })
 }
 
+test('with dbt on PATH, the profile script runs under the interpreter dbt\'s launcher names, not python3', async ($, on) => {
+  const { clock, runs } = await start($, on, { pathDbtPython: '/x/bin/python' })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const script = runs.find(argv => argv[2] === PROFILE_TYPE)
+  expect(script?.[0]).toBe('/x/bin/python')
+  expect(runs.some(argv => argv[0] === 'python3')).toBe(false)
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'duckdb' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('with a project .venv, the profile script runs under the .venv\'s python', async ($, on) => {
+  const { clock, runs } = await start($, on)
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  expect(runs.find(argv => argv[2] === PROFILE_TYPE)?.[0]).toBe('/proj/.venv/bin/python')
+})
+
+test('a manifest slice for a PATH dbt runs under dbt\'s own interpreter too', async ($, on) => {
+  const { clock, runs } = await start($, on, { pathDbtPython: '/x/bin/python', manifestSize: 9 * 1024 * 1024 })
+  await $.tool.call({ tool: 'Read', file_path: ORDERS })
+  await clock.settle()
+  expect(runs.find(argv => argv[2] === MANIFEST_SLICE)?.[0]).toBe('/x/bin/python')
+})
+
 // The script is checked for what it relies on; run for real, it answers the fixtures (anchored output key,
 // list merge, anchored profile and outputs keys, DBT_PROFILE, DBT_TARGET, `default`, env_var) as dbt does.
 kitTest('the profile script parses YAML for real and follows dbt\'s selection', () => {
+  // Neither script lets the project folder shadow a module: dropping the working directory is its first statement.
+  const dropCwd = "import sys; sys.path = [p for p in sys.path if p not in ('', '.')]\n"
+  expect(PROFILE_TYPE.startsWith(dropCwd)).toBe(true)
+  expect(MANIFEST_SLICE.startsWith(dropCwd)).toBe(true)
+  // A type given by a template is settled like the target: the plain env_var, else `template`.
+  expect(PROFILE_TYPE).toMatch(/if '\{\{' in kind:\n    kind = settle\(kind\)\n    if not kind:\n        out\('template'/)
   expect(PROFILE_TYPE).toContain('yaml.safe_load')
   expect(PROFILE_TYPE).toContain("os.environ.get('DBT_PROFILE') or project.get('profile')")
   expect(PROFILE_TYPE).toContain("os.environ.get('DBT_TARGET') or profile.get('target') or 'default'")

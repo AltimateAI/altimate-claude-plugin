@@ -194,7 +194,8 @@ function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DB
 
 // Reads a manifest too big for $.fs.read with the project's Python, and prints only what the helpers need
 // about one file's node: the node, its tests, and the graph above and below it, names only.
-export const MANIFEST_SLICE = `import json, sys
+export const MANIFEST_SLICE = `import sys; sys.path = [p for p in sys.path if p not in ('', '.')]
+import json
 m = json.load(open(sys.argv[1]))
 rel = sys.argv[2]
 nodes = m.get('nodes') or {}
@@ -245,14 +246,24 @@ async function targetOf($: EngineInterface, root: string): Promise<string> {
   return normalize(path.startsWith('/') ? path : `${root}/${path}`)
 }
 
-/** The Python beside the project's dbt, else the one on PATH. */
+/** The interpreter dbt's own launcher names on its first line (`#!/x/bin/python`); undefined for a native binary or an `env` launcher. */
+async function dbtShebang($: EngineInterface, dbt: string): Promise<string | undefined> {
+  const launcher = dbt === 'dbt' ? await $.process.run(['which', 'dbt'], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '') : dbt
+  const named = launcher ? /^#!\s*(\S+)/.exec((await $.fs.read(launcher).catch(() => '')).slice(0, 300))?.[1] : undefined
+  return named && !/\/env$/.test(named) ? named : undefined
+}
+
+/**
+ * The Python dbt runs under: the one beside the project's dbt, else the one its launcher names (a dbt
+ * from uv, pipx or Homebrew has its own, with dbt's dependencies such as PyYAML), else the one on PATH.
+ */
 async function pythonFor($: EngineInterface, root: string): Promise<string> {
   const dbt = await dbtBinary($, root)
   if (dbt !== 'dbt') {
     const beside = dbt.replace(/dbt(\.exe)?$/, (_, exe) => (exe ? 'python.exe' : 'python'))
     if (await $.fs.exists(beside).catch(() => false)) return beside
   }
-  return 'python3'
+  return (await dbtShebang($, dbt)) ?? 'python3'
 }
 
 /**
@@ -713,11 +724,15 @@ type ProfileProblem = { problem: 'template' | 'no-output' | 'no-type' | 'error';
  * Profile: DBT_PROFILE, else the project's `profile:`. Target: DBT_TARGET, else the profile's `target`
  * (a literal, or the plain `env_var('X', 'default')`; any other template is not settled here), else `default`.
  */
-export const PROFILE_TYPE = `import json, os, re, sys
+export const PROFILE_TYPE = `import sys; sys.path = [p for p in sys.path if p not in ('', '.')]
+import json, os, re
 import yaml
 def out(status, **rest):
     print(json.dumps(dict(status=status, **rest)))
     sys.exit(0)
+def settle(text):
+    call = re.fullmatch(r"\\s*\\{\\{\\s*env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)\\s*\\}\\}\\s*", text)
+    return (os.environ.get(call.group(2)) or call.group(4)) if call else None
 def load(path):
     try:
         with open(path) as f:
@@ -736,11 +751,10 @@ if not isinstance(profile, dict):
 target = os.environ.get('DBT_TARGET') or profile.get('target') or 'default'
 target = str(target)
 if '{{' in target:
-    call = re.fullmatch(r"\\s*\\{\\{\\s*env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)\\s*\\}\\}\\s*", target)
-    value = (os.environ.get(call.group(2)) or call.group(4)) if call else None
-    if not value:
-        out('template', profile=name, target=target)
-    target = value
+    raw = target
+    target = settle(target)
+    if not target:
+        out('template', profile=name, target=raw)
 outputs = profile.get('outputs')
 output = outputs.get(target) if isinstance(outputs, dict) else None
 if not isinstance(output, dict):
@@ -748,6 +762,10 @@ if not isinstance(output, dict):
 kind = output.get('type')
 if not isinstance(kind, str) or not kind:
     out('no_type', profile=name, target=target)
+if '{{' in kind:
+    kind = settle(kind)
+    if not kind:
+        out('template', profile=name, target=target)
 out('ok', profile=name, target=target, type=kind)
 `
 
@@ -792,8 +810,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   }
 
   // Python: the interpreter dbt's own launcher names.
-  const launcher = dbt === 'dbt' ? await $.process.run(['which', 'dbt'], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '') : dbt
-  const shebang = launcher ? /^#!\s*(\S+)/.exec((await $.fs.read(launcher).catch(() => '')).slice(0, 300))?.[1] : undefined
+  const shebang = await dbtShebang($, dbt)
   const python = shebang ? await $.process.run([shebang, '--version'], { timeoutMs: 10_000 }).catch(() => null) : null
   const pythonVersion = python ? /Python\s+(\S+)/.exec(`${python.stdout}${python.stderr}`)?.[1] : null
   if (pythonVersion) {
@@ -871,7 +888,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     const parsed = debugInfo(`${debug.stdout}\n${debug.stderr}`)
     checks.push(
       debug.exitCode === 0 && parsed.connection !== 'failed'
-        ? { id: 'connection', label: 'Connection', status: 'ok', detail: `${parsed.adapterType ?? type ?? 'warehouse'} connection test passed`, fix: null }
+        ? { id: 'connection', label: 'Connection', status: 'ok', detail: `${parsed.adapterType ?? (typeof type === 'string' ? type : null) ?? 'warehouse'} connection test passed`, fix: null }
         : { id: 'connection', label: 'Connection', status: 'fail', detail: (parsed.detail ?? stripAnsi(debug.stdout || debug.stderr).trim().split('\n').slice(-3).join(' ')).slice(0, 300), fix: 'check profiles.yml credentials; run dbt debug' },
     )
   } else if (previous?.root === root) {
