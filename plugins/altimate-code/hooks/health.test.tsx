@@ -533,6 +533,10 @@ test('a leading input redirect does not hide git push', () => {
   for (const line of ['< in.txt git push', '<in.txt git push origin main', '<<< "x" git push', '&> /dev/null git push', '0< in git push', '<> f git push'])
     expect([line, isGitPush(line)]).toEqual([line, true])
   expect(isGitPush('< in.txt git status')).toBe(false)
+  expect(isGitPush('"0"<input git push')).toBe(false)
+  expect(isGitPush('\\0<input git push')).toBe(false)
+  expect(filesWrittenBy('touch marker <models/input.sql')).toEqual([])
+  expect(filesWrittenBy('touch marker < models/input.sql')).toEqual([])
 })
 
 test('models match by their own files, so a model of another package is never matched', () => {

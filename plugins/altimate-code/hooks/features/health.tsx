@@ -223,11 +223,15 @@ export function simpleCommands(line: string): string[][] {
   let words: string[] = []
   let word = ''
   let inWord = false
+  // Whether the word being read has quoted or escaped text: digits then are an argument, not a file descriptor.
+  let quoted = false
   const endWord = () => {
     if (inWord) words.push(word)
     word = ''
     inWord = false
+    quoted = false
   }
+  const bareDescriptor = () => inWord && !quoted && /^\d+$/.test(word)
   const endCommand = () => {
     endWord()
     if (words.length) commands.push(words)
@@ -236,12 +240,14 @@ export function simpleCommands(line: string): string[][] {
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!
     if (c === "'") {
+      quoted = true
       const close = line.indexOf("'", i + 1)
       word += line.slice(i + 1, close < 0 ? line.length : close)
       inWord = true
       i = close < 0 ? line.length : close
     } else if (c === '"') {
       inWord = true
+      quoted = true
       i++
       for (; i < line.length && line[i] !== '"'; i++) {
         if ((line[i] === '$' && line[i + 1] === '(') || line[i] === '`') {
@@ -264,6 +270,7 @@ export function simpleCommands(line: string): string[][] {
     } else if (c === '\\' && i + 1 < line.length) {
       word += line[++i]
       inWord = true
+      quoted = true
     } else if (c === '$' && line[i + 1] === '(') {
       endCommand()
       i++
@@ -286,7 +293,7 @@ export function simpleCommands(line: string): string[][] {
       i = at
     } else if (c === '<' && line[i + 1] !== '(') {
       // An input redirect (`<`, `<<<`) is its own word before its target, as an output one is.
-      if (!(inWord && /^\d+$/.test(word))) endWord()
+      if (!bareDescriptor()) endWord()
       word += '<'
       if (line.startsWith('<<', i + 1)) {
         word += '<<'
@@ -295,7 +302,7 @@ export function simpleCommands(line: string): string[][] {
       inWord = true
       endWord()
     } else if (c === '>') {
-      if (!(inWord && /^\d+$/.test(word))) endWord()
+      if (!bareDescriptor()) endWord()
       word += '>'
       if (line[i + 1] === '>' || line[i + 1] === '&' || line[i + 1] === '|') word += line[++i]
       inWord = true
@@ -357,7 +364,9 @@ export function filesWrittenBy(command: string): string[] {
   const out: string[] = []
   let cwd = ''
   const from = (w: string) => (w.startsWith('/') || /^[A-Za-z]:/.test(w) || !cwd ? w : `${cwd}/${w}`)
-  for (const words of simpleCommands(command)) {
+  for (const all of simpleCommands(command)) {
+    // An input redirect's operand is read, not written.
+    const words = all.filter((_, j) => !/^\d*<(<<|>)?$/.test(all[j - 1] ?? '') && !/^\d*<(<<|>)?$/.test(all[j]!))
     const models = (list: readonly string[]) => list.filter(w => MODEL_FILE.test(w) && !w.startsWith('-')).map(from)
     for (let i = 0; i < words.length; i++) {
       const redirect = /^\d*>[>|]?$/.exec(words[i]!)
