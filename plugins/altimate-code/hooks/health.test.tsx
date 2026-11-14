@@ -1,3 +1,7 @@
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import { expect, mock, test } from 'claude-code/testing'
 
 import { bandText, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
@@ -460,6 +464,9 @@ test('shell syntax: a redirect without spaces, bash -c, cd before the edit, back
   expect(filesWrittenBy('cd models && sed -i s/a/b/ x.sql')).toEqual(['models/x.sql'])
   expect(filesWrittenBy('cd /repo/models/staging; echo x > y.sql')).toEqual(['/repo/models/staging/y.sql'])
   expect(filesWrittenBy('echo x > /dev/null 2>&1')).toEqual([])
+  expect(isGitPush('2>/dev/null git push origin main')).toBe(true)
+  expect(isGitPush('>out.log git push')).toBe(true)
+  expect(isGitPush('2>/dev/null git status')).toBe(false)
   expect(isGitPush('echo "`git push`"')).toBe(true)
   expect(isGitPush('echo "$(git push)"')).toBe(true)
   expect(isGitPush("cat <<'EOF'\ngit push\nEOF")).toBe(false)
@@ -488,6 +495,19 @@ test('shell syntax: a redirect without spaces, bash -c, cd before the edit, back
   // Delimiters that are not names, and CRLF line ends.
   expect(isGitPush("cat <<1\nit's\n1\ngit push")).toBe(true)
   expect(isGitPush('cat <<EOF\r\ngit push\r\nEOF\r\ngit status')).toBe(false)
+})
+
+test('a model edited through a symlinked folder matches the files dbt_health names under the real one', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'health-'))
+  try {
+    mkdirSync(join(dir, 'real/models'), { recursive: true })
+    writeFileSync(join(dir, 'real/models/x.sql'), 'select 1')
+    symlinkSync(join(dir, 'real'), join(dir, 'alias'))
+    const insight = { ...OLD_STG, file: join(realpathSync(dir), 'real/models/x.sql'), properties: '' }
+    expect([...modelsOfFiles([join(dir, 'alias/models/x.sql')], [insight])]).toEqual([OLD_STG.uniqueId])
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('models match by their own files, so a model of another package is never matched', () => {

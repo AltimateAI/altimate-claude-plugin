@@ -9,6 +9,7 @@
 //
 // One check runs at a time. Changes that land while one runs are checked by the next, which starts
 // when that one ends.
+import { realpathSync } from 'node:fs'
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
@@ -66,11 +67,21 @@ const norm = (p: string) => {
   return (absolute ? '/' : '') + parts.join('/')
 }
 
+/** `norm`, with a symlinked folder resolved to the one the system names, as dbt_health names a model's files. */
+const canonical = (p: string) => {
+  const n = norm(p)
+  try {
+    return norm(realpathSync(n))
+  } catch {
+    return n
+  }
+}
+
 /** The models whose SQL file or properties file is one of `files`. */
 export function modelsOfFiles(files: readonly string[], insights: readonly HealthInsight[]): Set<string> {
-  const changed = new Set(files.map(norm))
+  const changed = new Set(files.map(canonical))
   const ids = new Set<string>()
-  for (const i of insights) if ((i.file && changed.has(norm(i.file))) || (i.properties && changed.has(norm(i.properties)))) ids.add(i.uniqueId)
+  for (const i of insights) if ((i.file && changed.has(canonical(i.file))) || (i.properties && changed.has(canonical(i.properties)))) ids.add(i.uniqueId)
   return ids
 }
 
@@ -291,6 +302,7 @@ function leaderEnd(words: readonly string[]): number {
   while (i < words.length) {
     const w = words[i]!
     if (/^[A-Za-z_]\w*=/.test(w)) i++
+    else if (/^\d*>[>|&]?$/.test(w)) i += 2
     else if (LEADERS.has(w)) leader = words[i++]!
     else if (leader && w.startsWith('-')) i += LEADER_VALUE_OPTIONS[leader]?.includes(w) ? 2 : 1
     else break
@@ -379,9 +391,12 @@ async function projectAbove($: EngineInterface, dir: string): Promise<string | n
 /** Whether a changed file is one a model check can be about: a .sql or .yml in a dbt project, not dbt's own files. */
 async function isModelFile($: EngineInterface, file: string): Promise<boolean> {
   const path = norm(file)
-  if (!/\.(sql|ya?ml)$/i.test(path) || SKIPPED_DIRS.test(path)) return false
+  if (!/\.(sql|ya?ml)$/i.test(path)) return false
   const dir = path.replace(/\/[^/]*$/, '')
   const project = await projectAbove($, dir)
+  // dbt's own folders are skipped by their place in the project, not by where the project sits on disk.
+  const inside = project !== null && path.startsWith(`${norm(project)}/`) ? path.slice(norm(project).length + 1) : path
+  if (SKIPPED_DIRS.test(inside)) return false
   // dbt's own files are the ones at the project root; a `profiles.yml` in a model folder is a properties file.
   return project !== null && !(ROOT_FILES.has(path.split('/').pop() ?? '') && norm(project) === dir)
 }
