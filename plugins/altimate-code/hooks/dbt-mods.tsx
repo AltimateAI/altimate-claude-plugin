@@ -240,7 +240,7 @@ print(json.dumps(out))
 export const RUN_FAILURES = `import sys; sys.path = [p for p in sys.path if p not in ('', '.')]
 import json
 r = json.load(open(sys.argv[1]))
-keep = ('unique_id', 'status', 'message', 'failures', 'relation_name', 'path')
+keep = ('unique_id', 'status', 'message', 'failures')
 bad = [{k: x[k] for k in keep if k in x} for x in (r.get('results') or []) if x.get('status') not in ('success', 'pass', 'skipped')]
 for x in bad:
     if isinstance(x.get('message'), str):
@@ -407,7 +407,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
         : !returned
           ? 'the query returned no row, so its columns could not be read'
           : !node
-            ? 'the manifest has no entry for this file, so the documented columns could not be read'
+            ? manifestUnread ? 'the manifest could not be read, so the documented columns could not be read' : 'the manifest has no entry for this file, so the documented columns could not be read'
             : documented.length === 0
               ? 'schema.yml documents no columns for this model'
               : null

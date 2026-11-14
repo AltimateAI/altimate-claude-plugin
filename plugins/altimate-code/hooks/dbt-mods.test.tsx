@@ -2479,6 +2479,15 @@ test('a manifest over 4 MiB that could not be sliced is not reported as "dbt has
   expect(note).not.toContain('FAILED')
 })
 
+test('a manifest that could not be read is named as the reason the columns were not compared, when dbt show returned rows', async ($, on) => {
+  const { clock } = await start($, on, { manifestSize: 9 * 1024 * 1024, sliceAnswer: { exitCode: 1, stdout: '' }, files: { 'models/orders.sql': 'select 1' } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/orders.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).toContain('the manifest could not be read, so the documented columns could not be read')
+  expect(note).not.toContain('the manifest has no entry for this file')
+})
+
 for (const field of ['type', 'target'] as const) {
   test(`doctor adapter: a templated ${field} is named as the ${field}`, async ($, on) => {
     const { clock } = await start($, on, { profileAnswer: said({ status: 'template', profile: 'shop', target: 'dev', field }) })
