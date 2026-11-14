@@ -288,8 +288,10 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
       env.set(word.slice(0, word.indexOf('=')), word)
     }
   }
-  const context = [...env.values()].sort()
-  const byFlag = new Map<string, string[]>()
+  // Values never leave this function in the clear: they are compared, stored with the history and kept in
+  // the failure's context, and a password set for one command must not end up on disk.
+  const context = [...env.values()].map(hashedEnv).sort()
+  const byFlag = new Map<string, { value: string; bool: boolean }[]>()
   const rest = [...words.slice(1, words.indexOf(verb) < 0 ? undefined : words.indexOf(verb)), ...(words.indexOf(verb) < 0 ? [] : words.slice(words.indexOf(verb) + 1))]
   for (let i = 0; i < rest.length; ) {
     const word = rest[i]!
@@ -301,12 +303,67 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
     const { values, next } = flagValues(rest, i)
     i = next
     if (SELECT_FLAGS[flag] || DISPLAY_FLAGS.has(flag)) continue
-    const key = CONTEXT_FLAGS[flag] ?? (flag === '-x' ? '--fail-fast' : flag)
-    byFlag.set(key, [...(byFlag.get(key) ?? []), values.join(' ')])
+    // `--X` and `--no-X` are one boolean: the last one written is the value dbt uses.
+    const off = /^--no-(.+)$/.exec(flag)
+    const bool = !!off || values.length === 0
+    const key = off ? `--${off[1]}` : (CONTEXT_FLAGS[flag] ?? (flag === '-x' ? '--fail-fast' : flag))
+    byFlag.set(key, [...(byFlag.get(key) ?? []), { value: off ? 'false' : values.join(' '), bool }])
   }
-  // Each flag once, its values in the order written (the last wins), the flags in a fixed order.
-  const identity = [...byFlag].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([key, values]) => `${key} ${values.join(' | ')}`.trim())
+  // Each flag once, in a fixed order. A boolean is its effective value (`--X`, or `--X false`); any other
+  // flag keeps its values in the order written (the last wins).
+  const identity = [...byFlag]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, uses]) => (uses.every(one => one.bool) ? (uses.at(-1)!.value === 'false' ? `${key} false` : key) : `${key} ${uses.map(one => one.value || 'true').join(' | ')}`))
   return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: start, end: match.index + match[0].length, argv: words, replayable, env: context }
+}
+
+/** `NAME=value` as `NAME=#<first 8 hex of the value's sha256>`: the same value compares equal, and is not stored. */
+export const hashedEnv = (assignment: string): string => {
+  const at = assignment.indexOf('=')
+  return `${assignment.slice(0, at)}=#${sha256Hex(assignment.slice(at + 1)).slice(0, 8)}`
+}
+
+/** SHA-256 of a string's UTF-8 bytes, in hex (a hooks module has no `crypto` to import). */
+export function sha256Hex(text: string): string {
+  const prime = (n: number) => {
+    for (let d = 2; d * d <= n; d++) if (n % d === 0) return false
+    return true
+  }
+  const primes: number[] = []
+  for (let n = 2; primes.length < 64; n++) if (prime(n)) primes.push(n)
+  const frac = (x: number) => Math.floor((x - Math.floor(x)) * 2 ** 32)
+  const K = primes.map(p => frac(Math.cbrt(p)))
+  const h = primes.slice(0, 8).map(p => frac(Math.sqrt(p)))
+  const data = [...new TextEncoder().encode(text)]
+  const bits = data.length * 8
+  data.push(0x80)
+  while (data.length % 64 !== 56) data.push(0)
+  for (let i = 7; i >= 0; i--) data.push(i >= 4 ? 0 : (bits >>> (i * 8)) & 0xff)
+  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n))
+  for (let chunk = 0; chunk < data.length; chunk += 64) {
+    const w: number[] = []
+    for (let i = 0; i < 16; i++) w.push(((data[chunk + i * 4]! << 24) | (data[chunk + i * 4 + 1]! << 16) | (data[chunk + i * 4 + 2]! << 8) | data[chunk + i * 4 + 3]!) >>> 0)
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15]!, 7) ^ rotr(w[i - 15]!, 18) ^ (w[i - 15]! >>> 3)
+      const s1 = rotr(w[i - 2]!, 17) ^ rotr(w[i - 2]!, 19) ^ (w[i - 2]! >>> 10)
+      w.push((w[i - 16]! + s0 + w[i - 7]! + s1) >>> 0)
+    }
+    let [a, b, c, d, e, f, g, hh] = h as [number, number, number, number, number, number, number, number]
+    for (let i = 0; i < 64; i++) {
+      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + K[i]! + w[i]!) >>> 0
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0
+      hh = g
+      g = f
+      f = e
+      e = (d + t1) >>> 0
+      d = c
+      c = b
+      b = a
+      a = (t1 + t2) >>> 0
+    }
+    ;[a, b, c, d, e, f, g, hh].forEach((v, i) => (h[i] = (h[i]! + v) >>> 0))
+  }
+  return h.map(v => v.toString(16).padStart(8, '0')).join('')
 }
 
 /** Every dbt invocation in a shell command, in order (`dbt run -s a && dbt test -s a` is two). */

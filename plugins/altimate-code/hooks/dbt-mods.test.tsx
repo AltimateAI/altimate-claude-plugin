@@ -6,6 +6,8 @@ import {
   dbtCommand,
   dbtCommands,
   dbtVerdict,
+  hashedEnv,
+  sha256Hex,
   debugInfo,
   failuresFrom,
   failuresFromText,
@@ -388,13 +390,13 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   // An escaped separator is part of the argument, as the shell passes it.
   expect(dbtCommand('dbt show --inline select\\ 1\\; -s x')?.inline).toBe('select 1;')
   // The environment set for it is part of where it ran.
-  expect(dbtCommand('DBT_TARGET=prod dbt run -s orders')?.env).toEqual(['DBT_TARGET=prod'])
+  expect(dbtCommand('DBT_TARGET=prod dbt run -s orders')?.env).toEqual([hashedEnv('DBT_TARGET=prod')])
   // Only real assignments: a word with `=` in another command is not one.
   expect(dbtCommand('echo a=b; git commit -m x=1 && dbt run -s o')?.env).toEqual([])
-  expect(dbtCommand('export A=1 B=2; dbt run -s o')?.env).toEqual(['A=1', 'B=2'])
+  expect(dbtCommand('export A=1 B=2; dbt run -s o')?.env).toEqual([hashedEnv('A=1'), hashedEnv('B=2')].sort())
   // The value dbt runs with: the command's own prefix overrides an earlier export.
-  expect(dbtCommand('export DBT_TARGET=dev; DBT_TARGET=prod dbt run -s o')?.env).toEqual(['DBT_TARGET=prod'])
-  expect(dbtCommand('export DBT_TARGET=prod; DBT_TARGET=dev dbt run -s o')?.env).toEqual(['DBT_TARGET=dev'])
+  expect(dbtCommand('export DBT_TARGET=dev; DBT_TARGET=prod dbt run -s o')?.env).toEqual([hashedEnv('DBT_TARGET=prod')])
+  expect(dbtCommand('export DBT_TARGET=prod; DBT_TARGET=dev dbt run -s o')?.env).toEqual([hashedEnv('DBT_TARGET=dev')])
   // An installed package's model at the same path is not the project's.
   const shared = { metadata: { project_name: 'shop' }, nodes: { 'model.pkg.orders': { resource_type: 'model', package_name: 'pkg', original_file_path: 'models/orders.sql' }, 'model.shop.orders': { resource_type: 'model', package_name: 'shop', original_file_path: 'models/orders.sql' } } }
   expect(nodeForFile(shared, 'models/orders.sql')?.id).toBe('model.shop.orders')
@@ -430,7 +432,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommands('/Users/me/shows/p/.venv/bin/dbt show -s orders')[0]!.argv[0]).toBe('/Users/me/shows/p/.venv/bin/dbt')
   expect(dbtCommands('dbt run -s a && dbt test -s a').map(one => one.verb)).toEqual(['run', 'test'])
   // An export before the first invocation applies to every later one.
-  expect(dbtCommands('export DBT_TARGET=prod; dbt run -s a; dbt show -s a').map(one => one.env)).toEqual([['DBT_TARGET=prod'], ['DBT_TARGET=prod']])
+  expect(dbtCommands('export DBT_TARGET=prod; dbt run -s a; dbt show -s a').map(one => one.env)).toEqual([[hashedEnv('DBT_TARGET=prod')], [hashedEnv('DBT_TARGET=prod')]])
   // run-operation is its own subcommand, not a run.
   expect(dbtCommand('dbt run-operation grant_select')?.verb).toBe('run-operation')
   expect(dbtCommands('dbt deps; dbt run -s a; dbt test -s a').map(one => one.verb)).toEqual(['deps', 'run', 'test'])
@@ -2115,4 +2117,54 @@ kitTest('failures in dbt\'s text are one per resource: the same name in another 
     '06:45:43  Failure in test orders (models/schema.yml)',
   ].join('\n')
   expect(failuresFromText(text).map(one => [one.kind, one.name, one.path])).toEqual([['model', 'orders', 'models/orders_v1.sql'], ['model', 'orders', 'models/orders_v2.sql'], ['test', 'orders', 'models/schema.yml']])
+})
+
+// ─── Boolean pairs, environment values never stored ──────────────────────────────────────────────
+
+kitTest('the last of --X and --no-X is the one flag dbt uses', () => {
+  expect(dbtCommand('dbt build --empty --no-empty')?.identity).toEqual(['--empty false'])
+  expect(dbtCommand('dbt build --no-empty --empty')?.identity).toEqual(['--empty'])
+  expect(dbtCommand('dbt build --empty')?.identity).toEqual(['--empty'])
+})
+
+for (const flag of ['empty', 'defer', 'favor-state']) {
+  test(`--${flag} and --no-${flag} in the other order do not clear each other, and the same order does`, async ($, on) => {
+    const { clock, setBash, band } = await failedBuild($, on, `dbt build -s orders --${flag} --no-${flag}`)
+    setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+    await $.tool.call({ tool: 'Bash', command: `dbt build -s orders --no-${flag} --${flag}` })
+    await clock.settle()
+    expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+    await $.tool.call({ tool: 'Bash', command: `dbt build -s orders --${flag} --no-${flag}` })
+    await clock.settle()
+    expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+    await band.unmount()
+  })
+}
+
+kitTest('sha256Hex is SHA-256, and an environment value is kept only as a short hash', () => {
+  expect(sha256Hex('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+  expect(sha256Hex('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+  expect(hashedEnv('DBT_PASSWORD=hunter2')).toMatch(/^DBT_PASSWORD=#[0-9a-f]{8}$/)
+  expect(dbtCommand('DBT_PASSWORD=hunter2 dbt run -s o')?.env.join()).not.toContain('hunter2')
+})
+
+test('an environment value set for a show is not persisted with its history; one for a run is not kept in the failure', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'DBT_PASSWORD=hunter2 dbt show -s orders' })
+  await clock.settle()
+  expect(JSON.stringify([...store])).not.toContain('hunter2')
+  expect(store.get('dbt-results-history')).toBeDefined()
+})
+
+test('a failure under an environment value is cleared only by a run with the same value', async ($, on) => {
+  const { clock, setBash, band } = await failedBuild($, on, 'DBT_PASSWORD=hunter2 dbt build -s orders')
+  setBash({ stdout: `${HEADER}\n${RUN_PASSED}` })
+  await $.tool.call({ tool: 'Bash', command: 'DBT_PASSWORD=other dbt build -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeDefined()
+  await $.tool.call({ tool: 'Bash', command: 'DBT_PASSWORD=hunter2 dbt build -s orders' })
+  await clock.settle()
+  expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
+  await band.unmount()
 })

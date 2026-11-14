@@ -197,9 +197,11 @@ export type FailureView = {
   /** run, test, build, seed, snapshot or retry; a command that ran several joins them (`run+test`). */
   verb: string
   /**
-   * The flags it ran with, in the order written: every flag but the selection and display-only ones (target,
-   * vars, `--full-refresh`, …), then its environment. A passing run with other flags clears nothing. A command
-   * that ran several invocations with different flags keeps each one's list, in order.
+   * What it ran with: every flag but the selection and display-only ones (target, vars, `--full-refresh`, …),
+   * sorted by flag, a repeated flag's values in the order written (the last wins), a `--X`/`--no-X` pair
+   * reduced to its effective value; then the environment set in the command (each value as a short hash,
+   * never in the clear), then `cwd:<folder it ran in>`. A passing run with anything else clears nothing. A
+   * command that ran several invocations with different contexts keeps each one's list, in order.
    */
   options: string[] | string[][]
   /** The failed command's --select; null when it ran the whole project. A compound command's selections are joined (`a | b`, `*` for a whole-project one). */
