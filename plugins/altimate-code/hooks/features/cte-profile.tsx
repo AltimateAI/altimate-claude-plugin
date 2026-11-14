@@ -214,11 +214,11 @@ async function profile($: EngineInterface, model: string, generation: number) {
       // A refusal (no write permission, another project, an adapter that did not start) or a missing tool would meet every later CTE too.
       const last = i === list.length - 1
       if (refused) {
-        if (!last) await setState($, prev => ({ ...prev, message: 'Ended early: the next CTE cannot be timed (see the reason above).' }))
+        if (!last && current()) await update($, stateAtom, prev => (prev && current() ? { ...prev, message: 'Ended early: the next CTE cannot be timed (see the reason above).' } : prev))
         break
       }
       if (unanswered) {
-        if (!last) await setState($, prev => ({ ...prev, message: 'Ended early: a query timed out or got no usable answer and may still be running on the warehouse, so no more are started.' }))
+        if (!last && current()) await update($, stateAtom, prev => (prev && current() ? { ...prev, message: 'Ended early: a query timed out or got no usable answer and may still be running on the warehouse, so no more are started.' } : prev))
         break
       }
     }
