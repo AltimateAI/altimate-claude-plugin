@@ -12,6 +12,8 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
+import { endDbtMods, newTurnDbtMods } from './dbt-mods'
+import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
@@ -133,9 +135,9 @@ const MIN_GRAPH_COLUMNS = 48
 // the rows a very wide layer draws.
 const BOX_CAP = 4
 const UNFOLDED = 40
-// Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
-// surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
-const PANE_SIZE = { columns: 110, rows: 34 }
+// Rows asked for when the pane sits above the prompt (about four boxes high). Docked, its width is the
+// widest dock, which the surface caps at 45% of the terminal; a size the person set wins.
+const PANE_SIZES: PaneSpec = { rows: 34 }
 // The engine's label for a column it could not classify, which is every column read from a CTE or a
 // qualified table, so all of a dbt model's. It says nothing about the column, so the pane leaves it out.
 const NOT_SURE = 'Not sure'
@@ -734,7 +736,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   }
   if (input.open || (!paneOpened && input.auto)) {
     paneOpened = true
-    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
+    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
     if (opened && opened.isPlaced === false && !input.open) await narrowHint($, opened.reason)
   }
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
@@ -890,7 +892,7 @@ async function narrowHint($: EngineInterface, reason: string) {
 
 async function openPane($: EngineInterface) {
   paneOpened = true
-  await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
+  await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), focus: true, closeOnEscape: true })
 }
 
 /** The text an edit replaces and the text it writes: Edit's strings, MultiEdit's pairs, or a Write's whole file. */
@@ -1153,6 +1155,7 @@ export async function startLineage($: EngineInterface) {
   drawnCache = null
   contextGiven.clear()
   newConversation()
+  forgetPaneSizes()
   // A new conversation's answers start empty.
   await update($, answerAtom, () => [])
   await $.command.register({
@@ -1160,6 +1163,7 @@ export async function startLineage($: EngineInterface) {
     description: 'Show dbt lineage for a model beside the chat: upstream, downstream, columns and column reach',
     argumentHint: '<model>[.column]',
   })
+  await loadPaneSizesOnce($)
 }
 
 type Ui = { Box: any; Button: any; Text: any }
@@ -1226,6 +1230,7 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
 export function registerLineage(on: On) {
   // A new user turn gets the lineage note again (its context may have been compacted since), once.
   on('session.end', async ($, e, next) => {
+    await endDbtMods($).catch(() => {})
     paneOpened = false
     narrowHintShown = false
     drawnCache = null
@@ -1239,6 +1244,7 @@ export function registerLineage(on: On) {
     // A subagent's turn starting does not clear the main conversation's context.
     if (!(e as { agentId?: string }).agentId) {
       contextGiven.clear()
+      newTurnDbtMods()
       turnCount++
     }
     return next(e)
@@ -1288,6 +1294,7 @@ export function registerLineage(on: On) {
 
   on('command.run', { command: COMMAND }, async ($, e) => {
     const model = e.args.trim()
+    noteTerminal(e.presentation?.columns)
     const current = await read($, focusAtom)
     if (!model && !current) {
       await update($, messageAtom, () => 'Read or edit a dbt model, or run /lineage <model>[.column].')
@@ -1596,6 +1603,7 @@ export function registerLineage(on: On) {
       ) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, spec: PANE_SIZES, keyPrefix: 'lineage', terminal: e.surface === 'terminal' ? e.viewport?.columns : undefined }, work => later($, work))
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
@@ -1619,6 +1627,7 @@ export function registerLineage(on: On) {
             </Box>
           )}
           {columns?.note && <Text color="warning">⚠ {columns.note}</Text>}
+          {sizes}
         </Box>
 
         {view !== 'list' && foldedList('up')}

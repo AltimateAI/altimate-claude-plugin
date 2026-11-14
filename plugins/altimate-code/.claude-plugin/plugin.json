@@ -1,7 +1,7 @@
 {
   "name": "altimate-code",
   "displayName": "Altimate Code",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Gives Claude Code altimate-code's model-free data tools (column-level lineage, impact analysis, PII detection, data-diff, FinOps, query equivalence, dialect translation, warehouse queries) through its MCP server, or through `altimate tool run` when MCP servers are not allowed, with delegation to the altimate-code agent for long dbt jobs, access to a linked Altimate workspace's knowledge, and the workspace's team rules in each session.",
   "author": {
     "name": "AltimateAI",
@@ -20,5 +20,13 @@
     "databricks",
     "column-lineage"
   ],
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "dbt_mods": {
+      "type": "boolean",
+      "title": "dbt helpers",
+      "description": "Compile and validate each model Claude edits, Explain and Fix on a failed dbt run, the Query results pane, model context on read, and the dbt environment doctor at session start. They run the project's own dbt.",
+      "default": true
+    }
+  }
 }

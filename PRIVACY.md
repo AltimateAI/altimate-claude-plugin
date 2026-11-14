@@ -30,6 +30,10 @@ The plugin registers a local stdio MCP server through `.mcp.json`, provides rout
 | Schema metadata, sampled column values, and query results returned by tools | Local MCP server → Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
 | Scratch tables and spilled query results | Local session storage or spill files; any content Claude reads enters the conversation and reaches your model provider | Local artifacts; conversation copies follow Claude Code and provider policies |
 
+## dbt helpers
+
+In a dbt project the plugin's hooks module runs the project's own dbt on this machine (`dbt show`, `dbt parse`, `dbt --version`, and `dbt debug` when you ask): after Claude edits a model, at session start, and when you press a button. Those commands connect to your warehouse with your local profile. What the helpers give Claude (dbt's errors, column names, the manifest's facts about a model, the environment check) enters the Claude Code conversation and reaches your model provider. Rows from `dbt show` that the results pane keeps (up to 50 per query, the last 20 queries and your bookmarks) stay in Claude Code's local plugin store until you press **Clear history**; they are not sent anywhere by the plugin. Set the plugin's `dbt_mods` option to false to turn the helpers off.
+
 Direct local data tools do not invoke a planning model. Workspace tools have the additional service flows below; delegation uses the separate provider path described later.
 
 ## Data flows for workspace tools

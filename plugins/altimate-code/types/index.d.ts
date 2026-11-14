@@ -176,6 +176,140 @@ export type ImpactView = {
   truncated: boolean
 }
 
+/** A node a dbt run, test or build left failed: from run_results.json, or the command's text. */
+export type DbtFailure = {
+  id: string
+  name: string
+  /** model, test, seed, snapshot, or project for an error before any node ran. */
+  kind: string
+  status: 'error' | 'fail'
+  message: string
+  /** Project-relative file, when known. */
+  path: string | null
+  /** A failed test's failing row count. */
+  failures: number | null
+}
+
+/** The last failed dbt command Claude ran, offered for Explain and Fix. */
+export type FailureView = {
+  command: string
+  root: string
+  /** run, test, build, seed, snapshot or retry; a command that ran several joins them (`run+test`). */
+  verb: string
+  /**
+   * What it ran with: every flag but the selection and display-only ones (target, vars, `--full-refresh`, …),
+   * sorted by flag, a repeated flag's values in the order written (the last wins), a `--X`/`--no-X` pair
+   * reduced to its effective value; then the environment set in the command (each value as a short hash,
+   * never in the clear), then `cwd:<folder it ran in>`. A passing run with anything else clears nothing. A
+   * command that ran several invocations with different contexts keeps each one's list, in order.
+   */
+  options: string[] | string[][]
+  /** The failed command's --select; null when it ran the whole project. A compound command's selections are joined (`a | b`, `*` for a whole-project one). */
+  select: string | null
+  failures: DbtFailure[]
+  at: number
+}
+
+/** What compile-and-validate found after Claude edited a model. */
+export type CheckView = {
+  model: string
+  /** The dbt project the model is in. */
+  root: string
+  /** Project-relative path of the model's file. */
+  file: string
+  /** `partial`: not fully checked (see `reason`): its columns could not be compared, or dbt has no model for the file. */
+  status: 'running' | 'ok' | 'warn' | 'error' | 'partial'
+  /** What was not checked, for a `partial` check. */
+  reason: string | null
+  /** Whether dbt compiled and ran the model at all. */
+  ran: boolean
+  /** Project-relative path of the schema file that documents the model, when the manifest names one. */
+  schema: string | null
+  /** The project's artifact folder (absolute): edits there are dbt's output, not sources. */
+  target: string
+  /** dbt's compile or warehouse errors. */
+  errors: string[]
+  /** Columns schema.yml documents that the warehouse did not return. */
+  missing: string[]
+  /** Columns the warehouse returned that schema.yml does not document. */
+  undocumented: string[]
+  /** Columns the warehouse returned; null when it returned no row to read them from. */
+  columns: number | null
+  /** Their names, in the query's order. */
+  returned: string[]
+  /** The columns schema.yml documents for the model. */
+  documented: string[]
+  ms: number
+  at: number
+}
+
+/** One query's rows, as the results pane shows them. */
+export type QueryResult = {
+  id: string
+  /** The model name, or the start of the inline SQL. */
+  title: string
+  root: string
+  select: string | null
+  inline: string | null
+  /** The context flags it ran with (target, profile, vars, …), part of its identity. */
+  options: string[]
+  /** Claude's own dbt invocation, as the shell ran it: Re-run runs it again. Null for /dbt-show's queries. */
+  argv?: string[] | null
+  /** The folder Claude ran it in. */
+  cwd?: string | null
+  /** False when Claude's command used shell variables or an env prefix: it cannot be run again word for word. */
+  replayable?: boolean
+  columns: string[]
+  rows: unknown[][]
+  limit: number
+  ms: number | null
+  at: number
+  error: string | null
+  /** Who ran it first: Claude's own `dbt show`, or the person's /dbt-show. A Re-run keeps it. */
+  by: 'claude' | 'you'
+}
+
+/** A query kept in the results pane's history or bookmarks, rows included (capped). */
+export type SavedQuery = QueryResult & { bookmarked: boolean }
+
+export type DoctorCheck = {
+  id: 'dbt' | 'python' | 'adapter' | 'manifest' | 'packages' | 'connection'
+  label: string
+  status: 'ok' | 'warn' | 'fail'
+  detail: string
+  fix: string | null
+}
+
+/** The environment doctor's last answer for the session's dbt project. */
+export type DoctorView = {
+  root: string
+  checks: DoctorCheck[]
+  at: number
+  /** Files changed after the manifest was written, newest first, when it is stale. */
+  staleFiles: string[]
+  /** What runs now: a parse, a connection test, the check itself. */
+  busy: string | null
+}
+
+/** A column of a model's manifest entry, as Claude is told about it on Read. */
+export type ModelContextColumn = { name: string; type: string | null; description: string | null; tests: string[] }
+
+export type ModelContext = {
+  id: string
+  name: string
+  path: string | null
+  materialized: string | null
+  description: string | null
+  relation: string | null
+  columns: ModelContextColumn[]
+  tests: string[]
+  parents: string[]
+  children: string[]
+  upstreamDepth: number
+  downstreamDepth: number
+  tags: string[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -217,6 +351,20 @@ declare module 'claude-code' {
       lineageStale: string | null
       lineageLoading: boolean
       isLineageBandHidden: boolean
+      /** Compile-and-validate's answer for the last model Claude edited. */
+      dbtCheck: CheckView | null
+      /** The last failed dbt run, test, build, seed, snapshot or retry Claude ran; null once a passing run of the same kind, selection, project and context (or a whole-project build, or a build with the same selection) clears it or it is dismissed. A passing `dbt retry` never clears it, and neither does a run whose output shows no passing summary or cannot be split per command (piped through `tail`, headers cut off). A compound command (`run+test`) is cleared only by the same command again or a whole-project build. */
+      dbtFailure: FailureView | null
+      /** The environment doctor's answer for the session's dbt project. */
+      dbtDoctor: DoctorView | null
+      /** The query the results pane shows. */
+      dbtResult: QueryResult | null
+      /** Earlier queries and bookmarks, newest first, for the results pane. */
+      dbtHistory: SavedQuery[]
+      /** A /dbt-show or Re-run in flight: its label. */
+      dbtResultBusy: string | null
+      /** The Min, Default or Max size chosen for a pane, by pane id; a pane without one opens at its default. */
+      paneSizes: Record<string, 'min' | 'default' | 'max'>
     }
   }
 }
