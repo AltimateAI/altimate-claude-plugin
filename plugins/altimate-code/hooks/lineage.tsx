@@ -11,7 +11,8 @@ import type {
   LineageGraph,
   WarehouseView,
 } from '../types'
-import { later, parseJson, runAltimate } from './altimate-cli'
+import { later, parseJson, runTool, textOf, within } from './altimate-cli'
+import { featuresSessionEnd, featuresTurnComplete, featuresTurnStart } from './features'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
@@ -40,13 +41,10 @@ import {
 const PANE = 'altimate-lineage'
 const PANE_TITLE = 'Altimate lineage'
 const COMMAND = 'lineage'
-// The plugin's own MCP server, by its key in .mcp.json.
-const SERVER_KEY = 'altimate-code'
 const DBT_LINEAGE = /__dbt_lineage$/
 const WAREHOUSE_TOOL = /^mcp__(.+)__((?:databricks_)?table_lineage)$/
 // $.fs.read refuses files over 4 MiB; bigger manifests are read through altimate-code's tools.
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024
-const TOOL_TIMEOUT_MS = 60_000
 // How long an edit waits for the column reach before it goes ahead without it.
 const HOLD_MS = 5_000
 // The whole lookup (project, manifest, columns) before an edit runs; the edit waits no longer.
@@ -151,20 +149,6 @@ const SEVERITY_COLOR: Record<ImpactView['severity'], string> = {
   LOW: 'suggestion',
   MEDIUM: 'warning',
   HIGH: 'error',
-}
-
-/** Resolves with the work's value, or null once `ms` pass or it fails. */
-function within<T>($: EngineInterface, ms: number, work: Promise<T>): Promise<T | null> {
-  return new Promise(resolve => {
-    let settled = false
-    const settle = (value: T | null) => {
-      if (settled) return
-      settled = true
-      resolve(value)
-    }
-    $.clock.after(ms, () => settle(null))
-    work.then(settle, () => settle(null))
-  })
 }
 
 /** One focus: the model in one manifest revision. Async answers for another are dropped. */
@@ -275,21 +259,6 @@ async function modelsNamed($: EngineInterface, text: string, root: string, shown
     if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root, ...(kept && { manifest: kept }) })
   }
   return [...found.values()].slice(0, 12)
-}
-
-let serverName: string | null = null
-let connectFailedAt = -Infinity
-const CONNECT_RETRY_MS = 60_000
-
-/** The plugin's MCP server as $.mcp.call names it, or null when it is not connected (CLI mode); a failure is retried after a minute. */
-async function mcpServer($: EngineInterface): Promise<string | null> {
-  if (serverName) return serverName
-  const now = await $.clock.now()
-  if (now - connectFailedAt < CONNECT_RETRY_MS) return null
-  const connected = await $.mcp.connect(SERVER_KEY).catch(() => null)
-  serverName = connected?.isConnected ? connected.server : null
-  if (!serverName) connectFailedAt = now
-  return serverName
 }
 
 const elapsed = (ms: number) => (ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`)
@@ -421,88 +390,6 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
   return graph
 }
 
-function textOf(content: unknown): string {
-  if (typeof content === 'string') return content
-  const blocks = Array.isArray(content) ? content : Array.isArray((content as any)?.content) ? (content as any).content : []
-  return blocks
-    .filter((block: any) => block?.type === 'text' && typeof block.text === 'string')
-    .map((block: any) => block.text)
-    .join('\n')
-}
-
-/**
- * The file a `<persisted-output>` preview says holds the whole answer: null when the text is no such
- * preview, undefined when it is one but names no file.
- */
-export function persistedPath(text: string): string | null | undefined {
-  if (!/^\s*(?:<|&lt;)persisted-output(?:>|&gt;)/.test(text)) return null
-  return /Full output saved to: ([^\n]+?)\s*$/m.exec(text)?.[1]
-}
-
-/** A file:// URI as a filesystem path; a Windows drive path keeps no leading slash. */
-function fileUriPath(uri: string): string {
-  const path = decodeURIComponent(new URL(uri).pathname)
-  return /^\/[A-Za-z]:/.test(path) ? path.slice(1) : path
-}
-
-/**
- * Runs one altimate-code data tool: through the plugin's MCP server when it is connected (no
- * permission prompt, structured content when the build sends it), else `altimate tool run --json`.
- * `cliOnly` goes straight to the CLI, whose --json carries the whole metadata; a structured result
- * the server left out for size is fetched that way too.
- */
-async function runTool($: EngineInterface, name: string, args: Record<string, unknown>, cliOnly = false, until?: number) {
-  // With a deadline, nothing starts once it has passed, and the CLI is stopped at it.
-  const left = async () => {
-    const ms = until === undefined ? TOOL_TIMEOUT_MS : until - (await $.clock.now())
-    if (ms <= 0) throw new Error('out of time')
-    return ms
-  }
-  const server = cliOnly ? null : await mcpServer($)
-  if (server) {
-    const ms = await left()
-    try {
-      // The engine's MCP call has no timeout of its own: one that never answers is given up on, so a
-      // shared trace does not hold every later edit of that column, and the CLI is tried instead.
-      const result = await within($, ms, $.mcp.call(server, name, args))
-      if (!result) throw new Error('altimate-code did not answer over MCP')
-      let text = textOf(result.content)
-      // A long result comes back as a preview plus a link to the full text.
-      const link = result.content.find((block: any) => block?.type === 'resource_link' && String(block.uri).startsWith('file://')) as
-        | { uri: string }
-        | undefined
-      // Claude Code (2.1.319) swaps an answer of about 49 KB or more for a preview that names the file it
-      // saved the whole answer to, with no link block: the answer is that file.
-      const saved = link ? null : persistedPath(text)
-      if (!link && saved === undefined) throw new Error('a cut-off preview with no file named')
-      // An unreadable link or file leaves only the preview: fetch the whole answer through the CLI instead.
-      const full = link ? await $.fs.read(fileUriPath(link.uri)).catch(() => null) : saved ? await $.fs.read(saved).catch(() => null) : text
-      if (full === null) throw new Error('the full result could not be read')
-      text = full
-      // Claude Code hands a tool's structured content over as one JSON text block in place of the
-      // text; the structured content carries the text report as `report`.
-      const structured = (result.structuredContent ?? (text.trim().startsWith('{') ? parseJson(text) : null)) as any
-      if (structured?.truncated !== true) {
-        return { metadata: structured, text: typeof structured?.report === 'string' ? structured.report : text, ok: !result.isError }
-      }
-    } catch {
-      // Fall through to the CLI: the server may have gone away mid-session, so the next call reconnects.
-      serverName = null
-    }
-  }
-  const result = await runAltimate($, ['tool', 'run', name, '--args', JSON.stringify(args), '--json'], await left())
-  if ((result as { isStdoutTruncated?: boolean }).isStdoutTruncated) {
-    return { metadata: null as any, text: `${name}'s answer was larger than the 4 MiB a plugin can read`, ok: false }
-  }
-  const data = parseJson<{ status?: string; output?: string; metadata?: unknown }>(result.stdout)
-  // Anything but the CLI's answer object (an altimate-code that exits before a pipe drains cuts it off) is a
-  // failure to report and ask again, not "no such model".
-  if (result.exitCode === 0 && (!data || typeof data !== 'object' || typeof data.status !== 'string')) {
-    return { metadata: null as any, text: 'the answer could not be read', ok: false }
-  }
-  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? '', ok: result.exitCode === 0 && data?.status !== 'error' }
-}
-
 /** The manifest's graph, read from the file once per change; null when the file is too big to read. */
 async function readGraph($: EngineInterface, manifest: string): Promise<LineageGraph | null> {
   const stat = await $.fs.stat(manifest)
@@ -524,7 +411,7 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
   model = path ?? model
   const key = `${manifest}\u0000${mtimeMs}\u0000${model}`
   if (toolsCache.has(key)) return checkPath(toolsCache.get(key)!, path)
-  const result = await shared(`graph\u0000${key}`, () => runTool($, 'dbt_lineage', { manifest_path: manifest, model, include_graph: true }, true))
+  const result = await shared(`graph\u0000${key}`, () => runTool($, 'dbt_lineage', { manifest_path: manifest, model, include_graph: true }, { cliOnly: true }))
   const graph = result.metadata?.graph as LineageGraph | undefined
   const id: string | undefined = result.metadata?.model_unique_id ?? undefined
   // An answer the plugin could not read (too large, no output) or the CLI's own failure (empty
@@ -1019,7 +906,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
         const left = Math.min(HOLD_MS, deadline - (await $.clock.now()))
         if (left <= 0) return null
         const args = { manifest_path: manifest, model: id, column: col, change_type: 'modify' }
-        return within($, left, shared(`impact\u0000${manifest}\u0000${stat.mtimeMs}\u0000${id}\u0000${col}`, () => runTool($, 'impact_analysis', args, false, deadline)))
+        return within($, left, shared(`impact\u0000${manifest}\u0000${stat.mtimeMs}\u0000${id}\u0000${col}`, () => runTool($, 'impact_analysis', args, { until: deadline })))
       }),
     )
     const reaches = results.map((result, i) => (result?.ok ? reachFromMetadata(result.metadata, node.name, touched[i]!) : null))
@@ -1097,7 +984,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
 function modelColumnsFromCli($: EngineInterface, manifest: string, mtimeMs: number, id: string): Promise<string[]> {
   const key = columnsKey(manifest, mtimeMs, id)
   const fetching = shared(`columns\u0000${key}`, async () => {
-    const result = await runTool($, 'dbt_lineage', { manifest_path: manifest, model: id }, true)
+    const result = await runTool($, 'dbt_lineage', { manifest_path: manifest, model: id }, { cliOnly: true })
     const columns = result.ok ? (columnsFromMetadata(result.metadata) ?? parsedLineage(result.text)) : null
     // An answer with no columns (a failure the CLI reported) is kept too, so this revision is not asked
     // again, but never over columns the pane read meanwhile. A call that never answered throws instead,
@@ -1232,6 +1119,8 @@ export function registerLineage(on: On) {
     contextGiven.clear()
     newConversation()
     await update($, answerAtom, () => [])
+    // The features' own end (features/index.ts): this is the plugin's one session.end hook.
+    await featuresSessionEnd($, e)
     return next(e)
   })
 
@@ -1241,6 +1130,8 @@ export function registerLineage(on: On) {
       contextGiven.clear()
       turnCount++
     }
+    // The features' turn start (features/index.ts): this is the plugin's one turn.start hook.
+    await featuresTurnStart($, e)
     return next(e)
   })
 
@@ -1248,6 +1139,8 @@ export function registerLineage(on: On) {
   // answered from memory) it follows the first one named, so the pane shows what the answer is about.
   on('turn.complete', async ($, e, next) => {
     const out = await next(e)
+    // The features' turn end (features/index.ts): this is the plugin's one turn.complete hook.
+    await featuresTurnComplete($, e, out)
     if ((e as { agentId?: string }).agentId || e.reason !== 'answer' || !out.text) return out
     const text = out.text
     const turn = turnCount
