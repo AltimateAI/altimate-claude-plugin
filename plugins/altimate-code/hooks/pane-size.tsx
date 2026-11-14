@@ -44,11 +44,31 @@ export function paneSizes(spec: PaneSpec): PaneSizes {
   }
 }
 
+/** Reads the saved sizes into the session. A store read that fails leaves the sizes as they are: it says nothing about what was saved. */
 export async function loadPaneSizes($: EngineInterface) {
   terminalColumns = null
-  const saved = await $.store.get(SIZES_KEY).catch(() => null)
+  const read = await $.store.get(SIZES_KEY).then(
+    saved => ({ saved }),
+    () => null,
+  )
+  if (!read) return
+  const { saved } = read
   const valid = saved && typeof saved === 'object' ? Object.entries(saved as Record<string, unknown>).filter(([, one]) => SIZE_ORDER.includes(one as PaneSize)) : []
   await update($, sizeAtom, () => Object.fromEntries(valid) as Record<string, PaneSize>)
+}
+
+// One load per session: the lineage and the dbt halves both start in it and share the saved sizes.
+let loading: Promise<void> | null = null
+
+/** A new session reads the saved sizes again. */
+export function forgetPaneSizes() {
+  loading = null
+}
+
+/** loadPaneSizes once for the session, however many halves ask; never rejects, so a failing store cannot stop a start. */
+export function loadPaneSizesOnce($: EngineInterface): Promise<void> {
+  loading ??= loadPaneSizes($).catch(() => {})
+  return loading
 }
 
 /** What a pane asks for when it opens: the size the person chose for it, else its default. */

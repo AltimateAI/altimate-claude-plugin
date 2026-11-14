@@ -24,7 +24,7 @@ import {
   textTable,
   versionInfo,
 } from './dbt-mods-core'
-import { MANIFEST_SLICE, PROFILE_TYPE } from './dbt-mods'
+import { MANIFEST_SLICE, PROFILE_TYPE, RUN_FAILURES } from './dbt-mods'
 
 // The dbt helpers on; the lineage half reads no manifest in these tests that it would draw.
 // The kit's `$` and `on`, loosely typed: the tests drive engine events with only the fields the helpers read.
@@ -139,6 +139,14 @@ type Options = {
   env?: Record<string, string>
   /** No project .venv: dbt is the one on PATH, its launcher naming this interpreter. */
   pathDbtPython?: string
+  /** run_results.json's size: over 4 MiB $.fs.read refuses it and its failures come through the project's Python. */
+  runResultsSize?: number
+  /** What the project's Python prints for the run_results script. */
+  runFailures?: { exitCode: number; stdout: string }
+  /** What the project's Python prints for the manifest slice; the default is the manifest's nodes. */
+  sliceAnswer?: { exitCode: number; stdout: string }
+  /** While this answers true, a read of the plugin's store fails. */
+  storeGetFails?: () => boolean
   /** What the project's Python prints for the profile script; the default is an ok duckdb output. */
   profileAnswer?: { exitCode: number; stdout: string }
   /** What the plugin's store held from an earlier session. */
@@ -207,7 +215,12 @@ async function start($: any, on: any, options: Options = {}) {
     mtimes[`${options.target}/manifest.json`] = mtimes['target/manifest.json']!
   }
   const exists = (path: string) => path === ROOT || (path.startsWith(`${ROOT}/`) && (path.slice(ROOT.length + 1) in files || Object.keys(files).some(one => one.startsWith(`${path.slice(ROOT.length + 1)}/`))))
-  on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
+  const registered: string[] = []
+  const storeGets: string[] = []
+  on('command.register', (_: unknown, e: { name: string }) => {
+    registered.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'test' }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
@@ -247,7 +260,11 @@ async function start($: any, on: any, options: Options = {}) {
     prompts.push(`/${e.command} ${e.args}`)
     return { text: '' }
   })
-  on('store.get', (_: unknown, e: { key: string }) => ({ value: store.get(e.key) }))
+  on('store.get', (_: unknown, e: { key: string }) => {
+    storeGets.push(e.key)
+    if (options.storeGetFails?.()) throw new Error('store unavailable')
+    return { value: store.get(e.key) }
+  })
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
     store.set(e.key, JSON.parse(JSON.stringify(e.value)))
     return { value: undefined }
@@ -259,13 +276,14 @@ async function start($: any, on: any, options: Options = {}) {
     if (!exists(e.path)) throw new Error('ENOENT')
     const isDir = !(rel in files)
     const mtimeMs = rel === 'target/run_results.json' ? (options.runResultsAt ?? 5_000) : (mtimes[rel] ?? 500)
-    const size = rel === 'target/manifest.json' && options.manifestSize ? options.manifestSize : (files[rel]?.length ?? 0)
+    const size = rel === 'target/manifest.json' && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
     return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: false } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
     const rel = e.path.slice(ROOT.length + 1)
     if (!(rel in files)) throw new Error('ENOENT')
+    if (rel === 'target/run_results.json' && (options.runResultsSize ?? 0) > 4 * 1024 * 1024) throw new Error('file is larger than 4 MiB')
     return { value: files[rel] }
   })
   on('fs.list', (_: unknown, e: { path: string }) => {
@@ -300,6 +318,8 @@ async function start($: any, on: any, options: Options = {}) {
       // The script itself is checked below; here the interpreter answers what it would print.
       return { value: { ...(options.profileAnswer ?? { exitCode: 0, stdout: '{"status":"ok","profile":"shop","target":"dev","type":"duckdb"}' }), stderr: '' } }
     }
+    if (bin === python && verb === '-c' && e.argv[2] === RUN_FAILURES) return { value: { ...(options.runFailures ?? { exitCode: 0, stdout: JSON.stringify({ results: [] }) }), stderr: '' } }
+    if (bin === python && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
     if (bin === python && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
     if (bin === python) return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
     if (bin !== (options.pathDbtPython ? 'dbt' : DBT)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
@@ -348,7 +368,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { clock, runs, cwds, toasts, prompts, store, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
+  return { clock, runs, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -2223,7 +2243,7 @@ const adapterCases: [string, { exitCode: number; stdout: string }, string][] = [
   ['an adapter that is not installed fails with the pip command', said({ status: 'ok', profile: 'shop', target: 'wh', type: 'snowflake' }), 'the profile uses snowflake, but only duckdb is installed'],
   ['a templated target the script could not settle', said({ status: 'template', profile: 'shop', target: "{{ var('t') }}" }), "the profile's target is set by a template, so which adapter it uses could not be told; installed: duckdb"],
   ['a target with no output fails', said({ status: 'no_output', profile: 'shop', target: 'prod' }), 'profile shop has no output named prod'],
-  ['an output with no type warns', said({ status: 'no_type', profile: 'shop', target: 'dev' }), 'output dev has no type:'],
+  ['an output with no type names the missing key', said({ status: 'no_type', profile: 'shop', target: 'dev' }), 'output dev has no `type` key'],
 ]
 for (const [name, answer, expected] of adapterCases) {
   test(`doctor adapter: ${name}`, async ($, on) => {
@@ -2236,7 +2256,7 @@ for (const [name, answer, expected] of adapterCases) {
   })
 }
 
-for (const [name, answer, fixShown] of [['a no-output answer is a failure with a fix', { status: 'no_output', profile: 'shop', target: 'prod' }, true], ['an untyped output is only a warning', { status: 'no_type', profile: 'shop', target: 'dev' }, false]] as const) {
+for (const [name, answer, fixShown] of [['a no-output answer is a failure with a fix', { status: 'no_output', profile: 'shop', target: 'prod' }, true], ['an untyped output is a failure with its own fix, not the missing-output one', { status: 'no_type', profile: 'shop', target: 'dev' }, false]] as const) {
   test(name, async ($, on) => {
     const { clock } = await start($, on, { profileAnswer: said(answer) })
     await $.command.run({ command: 'dbt-doctor', args: '' })
@@ -2410,4 +2430,119 @@ test('a failure under an environment value is cleared only by a run with the sam
   await clock.settle()
   expect(await band.find({ key: 'dbt-explain' })).toBeUndefined()
   await band.unmount()
+})
+
+test('a run_results.json over 4 MiB gives its failures through the project\'s Python, and they reach Explain', async ($, on) => {
+  const failed = { results: [{ unique_id: 'test.shop.not_null_orders_amount.106140f9fd', status: 'error', message: 'artifact message from python', failures: null }] }
+  const { clock, runs, prompts, setBash } = await start($, on, { runResultsSize: 9 * 1024 * 1024, runFailures: { exitCode: 0, stdout: JSON.stringify(failed) } })
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  const run = runs.find(argv => argv[2] === RUN_FAILURES)
+  expect(run).toEqual(['/proj/.venv/bin/python', '-c', RUN_FAILURES, '/proj/target/run_results.json'])
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts[0]).toContain('artifact message from python')
+  expect(prompts[0]!.split('\n- ').length - 1).toBe(1)
+  await band.unmount()
+})
+
+test('a run_results.json over 4 MiB that is older than the command is not read through the Python', async ($, on) => {
+  const old = await start($, on, { runResultsSize: 9 * 1024 * 1024, runResultsAt: 10 })
+  old.setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await old.clock.settle()
+  expect(old.runs.some(argv => argv[2] === RUN_FAILURES)).toBe(false)
+})
+
+test('a run_results.json over 4 MiB the Python cannot give leaves the failures dbt printed', async ($, on) => {
+  const { clock, runs, prompts, setBash } = await start($, on, { runResultsSize: 9 * 1024 * 1024, runFailures: { exitCode: 1, stdout: '' } })
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  expect(runs.some(argv => argv[2] === RUN_FAILURES)).toBe(true)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts[0]).toContain('not_null_orders_amount')
+  await band.unmount()
+})
+
+test('a manifest over 4 MiB that could not be sliced is not reported as "dbt has no model for this file"', async ($, on) => {
+  const { clock } = await start($, on, { manifestSize: 9 * 1024 * 1024, sliceAnswer: { exitCode: 1, stdout: '' }, show: { node: 'none' }, files: { 'models/disabled.sql': 'select 1' } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/disabled.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).toContain('- not checked: the manifest could not be read, so whether dbt has a model for this file is unknown')
+  expect(note).not.toContain('dbt has no model for this file (disabled')
+  expect(note).not.toContain('FAILED')
+})
+
+for (const field of ['type', 'target'] as const) {
+  test(`doctor adapter: a templated ${field} is named as the ${field}`, async ($, on) => {
+    const { clock } = await start($, on, { profileAnswer: said({ status: 'template', profile: 'shop', target: 'dev', field }) })
+    await $.command.run({ command: 'dbt-doctor', args: '' })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: `the profile's ${field} is set by a template, so which adapter it uses could not be told; installed: duckdb` })).toBeDefined()
+    await ui.unmount()
+  })
+}
+
+test('doctor adapter: an output with no type is a failure, and says which output', async ($, on) => {
+  const { clock } = await start($, on, { profileAnswer: said({ status: 'no_type', profile: 'shop', target: 'dev' }) })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'output dev has no `type` key' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /✖ Adapter/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('PROFILE_TYPE says which field a template left unsettled', () => {
+  expect(PROFILE_TYPE).toContain("out('template', profile=name, target=raw, field='target')")
+  expect(PROFILE_TYPE).toContain("out('template', profile=name, target=target, field='type')")
+})
+
+test('Bookmark after Clear history puts the shown result back in the history, bookmarked', async ($, on) => {
+  const { clock, store, setBash } = await start($, on)
+  setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: '.venv/bin/dbt show -s orders --log-format json' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  await ui.press({ key: 'results-clear' })
+  await clock.settle()
+  expect(store.get('dbt-results-history')).toEqual([])
+  await ui.press({ key: 'results-bookmark' })
+  await clock.settle()
+  const kept = store.get('dbt-results-history') as any[]
+  expect(kept.map(one => [one.title, one.bookmarked])).toEqual([['orders', true]])
+  expect(await ui.find({ type: 'Button', text: /★ Bookmarked/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a failed store read keeps the sizes already chosen: the next choice saves both panes', async ($, on) => {
+  let failing = false
+  const { clock, store } = await start($, on, { stored: { 'pane-sizes': { 'altimate-results': 'max', 'altimate-lineage': 'min' } }, storeGetFails: () => failing })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  // The next session reads the store again, and it fails.
+  failing = true
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: false })
+  await clock.settle()
+  failing = false
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', text: /● Max/ })).toBeDefined()
+  await ui.press({ key: 'results-size-default' })
+  await clock.settle()
+  expect(store.get('pane-sizes')).toEqual({ 'altimate-results': 'default', 'altimate-lineage': 'min' })
+  await ui.unmount()
+})
+
+test('a failing store read still registers /lineage, and the saved sizes are read once for both halves', async ($, on) => {
+  const { registered, storeGets } = await start($, on, { storeGetFails: () => true })
+  expect(registered).toContain('lineage')
+  expect(registered).toContain('dbt-show')
+  expect(storeGets.filter(key => key === 'pane-sizes').length).toBe(1)
 })

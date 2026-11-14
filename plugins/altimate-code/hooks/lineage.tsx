@@ -13,7 +13,7 @@ import type {
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
 import { endDbtMods, newTurnDbtMods } from './dbt-mods'
-import { loadPaneSizes, noteTerminal, paneRequest, sizeControls, type PaneSpec } from './pane-size'
+import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
@@ -1155,7 +1155,7 @@ export async function startLineage($: EngineInterface) {
   drawnCache = null
   contextGiven.clear()
   newConversation()
-  await loadPaneSizes($)
+  forgetPaneSizes()
   // A new conversation's answers start empty.
   await update($, answerAtom, () => [])
   await $.command.register({
@@ -1163,6 +1163,7 @@ export async function startLineage($: EngineInterface) {
     description: 'Show dbt lineage for a model beside the chat: upstream, downstream, columns and column reach',
     argumentHint: '<model>[.column]',
   })
+  await loadPaneSizesOnce($)
 }
 
 type Ui = { Box: any; Button: any; Text: any }

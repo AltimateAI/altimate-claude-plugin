@@ -6,7 +6,7 @@ import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later } from './altimate-cli'
-import { loadPaneSizes, noteTerminal, paneRequest, sizeControls, type PaneSpec } from './pane-size'
+import { loadPaneSizesOnce, noteTerminal, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
   cellText,
   columnDrift,
@@ -235,6 +235,19 @@ for k in keep:
 print(json.dumps(out))
 `
 
+// Reads a run_results.json too big for $.fs.read with the project's Python, and prints only the results that
+// did not succeed, with the fields the failure view reads.
+export const RUN_FAILURES = `import sys; sys.path = [p for p in sys.path if p not in ('', '.')]
+import json
+r = json.load(open(sys.argv[1]))
+keep = ('unique_id', 'status', 'message', 'failures', 'relation_name', 'path')
+bad = [{k: x[k] for k in keep if k in x} for x in (r.get('results') or []) if x.get('status') not in ('success', 'pass', 'skipped')]
+for x in bad:
+    if isinstance(x.get('message'), str):
+        x['message'] = x['message'][:2000]
+print(json.dumps({'results': bad}))
+`
+
 /** The project's name in dbt_project.yml: which manifest nodes are its own, not an installed package's. */
 async function projectName($: EngineInterface, root: string): Promise<string | null> {
   return /^name:\s*['"]?([\w-]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1] ?? null
@@ -378,6 +391,8 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // dbt exited 0 but showed nothing. A model the manifest still lists is a failure; a file it does not
   // list (a model just disabled, not a model at all) was not checked.
   const nothingShown = run.exitCode === 0 && !preview
+  // A manifest that is there but could not be read (too big to slice, no interpreter) says nothing about this file.
+  const manifestUnread = !after && (await $.fs.stat(`${await targetOf($, root)}/manifest.json`).catch(() => null))?.kind === 'file'
   if (nothingShown && node) errors.push(`dbt show selected nothing for ${rel} (the model ${named ?? model}), so nothing was compiled or run. ${stripAnsi(run.stdout).split('\n').map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? ''}`.trim())
   const documented = node ? Object.values<any>(node.node.columns ?? {}).map(column => String(column.name)) : []
   const returned = preview && preview.rows.length > 0 ? preview.columns : null
@@ -385,15 +400,17 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // Agreement is claimed only when both sides were read: else it says what was not checked.
   const reason = errors.length
     ? null
-    : nothingShown
-      ? 'dbt has no model for this file (disabled, or not a model), so nothing was compiled or run'
-      : !returned
-        ? 'the query returned no row, so its columns could not be read'
-        : !node
-          ? 'the manifest has no entry for this file, so the documented columns could not be read'
-          : documented.length === 0
-            ? 'schema.yml documents no columns for this model'
-            : null
+    : nothingShown && manifestUnread
+      ? 'the manifest could not be read, so whether dbt has a model for this file is unknown, and nothing was compiled or run'
+      : nothingShown
+        ? 'dbt has no model for this file (disabled, or not a model), so nothing was compiled or run'
+        : !returned
+          ? 'the query returned no row, so its columns could not be read'
+          : !node
+            ? 'the manifest has no entry for this file, so the documented columns could not be read'
+            : documented.length === 0
+              ? 'schema.yml documents no columns for this model'
+              : null
   const status: CheckView['status'] = errors.length ? 'error' : reason ? 'partial' : drift.missing.length || drift.undocumented.length ? 'warn' : 'ok'
   const view: CheckView = { ...blank, model: named ?? model, schema: node ? schemaOf(node.node) : blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
   await setCheck($, view, newest)
@@ -482,6 +499,17 @@ function checkNote(view: CheckView): string {
 
 // ─── 08 · A failed run, one press from a fix ───────────────────────────────────────────────────────
 
+/** The parsed run_results.json; over 4 MiB (more than $.fs.read takes) only its failed results, through the project's Python. Null when unreadable. */
+async function readRunResults($: EngineInterface, root: string, path: string, size: number): Promise<unknown> {
+  if (size <= MAX_MANIFEST_BYTES) return $.fs.read(path).then(JSON.parse).catch(() => null)
+  try {
+    const run = await $.process.run([await pythonFor($, root), '-c', RUN_FAILURES, path], { cwd: root, timeoutMs: 60_000 })
+    return run.exitCode === 0 && !run.isStdoutTruncated ? JSON.parse(run.stdout) : null
+  } catch {
+    return null
+  }
+}
+
 async function recordRun($: EngineInterface, command: string, verb: string, select: string | null, options: string[] | string[][], root: string, output: string, failed: boolean, proven: boolean, startedAt: number, mineGeneration = generation) {
   if (generation !== mineGeneration) return null
   if (!failed) {
@@ -502,7 +530,7 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
   const stat = await $.fs.stat(results).catch(() => null)
   let failures = [] as FailureView['failures']
   if (stat && stat.mtimeMs >= startedAt) {
-    const runResults = await $.fs.read(results).then(JSON.parse).catch(() => null)
+    const runResults = await readRunResults($, root, results, stat.size)
     const manifest = await readManifest($, root)
     failures = failuresFrom(runResults, manifest?.manifest)
   }
@@ -549,8 +577,13 @@ async function remember($: EngineInterface, result: QueryResult) {
   await persistHistory($)
 }
 
-async function toggleBookmark($: EngineInterface, id: string) {
-  await update($, historyAtom, history => history.map(one => (one.id === id ? { ...one, bookmarked: !one.bookmarked } : one)))
+/** Bookmarks the shown result, or lifts its bookmark; a result no longer in the history (after Clear history) is put back first. */
+async function toggleBookmark($: EngineInterface, result: QueryResult) {
+  await update($, historyAtom, history =>
+    history.some(one => one.id === result.id)
+      ? history.map(one => (one.id === result.id ? { ...one, bookmarked: !one.bookmarked } : one))
+      : [{ ...result, rows: result.rows.slice(0, SHOW_LIMIT), bookmarked: true }, ...history],
+  )
   await persistHistory($)
 }
 
@@ -716,7 +749,7 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
 }
 
 /** Why the selected output's adapter could not be read. */
-type ProfileProblem = { problem: 'template' | 'no-output' | 'no-type' | 'error'; profile: string; target: string }
+type ProfileProblem = { problem: 'template' | 'no-output' | 'no-type' | 'error'; profile: string; target: string; field?: 'target' | 'type' }
 
 /**
  * Selects the output dbt would use, from the profiles.yml and dbt_project.yml given, and prints its adapter
@@ -754,7 +787,7 @@ if '{{' in target:
     raw = target
     target = settle(target)
     if not target:
-        out('template', profile=name, target=raw)
+        out('template', profile=name, target=raw, field='target')
 outputs = profile.get('outputs')
 output = outputs.get(target) if isinstance(outputs, dict) else None
 if not isinstance(output, dict):
@@ -765,7 +798,7 @@ if not isinstance(kind, str) or not kind:
 if '{{' in kind:
     kind = settle(kind)
     if not kind:
-        out('template', profile=name, target=target)
+        out('template', profile=name, target=target, field='type')
 out('ok', profile=name, target=target, type=kind)
 `
 
@@ -786,11 +819,11 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   try {
     const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_TYPE, `${root}/dbt_project.yml`, path], { cwd: root, timeoutMs: 30_000 })
     if (run.exitCode !== 0) return unread
-    const answer = JSON.parse(run.stdout) as { status: string; profile?: string; target?: string; type?: string }
+    const answer = JSON.parse(run.stdout) as { status: string; profile?: string; target?: string; type?: string; field?: 'target' | 'type' }
     if (answer.status === 'ok' && answer.type) return answer.type
     if (answer.status === 'no_profile') return null
     const problem = ({ template: 'template', no_output: 'no-output', no_type: 'no-type' } as const)[answer.status as 'template']
-    return problem ? { problem, profile: answer.profile ?? '', target: answer.target ?? '' } : unread
+    return problem ? { problem, profile: answer.profile ?? '', target: answer.target ?? '', field: answer.field === 'type' ? 'type' : 'target' } : unread
   } catch {
     return unread
   }
@@ -827,13 +860,14 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   const known = installed.length ? `; installed: ${installed.join(', ')}` : ''
   if (type && typeof type === 'object') {
     const detail = {
-      template: `the profile's target is set by a template, so which adapter it uses could not be told${known}`,
+      template: `the profile's ${type.field ?? 'target'} is set by a template, so which adapter it uses could not be told${known}`,
       'no-output': `profile ${type.profile} has no output named ${type.target}`,
-      'no-type': `output ${type.target} has no type:`,
+      'no-type': `output ${type.target} has no \`type\` key`,
       error: `could not tell which adapter the profile uses (its profiles.yml could not be read here)${known}`,
     }[type.problem]
-    // dbt itself refuses a profile with no such output.
-    checks.push({ id: 'adapter', label: 'Adapter', status: type.problem === 'no-output' ? 'fail' : 'warn', detail, fix: type.problem === 'no-output' ? 'add the output to profiles.yml, or pick another target' : null })
+    // dbt itself refuses a profile with no such output, or an output with no type.
+    const refused = type.problem === 'no-output' || type.problem === 'no-type'
+    checks.push({ id: 'adapter', label: 'Adapter', status: refused ? 'fail' : 'warn', detail, fix: type.problem === 'no-output' ? 'add the output to profiles.yml, or pick another target' : type.problem === 'no-type' ? 'add the adapter\'s `type` to the output in profiles.yml' : null })
   }
   else if (!type) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `no profile found for this project${installed.length ? `; installed: ${installed.join(', ')}` : ''}`, fix: 'add the profile to profiles.yml (or set DBT_PROFILES_DIR)' })
   // dbt-core's version unread (dbt Fusion bundles its adapters, a broken install): nothing to hold the profile to.
@@ -938,9 +972,9 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
   pendingNotes.splice(0)
   doctorNoteDue = null
   await loadHistory($)
-  await loadPaneSizes($)
   await $.command.register({ name: SHOW_COMMAND, description: 'Run dbt show for a model or a SQL query and open the rows in the Query results pane', argumentHint: '<model> | <select …>' })
   await $.command.register({ name: DOCTOR_COMMAND, description: 'Check the dbt environment: Python, dbt, adapter, packages, manifest freshness and the warehouse connection' })
+  await loadPaneSizesOnce($)
   // The doctor at session start: a -p run or the SDK has nobody to show the band to, and no dbt to wait on.
   if (!isInteractive) return
   later($, async () => {
@@ -1113,7 +1147,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
           landed.view.status === 'error'
             ? `✖ ${landed.view.model} · dbt could not compile or run it · see the band`
             : landed.view.status === 'partial'
-              ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : 'not checked: dbt has no model for this file'}`
+              ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : `not checked: ${landed.view.reason}`}`
               : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
           { timeoutMs: 6000 },
         )
@@ -1311,7 +1345,7 @@ export function registerDbtMods(on: On) {
           {busy ? <Text color="suggestion">{busy}</Text> : null}
           {result ? (
             <Box>
-              <Button key="results-bookmark" label={saved?.bookmarked ? '★ Bookmarked' : '☆ Bookmark'} onPress={() => later($, () => toggleBookmark($, result.id))} />
+              <Button key="results-bookmark" label={saved?.bookmarked ? '★ Bookmarked' : '☆ Bookmark'} onPress={() => later($, () => toggleBookmark($, result))} />
               {!busy && result.replayable !== false ? <Button key="results-rerun" label="Re-run" onPress={() => later($, async () => void (await rerun($, result)))} /> : null}
               {result.replayable === false ? <Text dimColor>  Re-run is off: Claude's command depended on its shell (variables, `~`, other commands before it)</Text> : null}
             </Box>
