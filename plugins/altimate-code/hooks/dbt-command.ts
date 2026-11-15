@@ -286,9 +286,35 @@ export function parseDbtCommand(line: string): DbtInvocation[] {
       const shift = token.start + 2
       for (const inner of parseDbtCommand(line.slice(shift, token.end - 1)))
         found.push({ ...inner, start: inner.start + shift, end: inner.end + shift, subcommandEnd: inner.subcommandEnd + shift })
+    } else if (token.kind === 'word') {
+      // So do the commands of a `$(…)` or backtick substitution in the word, outside single quotes.
+      for (const [from, to] of substitutionsIn(line, token.start, token.end)) {
+        const shift = from
+        for (const inner of parseDbtCommand(line.slice(from, to)))
+          found.push({ ...inner, start: inner.start + shift, end: inner.end + shift, subcommandEnd: inner.subcommandEnd + shift })
+      }
     }
   }
   finish()
+  return found
+}
+
+/** The commands' ranges of the `$(…)` and backtick substitutions written in line[start, end), outside single quotes. */
+function substitutionsIn(line: string, start: number, end: number): [number, number][] {
+  const found: [number, number][] = []
+  let quoted = false
+  for (let i = start; i < end; i++) {
+    const c = line[i]
+    if (quoted) quoted = c !== "'"
+    else if (c === '\\') i++
+    else if (c === "'") quoted = true
+    else if ((c === '$' && line[i + 1] === '(') || c === '`') {
+      const close = substitutionEnd(line, c === '$' ? i + 1 : i)
+      if (close < 0 || close > end) break
+      found.push([i + (c === '$' ? 2 : 1), close - 1])
+      i = close - 1
+    }
+  }
   return found
 }
 

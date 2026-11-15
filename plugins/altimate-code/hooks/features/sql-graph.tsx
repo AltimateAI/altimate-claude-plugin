@@ -33,6 +33,24 @@ const NOT_MODEL_ANYWHERE = /^(target|dbt_packages|dbt_modules)$/i
 // The most of a node's SQL the pane draws; a larger statement is cut, and says so.
 const SQL_LIMIT = 20_000
 
+/** Whether a dbt project's folder sits among the installed packages of an enclosing project: a default package folder at any depth, or its `packages-install-path`. */
+async function insideInstalledPackages($: EngineInterface, root: string): Promise<boolean> {
+  let dir = root
+  for (let i = 0; i < 40; i++) {
+    const cut = dir.lastIndexOf('/')
+    if (cut <= 0) return false
+    dir = dir.slice(0, cut)
+    if (!(await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false))) continue
+    const inside = root.slice(dir.length).replace(/^\/+/, '').split('/')
+    if (inside.some(part => NOT_MODEL_ANYWHERE.test(part))) return true
+    const yml = await $.fs.read(`${dir}/dbt_project.yml`).catch(() => '')
+    const custom = /^packages-install-path:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/m.exec(String(yml))?.[1]
+    const own = custom?.replace(/^\.\/+/, '').replace(/\/+$/, '')
+    return !!own && own !== '.' && (inside.join('/') === own || inside.join('/').startsWith(`${own}/`))
+  }
+  return false
+}
+
 /** The model a SQL file holds, by its file name; null for a file outside a dbt project's model folders. */
 export async function modelOf($: EngineInterface, file: string): Promise<string | null> {
   if (!/\.sql$/i.test(file)) return null
@@ -50,6 +68,7 @@ export async function modelOf($: EngineInterface, file: string): Promise<string 
   }
   // An installed package has a dbt_project.yml of its own: its models are not this project's.
   if (!root || NOT_MODEL_ANYWHERE.test(root.split('/').slice(-2, -1)[0] ?? '')) return null
+  if (await insideInstalledPackages($, root)) return null
   const relative = path.slice(root.length).replace(/^\/+/, '')
   const folders = relative.split('/').slice(0, -1)
   if (folders.some(part => NOT_MODEL_ANYWHERE.test(part)) || NOT_MODEL_TOP.test(folders[0] ?? '')) return null

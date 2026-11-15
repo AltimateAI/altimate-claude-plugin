@@ -130,3 +130,17 @@ test("quotes in a heredoc inside a substitution are text, so Claude's commit for
   const line = `dbt run -s a && git commit -m "$(cat <<'EOF'\nfix "foo it's\nEOF\n)"`
   expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
 })
+
+test('the commands of a `$(…)` or backtick substitution run too, quoted or not, nested or not', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('echo "$(dbt run -s orders)"')).toEqual([{ ...run, select: ['orders'] }])
+  expect(shape('echo `dbt run`')).toEqual([run])
+  expect(shape('x=$(dbt build); dbt test')).toEqual([
+    { ...base, binary: 'dbt', subcommand: 'build' },
+    { ...base, binary: 'dbt', subcommand: 'test' },
+  ])
+  expect(shape('echo $(echo $(dbt run))')).toEqual([run])
+  expect(shape("echo '$(dbt run)'")).toEqual([])
+  const line = 'echo "$(dbt run -s a)"'
+  expect(parseDbtCommand(line).map(({ start, end }) => line.slice(start, end))).toEqual(['dbt run -s a'])
+})

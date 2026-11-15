@@ -44,7 +44,7 @@ async function start($: any, on: any, options: Options = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: !options.noProject && (e.path === `${ROOT}/dbt_project.yml` || e.path === `${ROOT}/dbt_packages/pkg/dbt_project.yml`) }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: !options.noProject && (e.path === `${ROOT}/dbt_project.yml` || e.path === `${ROOT}/dbt_packages/pkg/dbt_project.yml` || e.path === `${ROOT}/dbt_packages/vendor/pkg/dbt_project.yml` || e.path === `${ROOT}/vendor/pkg/dbt_project.yml`) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     reads.push(e.path)
     return { value: e.path === `${ROOT}/dbt_project.yml` ? (options.yml ?? "name: 'shop'\n") : (options.sql ?? 'select 1') }
@@ -109,6 +109,18 @@ test('a model is the .sql file in a dbt project\'s model folders: by file name, 
   expect(await reads(`${ROOT}/dbt_packages/pkg/models/p.sql`)).toContain('in_models')
 })
 
+test('a package installed deeper in the default folder, or under the project\'s packages-install-path, is not the project\'s model', async ($, on) => {
+  const { clock } = await start($, on, { yml: "name: 'shop'\npackages-install-path: vendor\n" })
+  const reads = async (file: string) => {
+    await $.tool.call({ tool: 'Read', file_path: file })
+    await clock.settle()
+    return (await $.command.run({ command: 'sql-graph', args: '', ...composer } as any)).text
+  }
+  expect(await reads(`${ROOT}/models/fct_orders.sql`)).toContain('fct_orders')
+  expect(await reads(`${ROOT}/vendor/pkg/models/v.sql`)).toContain('fct_orders')
+  expect(await reads(`${ROOT}/dbt_packages/vendor/pkg/models/d.sql`)).toContain('fct_orders')
+})
+
 test('outside a dbt project a .sql read sets no default model and an edit adds no line', async ($, on) => {
   const { clock, cli } = await start($, on, { noProject: true, sql: 'with a as (select 1) select * from a' })
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: '/other/models/x.sql', old_string: '1', new_string: '2' })
@@ -141,9 +153,8 @@ test('/sql-graph <model> asks the tool once, with write permission, and the pane
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /SQL graph · fct_orders · 3 nodes/ })).toBeDefined()
-  expect(await ui.find({ key: 'node-orders' })).toBeDefined()
-  expect(await ui.find({ key: 'node-paid' })).toBeDefined()
-  expect(await ui.find({ key: 'node-fct_orders' })).toBeDefined()
+  // The backend lists fct_orders first; the pane draws each node after what feeds it.
+  expect((await ui.findAll({ type: 'Button' })).map(row => row.key)).toEqual(['node-orders', 'node-paid', 'node-fct_orders'])
   expect(await ui.find({ type: 'Text', text: 'Press a row to see its SQL.' })).toBeDefined()
   await ui.unmount()
 })
@@ -193,13 +204,42 @@ test('text from the CLI, the repo and the backend is drawn without escape or con
   await clock.settle()
   expect(reply.text).not.toMatch(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(JSON.stringify(await ui.find({ type: 'Text', text: /bad/ }))).not.toMatch(/u001b|u0007|u2028/)
+  const drawn = JSON.stringify(await ui.find({ type: 'Text', text: /bad/ }))
+  expect(drawn).not.toMatch(/u001b|u0007/)
+  expect(drawn).not.toContain('\u2028')
+  await ui.unmount()
+})
+
+test('a graph whose names, types and SQL carry escape and control characters is drawn as plain text', async ($, on) => {
+  const esc = String.fromCharCode(27)
+  const dirty = (word: string) => `${word}${esc}[31m!${esc}]0;x\u0007\u2028end`
+  const answer = {
+    nodes: [
+      { id: 'a', name: dirty('src'), type: dirty('model'), sql: '', columns: [] },
+      { id: 'b', name: dirty('out'), type: 'cte', sql: `select${esc}[1m 1\u0007\nfrom${esc}]0;x\u0007 a\u2028`, columns: [] },
+    ],
+    edges: [['a', 'b']],
+  }
+  const { clock } = await start($, on, { answer })
+  await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'node-b' })
+  await clock.settle()
+  const bad = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/
+  const rows = await ui.findAll({ type: 'Button' })
+  expect(rows).toHaveLength(2)
+  for (const row of rows) expect(String((row as any).props.label)).not.toMatch(bad)
+  expect(String((rows[1] as any).props.label)).toContain('from src')
+  const texts = await ui.findAll({ type: 'Text' })
+  for (const text of texts) expect(String((text as any).text ?? '')).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/)
+  expect(await ui.find({ type: 'Text', text: /select.*1/s })).toBeDefined()
   await ui.unmount()
 })
 
 test('the SQL of a selected node is cut at a limit and says how much was left out', async ($, on) => {
   const answer = {
-    nodes: [{ id: 'big', name: 'big', type: 'cte', sql: 'x'.repeat(25_000), columns: [] }],
+    nodes: [{ id: 'big', name: 'big', type: 'cte', sql: `${'x'.repeat(20_000)}TAILMARK${'x'.repeat(4_992)}`, columns: [] }],
     edges: [],
   }
   const { clock } = await start($, on, { answer })
@@ -208,7 +248,9 @@ test('the SQL of a selected node is cut at a limit and says how much was left ou
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'node-big' })
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /… 5000 more characters not shown$/ })).toBeDefined()
+  const shown = await ui.find({ type: 'Text', text: /… 5000 more characters not shown$/ })
+  expect(shown).toBeDefined()
+  expect(JSON.stringify(shown)).not.toContain('TAILMARK')
   await ui.unmount()
 })
 
@@ -270,6 +312,20 @@ test('an older ask for the same model that answers after a newer one does not re
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /SQL graph · fct_orders · 3 nodes/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('an older ask that answers after a newer one, inside the wait, replies that it was replaced', async ($, on) => {
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const { clock } = await start($, on, { holdFirst: held })
+  const older = $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.advance(500)
+  const newer = await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.settle()
+  expect(newer.text).toBe('The SQL graph for fct_orders is open.')
+  release()
+  await clock.settle()
+  expect((await older).text).toBe('The SQL graph for fct_orders was replaced by a newer /sql-graph.')
 })
 
 test('an answer that lands after a new conversation started is dropped', async ($, on) => {
