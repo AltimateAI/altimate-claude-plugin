@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { FEATURE_IDS } from './features'
+import { register } from './integrations'
 import { STATUS_ORDER, statusLineOf } from './status-line'
 import { afterCall, beforeCall, PHASES, type ChainSteps } from './tool-chain'
 
@@ -91,4 +92,22 @@ test('through the plugin, a Bash call passes unchanged while every feature is a 
   const bash: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
   expect(calls.map(one => one.command ?? one.tool)).toEqual(['dbt run -s orders'])
   expect(bash.context ?? []).toEqual([])
+})
+
+test('the plugin registers the chain: one tool.call hook for Bash and the file tools, which runs the call it is given', async () => {
+  const hooks: { event: string; matcher: any; handler: any }[] = []
+  const on: any = (event: string, ...rest: any[]) => {
+    hooks.push({ event, matcher: rest.length > 1 ? rest[0] : undefined, handler: rest[rest.length - 1] })
+  }
+  register(on, {} as any)
+  const chains = hooks.filter(hook => hook.event === 'tool.call' && hook.matcher?.tool instanceof RegExp)
+  expect(chains.length).toBe(1)
+  const tool: RegExp = chains[0]!.matcher.tool
+  expect(['Bash', 'Read', 'Edit', 'Write', 'MultiEdit'].every(name => tool.test(name))).toBe(true)
+  expect(tool.test('Grep')).toBe(false)
+  // With every feature a stub, the chain hands the call on unchanged and passes its result back.
+  const seen: any[] = []
+  const result = await chains[0]!.handler({ fs: { read: async () => null } }, { tool: 'Bash', command: 'dbt run -s orders' }, async (e: any) => (seen.push(e), ok))
+  expect(seen).toEqual([{ tool: 'Bash', command: 'dbt run -s orders' }])
+  expect(result).toBe(ok)
 })

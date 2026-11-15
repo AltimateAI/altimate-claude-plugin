@@ -140,3 +140,17 @@ test('a heredoc right after an escaped < is still a heredoc, so its quotes are t
   const line = `dbt run -s a && echo "$(cat \\<<<'EOF'\nit's\nEOF\n)"`
   expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
 })
+
+test('the offsets leave out the keywords and prefix commands in front of dbt, but keep its assignments', () => {
+  const cut = (line: string) => parseDbtCommand(line).map(inv => line.slice(inv.start, inv.end))
+  expect(cut('if dbt run; then echo ok; fi')).toEqual(['dbt run'])
+  expect(cut('time dbt run -s a')).toEqual(['dbt run -s a'])
+  expect(cut('! nohup dbt test')).toEqual(['dbt test'])
+  expect(cut('env DBT_TARGET=prod dbt run -s a')).toEqual(['DBT_TARGET=prod dbt run -s a'])
+  expect(cut('env -u HOME X=1 Y=2 dbt build')).toEqual(['X=1 Y=2 dbt build'])
+  expect(cut('X=1 nohup dbt run')).toEqual(['dbt run'])
+  // Splicing a rewrite in keeps the line valid shell.
+  const line = 'if dbt run; then echo ok; fi'
+  const [one] = parseDbtCommand(line)
+  expect(line.slice(0, one!.start) + 'dbt run --target dev' + line.slice(one!.end)).toBe('if dbt run --target dev; then echo ok; fi')
+})

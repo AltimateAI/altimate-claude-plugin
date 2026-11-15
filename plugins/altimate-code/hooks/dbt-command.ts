@@ -19,7 +19,11 @@ export type DbtInvocation = {
   hasDefer: boolean
   /** --state or --defer-state is given, or DBT_STATE / DBT_DEFER_STATE is set in front of the command. */
   hasState: boolean
-  /** Offset of the invocation's first character (its leading VAR=x assignments included). */
+  /**
+   * Offset of the invocation's first character: its leading VAR=x assignments included, the shell
+   * keywords and prefix commands in front of them (`if`, `then`, `!`, `time`, `nohup`, `env` and its
+   * options) not, so `line.slice(start, end)` can be replaced without breaking what surrounds it.
+   */
   start: number
   /** Offset just past its last argument (redirections and what follows a pipe excluded). */
   end: number
@@ -427,7 +431,8 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
     words.push(token)
   }
   if (words.length === 0) return null
-  const start = words[0]!.start
+  // The first of the assignments right in front of the launcher; prefix words reset it.
+  let firstAssignment: number | null = null
   let i = 0
   let hasDefer = false
   let hasState = false
@@ -445,19 +450,23 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       if (name === 'DBT_TARGET') envTarget = assigned
       if (name === 'DBT_TARGET_PATH') envTargetPath = assigned
       prefix = null
+      firstAssignment ??= i
       continue
     }
     if (PREFIX_WORDS.has(word)) {
       prefix = word
+      firstAssignment = null
       continue
     }
     if (word.startsWith('-') && prefix !== null) {
       if (PREFIX_VALUE_FLAGS.has(word)) i++
+      firstAssignment = null
       continue
     }
     break
   }
   if (i >= words.length) return null
+  const start = words[firstAssignment ?? i]!.start
   const launcherStart = i
   let binaryEnd: number
   if (isDbt(words[i]!.text)) {

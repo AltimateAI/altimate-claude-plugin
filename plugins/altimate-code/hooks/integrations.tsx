@@ -5,7 +5,7 @@ import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, Wo
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
 import { lineageBand, registerLineage, startLineage } from './lineage'
-import { setStatusPart } from './status-line'
+import { clearStatusParts, setStatusPart } from './status-line'
 import { installToolChain } from './tool-chain'
 
 const PANE = 'altimate-integrations'
@@ -564,6 +564,8 @@ export const register: Register = (on, options) => {
     })
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
+    // An earlier session's status parts are not this one's.
+    await clearStatusParts($)
     // Each feature's own start (its commands); one failing is logged and the rest go on.
     await featuresSessionStart($, e)
     // A press that was running when an earlier session ended can never finish, so it must not block this one.

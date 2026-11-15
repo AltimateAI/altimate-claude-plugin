@@ -557,3 +557,25 @@ test('signed out: the band and pane offer Sign in to sync and no sync control; t
   expect(await ui.find({ key: 'sync-everything' })).toBeDefined()
   await ui.unmount()
 })
+
+test("a new session's start clears the status line an earlier session drew before drawing its own", async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  fakeCli(on, { connect: { exitCode: 0, body: {} } })
+  const drawn: (string | undefined)[] = []
+  on('ui.status', (_: unknown, e: { text: string | undefined }) => {
+    drawn.push(e.text)
+    return { value: undefined }
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const first = drawn.splice(0)
+  expect(first.at(-1)).toBeDefined()
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(drawn[0]).toBeUndefined()
+  expect(drawn.at(-1)).toBe(first.at(-1))
+})
