@@ -367,6 +367,11 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
   if (posting) return
   posting = true
   const mine = generation
+  let released = false
+  const release = () => {
+    if (!released && mine === generation) posting = false
+    released = true
+  }
   await change($, current => ({ ...current, posting: key, note: null }))
   try {
     // Posting speaks for the person and changes the shared docs: write permission, CLI route.
@@ -392,12 +397,14 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       drafts: { ...current.drafts, [key]: '' },
       threads: resolved ? current.threads.filter(one => one.shareId !== thread.shareId || one.groupId !== thread.groupId) : current.threads,
     }))
+    // The buttons are back: the next press must not be dropped while the refresh runs.
+    release()
     await load($)
   } catch (error) {
     if (mine !== generation) return
     await change($, current => ({ ...current, posting: null, note: `Could not post: ${oneLine(String(error))}` }))
   } finally {
-    if (mine === generation) posting = false
+    release()
   }
 }
 
@@ -469,9 +476,16 @@ export function placeThread(thread: CommentsThread, text: string | null): number
     const body = text.replace(/\r\n/g, '\n')
     const word = /^\w+$/.test(wanted)
     const lines: number[] = []
+    // Newlines are counted from the previous match on, so placing a thread reads the text once.
+    let line = 1
+    let counted = 0
     for (let at = body.indexOf(wanted); at >= 0 && lines.length < 500; at = body.indexOf(wanted, at + 1)) {
       if (word && (/\w/.test(body[at - 1] ?? '') || /\w/.test(body[at + wanted.length] ?? ''))) continue
-      lines.push(body.slice(0, at).split('\n').length)
+      for (let i = body.indexOf('\n', counted); i >= 0 && i < at; i = body.indexOf('\n', counted)) {
+        line++
+        counted = i + 1
+      }
+      lines.push(line)
     }
     if (lines.length > 0) {
       if (stored === null) return lines[0]!
