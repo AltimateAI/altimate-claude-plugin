@@ -124,7 +124,7 @@ test('a package installed deeper in the default folder, or under the project\'s 
 })
 
 // A configured folder that is not the project's own vendor folder leaves the models in it alone.
-for (const path of ['/vendor', `cache${ROOT}/vendor`, `/opt${ROOT}/vendor`])
+for (const path of ['/vendor', 'vendor/repo/', '/vendor/repo/', `cache${ROOT}/vendor`, `/opt${ROOT}/vendor`])
   test(`a packages-install-path of ${path} hides none of the project's own models`, async ($, on) => {
     const { clock } = await start($, on, { yml: `name: 'shop'\npackages-install-path: ${path}\n` })
     await $.tool.call({ tool: 'Read', file_path: `${ROOT}/vendor/pkg/models/v.sql` })
