@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { applyPrompt, candidatesFrom, changedDescriptions, columnDescriptions, modelPaths } from './docs'
+import { applyPrompt, candidatesFrom, changedDescriptions, columnDescriptions, modelPaths, sentGroups } from './docs'
 
 const ROOT = '/repo'
 const MANIFEST_PATH = `${ROOT}/target/manifest.json`
@@ -434,4 +434,18 @@ test('a model that selects * says that only the manifest columns are counted, ev
   const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/staging/stg_orders.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
   expect(result.context.join('\n')).toContain('the model selects `*`, so only the columns the manifest lists are counted')
+})
+
+test('Apply clears the offers it sent, not a group whose columns were all unticked', () => {
+  const make = (column: string) => ({
+    model: 'stg_orders',
+    column,
+    description: 'd',
+    manifest: MANIFEST_PATH,
+    file: SCHEMA,
+    candidates: [{ model: 'fct_orders', column, lens: 'Original' as const }],
+  })
+  const [a, b] = [make('order_id'), make('customer_id')]
+  expect(sentGroups([a, b], [`${MANIFEST_PATH}|stg_orders.order_id>fct_orders.order_id`])).toEqual([b])
+  expect(sentGroups([a, b], [])).toEqual([a, b])
 })

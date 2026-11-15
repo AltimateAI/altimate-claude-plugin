@@ -258,6 +258,11 @@ export function propagationLine(group: DocsGroup): string {
   return `◆ docs · ${JSON.stringify(group.column)}: ${plural(group.candidates.length, 'downstream column')} can take this description · /propagate (${names.join(', ')}${more})`
 }
 
+/** The groups a request is written for: one whose candidates are all unticked is left out of it, so Apply leaves its offer be. */
+export function sentGroups(groups: DocsGroup[], skipped: string[]): DocsGroup[] {
+  return groups.filter(group => group.candidates.some(one => !skipped.includes(candidateKey(group, one))))
+}
+
 /** The request the pane's Apply sends: the files and columns to edit, for Claude to make the edits. */
 export function applyPrompt(groups: DocsGroup[], skipped: string[]): string | null {
   // Names come from the project, so each is written as a quoted string: data, not instructions.
@@ -508,7 +513,7 @@ export function register(on: On, context: FeatureContext) {
                   if (!prompt || applying) return
                   applying = true
                   const marks: string[] = []
-                  const sent = new Set(groups.map(group => `${groupKey(group.manifest, group.model, group.column)}|${group.description}`))
+                  const sent = new Set(sentGroups(groups, state.skipped).map(group => `${groupKey(group.manifest, group.model, group.column)}|${group.description}`))
                   try {
                     for (const group of groups) {
                       for (const one of group.candidates) {
