@@ -44,9 +44,17 @@ test('the summary for Claude lists timed CTEs slowest first and names the failed
   })
   const lines = text.split('\n')
   expect(lines[0]).toContain('"customers" (stopped, 1 CTE not timed)')
-  expect(lines[1]).toContain('- "b" (line 1): +300 ms (hot)')
-  expect(lines[2]).toContain('- "a" (line 1): +100 ms (warm)')
+  expect(lines[1]).toBe('Failed:')
+  expect(lines[3]).toContain('- "b" (line 1): +300 ms (hot)')
+  expect(lines[4]).toContain('- "a" (line 1): +100 ms (warm)')
   expect(text).toContain('- "c" (line 1): "boom"')
+})
+
+test('a long summary keeps the failed CTEs: the cut falls on the measured ones', () => {
+  const many = Array.from({ length: 80 }, (_, i) => row(`cte_${i}`, { queryMs: 100 + i, rows: 1 }))
+  const text = summaryOf({ model: 'big', status: 'done', rows: withTiers([...many, row('broken', { status: 'failed', error: 'boom' })]) })
+  expect(text.length).toBeLessThanOrEqual(3002)
+  expect(text).toContain('- "broken" (line 1): "boom"')
 })
 
 type Setup = {
@@ -255,6 +263,8 @@ test('a bare /profile-ctes means the model the main conversation read last: not 
   await $.tool.call({ tool: 'Read', file_path: '/repo/models/sub.sql', agentId: 'agent-1' } as any)
   await $.tool.call({ tool: 'Read', file_path: '/repo/target/compiled/p/models/main.sql' } as any)
   await $.tool.call({ tool: 'Read', file_path: '/repo/dbt_packages/x/models/pkg.sql' } as any)
+  await $.tool.call({ tool: 'Read', file_path: 'target/compiled/p/models/rel.sql' } as any)
+  await $.tool.call({ tool: 'Read', file_path: 'C:\\repo\\Target\\compiled\\p\\models\\win.sql' } as any)
   await run('')
   await clock.settle()
   expect(models[0]).toBe('/repo/models/main.sql')
