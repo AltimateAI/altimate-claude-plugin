@@ -13,6 +13,11 @@ test('each dbt invocation in cd a && dbt run is rewritten, the rest of the line 
   expect(rewriteDeferCommand('dbt run && dbt test | tee log', on)).toBe('dbt run --defer --state /work/prod-state && dbt test --defer --state /work/prod-state | tee log')
 })
 
+test('a quoted --directory or --project option is not followed', () => {
+  expect(runsInProject('uv run "--directory=../b" dbt run', '/repo/a', '/repo/a')).toBe(false)
+  expect(runsInProject("uv run '--directory' ../b dbt run", '/repo/a', '/repo/a')).toBe(false)
+})
+
 test('uv run dbt test is rewritten after the subcommand, and --favor-state follows the setting', () => {
   expect(rewriteDeferCommand('uv run dbt test', { ...on, favorState: true })).toBe('uv run dbt test --defer --state /work/prod-state --favor-state')
 })
@@ -248,4 +253,13 @@ test('a new session clears the status line and the overrides of the one before',
   expect(String(seen.statuses.at(-1))).not.toContain('dbt prod')
   await $.tool.call({ tool: 'Bash', command: 'dbt run' })
   expect(seen.bash.at(-1)).toBe('dbt run --defer --state /work/prod-state --favor-state')
+})
+
+test('a command that only mentions dbt does not read the setting', async ($, on) => {
+  const seen = start($, on, DEFER)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'cat dbt_project.yml' })
+  await $.tool.call({ tool: 'Bash', command: 'git commit -m "dbt"' })
+  expect(seen.reads).toEqual([])
+  expect(seen.bash).toEqual(['cat dbt_project.yml', 'git commit -m "dbt"'])
 })

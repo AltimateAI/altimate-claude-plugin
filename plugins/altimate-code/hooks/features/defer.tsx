@@ -115,10 +115,10 @@ function resolvePath(base: string, target: string): string | null {
  * folder (`cd`, `pushd`, `--project-dir`, `DBT_PROJECT_DIR`, uv's `--directory`) or one it cannot work out.
  */
 export function runsInProject(command: string, root: string, projectDir: string): boolean {
-  if (/\s--(?:directory|project)[\s=]/.test(command)) return false
   // A folder change this does not follow (`popd`, `env -C`, `command cd`, a `cd` with no folder) leaves the folder unknown.
   // Quotes and backslashes are dropped for this check: `command 'cd' ../b` and `env "-C" ../b` change folder like their plain forms.
   const plain = command.replace(/["'\\]/g, '')
+  if (/\s--(?:directory|project)[\s=]/.test(command) || /\s--(?:directory|project)[\s=]/.test(plain)) return false
   if (/(?:^|[\s;&|(){}!])(?:popd|chdir)(?=[\s;&|)]|$)|\benv\s+(?:\S+\s+)*(?:-C|--chdir)\b/.test(plain)) return false
   const cdWords = plain.match(/(?:^|[\s;&|(){}!])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
   if (cdWords !== [...command.matchAll(CD)].length) return false
@@ -224,9 +224,13 @@ async function ensure($: EngineInterface): Promise<DeferState> {
     if (mine === generation) await publish($, state)
     return state
   }))
-  const state = await started
-  // Another session's read must not be dropped by a caller that was waiting on this one.
-  if (loading === started) loading = null
+  let state: DeferState
+  try {
+    state = await started
+  } finally {
+    // Another session's read must not be dropped by a caller that was waiting on this one; a read that rejected is not kept.
+    if (loading === started) loading = null
+  }
   return mine === generation ? state : await ensure($)
 }
 
@@ -254,6 +258,7 @@ function describe(state: DeferState | null): string {
 export function register(on: On, context: FeatureContext) {
   on('command.run', { command: 'defer' }, async ($, e) => {
     const word = e.args.trim().toLowerCase()
+    const started = generation
     let state = await ensure($)
     if (word === 'on' || word === 'off') {
       if (word === 'on' && !state.stateDir) {
@@ -261,7 +266,8 @@ export function register(on: On, context: FeatureContext) {
         return { text: `Defer cannot be turned on: ${state.reason ?? 'no state directory is configured for this project (dbt.deferConfigPerProject).'}` }
       }
       state = { ...state, override: word === 'on' }
-      await publish($, state)
+      // A session that started while the setting was read has its own state.
+      if (started === generation) await publish($, state)
       return { text: `Defer ${word} for this session.\n${describe(state)}` }
     }
     if (word === 'reset') {
@@ -279,6 +285,7 @@ export function register(on: On, context: FeatureContext) {
 
   on('command.run', { command: 'target' }, async ($, e) => {
     const name = e.args.trim()
+    const started = generation
     let state = await ensure($)
     if (name === '') {
       return { text: `target: ${state.target ?? state.defaultTarget ?? 'profile default'}${state.target ? ' (session)' : ''}${state.targets.length ? `\ntargets: ${state.targets.join(', ')}` : ''}` }
@@ -294,7 +301,7 @@ export function register(on: On, context: FeatureContext) {
     }
     if (!state.projectDir) return { text: 'No dbt project found in this folder, so there is no target to set.' }
     state = { ...state, target: name }
-    await publish($, state)
+    if (started === generation) await publish($, state)
     return { text: `dbt commands now run with --target ${name} (this session).` }
   })
 }
@@ -326,7 +333,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
 /** The command to run in place of `e.command`; null keeps it. */
 export async function bashRewrite($: EngineInterface, e: BashCall): Promise<string | null> {
   // Most commands name no dbt: they never cost the settings read.
-  if (!/\bdbt\b/.test(e.command)) return null
+  if (!/\bdbt\b/.test(e.command) || parseDbtCommand(e.command).length === 0) return null
   const state = await ensure($)
   if (!state.projectDir) return null
   const root = await $.session.root().catch(() => null)

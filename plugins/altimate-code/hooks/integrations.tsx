@@ -105,6 +105,7 @@ async function refresh($: EngineInterface, subcommand: 'status' | 'detect' = 'st
     const next = parseStatus(result.stdout)
     if (next) {
       await update($, status, () => next)
+      if (mine !== latestRefresh) return
       await showStatusLine($, next)
     } else {
       const failure = parseJson<{ message?: string }>(result.stdout)?.message ?? firstLine(result.stderr.replace(ANSI, ''))
