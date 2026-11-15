@@ -566,6 +566,33 @@ test('an edit that lands while the folders resolve is counted as an edit of its 
   expect(toasts).toEqual(['◆ 2 new health issues · stg_orders: missing documentation · /health'])
 })
 
+test('a check of the session before a restart does not write its answer into the new session while the folders resolve', async ($, on) => {
+  let releaseStat!: () => void
+  const holdStat = new Promise<void>(resolve => (releaseStat = resolve))
+  let releaseRun!: () => void
+  const until = new Promise<void>(resolve => (releaseRun = resolve))
+  const real = '/private/shop'
+  const file = `${real}/models/staging/stg_orders.sql`
+  const old = { ...OLD_STG, file, properties: '' }
+  const added = { ...NEW_STG, file, properties: '' }
+  const { clock, toasts } = await start($, on, {
+    // The first answer is for the session before the restart; the new session's baseline is the project as it is.
+    runs: [[old, added], [old], [old, added]],
+    realFolders: { [`${ROOT}/models/staging`]: `${real}/models/staging` },
+    holdStat,
+    hold: { at: 1, until },
+  })
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  releaseStat()
+  await clock.settle()
+  releaseRun()
+  await clock.settle()
+  // The old session's answer did not become the new baseline: this edit's new issue is new.
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
 test('a deleted model in a folder that is gone too still matches through its nearest existing folder', async ($, on) => {
   const real = '/private/shop'
   const file = `${real}/models/gone/stg_orders.sql`

@@ -518,9 +518,12 @@ async function loop($: EngineInterface, mine: number) {
     for (let attempt = 0; ; attempt++) {
       const asked = new Set((await read($, healthAtom))?.touched ?? [])
       const real = await canonical($, [...asked, ...run.insights.flatMap(i => [i.file, i.properties])])
+      // A session that restarted meanwhile owns the state now: this check's answer is for the one before.
+      if (mine !== generation) return
       let late = false
       await update($, healthAtom, prev => {
         const base = prev ?? fresh()
+        if (mine !== generation) return base
         if (attempt < 3 && base.touched.some(f => !asked.has(f))) {
           late = true
           return base
@@ -534,6 +537,7 @@ async function loop($: EngineInterface, mine: number) {
       })
       if (!late) break
     }
+    if (mine !== generation) return
     toldProblem = null
     const issues = (await read($, healthAtom))?.issues ?? []
     await drawStatus($, issues)
