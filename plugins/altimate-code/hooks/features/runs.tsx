@@ -301,6 +301,8 @@ export const OVERLAP_LINE = 'run not recorded: overlapping dbt commands'
 export const runsDbt = (command: string) => parseDbtCommand(command).length > 0
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
+/** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
+const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(^|[^&])&\s*$/.test(e.command.trim())
 /** The artifact folder a call writes to, as one string: the project's own `target` and an unnamed one are the same folder. */
 const folderOf = (one: Invocation) => {
   const named = one.targetPath === null ? null : normalize(one.targetPath.startsWith('/') ? one.targetPath : `${one.projectDir}/${one.targetPath}`)
@@ -346,6 +348,8 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   const ended = await $.clock.now()
   // The bookkeeping below is one block with no await in it: two calls ending together each see the other.
   const began = started.get(startKey(e))
+  // A backgrounded call returns at once while dbt keeps running: it stays in flight (until the limit) and records nothing.
+  if (isBackground(e)) return null
   started.delete(startKey(e))
   if (began === undefined) return null
   // Any other dbt call that ran at the same time, in any folder, may have written the file this call would read: whose

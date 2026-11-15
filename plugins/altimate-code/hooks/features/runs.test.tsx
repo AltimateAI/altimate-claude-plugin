@@ -342,6 +342,15 @@ test('two spellings of one project folder overlap: /repo and /repo/models share 
   expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
 })
 
+test('a backgrounded dbt call keeps running after its tool returns: a later call overlapping it is not recorded', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-bg', undefined, 'build', AFTER))
+  const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a &', tool_use_id: 'bg' })
+  const second: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s b', tool_use_id: 'fg' })
+  expect(first.context ?? []).toEqual([])
+  expect(second.context).toEqual([NOT_RECORDED])
+  expect(stored.has('runs')).toBe(false)
+})
+
 test('a call whose folder cannot be told still counts as a dbt call that overlaps', async ($, on) => {
   const { stored, cli } = await start($, on, () => view('inv-x', undefined, 'build', AFTER))
   const both: any[] = await Promise.all([
