@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { registerFeatures } from './features'
 import { bandText, canonical, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
 
 const ROOT = '/repo'
@@ -32,7 +33,7 @@ const OLD_FCT = insight('fct_orders', FCT, 'Missing tests')
 const NEW_STG = insight('stg_orders', STG, 'Hard coded references', 'stg_orders reads raw.orders directly', STG_YML)
 const NEW_FCT = insight('fct_orders', FCT, 'Model fanout', 'fct_orders has 4 direct children')
 // A model of a dependency package: it has no files in the project.
-const DEP = { ...insight('base', '', 'Missing tests'), uniqueId: 'model.dep.base', path: 'models/base.sql' }
+const DEP = { ...insight('base', `${ROOT}/dbt_packages/dep/models/base.sql`, 'Missing tests'), uniqueId: 'model.dep.base', path: 'models/base.sql' }
 
 type Options = {
   /** The tool's answer per run (the last repeats). */
@@ -45,6 +46,8 @@ type Options = {
   realFolders?: Record<string, string>
   /** Holds the first folder lookup until released. */
   holdStat?: Promise<void>
+  /** Called with the number of each folder lookup (from 1). */
+  onStat?: (n: number) => Promise<void> | void
 }
 
 async function start($: any, on: any, options: Options, session: { isInteractive?: boolean } = {}) {
@@ -73,7 +76,9 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   const projects = options.projects ?? [ROOT]
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: projects.some(p => e.path === `${p}/dbt_project.yml`) }))
   let statHeld = false
+  let stats = 0
   on('fs.stat', async (_: unknown, e: { path: string }) => {
+    await options.onStat?.(++stats)
     if (options.holdStat && !statHeld) {
       statHeld = true
       await options.holdStat
@@ -591,6 +596,48 @@ test('a check of the session before a restart does not write its answer into the
   await $.tool.call(edit(STG))
   await endTurn($, clock, 't1')
   expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('an edit that keeps landing while the folders resolve is never folded into the baseline, however many tries it takes', async ($, on) => {
+  const real = '/private/shop'
+  const file = `${real}/models/staging/stg_orders.sql`
+  const both = [{ ...OLD_STG, file, properties: '' }, { ...NEW_STG, file, properties: '' }]
+  // Each folder lookup waits for the test, which lands an edit during it: three late edits of other files
+  // use up the tries, and the model's own file lands during the last one.
+  const held: (() => void)[] = []
+  let gate = true
+  const started = start($, on, {
+    runs: [both],
+    realFolders: { [`${ROOT}/models/staging`]: `${real}/models/staging` },
+    onStat: () => (gate ? new Promise<void>(resolve => held.push(resolve)) : undefined),
+  })
+  const files = [`${ROOT}/models/staging/late1.sql`, `${ROOT}/models/staging/late2.sql`, `${ROOT}/models/staging/late3.sql`, STG]
+  for (const file of files) {
+    while (held.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
+    gate = false
+    await $.tool.call(edit(file))
+    gate = true
+    held.splice(0).forEach(release => release())
+  }
+  gate = false
+  const { clock, statuses } = await started
+  await clock.settle()
+  expect(statuses.at(-1)).toContain('2 health issues')
+})
+
+test('the status line part a previous process left is cleared at session start, drawn or not', async ($, on) => {
+  const { clock, statuses } = await start($, on, { runs: [[OLD_STG]] })
+  const before = statuses.length
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  expect(statuses.length).toBeGreaterThan(before)
+})
+
+test('one feature that throws while registering does not stop the others', () => {
+  const on: any = () => {
+    throw new Error('every registration fails')
+  }
+  expect(() => registerFeatures(on, { options: {} as any })).not.toThrow()
 })
 
 test('a deleted model in a folder that is gone too still matches through its nearest existing folder', async ($, on) => {

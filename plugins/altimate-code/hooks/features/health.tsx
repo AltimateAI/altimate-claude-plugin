@@ -515,6 +515,9 @@ async function loop($: EngineInterface, mine: number) {
     }
     // Resolving the folders takes engine calls, and an edit can land meanwhile: the result is committed only with
     // every touched file resolved, so a late edit's model never counts its old issues as the baseline.
+    // After three tries the answer is not committed (it would count a late edit's model in its unresolved
+    // spelling): the changes it covered are asked for again, and the loop starts over.
+    let again = false
     for (let attempt = 0; ; attempt++) {
       const asked = new Set((await read($, healthAtom))?.touched ?? [])
       const real = await canonical($, [...asked, ...run.insights.flatMap(i => [i.file, i.properties])])
@@ -524,9 +527,11 @@ async function loop($: EngineInterface, mine: number) {
       await update($, healthAtom, prev => {
         const base = prev ?? fresh()
         if (mine !== generation) return base
-        if (attempt < 3 && base.touched.some(f => !asked.has(f))) {
+        if (base.touched.some(f => !asked.has(f))) {
           late = true
-          return base
+          if (attempt < 3) return base
+          again = true
+          return { ...base, pending: [...new Set([...batch, ...base.pending])] }
         }
         // A baseline that lands after edits (the first run failed, or the project was opened above the dbt
         // project) cannot tell the touched models' old issues from the new: all of theirs count as new.
@@ -535,8 +540,9 @@ async function loop($: EngineInterface, mine: number) {
         const issues = newIssues(run.insights, baseline, edited)
         return { ...base, baseline, issues, running: false, problem: null }
       })
-      if (!late) break
+      if (!late || again) break
     }
+    if (again) continue
     if (mine !== generation) return
     toldProblem = null
     const issues = (await read($, healthAtom))?.issues ?? []
@@ -602,7 +608,9 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   toldProblem = null
   projects.clear()
   await update($, healthAtom, () => fresh())
-  if (drawn) await drawStatus($, [])
+  // The status line outlives a process: a part an earlier one left is cleared whether or not this one drew it.
+  drawn = true
+  await drawStatus($, [])
   await $.command.register({ name: COMMAND, description: 'Show the project health issues Claude introduced' })
   // The baseline takes a while (the dbt adapter starts): nothing waits for it. A session with nobody at
   // the prompt checks only when the push gate needs it.

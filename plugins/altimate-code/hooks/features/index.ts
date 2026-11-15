@@ -153,20 +153,60 @@ function failed($: EngineInterface, id: string, part: string, error: unknown) {
   } catch {}
 }
 
-/** Registers every feature's own hooks. */
+/** Registers that threw, logged at the next session start (there is no `$` while registering). */
+const registerFailures: [string, unknown][] = []
+
+/** Registers every feature's own hooks; one feature's failure never skips the rest. */
 export function registerFeatures(on: On, context: FeatureContext) {
-  runsRegister(on, context)
-  deferRegister(on, context)
-  toModelRegister(on, context)
-  commentsRegister(on, context)
-  costRegister(on, context)
-  healthRegister(on, context)
-  sqlGraphRegister(on, context)
-  docsRegister(on, context)
-  cteProfileRegister(on, context)
+  try {
+    runsRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['runs', error])
+  }
+  try {
+    deferRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['defer', error])
+  }
+  try {
+    toModelRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['toModel', error])
+  }
+  try {
+    commentsRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['comments', error])
+  }
+  try {
+    costRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['cost', error])
+  }
+  try {
+    healthRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['health', error])
+  }
+  try {
+    sqlGraphRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['sqlGraph', error])
+  }
+  try {
+    docsRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['docs', error])
+  }
+  try {
+    cteProfileRegister(on, context)
+  } catch (error) {
+    registerFailures.push(['cteProfile', error])
+  }
 }
 
 export async function featuresSessionStart($: EngineInterface, e: Args<'session.start'>) {
+  for (const [id, error] of registerFailures.splice(0)) failed($, id, 'register', error)
   await runsSessionStart($, e).catch(error => failed($, 'runs', 'sessionStart', error))
   await deferSessionStart($, e).catch(error => failed($, 'defer', 'sessionStart', error))
   await toModelSessionStart($, e).catch(error => failed($, 'toModel', 'sessionStart', error))
