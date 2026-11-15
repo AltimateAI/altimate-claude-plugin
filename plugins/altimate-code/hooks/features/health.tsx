@@ -9,7 +9,6 @@
 //
 // One check runs at a time. Changes that land while one runs are checked by the next, which starts
 // when that one ends.
-import { realpathSync } from 'node:fs'
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
@@ -67,29 +66,49 @@ const norm = (p: string) => {
   return (absolute ? '/' : '') + parts.join('/')
 }
 
-/** `norm`, with a symlinked folder resolved to the one the system names, as dbt_health names a model's files. */
-const canonical = (p: string) => {
-  const n = norm(p)
-  // A deleted or renamed file has no real path of its own: resolve its nearest folder that exists and keep the rest.
-  let head = n
-  let tail = ''
-  for (;;) {
-    try {
-      return norm(realpathSync(head) + tail)
-    } catch {
-      const slash = head.lastIndexOf('/')
-      if (slash <= 0) return n
-      tail = head.slice(slash) + tail
-      head = head.slice(0, slash)
-    }
+/** A path as the system names it: how `canonical` spells it, or `norm`'s spelling for a path it was not asked about. */
+export type RealPath = (path: string) => string
+
+/** The folder's real path; a folder that does not exist gets its nearest existing folder's real path and the rest. */
+async function realFolder($: EngineInterface, dir: string, seen: Map<string, Promise<string>>): Promise<string> {
+  const known = seen.get(dir)
+  if (known) return known
+  const work = (async () => {
+    const stat = await $.fs.stat(dir, { resolve: true }).catch(() => null)
+    if (stat?.realPath) return norm(stat.realPath)
+    // A deleted or renamed file's folder may be gone too: resolve the nearest folder that exists and keep the rest.
+    const slash = dir.lastIndexOf('/')
+    if (slash <= 0) return dir
+    return `${await realFolder($, dir.slice(0, slash), seen)}${dir.slice(slash)}`
+  })()
+  seen.set(dir, work)
+  return work
+}
+
+/**
+ * Resolves each file's folder through the engine (a symlinked folder to the one `dbt_health` names a model's files under),
+ * so the hooks module needs no file-system module of its own. The result is for the files asked about.
+ */
+export async function canonical($: EngineInterface, files: readonly string[]): Promise<RealPath> {
+  const seen = new Map<string, Promise<string>>()
+  const real = new Map<string, string>()
+  await Promise.all(
+    [...new Set(files.filter(Boolean).map(norm))].map(async file => {
+      const slash = file.lastIndexOf('/')
+      real.set(file, slash <= 0 ? file : `${await realFolder($, file.slice(0, slash), seen)}${file.slice(slash)}`)
+    }),
+  )
+  return p => {
+    const n = norm(p)
+    return real.get(n) ?? n
   }
 }
 
-/** The models whose SQL file or properties file is one of `files`. */
-export function modelsOfFiles(files: readonly string[], insights: readonly HealthInsight[]): Set<string> {
-  const changed = new Set(files.map(canonical))
+/** The models whose SQL file or properties file is one of `files`; `real` names the paths as `canonical` resolved them. */
+export function modelsOfFiles(files: readonly string[], insights: readonly HealthInsight[], real: RealPath = norm): Set<string> {
+  const changed = new Set(files.map(real))
   const ids = new Set<string>()
-  for (const i of insights) if ((i.file && changed.has(canonical(i.file))) || (i.properties && changed.has(canonical(i.properties)))) ids.add(i.uniqueId)
+  for (const i of insights) if ((i.file && changed.has(real(i.file))) || (i.properties && changed.has(real(i.properties)))) ids.add(i.uniqueId)
   return ids
 }
 
@@ -494,13 +513,15 @@ async function loop($: EngineInterface, mine: number) {
       // Not asked for again at once: the next change, /health or push asks.
       return
     }
+    const asked = (await read($, healthAtom))?.touched ?? []
+    const real = await canonical($, [...asked, ...run.insights.flatMap(i => [i.file, i.properties])])
     await update($, healthAtom, prev => {
       const base = prev ?? fresh()
       // A baseline that lands after edits (the first run failed, or the project was opened above the dbt
       // project) cannot tell the touched models' old issues from the new: all of theirs count as new.
-      const edited = modelsOfFiles(base.touched, run.insights)
+      const edited = modelsOfFiles(base.touched, run.insights, real)
       const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
-      const issues = newIssues(run.insights, baseline, modelsOfFiles(base.touched, run.insights))
+      const issues = newIssues(run.insights, baseline, modelsOfFiles(base.touched, run.insights, real))
       return { ...base, baseline, issues, running: false, problem: null }
     })
     toldProblem = null

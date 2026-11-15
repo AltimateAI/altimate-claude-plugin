@@ -1,10 +1,6 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-
 import { expect, mock, test } from 'claude-code/testing'
 
-import { bandText, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
+import { bandText, canonical, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
 
 const ROOT = '/repo'
 const STG = `${ROOT}/models/staging/stg_orders.sql`
@@ -45,6 +41,8 @@ type Options = {
   hold?: { at: number; until: Promise<void> }
   /** Folders that hold a dbt_project.yml (default: the repo). */
   projects?: string[]
+  /** Folders the engine resolves to another real folder (a symlink); any other folder is unknown to it. */
+  realFolders?: Record<string, string>
 }
 
 async function start($: any, on: any, options: Options, session: { isInteractive?: boolean } = {}) {
@@ -72,6 +70,11 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   })
   const projects = options.projects ?? [ROOT]
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: projects.some(p => e.path === `${p}/dbt_project.yml`) }))
+  on('fs.stat', (_: unknown, e: { path: string }) => {
+    const real = options.realFolders?.[e.path]
+    if (real === undefined) throw new Error('ENOENT')
+    return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: true, realPath: real } }
+  })
   on('fs.read', () => ({ value: '' }))
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
@@ -504,29 +507,53 @@ test('shell syntax: a redirect without spaces, bash -c, cd before the edit, back
   expect(isGitPush('cat <<EOF\r\ngit push\r\nEOF\r\ngit status')).toBe(false)
 })
 
-test('a model edited through a symlinked folder matches the files dbt_health names under the real one', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'health-'))
-  try {
-    mkdirSync(join(dir, 'real/models'), { recursive: true })
-    writeFileSync(join(dir, 'real/models/x.sql'), 'select 1')
-    symlinkSync(join(dir, 'real'), join(dir, 'alias'))
-    const insight = { ...OLD_STG, file: join(realpathSync(dir), 'real/models/x.sql'), properties: '' }
-    expect([...modelsOfFiles([join(dir, 'alias/models/x.sql')], [insight])]).toEqual([OLD_STG.uniqueId])
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
-  }
+test('the hooks module loads in the sandbox Claude Code runs it in (no node: import) and runs a baseline', async ($, on) => {
+  const { calls } = await start($, on, { runs: [[OLD_STG]] })
+  expect(calls.map(c => c.tool)).toEqual(['dbt_health'])
 })
 
-test('a deleted or renamed model reached through a symlinked folder still matches the real path', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'health-'))
-  try {
-    mkdirSync(join(dir, 'real/models'), { recursive: true })
-    symlinkSync(join(dir, 'real'), join(dir, 'alias'))
-    const insight = { ...OLD_STG, file: join(realpathSync(dir), 'real/models/gone.sql'), properties: '' }
-    expect([...modelsOfFiles([join(dir, 'alias/models/gone.sql')], [insight])]).toEqual([OLD_STG.uniqueId])
-  } finally {
-    rmSync(dir, { recursive: true, force: true })
+test('canonical resolves a symlinked folder through the engine, and a deleted file through its nearest existing folder', async () => {
+  const folders: Record<string, string> = { '/alias': '/private/real', '/alias/models': '/private/real/models' }
+  const engine = {
+    fs: {
+      stat: async (path: string) => {
+        if (!(path in folders)) throw new Error('ENOENT')
+        return { realPath: folders[path] }
+      },
+    },
   }
+  const real = await canonical(engine as any, ['/alias/models/x.sql', '/alias/models/sub/gone.sql', '/other/a.sql', '/alias/./models/../models/y.sql'])
+  expect(real('/alias/models/x.sql')).toBe('/private/real/models/x.sql')
+  expect(real('/alias/models/sub/gone.sql')).toBe('/private/real/models/sub/gone.sql')
+  expect(real('/other/a.sql')).toBe('/other/a.sql')
+  expect(real('/alias/./models/../models/y.sql')).toBe('/private/real/models/y.sql')
+  // A path it was not asked about keeps its own spelling.
+  expect(real('/alias/models/z.sql')).toBe('/alias/models/z.sql')
+})
+
+test('a model edited through a symlinked folder, edited or deleted, shows its new issue in the band', async ($, on) => {
+  const real = '/private/shop'
+  const file = `${real}/models/staging/stg_orders.sql`
+  const stg = { ...NEW_STG, file, properties: '' }
+  const old = { ...OLD_STG, file, properties: '' }
+  const { clock, toasts } = await start($, on, {
+    runs: [[old], [old, stg]],
+    realFolders: { [`${ROOT}/models/staging`]: `${real}/models/staging` },
+  })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('a deleted model in a folder that is gone too still matches through its nearest existing folder', async ($, on) => {
+  const real = '/private/shop'
+  const file = `${real}/models/gone/stg_orders.sql`
+  const stg = { ...NEW_STG, file, properties: '' }
+  const old = { ...OLD_STG, file, properties: '' }
+  const { clock, toasts } = await start($, on, { runs: [[old], [old, stg]], realFolders: { [`${ROOT}/models`]: `${real}/models` } })
+  await $.tool.call(edit(`${ROOT}/models/gone/stg_orders.sql`))
+  await endTurn($, clock, 't1')
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
 })
 
 test('a leading input redirect does not hide git push', () => {
