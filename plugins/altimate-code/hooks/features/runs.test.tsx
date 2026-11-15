@@ -504,7 +504,12 @@ test('a record keeps failures first, cuts long messages and rows; at most 50 run
   expect(run.rows[0]!.status).toBe('error')
   expect(run.rows[0]!.message!.length).toBe(MAX_MESSAGE + 1)
   expect(toRecord({ ...view(null), completedAt: null as any }, lines)).toBeNull()
-  expect(toRecord(view(null), lines)!.id).toBe(AFTER)
+  expect(toRecord(view(null), lines)!.id).toBe(`${ROOT}\u0000${AFTER}`)
+  // Two projects finishing in the same instant, neither artifact with an invocation id, are two runs.
+  const first = toRecord(view(null, undefined, 'build', AFTER, '/a'), lines)!
+  const second = toRecord(view(null, undefined, 'build', AFTER, '/b'), lines)!
+  expect(first.id).not.toBe(second.id)
+  expect(withRun([first], second)).toHaveLength(2)
 
   let runs: RunRecord[] = []
   for (let i = 0; i < MAX_RUNS + 5; i++) runs = withRun(runs, { ...run, id: `r${i}` })

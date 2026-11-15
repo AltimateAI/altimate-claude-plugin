@@ -155,15 +155,34 @@ function failed($: EngineInterface, id: string, part: string, error: unknown) {
 
 /** Registers every feature's own hooks. */
 export function registerFeatures(on: On, context: FeatureContext) {
-  runsRegister(on, context)
-  deferRegister(on, context)
-  toModelRegister(on, context)
-  commentsRegister(on, context)
-  costRegister(on, context)
-  healthRegister(on, context)
-  sqlGraphRegister(on, context)
-  docsRegister(on, context)
-  cteProfileRegister(on, context)
+  // One feature's register throwing (a duplicate command, a refused matcher) must not stop the others or the tool hook after them.
+  try {
+    runsRegister(on, context)
+  } catch {}
+  try {
+    deferRegister(on, context)
+  } catch {}
+  try {
+    toModelRegister(on, context)
+  } catch {}
+  try {
+    commentsRegister(on, context)
+  } catch {}
+  try {
+    costRegister(on, context)
+  } catch {}
+  try {
+    healthRegister(on, context)
+  } catch {}
+  try {
+    sqlGraphRegister(on, context)
+  } catch {}
+  try {
+    docsRegister(on, context)
+  } catch {}
+  try {
+    cteProfileRegister(on, context)
+  } catch {}
 }
 
 export async function featuresSessionStart($: EngineInterface, e: Args<'session.start'>) {

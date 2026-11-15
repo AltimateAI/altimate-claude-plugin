@@ -200,7 +200,8 @@ export function writer(invocations: readonly Invocation[], written: string | nul
 /** One run as it is kept: the counts of every node, the rows failures first, each message cut. */
 export function toRecord(view: RunView, invocation: Pick<Invocation, 'commandLine' | 'retryLine'>): RunRecord | null {
   const completedAt = view.completedAt ?? ''
-  const id = view.invocationId ?? (completedAt || null)
+  // Without an invocation id the finish time stands in; it is only unique per project, so the project is part of it.
+  const id = view.invocationId ?? (completedAt ? `${view.projectDir ?? ''}\u0000${completedAt}` : null)
   if (!id) return null
   const rows = [...view.results.filter(row => isFailure(row.status)), ...view.results.filter(row => !isFailure(row.status))]
   return {
@@ -370,10 +371,9 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   const root = await $.session.root()
   const invocations = resultsInvocations(e.command, root, began.cwd)
   const mine = [...new Set(invocations.map(folderOf))]
-  const free = mine
   // One read for each folder, at the same time: a slow one does not take the others' time, a failed one does not stop them.
   const read = await Promise.all(
-    free.map(folder => readRun($, invocations.filter(one => folderOf(one) === folder), invocations, began.at, ended).catch(() => null)),
+    mine.map(folder => readRun($, invocations.filter(one => folderOf(one) === folder), invocations, began.at, ended).catch(() => null)),
   )
   // Two spellings of one folder read one file: of its runs the later invocation's is the one that wrote it.
   const latest = new Map<string, { run: RunRecord; order: number }>()

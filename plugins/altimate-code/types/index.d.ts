@@ -217,7 +217,7 @@ export type RunRecord = {
 export interface RunsState {
   /** The session folder the runs below were recorded for. */
   root: string
-  /** Newest first, at most 50. */
+  /** Newest first, at most 50 of each project: a session folder that covers several dbt projects holds up to 50 per project. */
   runs: RunRecord[]
   /** The run the pane shows in full; null for the list. */
   open: string | null
