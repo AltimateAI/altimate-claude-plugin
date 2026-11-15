@@ -129,8 +129,10 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     const label = target.model ?? 'the inline query'
     const answer = await estimate($, target.model ? { model: target.model } : { sql: target.sql }, until)
     if (answer.kind === 'unsupported') {
-      await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter }))
+      // Nothing can be held on this warehouse, so a hold from before the verdict goes with it.
+      await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter, held: null, allowOnce: false }))
       lines.push(`cost · no estimate on ${answer.adapter}: only BigQuery has a dry run`)
+      over.length = 0
       break
     }
     if (answer.kind === 'none') {
@@ -138,8 +140,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       continue
     }
     estimated = true
-    await update($, costAtom, prev => ({ ...(prev ?? FRESH), lastEstimate: { target: label, bytes: answer.bytes, display: answer.display } }))
-    await setStatusPart($, 'cost', `scan ≈ ${answer.display}`)
+    await rememberEstimate($, label, answer.bytes, answer.display)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}`)
     else over.push({ label, bytes: answer.maxBytes, display: answer.display })
   }
@@ -162,8 +163,10 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     }
     notes.delete(e.command)
     await setStatusPart($, 'cost', `scan held ≈ ${worst.display}`)
+    // The display is rounded: a scan just past the limit would read as equal to it.
+    const scanned = worst.display === formatBytes(limitBytes) ? `just over ${worst.display}` : `≈ ${worst.display}`
     return {
-      deny: `≈ ${worst.display} would be scanned, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
+      deny: `${scanned} would be scanned, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
     }
   }
   // A command that was estimated and is under the limit ends an earlier hold, and its allowance. One that
@@ -177,8 +180,12 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   return null
 }
 
+/** Notes kept per command: a line of many dbt calls would otherwise put one note each into Claude's context. */
+const MAX_NOTES = 5
+
 function keepNotes(command: string, lines: string[]) {
-  if (lines.length > 0) notes.set(command, lines)
+  if (lines.length > MAX_NOTES) notes.set(command, [...lines.slice(0, MAX_NOTES), `cost · ${lines.length - MAX_NOTES} more notes not shown`])
+  else if (lines.length > 0) notes.set(command, lines)
   else notes.delete(command)
 }
 

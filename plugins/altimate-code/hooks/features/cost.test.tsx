@@ -220,6 +220,24 @@ test('an estimate whose rounded size is within the limit but whose upper bound i
   await clock.settle()
 })
 
+test('a warehouse found to have no dry run ends a hold from before, and its allowance', async ($, on) => {
+  const answers: Record<string, any> = { orders: OVER }
+  const { clock, ran } = await start($, on, { answers })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  answers.orders = { success: true, supported: false, adapter: 'snowflake' }
+  await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(ran).toEqual(['dbt run -s orders'])
+  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('Nothing is held')
+})
+
+test('a scan just over the limit reads as over it, not as equal to it', async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: bq(10 * GIB, '10.0 GiB', 10 * GIB + 52 * 1024 ** 2) } })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBe('just over 10.0 GiB would be scanned, over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.')
+  await clock.settle()
+})
+
 test('a command that sets its own target, defer state, vars or project is not estimated', async ($, on) => {
   const { clock, estimates, ran } = await start($, on, { answers: { orders: OVER } })
   const commands = [
@@ -361,6 +379,8 @@ test('a line with a great many dbt calls is not read call by call', async ($, on
   const result: any = await $.tool.call(bash('dbt run -s orders;'.repeat(4000)))
   await clock.settle()
   expect(estimates).toEqual([])
-  expect(result.context.every((line: string) => line.startsWith('cost · no estimate'))).toBe(true)
+  expect(result.context.length).toBe(6)
+  expect(result.context[0]).toContain('cost · no estimate')
+  expect(result.context[5]).toBe('cost · 3995 more notes not shown')
   expect(Date.now() - began).toBeLessThan(3000)
 })
