@@ -49,7 +49,12 @@ async function insideInstalledPackages($: EngineInterface, root: string): Promis
     const given = (custom ?? '').replace(/\\/g, '/')
     const from = `${dir.replace(/\/+$/, '')}/`
     const relative = given.startsWith('/') ? (given.startsWith(from) ? given.slice(from.length) : null) : given
-    const own = relative === null ? '' : relative.split('/').filter(part => part && part !== '.').join('/')
+    const kept: string[] = []
+    for (const part of relative === null ? [] : relative.split('/')) {
+      if (part === '..') kept.pop()
+      else if (part && part !== '.') kept.push(part)
+    }
+    const own = kept.join('/')
     const here = inside.join('/')
     // An enclosing project that does not hold this one among its packages leaves the outer ones to be asked.
     if (own && (here === own || here.startsWith(`${own}/`))) return true

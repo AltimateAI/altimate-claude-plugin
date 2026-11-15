@@ -132,7 +132,7 @@ for (const path of ['/vendor', 'vendor/repo/', '/vendor/repo/', `cache${ROOT}/ve
     expect((await $.command.run({ command: 'sql-graph', args: '', ...composer } as any)).text).toMatch(/SQL graph for v\b/)
   })
 
-for (const path of [`${ROOT}/vendor`, 'vendor/./', './vendor'])
+for (const path of [`${ROOT}/vendor`, 'vendor/./', './vendor', 'cache/../vendor', `${ROOT}/cache/../vendor`])
   test(`a packages-install-path written ${path.startsWith('/') ? 'as an absolute path inside the project' : `as ${path}`} is the same folder`, async ($, on) => {
     const { clock } = await start($, on, { yml: `name: 'shop'\npackages-install-path: ${path}\n` })
     await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/fct_orders.sql` })
