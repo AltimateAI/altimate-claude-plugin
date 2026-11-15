@@ -43,6 +43,8 @@ type Options = {
   projects?: string[]
   /** Folders the engine resolves to another real folder (a symlink); any other folder is unknown to it. */
   realFolders?: Record<string, string>
+  /** Holds the first folder lookup until released. */
+  holdStat?: Promise<void>
 }
 
 async function start($: any, on: any, options: Options, session: { isInteractive?: boolean } = {}) {
@@ -70,7 +72,12 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   })
   const projects = options.projects ?? [ROOT]
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: projects.some(p => e.path === `${p}/dbt_project.yml`) }))
-  on('fs.stat', (_: unknown, e: { path: string }) => {
+  let statHeld = false
+  on('fs.stat', async (_: unknown, e: { path: string }) => {
+    if (options.holdStat && !statHeld) {
+      statHeld = true
+      await options.holdStat
+    }
     const real = options.realFolders?.[e.path]
     if (real === undefined) throw new Error('ENOENT')
     return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: true, realPath: real } }
@@ -543,6 +550,20 @@ test('a model edited through a symlinked folder, edited or deleted, shows its ne
   await $.tool.call(edit(STG))
   await endTurn($, clock, 't1')
   expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('an edit that lands while the folders resolve is counted as an edit of its model, not folded into the baseline', async ($, on) => {
+  let release!: () => void
+  const holdStat = new Promise<void>(resolve => (release = resolve))
+  const real = '/private/shop'
+  const file = `${real}/models/staging/stg_orders.sql`
+  const both = [{ ...OLD_STG, file, properties: '' }, { ...NEW_STG, file, properties: '' }]
+  const { clock, toasts } = await start($, on, { runs: [both], realFolders: { [`${ROOT}/models/staging`]: `${real}/models/staging` }, holdStat })
+  await $.tool.call(edit(STG))
+  release()
+  await clock.settle()
+  await endTurn($, clock, 't1')
+  expect(toasts).toEqual(['◆ 2 new health issues · stg_orders: missing documentation · /health'])
 })
 
 test('a deleted model in a folder that is gone too still matches through its nearest existing folder', async ($, on) => {

@@ -513,17 +513,27 @@ async function loop($: EngineInterface, mine: number) {
       // Not asked for again at once: the next change, /health or push asks.
       return
     }
-    const asked = (await read($, healthAtom))?.touched ?? []
-    const real = await canonical($, [...asked, ...run.insights.flatMap(i => [i.file, i.properties])])
-    await update($, healthAtom, prev => {
-      const base = prev ?? fresh()
-      // A baseline that lands after edits (the first run failed, or the project was opened above the dbt
-      // project) cannot tell the touched models' old issues from the new: all of theirs count as new.
-      const edited = modelsOfFiles(base.touched, run.insights, real)
-      const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
-      const issues = newIssues(run.insights, baseline, modelsOfFiles(base.touched, run.insights, real))
-      return { ...base, baseline, issues, running: false, problem: null }
-    })
+    // Resolving the folders takes engine calls, and an edit can land meanwhile: the result is committed only with
+    // every touched file resolved, so a late edit's model never counts its old issues as the baseline.
+    for (let attempt = 0; ; attempt++) {
+      const asked = new Set((await read($, healthAtom))?.touched ?? [])
+      const real = await canonical($, [...asked, ...run.insights.flatMap(i => [i.file, i.properties])])
+      let late = false
+      await update($, healthAtom, prev => {
+        const base = prev ?? fresh()
+        if (attempt < 3 && base.touched.some(f => !asked.has(f))) {
+          late = true
+          return base
+        }
+        // A baseline that lands after edits (the first run failed, or the project was opened above the dbt
+        // project) cannot tell the touched models' old issues from the new: all of theirs count as new.
+        const edited = modelsOfFiles(base.touched, run.insights, real)
+        const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
+        const issues = newIssues(run.insights, baseline, edited)
+        return { ...base, baseline, issues, running: false, problem: null }
+      })
+      if (!late) break
+    }
     toldProblem = null
     const issues = (await read($, healthAtom))?.issues ?? []
     await drawStatus($, issues)
