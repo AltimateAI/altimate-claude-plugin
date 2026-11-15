@@ -296,18 +296,22 @@ export function parseDbtCommand(line: string): DbtInvocation[] {
     }
   }
   finish()
-  return found
+  // An inner command (in a substitution) is listed where it is written, not before the command around it.
+  return found.sort((a, b) => a.start - b.start)
 }
 
 /** The commands' ranges of the `$(…)` and backtick substitutions written in line[start, end), outside single quotes. */
 function substitutionsIn(line: string, start: number, end: number): [number, number][] {
   const found: [number, number][] = []
-  let quoted = false
+  // Single quotes hide a substitution; inside double quotes a `'` is a plain character.
+  let single = false
+  let double = false
   for (let i = start; i < end; i++) {
     const c = line[i]
-    if (quoted) quoted = c !== "'"
+    if (single) single = c !== "'"
     else if (c === '\\') i++
-    else if (c === "'") quoted = true
+    else if (c === "'" && !double) single = true
+    else if (c === '"') double = !double
     else if ((c === '$' && line[i + 1] === '(') || c === '`') {
       const close = substitutionEnd(line, c === '$' ? i + 1 : i)
       if (close < 0 || close > end) break

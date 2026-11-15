@@ -144,3 +144,10 @@ test('the commands of a `$(…)` or backtick substitution run too, quoted or not
   const line = 'echo "$(dbt run -s a)"'
   expect(parseDbtCommand(line).map(({ start, end }) => line.slice(start, end))).toEqual(['dbt run -s a'])
 })
+
+test('quotes decide what a substitution is: an apostrophe inside double quotes hides nothing, single quotes hide it, and the commands come in the order written', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape(`echo "it's $(dbt run)"`)).toEqual([run])
+  expect(shape(`echo "it's"'$(dbt run)'`)).toEqual([])
+  expect(shape('dbt run --vars "$(dbt ls)"').map(i => i.subcommand)).toEqual(['run', 'ls'])
+})

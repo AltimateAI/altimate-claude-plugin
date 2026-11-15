@@ -45,8 +45,16 @@ async function insideInstalledPackages($: EngineInterface, root: string): Promis
     if (inside.some(part => NOT_MODEL_ANYWHERE.test(part))) return true
     const yml = await $.fs.read(`${dir}/dbt_project.yml`).catch(() => '')
     const custom = /^packages-install-path:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/m.exec(String(yml))?.[1]
-    const own = custom?.replace(/^\.\/+/, '').replace(/\/+$/, '')
-    return !!own && own !== '.' && (inside.join('/') === own || inside.join('/').startsWith(`${own}/`))
+    // The configured folder as a path from this project: an absolute one inside it loses the project's own prefix.
+    const own = custom
+      ?.replace(/\\/g, '/')
+      .replace(dir.endsWith('/') ? dir : `${dir}/`, '')
+      .split('/')
+      .filter(part => part && part !== '.')
+      .join('/')
+    const here = inside.join('/')
+    // An enclosing project that does not hold this one among its packages leaves the outer ones to be asked.
+    if (own && !own.startsWith('/') && (here === own || here.startsWith(`${own}/`))) return true
   }
   return false
 }

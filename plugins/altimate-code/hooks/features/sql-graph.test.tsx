@@ -44,7 +44,7 @@ async function start($: any, on: any, options: Options = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: !options.noProject && (e.path === `${ROOT}/dbt_project.yml` || e.path === `${ROOT}/dbt_packages/pkg/dbt_project.yml` || e.path === `${ROOT}/dbt_packages/vendor/pkg/dbt_project.yml` || e.path === `${ROOT}/vendor/pkg/dbt_project.yml`) }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: !options.noProject && (e.path === `${ROOT}/dbt_project.yml` || e.path === `${ROOT}/dbt_packages/pkg/dbt_project.yml` || e.path === `${ROOT}/dbt_packages/vendor/pkg/dbt_project.yml` || e.path === `${ROOT}/vendor/pkg/dbt_project.yml` || e.path === `${ROOT}/vendor/pkg/nested/child/dbt_project.yml`) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     reads.push(e.path)
     return { value: e.path === `${ROOT}/dbt_project.yml` ? (options.yml ?? "name: 'shop'\n") : (options.sql ?? 'select 1') }
@@ -119,7 +119,18 @@ test('a package installed deeper in the default folder, or under the project\'s 
   expect(await reads(`${ROOT}/models/fct_orders.sql`)).toContain('fct_orders')
   expect(await reads(`${ROOT}/vendor/pkg/models/v.sql`)).toContain('fct_orders')
   expect(await reads(`${ROOT}/dbt_packages/vendor/pkg/models/d.sql`)).toContain('fct_orders')
+  // A project nested inside an installed package is a package's too: the outer project is still asked.
+  expect(await reads(`${ROOT}/vendor/pkg/nested/child/models/n.sql`)).toContain('fct_orders')
 })
+
+for (const path of [`${ROOT}/vendor`, 'vendor/./', './vendor'])
+  test(`a packages-install-path written ${path.startsWith('/') ? 'as an absolute path inside the project' : `as ${path}`} is the same folder`, async ($, on) => {
+    const { clock } = await start($, on, { yml: `name: 'shop'\npackages-install-path: ${path}\n` })
+    await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/fct_orders.sql` })
+    await $.tool.call({ tool: 'Read', file_path: `${ROOT}/vendor/pkg/models/v.sql` })
+    await clock.settle()
+    expect((await $.command.run({ command: 'sql-graph', args: '', ...composer } as any)).text).toContain('fct_orders')
+  })
 
 test('outside a dbt project a .sql read sets no default model and an edit adds no line', async ($, on) => {
   const { clock, cli } = await start($, on, { noProject: true, sql: 'with a as (select 1) select * from a' })
