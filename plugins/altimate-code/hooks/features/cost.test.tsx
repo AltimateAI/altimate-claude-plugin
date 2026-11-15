@@ -216,24 +216,25 @@ test('the allowance is for the command that was held: another over-limit command
 
 test('an estimate whose rounded size is within the limit but whose upper bound is over it is held', async ($, on) => {
   const { clock } = await start($, on, { answers: { orders: bq(10 * GIB, '10.0 GiB', 10 * GIB + 52 * 1024 ** 2) } })
-  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('10.0 GiB')
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBe('up to 10.1 GiB (≈ 10.0 GiB estimated) would be scanned, over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.')
   await clock.settle()
 })
 
 test('a warehouse found to have no dry run ends a hold from before, and its allowance', async ($, on) => {
   const answers: Record<string, any> = { orders: OVER }
-  const { clock, ran } = await start($, on, { answers })
+  const { clock, ran, statuses } = await start($, on, { answers })
   expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
   await $.command.run({ command: 'allow-scan', args: '' } as any)
   answers.orders = { success: true, supported: false, adapter: 'snowflake' }
   await $.tool.call(bash('dbt run -s orders'))
   await clock.settle()
   expect(ran).toEqual(['dbt run -s orders'])
+  expect(statuses.at(-1) ?? '').not.toContain('held')
   expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('Nothing is held')
 })
 
 test('a scan just over the limit reads as over it, not as equal to it', async ($, on) => {
-  const { clock } = await start($, on, { answers: { orders: bq(10 * GIB, '10.0 GiB', 10 * GIB + 52 * 1024 ** 2) } })
+  const { clock } = await start($, on, { answers: { orders: bq(10 * GIB + 1024 ** 2, '10.0 GiB') } })
   expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBe('just over 10.0 GiB would be scanned, over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.')
   await clock.settle()
 })

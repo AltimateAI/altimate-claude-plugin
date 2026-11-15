@@ -117,7 +117,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 
   const lines: string[] = []
   let estimated = false
-  const over: { label: string; bytes: number; display: string }[] = []
+  const over: { label: string; bytes: number; point: number; display: string }[] = []
   // One budget for the whole command, however many queries it names.
   const until = (await $.clock.now()) + ESTIMATE_BUDGET_MS
   for (const invocation of invocations) {
@@ -131,6 +131,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     if (answer.kind === 'unsupported') {
       // Nothing can be held on this warehouse, so a hold from before the verdict goes with it.
       await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter, held: null, allowOnce: false }))
+      await setStatusPart($, 'cost', null)
       lines.push(`cost · no estimate on ${answer.adapter}: only BigQuery has a dry run`)
       over.length = 0
       break
@@ -142,7 +143,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     estimated = true
     await rememberEstimate($, label, answer.bytes, answer.display)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}`)
-    else over.push({ label, bytes: answer.maxBytes, display: answer.display })
+    else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
   }
 
   if (over.length > 0) {
@@ -163,8 +164,14 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     }
     notes.delete(e.command)
     await setStatusPart($, 'cost', `scan held ≈ ${worst.display}`)
-    // The display is rounded: a scan just past the limit would read as equal to it.
-    const scanned = worst.display === formatBytes(limitBytes) ? `just over ${worst.display}` : `≈ ${worst.display}`
+    // The hold is decided on the upper bound, and the display is the rounded point estimate: either can read
+    // as not over the limit when the scan is just past it.
+    const scanned =
+      worst.point <= limitBytes
+        ? `up to ${formatBytes(worst.bytes)} (≈ ${worst.display} estimated)`
+        : worst.display === formatBytes(limitBytes)
+          ? `just over ${worst.display}`
+          : `≈ ${worst.display}`
     return {
       deny: `${scanned} would be scanned, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
     }
