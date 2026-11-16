@@ -2,7 +2,7 @@
 
 All notable changes to this plugin will be documented in this file.
 
-## [Unreleased]
+## [1.6.0] — 2026-11-16
 
 ### Added
 - End-of-task column impact: after a task that changed a dbt model, a band sums up each changed column's downstream reach from `impact_analysis`. The task's start copies `target/manifest.json` aside, so the answer reflects the SQL before the task.
@@ -15,7 +15,7 @@ All notable changes to this plugin will be documented in this file.
 
 ### Changed
 - The band says how many columns and models the value reaches and how many more models may change: "reaches 24 columns in 11 models (11 end columns) · 28 more may change".
-- Needs altimate-code 0.12.11 or later<!-- placeholder: MIN_ALTIMATE_CODE in hooks/altimate-cli.ts, until the release with altimate-code#1710 is tagged -->, whose column answer says why each model it couldn't trace to may carry the value. An altimate-code that gives no column answer is told to update in the band and the report.
+- Needs altimate-code 0.12.11 or later, whose column answer says why each model it couldn't trace to may carry the value. An altimate-code that gives no column answer is told to update in the band and the report.
 - The per-edit impact note no longer shows as a toast and band; it still goes to Claude's context with the edit's result. A lookup that missed its time or failed still shows a toast.
 - The per-edit column lookup goes through the altimate CLI instead of the MCP server, so it raises no permission prompt in accept-edits mode and a large column answer arrives whole.
 
