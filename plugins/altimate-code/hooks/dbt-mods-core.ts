@@ -774,7 +774,7 @@ export function cellText(value: unknown, width: number): string {
 /**
  * Column widths for a results table that fits `columns` characters (each at least 3 wide; a room narrower
  * than that is clipped by the row). The values come first: a value that fits is never cut while a header
- * could give way, and spare room then goes to the headers, then back to cut values, one cell at a time.
+ * could give way, and spare room restores cut values first, then grows the headers, one cell at a time.
  */
 export function columnWidths(result: Pick<QueryResult, 'columns' | 'rows'>, columns: number): number[] {
   const MIN = 3
