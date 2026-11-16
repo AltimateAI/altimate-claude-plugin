@@ -31,6 +31,14 @@ export const noteTerminal = (columns: number | undefined) => {
 }
 
 /**
+ * The terminal's width as a pane's drawing knows it. A viewport's columns are the conversation's: the whole
+ * terminal only while the pane is inline; docked, they are what the dock leaves the transcript, so that width
+ * says nothing of the terminal and must not set the next dock's size.
+ */
+export const paneTerminalColumns = (e: { surface?: string; viewport?: { columns: number }; props?: unknown }): number | undefined =>
+  e.surface === 'terminal' && (e.props as { placement?: string } | undefined)?.placement === 'inline' ? e.viewport?.columns : undefined
+
+/**
  * A pane's three sizes. Default is the widest dock (the 45% the surface allows, or, before the width is
  * known, a request wide enough that the surface caps it to the same), so it does not change when the width
  * becomes known. Min is a quarter of the width. Max is as wide and as tall as an inline pane may be.

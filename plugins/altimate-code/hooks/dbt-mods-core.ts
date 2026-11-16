@@ -771,20 +771,34 @@ export function cellText(value: unknown, width: number): string {
   return line.length > width ? `${line.slice(0, Math.max(1, width - 1))}…` : line
 }
 
-/** Column widths for a results table that fits `columns` characters, each at least 4 wide. */
+/**
+ * Column widths for a results table that fits `columns` characters (each at least 3 wide; a room narrower
+ * than that is clipped by the row). The values come first: a value that fits is never cut while a header
+ * could give way, and spare room then goes to the headers, then back to cut values, one cell at a time.
+ */
 export function columnWidths(result: Pick<QueryResult, 'columns' | 'rows'>, columns: number): number[] {
-  const natural = result.columns.map((name, i) => Math.min(200, Math.max(name.length, ...result.rows.slice(0, 50).map(row => cellText(row[i], 200).length), 4)))
-  const room = Math.max(columns - (natural.length - 1) * 3, natural.length * 4)
-  // Shrink the widest columns to one cap that fits, then hand back what is spare to the columns it cut.
-  const total = (cap: number) => natural.reduce((sum, width) => sum + Math.min(width, cap), 0)
-  let cap = Math.max(...natural)
-  while (cap > 4 && total(cap) > room) cap--
-  const widths = natural.map(width => Math.min(width, cap))
+  const MIN = 3
+  const values = result.columns.map((_, i) => Math.min(200, Math.max(MIN, ...result.rows.slice(0, 50).map(row => cellText(row[i], 200).length))))
+  const natural = result.columns.map((name, i) => Math.max(values[i]!, Math.min(200, name.length)))
+  const room = Math.max(columns - (natural.length - 1) * 3, natural.length * MIN)
+  // Values too wide for the room: the widest give way to one cap that fits.
+  const total = (cap: number) => values.reduce((sum, width) => sum + Math.min(width, cap), 0)
+  let cap = Math.max(...values)
+  while (cap > MIN && total(cap) > room) cap--
+  const widths = values.map(width => Math.min(width, cap))
   let spare = room - total(cap)
-  for (let i = 0; i < widths.length && spare > 0; i++) {
-    if (natural[i]! > cap) {
-      widths[i]!++
-      spare--
+  // Spare room: values cut by the cap first, then headers.
+  for (const limit of [values, natural]) {
+    while (spare > 0) {
+      let gave = false
+      for (let i = 0; i < widths.length && spare > 0; i++) {
+        if (widths[i]! < limit[i]!) {
+          widths[i]!++
+          spare--
+          gave = true
+        }
+      }
+      if (!gave) break
     }
   }
   return widths

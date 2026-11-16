@@ -522,7 +522,18 @@ kitTest('dbt --version and dbt debug give the core, adapters, Python and the con
   expect(widths.reduce((a, b) => a + b, 0) + 3).toBeLessThanOrEqual(30)
   // Room to spare is used: a long value is cut only as far as the room needs.
   expect(columnWidths({ columns: ['a', 'b', 'c'], rows: [['x'.repeat(30), 'y'.repeat(30), 'z'.repeat(30)]] }, 80)).toEqual([25, 25, 24])
-  expect(columnWidths({ columns: ['id', 'note'], rows: [['1', 'n'.repeat(70)]] }, 100)).toEqual([4, 70])
+  expect(columnWidths({ columns: ['id', 'note'], rows: [['1', 'n'.repeat(70)]] }, 100)).toEqual([3, 70])
+  // Seven columns in a narrow pane: every cell shrinks to its floor and the table is no wider than the room allows beyond that.
+  const seven = { columns: ['customer_id', 'first_name', 'last_name', 'first_order', 'most_recent_order', 'number_of_orders', 'lifetime_value'], rows: [['1', 'Michael', 'P.', '2018-01-01', '2018-02-10', '2', '33']] }
+  expect(columnWidths(seven, 31).every(one => one >= 3)).toBe(true)
+  // A pane about 70 wide: every value is whole (the dates are 10), the headers share what is left, and the table fills the room.
+  const mid = columnWidths(seven, 68)
+  expect(mid[3]).toBeGreaterThanOrEqual(10)
+  expect(mid[4]).toBeGreaterThanOrEqual(10)
+  expect(mid.reduce((a, b) => a + b, 0) + 18).toBe(68)
+  const roomy = columnWidths(seven, 80)
+  expect(roomy.reduce((a, b) => a + b, 0) + 18).toBeLessThanOrEqual(80)
+  expect(roomy[3]).toBe(11)
 })
 
 // ─── 12 · Model context on Read ───────────────────────────────────────────────────────────────────
@@ -2554,4 +2565,75 @@ test('a failing store read still registers /lineage, and the saved sizes are rea
   expect(registered).toContain('lineage')
   expect(registered).toContain('dbt-show')
   expect(storeGets.filter(key => key === 'pane-sizes').length).toBe(1)
+})
+
+test('Re-run of a bookmarked /dbt-show query keeps one bookmark', async ($, on) => {
+  const { clock, store } = await start($, on)
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  await ui.press({ key: 'results-bookmark' })
+  await clock.settle()
+  await ui.press({ key: 'results-rerun' })
+  await clock.settle()
+  const kept = store.get('dbt-results-history') as any[]
+  expect(kept.map(one => [one.title, one.bookmarked])).toEqual([['orders', true]])
+  expect((await ui.findAll({ type: 'Button', text: /^★ orders/ })).length).toBe(1)
+  await ui.unmount()
+})
+
+test('a docked pane reports the transcript\'s width, which never sets the next dock; an inline pane reports the terminal\'s', async ($, on) => {
+  const { clock, sizes } = await start($, on)
+  await $.command.run({ command: 'dbt-show', args: 'orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  const docked = await $.ui.mount({ ...RESULTS, surface: 'terminal', viewport: { columns: 110, rows: 50, isFullscreen: true } })
+  await docked.press({ key: 'results-size-max' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 90, rows: 60 })
+  await docked.press({ key: 'results-size-default' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 90 })
+  await docked.unmount()
+  // Opened again by a query finishing: still the widest dock, equal to Default.
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 90 })
+  const inline = await $.ui.mount({ ...RESULTS, surface: 'terminal', props: { ...RESULTS.props, placement: 'inline' }, viewport: { columns: 100, rows: 50, isFullscreen: false } })
+  await inline.press({ key: 'results-size-max' })
+  await clock.settle()
+  expect(sizes.at(-1)).toMatchObject({ columns: 45, rows: 60 })
+  await inline.unmount()
+})
+
+test('Max asks for the width Default asks for, Min for less, and the first open asks as Default does', async ($, on) => {
+  const { clock, sizes } = await start($, on)
+  await $.command.run({ command: 'dbt-show', args: 'orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  const first = sizes.at(-1)!
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal', viewport: { columns: 110, rows: 50, isFullscreen: true } })
+  const asked: Record<string, any> = {}
+  for (const size of ['min', 'default', 'max']) {
+    await ui.press({ key: `results-size-${size}` })
+    await clock.settle()
+    asked[size] = sizes.at(-1)
+  }
+  expect(asked.default.columns).toBe(first.columns)
+  expect(asked.max.columns).toBe(asked.default.columns)
+  expect(asked.max.rows).toBeGreaterThan(asked.default.rows)
+  expect(asked.min.columns).toBeLessThan(asked.default.columns)
+  await ui.unmount()
+})
+
+test('table rows are clipped to the pane, never wrapped, and a value that fits is not cut', async ($, on) => {
+  const { clock } = await start($, on, { show: { rows: [{ customer_id: 1, first_order: '2018-01-01', most_recent_order: '2018-02-10', number_of_orders: 2, lifetime_value: 33, note: 'x' }] } })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  for (const [bodyColumns, whole] of [[30, false], [69, true]] as const) {
+    const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal', props: { ...RESULTS.props, bodyColumns } })
+    const row = await ui.find({ type: 'Text', text: /^1\s+│/ })
+    expect(row).toBeDefined()
+    expect((row as any).props.wrap).toBe('truncate-end')
+    expect(row!.text.includes('2018-01-01')).toBe(whole)
+    await ui.unmount()
+  }
 })

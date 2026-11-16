@@ -6,7 +6,7 @@ import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later } from './altimate-cli'
-import { loadPaneSizesOnce, noteTerminal, paneRequest, sizeControls, type PaneSpec } from './pane-size'
+import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
   cellText,
   columnDrift,
@@ -1304,14 +1304,14 @@ export function registerDbtMods(on: On) {
     const result = await read($, resultAtom)
     const history = await read($, historyAtom)
     const busy = await read($, resultBusyAtom)
-    // The pane's border and scrollbar take a few of its columns.
-    const width = Math.max(30, ((e.props as any).bodyColumns ?? 100) - 4)
+    // The cells across the pane's body, less one for the scrollbar; a row wider than that is clipped, never wrapped.
+    const width = Math.max(1, ((e.props as any).bodyColumns ?? 100) - 1)
     const saved = result ? history.find(one => one.id === result.id) : null
     const marks = history.filter(one => one.bookmarked)
     const recent = history.filter(one => !one.bookmarked && one.id !== result?.id).slice(0, HISTORY_SHOWN)
     // Clear history is offered while any query that is not bookmarked is kept, the one shown included.
     const clearable = history.some(one => !one.bookmarked)
-    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, spec: RESULTS_SIZES, keyPrefix: 'results', terminal: e.surface === 'terminal' ? e.viewport?.columns : undefined }, work => later($, work))
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, spec: RESULTS_SIZES, keyPrefix: 'results', terminal: paneTerminalColumns(e) }, work => later($, work))
 
     const table = (() => {
       if (!result) return <Text dimColor>Run /dbt-show &lt;model&gt;, or ask Claude to `dbt show` a model.</Text>
@@ -1321,10 +1321,10 @@ export function registerDbtMods(on: On) {
       const line = (cells: string[]) => cells.map((cell, i) => cell.padEnd(widths[i]!)).join(' │ ')
       return (
         <Box flexDirection="column">
-          <Text bold>{line(result.columns.map((name, i) => cellText(name, widths[i]!)))}</Text>
-          <Text dimColor>{widths.map(one => '─'.repeat(one)).join('─┼─')}</Text>
+          <Text bold wrap="truncate-end">{line(result.columns.map((name, i) => cellText(name, widths[i]!)))}</Text>
+          <Text dimColor wrap="truncate-end">{widths.map(one => '─'.repeat(one)).join('─┼─')}</Text>
           {result.rows.map((row, r) => (
-            <Text key={`row-${r}`}>{line(row.map((cell, i) => cellText(cell, widths[i]!)))}</Text>
+            <Text key={`row-${r}`} wrap="truncate-end">{line(row.map((cell, i) => cellText(cell, widths[i]!)))}</Text>
           ))}
         </Box>
       )

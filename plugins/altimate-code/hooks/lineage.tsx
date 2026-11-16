@@ -13,7 +13,7 @@ import type {
 } from '../types'
 import { later, parseJson, runAltimate } from './altimate-cli'
 import { endDbtMods, newTurnDbtMods } from './dbt-mods'
-import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneRequest, sizeControls, type PaneSpec } from './pane-size'
+import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
@@ -1603,7 +1603,7 @@ export function registerLineage(on: On) {
       ) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
-    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, spec: PANE_SIZES, keyPrefix: 'lineage', terminal: e.surface === 'terminal' ? e.viewport?.columns : undefined }, work => later($, work))
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, spec: PANE_SIZES, keyPrefix: 'lineage', terminal: paneTerminalColumns(e) }, work => later($, work))
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
