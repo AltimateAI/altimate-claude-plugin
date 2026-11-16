@@ -3,7 +3,8 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
-import { lineageBand, registerLineage, startLineage } from './lineage'
+import { registerLineage, startLineage } from './lineage'
+import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -560,6 +561,7 @@ export const register: Register = on => {
     })
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
+    await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
@@ -580,9 +582,9 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    // One band per plugin: the lineage impact line rides under the integrations one, or alone.
+    // One band per plugin: the end-of-task lineage summary rides under the integrations one, or alone.
     if (e.props.hasSurvey) return next(e)
-    const lineage = await lineageBand($, $.ui.resolve(e))
+    const lineage = await taskBand($, $.ui.resolve(e))
     const pass = async () => lineage ?? next(e)
     const current = await read($, status)
     if (!current || (await read($, isBandHidden))) return pass()
@@ -796,6 +798,7 @@ export const register: Register = on => {
   })
 
   registerLineage(on)
+  registerTaskImpact(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added
