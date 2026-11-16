@@ -190,7 +190,7 @@ export type RunRow = {
 }
 
 export type RunRecord = {
-  /** The artifact's invocation id; its completion time when the artifact has none. */
+  /** The artifact's invocation id; when the artifact has none, the project folder plus its completion time. */
   id: string
   /** The dbt project folder the run was read from. */
   project: string

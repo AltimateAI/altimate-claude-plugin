@@ -4,7 +4,7 @@
 // A plugin hooks each shared event once (a second hook on an event without a matcher is refused), and
 // the engine refuses `$` handed to anything but a function it can name, so this file calls every
 // feature's functions by name instead of looping over a list. A feature fills in its own file only.
-// A function that throws is logged and skipped: one feature's failure never stops another or the call.
+// A function that throws is skipped: one feature's failure never stops another or the call. A `register` failure is silent (`$` is not available at load); the other functions are logged to the debug log.
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { BashCall, EditedFile, FileCall } from '../tool-chain'
