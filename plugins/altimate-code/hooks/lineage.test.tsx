@@ -1756,5 +1756,6 @@ test('a very long run of blank lines before a command is read at once', () => {
   const began = Date.now()
   expect(commandDir(`${'\n'.repeat(64000)}cd models`, '/repo')).toBe('/repo/models')
   expect(commandDir(`${'\n'.repeat(64000)}dbt run -s orders`, '/repo')).toBe('/repo')
+  for (const blank of ['\r', '\r\n', '\u2028', '\u2029']) expect(commandDir(`${blank.repeat(32000)}cd models`, '/repo')).toBe('/repo/models')
   expect(Date.now() - began).toBeLessThan(500)
 })

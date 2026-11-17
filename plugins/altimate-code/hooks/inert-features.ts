@@ -7,6 +7,7 @@ const NOTHING_TO_REPORT: Record<string, Record<string, unknown>> = {
   dbt_defer_state: { success: true, enabled: false, mode: 'none' },
   dbt_cost_estimate: { supported: false, adapter: 'none' },
   dbt_run_results: { found: false },
+  // The docs feature shows a coverage line for any successful answer and passes over one that isn't, silently.
   dbt_docs_coverage: { success: false },
 }
 

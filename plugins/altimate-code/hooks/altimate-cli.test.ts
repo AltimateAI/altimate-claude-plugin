@@ -62,6 +62,9 @@ test('a failure with no answer object keeps its first line of text; one with an 
   expect(await text(() => ({ exitCode: 1, stdout: '', stderr: '\nTypeError: crashed\n    at main' }))).toBe('TypeError: crashed')
   expect(await text(() => ({ exitCode: 1, stdout: 'x'.repeat(900), stderr: '' }))).toBe('x'.repeat(500))
   expect(await text(() => ({ exitCode: 1, stdout: '', stderr: '' }))).toBe('')
+  // An answer cut off mid-JSON is no message: only stderr, if any, is shown.
+  expect(await text(() => ({ exitCode: 1, stdout: '{"status":"ok","out', stderr: '' }))).toBe('')
+  expect(await text(() => ({ exitCode: 1, stdout: '{"status":"ok","out', stderr: 'Killed: out of memory' }))).toBe('Killed: out of memory')
   // An answer object speaks for itself: its output, or nothing, never a line of stderr.
   expect(await text(() => ({ exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'boom', metadata: {} }), stderr: 'noise' }))).toBe('boom')
   expect(await text(() => ({ exitCode: 1, stdout: JSON.stringify({ status: 'error', metadata: {} }), stderr: 'noise' }))).toBe('')

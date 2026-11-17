@@ -185,6 +185,8 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
     return { metadata: null as any, text: 'the answer could not be read', ok: false }
   }
   // A crash, or a failure the CLI prints as plain text, has no answer object: its first line is what to show.
-  const said = data && typeof data === 'object' ? '' : (result.stdout.trim() || String(result.stderr ?? '').trim()).split('\n')[0]!.slice(0, 500)
+  // An answer cut off mid-JSON is no message, so only what the CLI printed to stderr is shown for it.
+  const out = result.stdout.trim()
+  const said = data && typeof data === 'object' ? '' : ((out.startsWith('{') ? '' : out) || String(result.stderr ?? '').trim()).split('\n')[0]!.slice(0, 500)
   return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? said, ok: result.exitCode === 0 && data?.status !== 'error' }
 }

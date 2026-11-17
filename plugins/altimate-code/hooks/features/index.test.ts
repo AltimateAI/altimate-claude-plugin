@@ -70,7 +70,8 @@ test('no feature fails in any phase: every failure would be logged, and none is'
   await featuresReadOrEditAfter($, file, {} as any, { path: '/repo/models/a.sql' })
   await featuresTurnComplete($, {} as any, {} as any)
   await featuresSessionEnd($, {} as any)
-  expect(logs).toEqual([])
+  // A feature may log what it does; what must not appear is a failure, which is logged as `<id> · <phase> failed: …`.
+  expect(logs.filter(line => line.includes(' failed: '))).toEqual([])
 })
 
 test('each phase runs through the features, which find nothing to report and log nothing', async () => {
