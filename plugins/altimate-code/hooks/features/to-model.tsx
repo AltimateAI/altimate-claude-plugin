@@ -157,7 +157,7 @@ async function projectNear($: EngineInterface, file: string, root: string | null
       const manifest = `${/^([\\/]|[A-Za-z]:)/.test(target) ? '' : `${dir}/`}${target.replace(/^\.\//, '').replace(/[\\/]+$/, '')}/manifest.json`
       const models = (projectLayout(yml).models[0] ?? 'models').replace(/^\.\//, '').replace(/[\\/]+$/, '') || '.'
       // The models folder as the prompt names it: from the session's root, or whole when the project is outside it.
-      const inside = dir === top ? '' : top && dir.startsWith(`${top}/`) ? dir.slice(top.length + 1) : null
+      const inside = dir === top ? '' : top === '' ? dir.replace(/^\//, '') : top && dir.startsWith(`${top}/`) ? dir.slice(top.length + 1) : null
       const modelsDir = inside === null ? [dir, models === '.' ? '' : models].filter(Boolean).join('/') : [inside, models === '.' ? '' : models].filter(Boolean).join('/') || '.'
       return { manifest: target.includes('{{') ? undefined : manifest, modelsDir }
     }

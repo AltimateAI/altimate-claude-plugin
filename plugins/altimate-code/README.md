@@ -134,7 +134,7 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 ## Raw SQL to a dbt model
 
-`/to-model <model_name> [path/to/query.sql]` turns a query into a dbt model. With no path, it uses the SQL you selected. The `dbt_map_relations` tool of altimate-code maps each table of the query to a `ref()` or `source()` call from the project's manifest. The pane lists the tables that need a decision first (no match, or a match on fewer name parts than the relation has), and Claude is then asked to write the model in the project's model folder with exactly those calls, ask before adding a source for an unmatched table, and run `dbt compile` on it.
+`/to-model <model_name> [path/to/query.sql]` turns a query into a dbt model. With no path, it uses the SQL you selected. The `dbt_map_relations` tool of altimate-code maps each table of the query to a `ref()` or `source()` call from the project's manifest. The pane lists the tables that need a decision first (no match, or a match on fewer name parts than the relation has), and Claude is then asked to write the model (with a path, in the project's `model-paths` folder; for a selection, in `models/<layer>`) with exactly those calls, ask before adding a source for an unmatched table, and run `dbt compile` on it.
 
 ## Settings
 

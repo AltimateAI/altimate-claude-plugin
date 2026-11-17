@@ -37,14 +37,15 @@ async function start($: any, on: any, setup: Setup = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  const files = new Set([`${ROOT}/transform/dbt_project.yml`, `${ROOT}/transform/target/manifest.json`, `${ROOT}/custom/dbt_project.yml`, `${ROOT}/custom/artifacts/manifest.json`, `${ROOT}/bare/dbt_project.yml`, `${ROOT}/abs/dbt_project.yml`, '/out/build/manifest.json', `${ROOT}/dot/dbt_project.yml`])
+  const files = new Set([`${ROOT}/transform/dbt_project.yml`, `${ROOT}/custom/dbt_project.yml`, `${ROOT}/bare/dbt_project.yml`, `${ROOT}/abs/dbt_project.yml`, `${ROOT}/dot/dbt_project.yml`, `${ROOT}/tpl/dbt_project.yml`])
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: files.has(e.path) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${ROOT}/q.sql` || e.path === `${ROOT}/transform/analyses/q.sql`) return { value: SQL }
-    if ([`${ROOT}/custom/q.sql`, `${ROOT}/bare/q.sql`, `${ROOT}/abs/q.sql`, `${ROOT}/dot/q.sql`].includes(e.path)) return { value: SQL }
+    if ([`${ROOT}/custom/q.sql`, `${ROOT}/bare/q.sql`, `${ROOT}/abs/q.sql`, `${ROOT}/dot/q.sql`, `${ROOT}/tpl/q.sql`].includes(e.path)) return { value: SQL }
     if (e.path === `${ROOT}/abs/dbt_project.yml`) return { value: 'name: a\ntarget-path: /out/build\n' }
     if (e.path === `${ROOT}/dot/dbt_project.yml`) return { value: "name: d\nmodel-paths: ['.']\n" }
     if (e.path === `${ROOT}/custom/dbt_project.yml`) return { value: "name: c\ntarget-path: 'artifacts'  # built here\nmodel-paths: ['transforms']\n" }
+    if (e.path === `${ROOT}/tpl/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{{ env_var('X', 'target') }}\"\nmodel-paths: ['transforms']\n" }
     if (e.path === `${ROOT}/bare/dbt_project.yml`) return { value: 'name: b\n' }
     if (e.path === '/abs/trap.sql') return { value: TRAP }
     if (e.path === `${ROOT}/empty.sql`) return { value: '  \n' }
@@ -169,6 +170,14 @@ test("a project's own target-path and model-paths are used; a manifest missing t
   expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/custom/artifacts/manifest.json` }, { sql: SQL, manifest_path: `${ROOT}/bare/target/manifest.json` }])
   expect(prompts[0]).toContain('write custom/transforms/<layer>/m.sql')
   expect(prompts[1]).toContain('write bare/models/<layer>/m.sql')
+})
+
+test('a templated target-path sends no manifest_path, and the models folder still reaches the prompt', async ($, on) => {
+  const { clock, cliArgs, prompts } = await start($, on)
+  await run($, 'm tpl/q.sql')
+  await clock.settle()
+  expect(cliArgs).toEqual([{ sql: SQL }])
+  expect(prompts[0]).toContain('write tpl/transforms/<layer>/m.sql')
 })
 
 test('an absolute target-path is used whole, a model-paths of "." names the project folder', async ($, on) => {

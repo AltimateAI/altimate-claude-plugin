@@ -167,15 +167,34 @@ export async function attempt<T>($: EngineInterface, id: string, part: string, r
 
 /** Registers every feature's own hooks. */
 export function registerFeatures(on: On, context: FeatureContext) {
-  runsRegister(on, context)
-  deferRegister(on, context)
-  toModelRegister(on, context)
-  commentsRegister(on, context)
-  costRegister(on, context)
-  healthRegister(on, context)
-  sqlGraphRegister(on, context)
-  docsRegister(on, context)
-  cteProfileRegister(on, context)
+  // One feature that throws while registering must not keep the others, or the tool chain after them, from registering.
+  try {
+    runsRegister(on, context)
+  } catch {}
+  try {
+    deferRegister(on, context)
+  } catch {}
+  try {
+    toModelRegister(on, context)
+  } catch {}
+  try {
+    commentsRegister(on, context)
+  } catch {}
+  try {
+    costRegister(on, context)
+  } catch {}
+  try {
+    healthRegister(on, context)
+  } catch {}
+  try {
+    sqlGraphRegister(on, context)
+  } catch {}
+  try {
+    docsRegister(on, context)
+  } catch {}
+  try {
+    cteProfileRegister(on, context)
+  } catch {}
 }
 
 export async function featuresSessionStart($: EngineInterface, e: Args<'session.start'>) {

@@ -183,5 +183,7 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
   if (result.exitCode === 0 && (!data || typeof data !== 'object' || typeof data.status !== 'string')) {
     return { metadata: null as any, text: 'the answer could not be read', ok: false }
   }
-  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? '', ok: result.exitCode === 0 && data?.status !== 'error' }
+  // A crash or a build that prints plain text has no answer object: keep its first line rather than nothing.
+  const plain = result.exitCode === 0 ? '' : (result.stdout.trim() || String(result.stderr ?? '').trim()).split('\n')[0].slice(0, 500)
+  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? (data && typeof data === 'object' ? '' : plain), ok: result.exitCode === 0 && data?.status !== 'error' }
 }

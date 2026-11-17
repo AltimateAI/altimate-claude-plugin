@@ -463,7 +463,6 @@ export function parseDbtCommand(line: string): DbtInvocation[] {
 const isRedirect = (token: Token) => token.kind === 'op' && /[<>]/.test(token.text)
 
 // Words after which a command still starts, so a `(` there opens a subshell.
-const COMMAND_KEYWORDS = new Set(['!', '{', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time'])
 const NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/
 
 /**
@@ -508,7 +507,7 @@ function readable(tokens: Token[]): Set<number> | null {
       else if (!words.length && word === 'case') {
         open.push('case')
         caseHead = 'case'
-      } else if (words.length || !COMMAND_KEYWORDS.has(word)) words.push(token.text)
+      } else if (words.length || !KEYWORDS.has(word)) words.push(token.text)
       continue
     }
     if (isRedirect(token)) {
