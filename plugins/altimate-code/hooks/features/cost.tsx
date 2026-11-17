@@ -143,7 +143,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     const label = target.model ?? 'the inline query'
     const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken)
     if (answer === 'pending') {
-      pending.push(label)
+      if (!pending.includes(label)) pending.push(label)
       continue
     }
     if (answer.kind === 'unsupported') {
@@ -406,8 +406,10 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   let running = inflight.get(key)
   if (running?.doneAt != null && (await $.clock.now()) - running.doneAt > ANSWER_KEEP_MS) running = undefined
   if (!running) {
+    // The wait is spent: nothing new starts. Each estimate may start the adapter (dbt deps), and two at once in one project collide.
+    if (waitUntil - (await $.clock.now()) <= 0) return 'pending'
     const entry: { answer: Promise<Answer>; doneAt: number | null } = { answer: estimate($, args, (await $.clock.now()) + ESTIMATE_BUDGET_MS), doneAt: null }
-    void entry.answer.then(async () => void (entry.doneAt = await $.clock.now()))
+    void entry.answer.then(async () => void (entry.doneAt = await $.clock.now())).catch(() => {})
     inflight.set(key, entry)
     running = entry
   }

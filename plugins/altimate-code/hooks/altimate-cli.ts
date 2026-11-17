@@ -120,8 +120,9 @@ export type RunToolOptions = {
   /**
    * The tool needs write permission (it starts the dbt adapter, or changes something): the call goes
    * through the CLI with `--allow-write`, since the plugin's MCP server runs read-only. runTool asks
-   * nobody: a caller sets it only once the user has said yes to this write (README, "How it works",
-   * item 4), as the skill does before it adds `--allow-write`.
+   * nobody. A caller sets it either once the user has said yes to this write (README, "How it works",
+   * item 4), as the skill does before it adds `--allow-write`, or for a tool that only reads and needs
+   * the adapter started, as the cost gate's estimate does.
    */
   write?: boolean
 }

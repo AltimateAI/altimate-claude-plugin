@@ -495,6 +495,33 @@ test('the same model named twice on a line is estimated once, so a slow estimate
   expect(ran).toEqual([line])
 })
 
+test('once the wait is spent no further estimate starts, so two adapters never start in one project at once', async ($, on) => {
+  const options: Options = { answers: { a: UNDER, b: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s a && dbt run -s b'))
+  await clock.advance(4_001)
+  const denied: any = await first
+  expect(denied.deny).toContain('The scan of a, b is still being estimated')
+  release()
+  await clock.settle()
+  // b was never started: only one adapter start runs at a time.
+  expect(estimates).toEqual(['a'])
+})
+
+test('a model named twice on a line is listed once as still being estimated', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders && dbt show -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('The scan of orders is still being estimated')
+  release()
+  await clock.settle()
+})
+
 test('a compound command gets every answer over its retries, however long each estimate takes', async ($, on) => {
   const options: Options = { answers: { a: UNDER, b: UNDER, c: UNDER } }
   const { clock, estimates, ran } = await start($, on, options)
