@@ -300,12 +300,12 @@ export async function featuresBashGate($: EngineInterface, e: BashCall): Promise
   return gate
 }
 
-/** The context lines every feature adds after a Bash call ran. */
 /** A Bash call that a gate refused, or whose result is a refusal, never reaches bashAfter: the features that kept it let go. */
 export async function featuresBashDropped($: EngineInterface, e: BashCall): Promise<void> {
-  await attempt($, 'runs', 'bashAfter', () => runsBashDropped($, e))
+  await attempt($, 'runs', 'bashDropped', () => runsBashDropped($, e))
 }
 
+/** The context lines every feature adds after a Bash call ran. */
 export async function featuresBashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<string[]> {
   const lines: string[] = []
   addLines(lines, await attempt($, 'runs', 'bashAfter', () => runsBashAfter($, e, result)))

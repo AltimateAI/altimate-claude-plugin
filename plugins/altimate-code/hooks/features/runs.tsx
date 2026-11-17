@@ -8,7 +8,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { RunRecord, RunRow, RunsState } from '../../types'
 import { runTool } from '../altimate-cli'
-import { parseDbtCommand } from '../dbt-command'
+import { parseDbtCommand, type DbtInvocation } from '../dbt-command'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -139,9 +139,27 @@ const SECRET_ASSIGNMENT = /(^|\s)((?=[A-Za-z_])[A-Za-z0-9_]*(?:SECRET|TOKEN|PASS
 /** A `--vars` value that names a secret: the command is not recorded, since a replay would store and show it. */
 const VARS_VALUE = /(?:^|\s)--vars(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g
 const SECRET_NAME = /(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)/i
-const varsHoldSecret = (body: string) => [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => SECRET_NAME.test(match[1]!))
+/** The words a `--vars` key is made of (`apiKey`, `db_password`, `auth-token`), lower case. */
+const keyWords = (key: string) => key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/)
+const SECRET_WORDS = new Set(['secret', 'secrets', 'token', 'tokens', 'pass', 'passwd', 'password', 'passwords', 'pwd', 'key', 'keys', 'apikey', 'credential', 'credentials', 'auth'])
+/** `key: value` pairs of a flow-style `--vars` value (JSON or YAML). */
+const VARS_PAIR = /["']?([\w.-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)/g
+/** A key that names a secret, unless its value is a number, a boolean or null: `pass_rate: 0.9` holds none. */
+const pairHoldsSecret = (key: string, value: string) => keyWords(key).some(word => SECRET_WORDS.has(word)) && !/^(?:-?\d[\d.eE+-]*|true|false|null|~)$/i.test(value)
+/** Whether a `--vars` value names a secret. A value that is no `key: value` mapping is tested as a whole text. */
+const holdsSecret = (value: string) => {
+  const pairs = [...value.matchAll(VARS_PAIR)]
+  return pairs.length === 0 ? SECRET_NAME.test(value) : pairs.some(pair => pairHoldsSecret(pair[1]!, pair[2]!))
+}
+const varsHoldSecret = (body: string) => [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => holdsSecret(match[1]!))
 const CREDENTIAL_URL = /:\/\/[^\s/:@"']+:[^\s@"']+@/
-const redact = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
+const redactAssignments = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
+/** A value continued onto the next line (backslash, newline) is one word to the shell: joined before the secret is cut out. */
+const redact = (head: string) => {
+  const joined = head.replace(/\\\r?\n/g, '')
+  const cut = redactAssignments(joined)
+  return cut === joined ? head : cut
+}
 
 /** The flags `dbt retry` does not take from the run it retries. */
 const VALUE = `"[^"]*"|'[^']*'|\\S+`
@@ -312,9 +330,14 @@ const IN_FLIGHT_MS = 60 * 60 * 1000
 export const OVERLAP_LINE = 'run not recorded: overlapping dbt commands'
 /** Whether the command runs dbt at all, with any subcommand. */
 export const runsDbt = (command: string) => parseDbtCommand(command).length > 0
+/**
+ * `dbt run-operation` and `dbt docs generate` replace run_results.json too, and `dbt clean` deletes it: they are no run
+ * to record, but the stored runs can no longer be retried from the file.
+ */
+const isOperation = (command: string, one: DbtInvocation) =>
+  one.subcommand === 'run-operation' || one.subcommand === 'clean' || (one.subcommand === 'docs' && /^\s+generate(?=\s|$)/.test(command.slice(one.subcommandEnd, one.end)))
+export const runsOperation = (command: string) => parseDbtCommand(command).some(one => isOperation(command, one))
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
-/** `dbt run-operation` and `dbt docs generate` replace run_results.json too, but are no run to record. */
-export const runsOperation = (command: string) => parseDbtCommand(command).some(one => one.subcommand === 'run-operation' || one.subcommand === 'docs')
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
 const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(^|[^&])&\s*$/.test(e.command.trim())
@@ -370,9 +393,9 @@ async function readRun(
   return run && written ? { run, order: all.lastIndexOf(written) } : null
 }
 
-/** The artifact on disk may now be a run that was not recorded: the stored runs of the project can no longer be retried from it. */
 /** Counts the clearings: a recording that began before one stores its run without a retry command. */
 let cleared = 0
+/** The artifact on disk may now be a run that was not recorded: the stored runs of the project can no longer be retried from it. */
 async function clearRetries($: EngineInterface): Promise<void> {
   cleared++
   await serially(async () => {
@@ -388,7 +411,8 @@ async function clearRetries($: EngineInterface): Promise<void> {
 
 /** Reads each project's last run that this call wrote and records them; Claude gets one line each, or null. */
 async function record($: EngineInterface, e: BashCall, result?: ToolCallResult): Promise<string | null> {
-  const clearedAtStart = cleared
+  // The count of clearings this call has seen: its own that leave its artifact retryable are added, only another call's differ.
+  let clearedAtStart = cleared
   const ended = await $.clock.now()
   // The bookkeeping below is one block with no await in it: two calls ending together each see the other.
   const began = started.get(startKey(e))
@@ -415,7 +439,13 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   // Kept back to the oldest call still running, never past the limit.
   const cutoff = Math.max(ended - IN_FLIGHT_MS, Math.min(ended, ...live.map(other => other.at)))
   while (finished.length > 500 || (finished[0] && finished[0].ended < cutoff)) finished.shift()
-  if (began.operation) await clearRetries($)
+  if (began.operation) {
+    await clearRetries($)
+    // An operation before the last command that writes results leaves that command's own artifact retryable.
+    const calls = parseDbtCommand(e.command)
+    const lastWrite = Math.max(-1, ...calls.filter(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand)).map(one => one.start))
+    if (!calls.some(one => isOperation(e.command, one) && one.start > lastWrite)) clearedAtStart++
+  }
   if (!began.writes) return null
   if (overlapped) {
     await clearRetries($)
@@ -447,7 +477,11 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
     ),
   )
   // This call may have replaced the artifact and it could not be read: what was recorded can no longer be retried from it.
-  if (unreadable) await clearRetries($)
+  if (unreadable) {
+    await clearRetries($)
+    // Only the folder that could not be read is unknown: the runs read from the others keep their retry command.
+    clearedAtStart++
+  }
   // Two spellings of one folder read one file: of its runs the later invocation's is the one that wrote it.
   const latest = new Map<string, { run: RunRecord; order: number }>()
   for (const one of read) {

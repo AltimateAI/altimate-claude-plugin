@@ -401,6 +401,48 @@ test('dbt docs generate clears the stored retry like run-operation', async ($, o
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
+test('dbt clean clears the stored retry: it deletes the artifact; dbt docs serve writes nothing and keeps it', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt docs serve', tool_use_id: 'serve' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual(['cd /repo && dbt retry'])
+  await $.tool.call({ tool: 'Bash', command: 'dbt clean', tool_use_id: 'clean' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+})
+
+test('an operation before a build leaves that build retryable; one after it does not', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  await $.tool.call({ tool: 'Bash', command: 'dbt run-operation grant && dbt build -s a', tool_use_id: 'first' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual(['cd /repo && dbt retry'])
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s b && dbt docs generate', tool_use_id: 'second' })
+  expect(kept(stored).map(run => run.retryLine)).not.toContain('cd /repo && dbt retry')
+})
+
+test('a secret continued onto the next line is redacted whole', () => {
+  const plain = resultsInvocations('SNOWFLAKE_PASSWORD=abc123\\\ndef456 dbt build', ROOT)[0]!
+  expect(plain.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt build')
+  const quoted = resultsInvocations('SNOWFLAKE_PASSWORD="abc\\\n123" dbt build', ROOT)[0]!
+  expect(quoted.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt build')
+  expect(quoted.retryLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt retry')
+})
+
+test('a --vars value is tested by its keys: author, key_metric with a number and pass_rate 0.9 are recorded', () => {
+  expect(resultsInvocations(`dbt build --vars '{"author": "data-team"}'`, ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt build --vars '{"pass_rate": 0.9}'`, ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt build --vars '{"label": "api_key_rotation"}'`, ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt build --vars '{"apiKey": "s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"limit": 3, "db_password": "x"}'`, ROOT)).toEqual([])
+})
+
+test('one unreadable artifact folder keeps the retry of the run read from the other', async ($, on) => {
+  const { stored } = await start($, on, args => {
+    if (args.target_path === 'b') throw new Error('no artifact')
+    return view('inv-a', [['model.shop.m', 'error', null]], 'build', AFTER, ROOT)
+  })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --target-path a; dbt build --target-path b', tool_use_id: 'two' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual(['cd /repo && dbt retry --target-path a'])
+})
+
 test('dbt run-operation clears the stored retry: it replaces the artifact but is no run to record', async ($, on) => {
   const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
