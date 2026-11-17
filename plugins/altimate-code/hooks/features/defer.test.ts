@@ -202,6 +202,16 @@ test('a background cd chain, a pushd stack word, an option value that looks like
   expect(runsInProject('cd models && dbt run', '/', '/', dir => dir === '/models')).toBe(false)
 })
 
+test('a chain that may have stopped half way, a hidden cd and an option value shaped like --project-dir are not trusted', () => {
+  const run = (command: string) => runsInProject(command, '/repo/b', '/repo/a')
+  expect(runsInProject('cd ../b && cd missing && cd ../../a && dbt run; dbt test', '/repo/a', '/repo/a')).toBe(false)
+  expect(runsInProject('cd ../b && cd ../missing/../a && dbt run || dbt test', '/repo/a', '/repo/a')).toBe(false)
+  expect(runsInProject("$'cd' ../b && dbt run", '/repo/a', '/repo/a')).toBe(false)
+  expect(runsInProject('dbt run --project\\\n-dir ../b', '/repo/a', '/repo/a')).toBe(false)
+  expect(run('dbt run --exclude --project-dir=/repo/a')).toBe(false)
+  expect(runsInProject('cd models && dbt run -s x && dbt test', '/repo/a', '/repo/a')).toBe(true)
+})
+
 test('the override decides, and the status text shows target and defer', () => {
   const state: any = { projectDir: '/p', enabled: true, favorState: false, mode: 'local', stateDir: '/work/prod', reason: null, override: null, defaultTarget: 'dev', targets: ['dev', 'prod'], target: null, failedAt: null }
   expect(statusText(state)).toBe('dbt dev · defer prod')

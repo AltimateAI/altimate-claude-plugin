@@ -160,6 +160,8 @@ export function runsInProject(command: string, root: string, projectDir: string,
   if (/\s--(?:directory|project)[\s=]|\s-C/.test(plain)) return false
   if (/(?:^|[\s;&|(){}!])(?:popd|chdir)(?=[\s;&|)]|$)|\benv\s+(?:\S+\s+)*(?:-C|--chdir)\b/.test(plain)) return false
   // Control flow (`if`, a loop, `case`) can skip a `cd`: the folder is unknown once a `cd` is among it.
+  // Quoting forms that hide a word from the checks below (`$'cd'`, a line continuation inside an option).
+  if (/\$['"]|\\\n/.test(command)) return false
   const control = /(?:^|[\s;&|(){}!])(?:if|then|else|elif|fi|while|until|do|done|for|case|esac|select)(?=[\s;&|)]|$)/.test(plain)
   const cdWords = plain.match(/(?:^|[\s;&|(){}!`])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
   if (cdWords !== [...command.matchAll(CD)].length) return false
@@ -171,6 +173,8 @@ export function runsInProject(command: string, root: string, projectDir: string,
   if (cdWords > 0) {
     const rest = command.replace(/^\s*(?:(?:cd|pushd)[ \t]+(?:"[^"]*"|'[^']*'|[^\s;&|()<>`$\\*?[\]{}'"]+)[ \t]*&&[ \t]*)*/, '')
     if (/(?:^|[\s;&|(){}!`])(?:cd|pushd|popd|chdir)(?=[\s;&|)]|$)/.test(rest.replace(/["'\\]/g, ''))) return false
+    // After a chain that may have stopped half way, only commands that run because it all worked: no `;`, `||` or new line.
+    if (rest !== command && /;|\|\||\n/.test(rest)) return false
   }
   // A folder change inside a subshell or command substitution leaves the parent's folder unchanged or unknown.
   if (cdWords > 0 && /[(`]/.test(plain)) return false
@@ -219,7 +223,7 @@ export function runsInProject(command: string, root: string, projectDir: string,
   }
   // A project named outright is the one to judge; otherwise the folder the command runs from.
   // An option word starts after whitespace: `--exclude=--project-dir=x` is another option's value.
-  const named = [...command.matchAll(PROJECT_DIR)].filter(match => !quoted(command, match.index) && (match.index === 0 || /\s/.test(command[match.index - 1]!)))
+  const named = [...command.matchAll(PROJECT_DIR)].filter(match => !quoted(command, match.index) && (match.index === 0 || /\s/.test(command[match.index - 1]!)) && !/(?:^|\s)-{1,2}[\w-]+\s+$/.test(command.slice(0, match.index)))
   // A project option written with quotes (`"--project-dir" ../b`) is only seen in the plain copy: unknown.
   if (named.length !== (plain.match(/--project-dir[\s=]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
   // A path word that goes on after its quotes (`--project-dir "."/../b`) is not one this can work out.
