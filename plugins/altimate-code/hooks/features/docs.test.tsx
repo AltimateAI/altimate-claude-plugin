@@ -204,6 +204,8 @@ async function start($: any, on: any, options: Options = {}) {
   const submitted: string[] = []
   // A file the edit creates is not there before it, so that read is not made.
   let schemaReads = options.newFile ? 1 : 0
+  // The read before the edit of a file that is not there yet fails.
+  let missingRead = options.newFile === true
   let clearing = false
   let downstreamReads = 0
   on('command.register', () => ({ value: { command: 'propagate' } }))
@@ -231,6 +233,10 @@ async function start($: any, on: any, options: Options = {}) {
     // The edit's text from before is read first, then the file as the edit left it.
     // Each edit reads the file three times: before it, after it, and when the traces are back.
     if (e.path === SCHEMA) {
+      if (missingRead) {
+        missingRead = false
+        throw new Error('ENOENT')
+      }
       const step = schemaReads++ % 3
       if (clearing) return { value: step === 0 ? AFTER : BEFORE }
       return { value: step === 0 || (step === 2 && options.stale) ? BEFORE : AFTER }

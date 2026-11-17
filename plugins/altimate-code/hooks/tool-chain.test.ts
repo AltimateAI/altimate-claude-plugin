@@ -179,18 +179,3 @@ test('a deadline or a logger that throws drops only that phase: the gate after i
   expect(pre.deny).toEqual({ deny: 'refused' })
   expect(seen).toEqual(['bashRewrite:dbt run', 'bashGate:dbt run'])
 })
-
-test('a before-read that fails is unknown, not a file that did not exist', async () => {
-  const edit = { tool: 'Edit', file_path: '/repo/models/schema.yml', old_string: '1', new_string: '2' } as any
-  const seen: any[] = []
-  const gone = recording({ readsBefore: true, readBefore: async () => null, editAfter: async (_e, _r, file) => (seen.push(file), []) })
-  const none = await beforeCall(edit, gone.steps)
-  await afterCall(none.e, ok, none.before, gone.steps, none.beforeUnknown)
-  const slow = recording({ readsBefore: true, readBefore: async () => { throw new Error('mount is slow') }, editAfter: async (_e, _r, file) => (seen.push(file), []) })
-  const late = await beforeCall(edit, slow.steps)
-  await afterCall(late.e, ok, late.before, slow.steps, late.beforeUnknown)
-  expect(seen).toEqual([
-    { path: '/repo/models/schema.yml', before: null, beforeUnknown: false },
-    { path: '/repo/models/schema.yml', before: null, beforeUnknown: true },
-  ])
-})

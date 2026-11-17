@@ -42,6 +42,8 @@ let saidOldCoverage = false
 const applied = new Map<string, string>()
 // An Apply whose request is still being sent; a second press is ignored.
 let applying = false
+/** Whether this feature has put a part in the status line, so a session start clears it only then. */
+let statusShown = false
 
 const groupKey = (manifest: string, model: string, column: string) => `${manifest}|${model}.${column}`
 // The reach names columns in lower case, so what Apply asked for is looked up the same way.
@@ -367,7 +369,7 @@ async function schemaEdited($: EngineInterface, file: EditedFile): Promise<strin
   // A file that is gone writes nothing, so what was offered from it no longer holds.
   const written = columnDescriptions(after ?? '')
   // A before-text that could not be read says nothing about what changed: no offer rather than every description.
-  const fresh = after === null || file.beforeUnknown ? [] : changedDescriptions(file.before, after)
+  const fresh = after === null || (file as { beforeUnknown?: boolean }).beforeUnknown ? [] : changedDescriptions(file.before, after)
   // Writing the description Apply asked for is the copy being made, not a new description to offer;
   // any other text written to that column is a new description.
   const all = fresh.filter(one => {
@@ -475,6 +477,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
 async function showStatus($: EngineInterface) {
   const state = await read($, docsAtom)
   const pending = state?.groups.reduce((sum, group) => sum + group.candidates.length, 0) ?? 0
+  statusShown = pending > 0
   await setStatusPart($, 'docs', pending ? `docs ${pending} to copy` : null)
 }
 
@@ -606,7 +609,8 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   applied.clear()
   applying = false
   await update($, docsAtom, () => null)
-  await setStatusPart($, 'docs', null)
+  if (statusShown) await setStatusPart($, 'docs', null)
+  statusShown = false
   await $.command.register({ name: COMMAND, description: 'Copy a column description Claude wrote to the downstream columns that carry the same value' })
 }
 

@@ -26,7 +26,7 @@ export type FileCall = ToolCallInput & { tool: 'Read' | 'Edit' | 'Write' | 'Mult
  * The file an edit landed in. `before` is its text before the call, read only when a feature asks
  * for it (`editReadsBefore`); null when not read, missing, or too big for `$.fs.read`.
  */
-export type EditedFile = { path: string; before: string | null; beforeUnknown?: boolean }
+export type EditedFile = { path: string; before: string | null }
 
 /** Context lines for Claude, appended to the call's result. */
 export type ContextLines = readonly string[] | void | null | undefined
@@ -99,30 +99,29 @@ async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore', fallba
 }
 
 /** The phases before the call: rewrites, then the gate. `deny` set means the call must not run. */
-export async function beforeCall(input: ToolCallInput, steps: ChainSteps): Promise<{ e: ToolCallInput; deny: { deny: string } | null; before: string | null; beforeUnknown: boolean }> {
+export async function beforeCall(input: ToolCallInput, steps: ChainSteps): Promise<{ e: ToolCallInput; deny: { deny: string } | null; before: string | null }> {
   let e = input
   const bash = bashCallOf(e)
   if (bash) {
     const command = await bounded(steps, 'bashRewrite', bash.command, () => steps.bashRewrite(bash))
     if (command !== bash.command) e = { ...e, command } as ToolCallInput
     const deny = await bounded(steps, 'bashGate', null, () => steps.bashGate({ ...bash, command }))
-    if (deny) return { e, deny, before: null, beforeUnknown: false }
+    if (deny) return { e, deny, before: null }
   }
   const path = filePathOf(e)
-  // `undefined` is a read that did not finish or failed, told apart from `null`, a file that did not exist.
-  const read = path && EDIT_TOOLS.has(e.tool) && steps.readsBefore ? await bounded<string | null | undefined>(steps, 'readBefore', undefined, () => steps.readBefore(path)) : null
-  return { e, deny: null, before: read ?? null, beforeUnknown: read === undefined }
+  const before = path && EDIT_TOOLS.has(e.tool) && steps.readsBefore ? await bounded(steps, 'readBefore', null, () => steps.readBefore(path)) : null
+  return { e, deny: null, before }
 }
 
 /** The phases after the call ran: bashAfter, editAfter, readOrEditAfter; their lines go to `context`. */
-export async function afterCall(e: ToolCallInput, result: ToolCallResult, before: string | null, steps: ChainSteps, beforeUnknown = false): Promise<ToolCallResult> {
+export async function afterCall(e: ToolCallInput, result: ToolCallResult, before: string | null, steps: ChainSteps): Promise<ToolCallResult> {
   if (result.deny !== undefined) return result
   const lines: string[] = []
   const bash = bashCallOf(e)
   if (bash) lines.push(...(await bounded<string[]>(steps, 'bashAfter', [], () => steps.bashAfter(bash, result))))
   const path = filePathOf(e)
   if (path && !result.isError) {
-    if (EDIT_TOOLS.has(e.tool)) lines.push(...(await bounded<string[]>(steps, 'editAfter', [], () => steps.editAfter(e as FileCall, result, { path, before, beforeUnknown }))))
+    if (EDIT_TOOLS.has(e.tool)) lines.push(...(await bounded<string[]>(steps, 'editAfter', [], () => steps.editAfter(e as FileCall, result, { path, before }))))
     lines.push(...(await bounded<string[]>(steps, 'readOrEditAfter', [], () => steps.readOrEditAfter(e as FileCall, result, { path }))))
   }
   return withContext(result, lines)
@@ -140,16 +139,15 @@ export function installToolChain(on: On) {
       bashAfter: (e, result) => featuresBashAfter($, e, result),
       editAfter: (e, result, file) => featuresEditAfter($, e, result, file),
       readOrEditAfter: (e, result, file) => featuresReadOrEditAfter($, e, result, file),
-      // A file that is not there yet (a Write that creates it) is `null`; one that is there but cannot be read rejects.
-      readBefore: async path => ((await $.fs.exists(path)) ? $.fs.read(path) : null),
+      readBefore: path => $.fs.read(path),
       readsBefore: EDIT_READS_BEFORE,
       limit: work => within($, PHASE_TIMEOUT_MS, work),
       log: text => $.ui.log(text, { to: 'debug' }),
     }
     // The chain failing never stops the call: it then runs as it came, and its result goes back as is.
-    const pre = await beforeCall(input, steps).catch(() => ({ e: input, deny: null, before: null, beforeUnknown: true }))
+    const pre = await beforeCall(input, steps).catch(() => ({ e: input, deny: null, before: null }))
     if (pre.deny) return pre.deny
     const result = await next(pre.e)
-    return afterCall(pre.e, result, pre.before, steps, pre.beforeUnknown).catch(() => result)
+    return afterCall(pre.e, result, pre.before, steps).catch(() => result)
   })
 }

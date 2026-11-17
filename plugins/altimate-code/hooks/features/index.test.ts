@@ -40,7 +40,7 @@ test('attempt logs a feature function that throws at once, one that rejects, and
   expect(logs).toEqual(['runs · sessionStart failed: Error: at once', 'defer · bandLine failed: Error: later'])
 })
 
-test('with every feature but docs a stub, each phase runs through the features and only docs, which needs a real engine, logs', async () => {
+test('with every feature a stub, each phase runs through the features and logs nothing', async () => {
   const { $, logs } = engine()
   const bash = { tool: 'Bash', command: 'dbt run -s a' } as any
   const file = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
@@ -54,6 +54,5 @@ test('with every feature but docs a stub, each phase runs through the features a
   expect(await featuresBashAfter($, bash, {} as any)).toEqual([])
   expect(await featuresEditAfter($, file, {} as any, { path: '/repo/models/a.sql', before: null })).toEqual([])
   expect(await featuresReadOrEditAfter($, file, {} as any, { path: '/repo/models/a.sql' })).toEqual([])
-  // docs is a real feature and reads the engine's state and file system, which this bare engine lacks.
-  expect(logs.filter(line => !line.startsWith('docs · '))).toEqual([])
+  expect(logs).toEqual([])
 })
