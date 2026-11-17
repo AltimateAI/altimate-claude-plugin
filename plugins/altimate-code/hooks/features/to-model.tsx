@@ -122,7 +122,12 @@ async function sqlOf($: EngineInterface, path: string | null): Promise<{ sql: st
     }
   }
   const selected = await $.ui.selection().catch(() => undefined)
-  if (selected?.text.trim()) return { sql: selected.text, source: 'selection' }
+  if (selected?.text.trim()) {
+    // A selection has no file: the project is the one at the session's root, if any.
+    const root = await $.session.root().catch(() => null)
+    const project = root ? await projectNear($, `${root.replace(/[\\/]$/, '')}/selection.sql`, root) : {}
+    return { sql: selected.text, source: 'selection', ...project }
+  }
   return { error: `No SQL: pass a file path or select the SQL first. ${USAGE}` }
 }
 
@@ -137,8 +142,7 @@ export function targetPathOf(yml: string): string {
 /**
  * The dbt project the SQL file sits in: the nearest dbt_project.yml above it, up to the session's root. Its
  * manifest (where its `target-path` puts it; a missing file is the tool's error to report, not a cue to map
- * against another project's manifest) and the folder its models go in. Without a project, or with a templated
- * `target-path` that is not read here, the tool looks around the working directory.
+ * against another project's manifest) and the folder its models go in. Without a project the tool looks around the working directory.
  */
 async function projectNear($: EngineInterface, file: string, root: string | null): Promise<{ manifest?: string; modelsDir?: string }> {
   // `.` and `..` are resolved first, so the folders walked are the ones that really lie above the file.
@@ -159,7 +163,8 @@ async function projectNear($: EngineInterface, file: string, root: string | null
       // The models folder as the prompt names it: from the session's root, or whole when the project is outside it.
       const inside = dir === top ? '' : top === '' ? dir.replace(/^\//, '') : top && dir.startsWith(`${top}/`) ? dir.slice(top.length + 1) : null
       const modelsDir = inside === null ? [dir, models === '.' ? '' : models].filter(Boolean).join('/') : [inside, models === '.' ? '' : models].filter(Boolean).join('/') || '.'
-      return { manifest: target.includes('{{') ? undefined : manifest, modelsDir }
+      // A templated target-path is not read here: dbt's default folder of this project stands in, so the tool never maps against another project's manifest.
+      return { manifest: target.includes('{{') ? `${dir}/target/manifest.json` : manifest, modelsDir }
     }
     const parent = dir.replace(/[\\/][^\\/]*$/, '')
     if (dir === top || parent === dir) return {}

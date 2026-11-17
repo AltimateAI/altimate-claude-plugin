@@ -20,7 +20,7 @@ const PANE = {
   props: { title: 'Raw SQL to dbt model', isFocused: true, bodyColumns: 100, placement: 'dock', scroll: { offset: 0, bodyRows: 30 }, view: {} },
 } as const
 
-type Setup = { mappings?: unknown; selection?: string | null; cli?: { exitCode: number; stdout: string }; noCli?: boolean }
+type Setup = { rootProject?: boolean; mappings?: unknown; selection?: string | null; cli?: { exitCode: number; stdout: string }; noCli?: boolean }
 
 /** A session with a CLI that answers dbt_map_relations, a file at /repo/q.sql, and the prompts the mod submits. */
 async function start($: any, on: any, setup: Setup = {}) {
@@ -38,6 +38,7 @@ async function start($: any, on: any, setup: Setup = {}) {
     return <Box key="engine" />
   })
   const files = new Set([`${ROOT}/transform/dbt_project.yml`, `${ROOT}/custom/dbt_project.yml`, `${ROOT}/bare/dbt_project.yml`, `${ROOT}/abs/dbt_project.yml`, `${ROOT}/dot/dbt_project.yml`, `${ROOT}/tpl/dbt_project.yml`])
+  if (setup.rootProject) files.add(`${ROOT}/dbt_project.yml`)
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: files.has(e.path) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${ROOT}/q.sql` || e.path === `${ROOT}/transform/analyses/q.sql`) return { value: SQL }
@@ -46,6 +47,7 @@ async function start($: any, on: any, setup: Setup = {}) {
     if (e.path === `${ROOT}/dot/dbt_project.yml`) return { value: "name: d\nmodel-paths: ['.']\n" }
     if (e.path === `${ROOT}/custom/dbt_project.yml`) return { value: "name: c\ntarget-path: 'artifacts'  # built here\nmodel-paths: ['transforms']\n" }
     if (e.path === `${ROOT}/tpl/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{{ env_var('X', 'target') }}\"\nmodel-paths: ['transforms']\n" }
+    if (e.path === `${ROOT}/dbt_project.yml`) return { value: "name: r\nmodel-paths: ['transforms']\n" }
     if (e.path === `${ROOT}/bare/dbt_project.yml`) return { value: 'name: b\n' }
     if (e.path === '/abs/trap.sql') return { value: TRAP }
     if (e.path === `${ROOT}/empty.sql`) return { value: '  \n' }
@@ -114,6 +116,14 @@ test('the pane lists unmatched rows first, then partial, then matched', async ($
   await ui.unmount()
 })
 
+test("a selection takes the manifest and models folder of the project at the session's root", async ($, on) => {
+  const { clock, cliArgs, prompts } = await start($, on, { rootProject: true, selection: 'select 1 from raw.events', mappings: [MAPPINGS[2]] })
+  await run($, 'stg_events')
+  await clock.settle()
+  expect(cliArgs).toEqual([{ sql: 'select 1 from raw.events', manifest_path: `${ROOT}/target/manifest.json` }])
+  expect(prompts[0]).toContain('write transforms/<layer>/stg_events.sql')
+})
+
 test('without a path the selection is the SQL; with neither, the reply says what to do', async ($, on) => {
   const selected = await start($, on, { selection: 'select 1 from raw.events', mappings: [MAPPINGS[2]] })
   const reply = await run($, 'stg_events')
@@ -172,11 +182,11 @@ test("a project's own target-path and model-paths are used; a manifest missing t
   expect(prompts[1]).toContain('write bare/models/<layer>/m.sql')
 })
 
-test('a templated target-path sends no manifest_path, and the models folder still reaches the prompt', async ($, on) => {
+test("a templated target-path maps against the project's own default target folder, never another project's manifest, and the models folder still reaches the prompt", async ($, on) => {
   const { clock, cliArgs, prompts } = await start($, on)
   await run($, 'm tpl/q.sql')
   await clock.settle()
-  expect(cliArgs).toEqual([{ sql: SQL }])
+  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/tpl/target/manifest.json` }])
   expect(prompts[0]).toContain('write tpl/transforms/<layer>/m.sql')
 })
 
