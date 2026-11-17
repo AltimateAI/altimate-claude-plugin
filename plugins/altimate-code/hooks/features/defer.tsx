@@ -17,9 +17,9 @@ import type { BandUi, FeatureContext } from './index'
 
 const deferAtom = atom({ plugin: 'altimate-code', key: 'defer' } as const, null as DeferState | null)
 
-// The commands that take `--defer` in every dbt version this reads state for (dbt before 1.8 refuses the option on
+// The commands that take `--defer` in every dbt version this reads state for (older dbt refuses the option on
 // `ls`, `parse`, `seed`, `run-operation` and others, and `retry` reads the previous run's results from `--state`).
-const DEFERS = new Set(['build', 'run', 'test', 'compile', 'show'])
+const DEFERS = new Set(['build', 'run', 'test', 'compile', 'show', 'snapshot'])
 // Commands that take no target, or take it after a second word (`source freshness`, `docs generate`) this does not read.
 const NO_TARGET = new Set(['deps', 'clean', 'init', 'retry', 'docs', 'source'])
 

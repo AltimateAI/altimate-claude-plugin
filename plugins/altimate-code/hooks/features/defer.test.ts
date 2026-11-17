@@ -38,6 +38,7 @@ test('commands that do not defer are left without --defer, and the target goes t
   const both = { ...on, target: 'qa', defaultTarget: 'dev' }
   expect(rewriteDeferCommand('dbt ls -s x', on)).toBe('dbt ls -s x')
   expect(rewriteDeferCommand('dbt seed', on)).toBe('dbt seed')
+  expect(rewriteDeferCommand('dbt snapshot -s x', on)).toBe('dbt snapshot --defer --state /work/prod-state -s x')
   expect(rewriteDeferCommand('dbt build -s x', on)).toBe('dbt build --defer --state /work/prod-state -s x')
   expect(rewriteDeferCommand('dbt deps', both)).toBe('dbt deps')
   expect(rewriteDeferCommand('dbt source freshness', both)).toBe('dbt source freshness')
