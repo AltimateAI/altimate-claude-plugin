@@ -16,19 +16,14 @@ import {
 
 const engine = () => {
   const logs: string[] = []
-  // The state and command surface is the defer feature's, which is real: its settings are not read for a stub run.
-  const kept = new Map<string, unknown>()
-  const state = { get: async (key: string) => ({ value: kept.get(key), version: 0 }), set: async (key: string, value: unknown) => (kept.set(key, value), { isSet: true, version: 1 }) }
-  return {
-    logs,
-    $: {
-      ui: { log: (text: string) => void logs.push(text), status: () => {} },
-      command: { register: async () => {} },
-      state,
-      session: { root: async () => null },
-      clock: { now: async () => 0 },
-    } as any,
+  // Enough of the engine for a feature that keeps state, reads files and registers commands; a stub needs none of it.
+  const $ = {
+    ui: { log: (text: string) => void logs.push(text) },
+    fs: { exists: async () => false, read: async () => '' },
+    state: { get: async () => ({ value: null }), set: async () => ({ isSet: true }), update: async () => ({ isSet: true }) },
+    command: { register: async () => {} },
   }
+  return { logs, $: $ as any }
 }
 
 test('attempt logs a feature function that throws at once, one that rejects, and passes a value on', async () => {

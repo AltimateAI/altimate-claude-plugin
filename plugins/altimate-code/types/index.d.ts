@@ -273,7 +273,18 @@ export interface HealthState {}
 // SQL graph: the edited model's SQL graph.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface SqlGraphState {}
+export interface SqlGraphState {
+  /** The model Claude last read or edited, which /sql-graph shows when it is given no name. */
+  lastModel: string | null
+  /** The model the pane shows, with its graph once the tool answered; `request` is the ask that owns it, so an older ask's answer is dropped. */
+  shown: { model: string; request: number; graph: SqlGraphView | null; loading: boolean; message: string | null; selected: string | null } | null
+}
+
+/** What `dbt_sql_graph` returns: one node per CTE, relation or select, and the edges between them (input id, then consumer id). A node's `id` is unique; its `name` is only what is shown and can repeat. */
+export interface SqlGraphView {
+  nodes: { id: string; name: string; type: string; nodeId?: string; sql: string; columns: { name: string; datatype?: string; expression?: string }[] }[]
+  edges: [string, string][]
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Docs coverage and propagation: what the project documents.
@@ -345,7 +356,7 @@ declare module 'claude-code' {
       /** hooks/features/: HealthState. */
       health: HealthState | null
       /** hooks/features/: SqlGraphState. */
-      sqlGraph: SqlGraphState | null
+      sqlGraph: Shaped<SqlGraphState | null>
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */

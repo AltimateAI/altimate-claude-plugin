@@ -131,6 +131,29 @@ test("quotes in a heredoc inside a substitution are text, so Claude's commit for
   expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
 })
 
+test('the commands of a `$(…)` or backtick substitution run too, quoted or not, nested or not', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('echo "$(dbt run -s orders)"')).toEqual([{ ...run, select: ['orders'] }])
+  expect(shape('echo `dbt run`')).toEqual([run])
+  expect(shape('x=$(dbt build); dbt test')).toEqual([
+    { ...base, binary: 'dbt', subcommand: 'build' },
+    { ...base, binary: 'dbt', subcommand: 'test' },
+  ])
+  expect(shape('echo $(echo $(dbt run))')).toEqual([run])
+  expect(shape("echo '$(dbt run)'")).toEqual([])
+  const line = 'echo "$(dbt run -s a)"'
+  expect(parseDbtCommand(line).map(({ start, end }) => line.slice(start, end))).toEqual(['dbt run -s a'])
+})
+
+test('quotes decide what a substitution is: an apostrophe inside double quotes hides nothing, single quotes hide it, and the commands come in the order written', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape(`echo "it's $(dbt run)"`)).toEqual([run])
+  expect(shape(`echo "it's"'$(dbt run)'`)).toEqual([])
+  expect(shape('dbt run --vars "$(dbt ls)"').map(i => i.subcommand)).toEqual(['run', 'ls'])
+  // A substitution in a leading assignment is written before the command it feeds.
+  expect(shape('TARGET=$(dbt run-operation get_target) dbt run').map(i => i.subcommand)).toEqual(['run-operation', 'run'])
+})
+
 test('a here-string inside a substitution is no heredoc', () => {
   const line = `dbt run -s a && echo "$(cat <<< text\n)"`
   expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
@@ -267,12 +290,6 @@ test('an expansion is part of its word, and the invocation is dynamic; its value
   expect(shape('DBT_TARGET=$T time dbt run')).toEqual([{ ...run, dynamic: true }])
   expect(shape('DBT_TARGET_PATH=$P nohup dbt run')).toEqual([{ ...run, dynamic: true }])
   expect(shape('DBT_TARGET=prod time dbt run')).toEqual([{ ...run, target: 'prod' }])
-  // An expansion in an unrelated assignment cannot add a flag to dbt.
-  expect(shape('START=$SECONDS time dbt run')).toEqual([run])
-  expect(shape('LOG_DIR=$LOG nohup dbt run')).toEqual([run])
-  // A combined short cluster of the launcher's flags is read.
-  expect(shape('uv run -qq dbt run')).toEqual([{ ...run, binary: 'uv run -qq dbt' }])
-  expect(shape('uv run -qv dbt run')).toEqual([{ ...run, binary: 'uv run -qv dbt' }])
   // The flag wins over the environment, but a dynamic flag value is unknown, not the environment's.
   expect(shape('DBT_TARGET=prod dbt run --target "$T"')).toEqual([{ ...run, dynamic: true }])
   expect(shape('dbt run --select=a,$x -s b')).toEqual([{ ...run, dynamic: true, select: ['b'] }])

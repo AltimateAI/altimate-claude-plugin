@@ -77,7 +77,8 @@ const dirname = (path: string) => path.replace(/[\\/]+[^\\/]*$/, '') || '/'
 
 /** The dbt project the session works in: the folder or one above it with a dbt_project.yml, else the only one a level below. */
 async function findProject($: EngineInterface): Promise<string | null> {
-  const root = await $.session.root().catch(() => null)
+  // A call that throws at once (an engine without a session) is no project either.
+  const root = await Promise.resolve().then(() => $.session.root()).catch(() => null)
   if (!root) return null
   for (let dir = root, i = 0; i < 40; i++) {
     if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) return dir
@@ -139,7 +140,7 @@ export function runsInProject(command: string, root: string, projectDir: string,
   const plain = command.replace(/["'\\]/g, '')
   if (/\s--(?:directory|project)[\s=]/.test(plain)) return false
   if (/(?:^|[\s;&|(){}!])(?:popd|chdir)(?=[\s;&|)]|$)|\benv\s+(?:\S+\s+)*(?:-C|--chdir)\b/.test(plain)) return false
-  const cdWords = plain.match(/(?:^|[\s;&|(){}!])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
+  const cdWords = plain.match(/(?:^|[\s;&|(){}!`])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
   if (cdWords !== [...command.matchAll(CD)].length) return false
   // A folder change inside a subshell or command substitution leaves the parent's folder unchanged or unknown.
   if (cdWords > 0 && /[(`]/.test(plain)) return false
@@ -268,7 +269,7 @@ async function ensure($: EngineInterface): Promise<DeferState> {
 
 async function publish($: EngineInterface, state: DeferState) {
   await update($, deferAtom, () => state)
-  await setStatusPart($, 'defer', statusText(state))
+  await setStatusPart($, 'defer', statusText(state)).catch(() => {})
 }
 
 function describe(state: DeferState | null): string {
@@ -346,7 +347,8 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   generation++
   loading = null
   await update($, deferAtom, () => null)
-  await setStatusPart($, 'defer', null)
+  // Clearing the line is cosmetic: an engine that cannot draw it does not stop the session.
+  await setStatusPart($, 'defer', null).catch(() => {})
 }
 
 /** Also called for a subagent's turns, which carry `e.agentId`. */

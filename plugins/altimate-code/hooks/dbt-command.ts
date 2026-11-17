@@ -470,15 +470,22 @@ const isAssignment = (word: Word) => ASSIGNMENT.test(word.text) && (word.quotedA
 
 /** The dbt invocations in a shell command line, in the order written; [] when there are none or the line can't be read. */
 export function parseDbtCommand(line: string): DbtInvocation[] {
+  return scan(line).map(one => one.invocation)
+}
+
+// An invocation with where its `dbt` word is written: leading `VAR=x` words don't move it.
+type Found = { invocation: DbtInvocation; at: number }
+
+function scan(line: string): Found[] {
   if (typeof line !== 'string' || !/\bdbt\b/.test(line)) return []
   const tokens = lex(line)
   const notCommand = tokens && readable(tokens)
   if (!tokens || !notCommand) return []
-  const found: DbtInvocation[] = []
+  const found: Found[] = []
   let simple: Token[] = []
   const finish = () => {
-    const invocation = readSimple(simple)
-    if (invocation) found.push(invocation)
+    const read = readSimple(simple)
+    if (read) found.push({ invocation: read.invocation, at: read.at })
     simple = []
   }
   for (let k = 0; k < tokens.length; k++) {
@@ -489,18 +496,50 @@ export function parseDbtCommand(line: string): DbtInvocation[] {
     // The commands of a process substitution (`<(…)`, `>(…)`) run too: they are read as a line of their own.
     if (token.kind === 'word' && /^[<>]\(/.test(line.slice(token.start, token.end))) {
       const shift = token.start + 2
-      for (const inner of parseDbtCommand(line.slice(shift, token.end - 1)))
-        found.push({ ...inner, start: inner.start + shift, end: inner.end + shift, subcommandEnd: inner.subcommandEnd + shift })
+      for (const inner of scan(line.slice(shift, token.end - 1))) found.push(moved(inner, shift))
+    } else if (token.kind === 'word') {
+      // So do the commands of a `$(…)` or backtick substitution in the word, outside single quotes.
+      for (const [from, to] of substitutionsIn(line, token.start, token.end)) {
+        for (const inner of scan(line.slice(from, to))) found.push(moved(inner, from))
+      }
     }
   }
   finish()
+  // An inner command (in a substitution) is listed where it is written, not before the command around it.
+  return found.sort((a, b) => a.at - b.at)
+}
+
+const moved = ({ invocation: i, at }: Found, shift: number): Found => ({
+  invocation: { ...i, start: i.start + shift, end: i.end + shift, subcommandEnd: i.subcommandEnd + shift },
+  at: at + shift,
+})
+
+/** The commands' ranges of the `$(…)` and backtick substitutions written in line[start, end), outside single quotes. */
+function substitutionsIn(line: string, start: number, end: number): [number, number][] {
+  const found: [number, number][] = []
+  // Single quotes hide a substitution; inside double quotes a `'` is a plain character.
+  let single = false
+  let double = false
+  for (let i = start; i < end; i++) {
+    const c = line[i]
+    if (single) single = c !== "'"
+    else if (c === '\\') i++
+    else if (c === "'" && !double) single = true
+    else if (c === '"') double = !double
+    else if ((c === '$' && line[i + 1] === '(') || c === '`') {
+      const close = substitutionEnd(line, c === '$' ? i + 1 : i)
+      if (close < 0 || close > end) break
+      found.push([i + (c === '$' ? 2 : 1), close - 1])
+      i = close - 1
+    }
+  }
   return found
 }
 
 const isRedirect = (token: Token) => token.kind === 'op' && /[<>]/.test(token.text)
 
-// Words after which a command still starts, so a `(` there opens a subshell (the same words as KEYWORDS).
-const COMMAND_KEYWORDS = KEYWORDS
+// Words after which a command still starts, so a `(` there opens a subshell.
+const COMMAND_KEYWORDS = new Set(['!', '{', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time'])
 const NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/
 
 /**
@@ -618,7 +657,7 @@ function readable(tokens: Token[]): Set<number> | null {
   return !open.length && !waiting && !pattern && caseHead === 'none' ? notCommand : null
 }
 
-function readSimple(tokens: Token[]): DbtInvocation | null {
+function readSimple(tokens: Token[]): Found | null {
   // Drop redirections and their targets: what is left is the command's words.
   const words: Word[] = []
   for (let i = 0; i < tokens.length; i++) {
@@ -638,7 +677,7 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
   let hasState = false
   let envTarget: string | null = null
   let envTargetPath: string | null = null
-  // Whether a target assignment dbt is given holds an expansion; prefix words do not clear it.
+  // Whether any assignment dbt is given holds an expansion; prefix words do not clear it.
   let assignmentDynamic = false
   // The prefix word whose options are being read (`env -u X`, `time -p`); whether it is a wrapper, after
   // which the next word that is no option is the command itself.
@@ -657,8 +696,7 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       if (name === 'DBT_STATE' || name === 'DBT_DEFER_STATE') hasState = true
       if (name === 'DBT_TARGET') envTarget = assigned
       if (name === 'DBT_TARGET_PATH') envTargetPath = assigned
-      // Only the target variables decide a `--target` insertion; another expansion cannot add a flag to dbt.
-      if (word.dynamic && (name === 'DBT_TARGET' || name === 'DBT_TARGET_PATH')) assignmentDynamic = true
+      if (word.dynamic) assignmentDynamic = true
       firstAssignment ??= i
       optionsOpen = false
       continue
@@ -717,10 +755,10 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       const name = flag.includes('=') ? flag.slice(0, flag.indexOf('=')) : flag
       // An unknown option may take a value, or print help or a version and run nothing.
       const options = RUNNER_OPTIONS[runner]!
-      // A combined short cluster (`-qv`) is read when each letter is a flag of the launcher.
-      const cluster = /^-[a-zA-Z]{2,}$/.test(flag) && [...flag.slice(1)].every(c => options.flags.has(`-${c}`))
+      // Repeated short flags (`-qq`, `-vv`) are read when the launcher has the single one.
+      const repeated = /^-([a-z])\1+$/.exec(flag)
       if (options.values.has(name)) i += flag.includes('=') ? 1 : 2
-      else if (!flag.includes('=') && (options.flags.has(flag) || cluster)) i++
+      else if (!flag.includes('=') && (options.flags.has(flag) || (repeated && options.flags.has(`-${repeated[1]}`)))) i++
       else return null
     }
     if (i >= words.length || !isDbt(words[i]!.text)) return null
@@ -798,16 +836,19 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
     subcommandEnd = firstOther.end
   }
   return {
-    binary,
-    subcommand,
-    select,
-    target: targetDynamic ? null : (target ?? envTarget),
-    targetPath: targetPathDynamic ? null : (targetPath ?? envTargetPath),
-    dynamic: assignmentDynamic || words.slice(firstAssignment ?? launcherStart).some(one => one.dynamic),
-    hasDefer,
-    hasState,
-    start,
-    end,
-    subcommandEnd,
+    at: words[launcherStart]!.start,
+    invocation: {
+      binary,
+      subcommand,
+      select,
+      target: targetDynamic ? null : (target ?? envTarget),
+      targetPath: targetPathDynamic ? null : (targetPath ?? envTargetPath),
+      dynamic: assignmentDynamic || words.slice(firstAssignment ?? launcherStart).some(one => one.dynamic),
+      hasDefer,
+      hasState,
+      start,
+      end,
+      subcommandEnd,
+    },
   }
 }
