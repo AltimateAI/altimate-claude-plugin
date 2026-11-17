@@ -16,13 +16,14 @@
 //   - a redirection among the arguments with another argument after it (`dbt run > log -s a`): an
 //     unsupported form, since cutting the invocation out would cut the redirection too. A trailing
 //     redirection (`dbt run -s a > log`) is fine and is left out of the invocation's range.
-// An expansion is `$(…)`, `${…}`, `$NAME`, `$1`, a backtick command, or a `<(…)` / `>(…)` substitution,
-// outside single quotes; a word holding one is a single word, whatever it holds.
+// An expansion is `$(…)`, `${…}`, `$NAME`, `$1`, a backtick command, a `<(…)` / `>(…)` substitution, an
+// unquoted `~`, brace list or pathname pattern, or a `$'…'` word with an escape, outside single quotes;
+// a word holding one is a single word, whatever it holds.
 
 export type DbtInvocation = {
   /** How dbt is launched, as written: `dbt`, `.venv/bin/dbt`, `uv run dbt`, `poetry run dbt`. */
   binary: string
-  /** The first known dbt subcommand after the launcher's options (`build`, `run`, `test`…), skipping any other word; null when there is none. */
+  /** The first known dbt subcommand after the launcher's options (`build`, `run`, `test`…); else the first other word; null when there is none. */
   subcommand: string | null
   /**
    * Every value given to -s, --select, -m, --models or --model, in order. A value that holds an expansion
@@ -71,7 +72,7 @@ type Word = {
    * no part is quoted. A NAME=value word is an assignment only when its `=` comes before it.
    */
   quotedAt: number
-  /** An expansion outside single quotes: `$(…)`, `${…}`, `$NAME`, `$1`, a backtick command, `<(…)`. */
+  /** An expansion outside single quotes, or a `$'…'` holding an escape: `$(…)`, `${…}`, `$NAME`, `$1`, a backtick command, `<(…)`, `~/x`, `{a,b}`, `*.sql`. */
   dynamic: boolean
 }
 type Token = Word | { kind: 'op'; text: string; start: number; end: number }
@@ -174,7 +175,7 @@ function braceEnd(line: string, at: number): number {
 }
 
 /** A `$` that opens a variable: a name, a digit or one of the special parameters. */
-const startsVariable = (next: string | undefined) => next !== undefined && /[A-Za-z0-9_@*#?!$]/.test(next)
+const startsVariable = (next: string | undefined) => next !== undefined && /[A-Za-z0-9_@*#?!$-]/.test(next)
 
 /** The words and operators of a command line, with their offsets; null when a quote or substitution is not closed. */
 function lex(line: string): Token[] | null {
@@ -245,8 +246,7 @@ function lex(line: string): Token[] | null {
     if (start < 0) start = i
     if (c === '\\') {
       quote()
-      // A backslash before a newline continues the line: it and the newline are not part of the word.
-      if (line[i + 1] !== '\n') text += line[i + 1] ?? ''
+      text += line[i + 1] ?? ''
       i += 2
     } else if (c === "'") {
       const close = line.indexOf("'", i + 1)
@@ -265,6 +265,9 @@ function lex(line: string): Token[] | null {
       if (body.includes('\\')) dynamic = true
       text += body
       i = j + 1
+    } else if (c === '$' && line[i + 1] === '"') {
+      // `$"…"` is a double-quoted string: the `$` is not part of the word.
+      i++
     } else if (c === '"') {
       quote()
       let j = i + 1
@@ -310,6 +313,11 @@ function lex(line: string): Token[] | null {
       i = end
     } else {
       if (c === '$' && startsVariable(line[i + 1])) dynamic = true
+      // The shell expands these before dbt sees them: a home directory, a brace list, a pathname pattern.
+      if (c === '*' || c === '?' || c === '[') dynamic = true
+      // (also after the `=` of a NAME=value word, but not after a flag's `=`)
+      if (c === '~' && (i === start || /^[A-Za-z_][A-Za-z0-9_]*=$/.test(line.slice(start, i)))) dynamic = true
+      if (c === '{' && /^\{[^}]*(,|\.\.)[^}]*\}/.test(line.slice(i))) dynamic = true
       text += c
       i++
     }
@@ -649,6 +657,8 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
     }
     while (i < words.length && words[i]!.text.startsWith('-')) {
       const flag = words[i]!.text
+      // The launcher prints its help or version and runs nothing.
+      if (flag === '-h' || flag === '--help' || flag === '-V' || flag === '--version') return null
       i += RUNNER_VALUE_FLAGS.has(flag) && !flag.includes('=') ? 2 : 1
     }
     // `uv run --` ends the launcher's options.

@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { runTool } from './altimate-cli'
 
 /** A stand-in for `$` whose CLI answers every call and whose MCP connection attempts go through `connect`. */
-function standIn(connect: () => unknown) {
+function standIn(connect: () => unknown, now = 0) {
   const argvs: string[][] = []
   const $: any = {
     process: {
@@ -14,11 +14,10 @@ function standIn(connect: () => unknown) {
     },
     mcp: {
       connect: async () => connect(),
-      call: async () => {
-        throw new Error('the MCP server must not be used')
-      },
+      // No answer: a call that does reach the server falls back to the CLI.
+      call: async () => null,
     },
-    clock: { now: async () => 0 },
+    clock: { now: async () => now },
   }
   return { $, argvs }
 }
@@ -38,8 +37,11 @@ test('a write call never asks the MCP server, even when one is connected', async
   const { $, argvs } = standIn(() => {
     connects++
     return { isConnected: true, server: 'altimate-code' }
-  })
+  }, 10 * 60_000)
   await runTool($, 'dbt_manifest', {}, { write: true })
   expect(connects).toBe(0)
   expect(argvs).toHaveLength(1)
+  // The same call without `write` does ask the server: the test above can fail.
+  await runTool($, 'dbt_manifest', {})
+  expect(connects).toBe(1)
 })

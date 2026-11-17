@@ -257,3 +257,16 @@ test('a $\'…\' word with an escape is not decoded: it is dynamic and reports n
   expect(shape("dbt run -t $'pro\\x64'")).toEqual([{ ...run, dynamic: true }])
   expect(shape("dbt run -t $'prod'")).toEqual([{ ...run, target: 'prod' }])
 })
+
+test('unquoted tilde, brace lists and patterns are expansions; $"…" is a quoted string; launcher help runs nothing', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('dbt run --target-path ~/dbt-target')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('DBT_TARGET_PATH=~/x dbt run')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run -s {orders,users}')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run -s models/*.sql -t dev')).toEqual([{ ...run, dynamic: true, target: 'dev' }])
+  expect(shape('dbt run -s "{orders,users}" --target-path "~/x" -t \\~')).toEqual([{ ...run, select: ['{orders,users}'], targetPath: '~/x', target: '~' }])
+  expect(shape('dbt run -t $"prod"')).toEqual([{ ...run, target: 'prod' }])
+  expect(shape('dbt run -t $-')).toEqual([{ ...run, dynamic: true }])
+  expect(parseDbtCommand('uv run --help dbt run')).toEqual([])
+  expect(parseDbtCommand('uvx --version dbt run')).toEqual([])
+})
