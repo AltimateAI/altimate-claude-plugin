@@ -183,7 +183,7 @@ async function load($: EngineInterface, model: string): Promise<'shown' | 'faile
       // A node the render reads must be well formed: others are dropped, not thrown on.
       const nodes = meta.nodes.filter(
         n => n && typeof n === 'object' && typeof n.id === 'string' && typeof n.name === 'string' && typeof n.type === 'string',
-      ).map(n => ({ ...n, columns: Array.isArray(n.columns) ? n.columns : [] }))
+      ).map(n => ({ ...n, sql: typeof n.sql === 'string' ? n.sql : '', columns: Array.isArray(n.columns) ? n.columns : [] }))
       const edges = meta.edges.filter(e => Array.isArray(e) && e.length === 2 && e.every(x => typeof x === 'string'))
       await showing($, request, { loading: false, graph: { nodes, edges } })
       outcome = 'shown'

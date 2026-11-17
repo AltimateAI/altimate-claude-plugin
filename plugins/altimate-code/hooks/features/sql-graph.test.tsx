@@ -380,7 +380,7 @@ test('the tool\'s own reason is shown, not the CLI\'s generic output', async ($,
 
 test('a malformed node or edge from the backend is dropped, and a node without columns is drawn with none', async ($, on) => {
   const answer = {
-    nodes: [null, { id: 'a', name: 'a', type: 'cte', sql: '' }, { id: 5 }],
+    nodes: [null, { id: 'a', name: 'a', type: 'cte', sql: 123 }, { id: 5 }],
     edges: [['a'], ['a', 'a']],
   }
   const { clock } = await start($, on, { answer })
@@ -388,5 +388,8 @@ test('a malformed node or edge from the backend is dropped, and a node without c
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect((await ui.findAll({ type: 'Button' })).map(row => row.key)).toEqual(['node-a'])
+  await ui.press({ key: 'node-a' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: '(no SQL)' })).toBeDefined()
   await ui.unmount()
 })
