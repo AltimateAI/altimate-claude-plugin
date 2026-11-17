@@ -118,7 +118,7 @@ export function runsInProject(command: string, root: string, projectDir: string)
   // A folder change this does not follow (`popd`, `env -C`, `command cd`, a `cd` with no folder) leaves the folder unknown.
   // Quotes and backslashes are dropped for this check: `command 'cd' ../b` and `env "-C" ../b` change folder like their plain forms.
   const plain = command.replace(/["'\\]/g, '')
-  if (/\s--(?:directory|project)[\s=]/.test(command) || /\s--(?:directory|project)[\s=]/.test(plain)) return false
+  if (/\s--(?:directory|project)[\s=]/.test(plain)) return false
   if (/(?:^|[\s;&|(){}!])(?:popd|chdir)(?=[\s;&|)]|$)|\benv\s+(?:\S+\s+)*(?:-C|--chdir)\b/.test(plain)) return false
   const cdWords = plain.match(/(?:^|[\s;&|(){}!])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
   if (cdWords !== [...command.matchAll(CD)].length) return false
