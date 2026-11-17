@@ -379,7 +379,8 @@ async function load($: EngineInterface): Promise<void> {
     return loadRun
   }
   // The run covers its follow-ups: a caller that joined it is released only once the fresh list is in.
-  const run: Promise<void> = (async () => {
+  let run!: Promise<void>
+  run = (async () => {
     try {
       do {
         loadAgain = false
