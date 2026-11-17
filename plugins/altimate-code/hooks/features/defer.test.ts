@@ -132,12 +132,30 @@ test('a path with spaces is quoted', () => {
   expect(rewriteDeferCommand('dbt run', { stateDir: "/my state/o'k" })).toBe(`dbt run --defer --state '/my state/o'\\''k'`)
 })
 
-test('the session target is added when it differs from the default and the command names none', () => {
+test('the session target is added when the command names none, even when it is the default, since the environment may name another', () => {
   const options = { target: 'prod', defaultTarget: 'dev' }
   expect(rewriteDeferCommand('dbt run -s x', options)).toBe('dbt run --target prod -s x')
   expect(rewriteDeferCommand('dbt run -t qa', options)).toBe('dbt run -t qa')
-  expect(rewriteDeferCommand('dbt run', { target: 'dev', defaultTarget: 'dev' })).toBe('dbt run')
+  expect(rewriteDeferCommand('dbt run', { target: 'dev', defaultTarget: 'dev' })).toBe('dbt run --target dev')
   expect(rewriteDeferCommand('dbt run', { ...on, ...options })).toBe('dbt run --defer --state /work/prod-state --target prod')
+})
+
+test('a favor-state option the command already has is not given a second one', () => {
+  const options = { ...on, favorState: true }
+  expect(rewriteDeferCommand('dbt --favor-state run', options)).toBe('dbt --favor-state run --defer --state /work/prod-state')
+  expect(rewriteDeferCommand('dbt run --no-favor-state', options)).toBe('dbt run --defer --state /work/prod-state --no-favor-state')
+  expect(rewriteDeferCommand('dbt run', options)).toBe('dbt run --defer --state /work/prod-state --favor-state')
+})
+
+test('a tab after --project-dir, an escaped folder word and a cd that may not run are not trusted', () => {
+  const run = (command: string) => runsInProject(command, '/repo/a', '/repo/a')
+  expect(run('dbt run --project-dir\t../b')).toBe(false)
+  expect(run('dbt run --project-dir\t../a')).toBe(true)
+  expect(run('cd nested\\ project && dbt run')).toBe(false)
+  expect(run('cd ../b; if false; then cd ../a; fi; dbt run')).toBe(false)
+  expect(run('false && cd ../a; dbt run')).toBe(false)
+  expect(run('cd ../b || cd ../a; dbt run')).toBe(false)
+  expect(run('cd models && cd .. && dbt run')).toBe(true)
 })
 
 test('the override decides, and the status text shows target and defer', () => {

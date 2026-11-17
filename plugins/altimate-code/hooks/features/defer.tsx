@@ -29,7 +29,7 @@ export type RewriteOptions = {
   /** The directory to defer to; null or undefined means defer is off. */
   stateDir?: string | null
   favorState?: boolean
-  /** The session's target; added to a command without one when it differs from the profile's default. */
+  /** The session's target, chosen with /target; added to a command without one, even when it is the profile's default, since the environment may say another. */
   target?: string | null
   defaultTarget?: string | null
 }
@@ -40,7 +40,7 @@ export type RewriteOptions = {
  * when nothing needs to change. An invocation with a word the parser cannot read (`$FLAGS`, `~/x`, a glob) is left as written.
  */
 export function rewriteDeferCommand(command: string, options: RewriteOptions): string {
-  const { stateDir, favorState = false, target, defaultTarget } = options
+  const { stateDir, favorState = false, target } = options
   if (!stateDir && !target) return command
   let out = command
   // DBT_STATE or DBT_TARGET exported in the line is the user's own choice: none of its dbt commands gets the flag
@@ -54,8 +54,8 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
     // may be among them: such an invocation is left as the user wrote it, as the parser's contract asks.
     if (one.dynamic) continue
     const flags: string[] = []
-    if (stateDir && !exportedState && DEFERS.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command.slice(one.start, one.end))) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
-    if (target && !NO_TARGET.has(one.subcommand) && target !== defaultTarget && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
+    if (stateDir && !exportedState && DEFERS.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command.slice(one.start, one.end))) flags.push('--defer', '--state', quote(stateDir), ...(favorState && !/--(?:no-)?favor-state\b/.test(command.slice(one.start, one.end)) ? ['--favor-state'] : []))
+    if (target && !NO_TARGET.has(one.subcommand) && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
     if (flags.length === 0) continue
     out = `${out.slice(0, one.subcommandEnd)} ${flags.join(' ')}${out.slice(one.subcommandEnd)}`
   }
@@ -111,7 +111,7 @@ export async function runsHere($: EngineInterface, command: string, root: string
 
 // Where a command runs from: the session folder, moved by each `cd` or `pushd` in the command.
 const CD = /(?:^|[;&|(\n{!]\s*|\b(?:if|elif|while|until|then|do|else|time)\s+)(?:cd|pushd)[ \t]+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
-const PROJECT_DIR = /(?:--project-dir[ =]|\bDBT_PROJECT_DIR=)("[^"]+"|'[^']+'|[^\s;&|)]+)/g
+const PROJECT_DIR = /(?:--project-dir[\s=]|\bDBT_PROJECT_DIR=)("[^"]+"|'[^']+'|[^\s;&|)]+)/g
 const UNQUOTE = /^['"]|['"]$/g
 
 /** `target` seen from `base`, as an absolute path with forward slashes (a drive letter kept); null when it cannot be known. */
@@ -156,10 +156,17 @@ export function runsInProject(command: string, root: string, projectDir: string,
     return false
   }
   const inside = (dir: string | null) => !!dir && (dir === project || (dir.startsWith(`${base}/`) && !ownsProject(dir)))
+  const windows = /^[A-Za-z]:/.test(projectDir)
   let dir = resolvePath(root, '.')
   let before = dir
   for (const match of command.matchAll(CD)) {
     if (!dir) return false
+    // A folder word with an escape (`nested\ project`) is cut short by the pattern: not a folder this can work out.
+    if (/\\/.test(match[1]!) && !(windows && /^['"]/.test(match[1]!))) return false
+    // A `cd` that may not run (after `||`, after another command in an `&&` list, inside `if`, `then` or a loop) leaves the folder unknown.
+    const at = match.index + match[0].search(/(?:cd|pushd)[ \t]+/)
+    const lead = command.slice(0, at)
+    if (!/^\s*(?:(?:cd|pushd)[ \t]+\S+\s*&&\s*)*$/.test(lead.slice(Math.max(lead.lastIndexOf(';'), lead.lastIndexOf('\n')) + 1))) return false
     // A folder word that goes on after its quotes (`"."/..`) is not one this can work out.
     if (!/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length))) return false
     const word = match[1]!.replace(UNQUOTE, '')
@@ -171,11 +178,10 @@ export function runsInProject(command: string, root: string, projectDir: string,
   // A project named outright is the one to judge; otherwise the folder the command runs from.
   const named = [...command.matchAll(PROJECT_DIR)]
   // A project option written with quotes (`"--project-dir" ../b`) is only seen in the plain copy: unknown.
-  if (named.length !== (plain.match(/--project-dir[ =]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
+  if (named.length !== (plain.match(/--project-dir[\s=]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
   // A path word that goes on after its quotes (`--project-dir "."/../b`) is not one this can work out.
   // An escaped word (`./a\ b`) is cut short by this pattern at the escaped space: not a path this can work out.
   // On a Windows project path a backslash separates folders; elsewhere any backslash may be an escape.
-  const windows = /^[A-Za-z]:/.test(projectDir)
   // In an unquoted word the shell eats a backslash as an escape, so only a quoted word keeps it as a separator.
   if (named.some(match => (windows && /^['"]/.test(match[1]!) ? /\\$/.test(match[1]!) : match[1]!.includes('\\')))) return false
   if (named.some(match => !/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length)))) return false
