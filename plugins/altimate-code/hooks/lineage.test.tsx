@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { commandDir } from './lineage'
 import { buildGraph, subgraph } from './lineage-graph'
 import { MANIFEST } from './lineage-graph.test'
 import { nothingToReport } from './inert-features'
@@ -1743,4 +1744,17 @@ test("the pane's MCP column trace that never answers is given up on, and the CLI
   expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeGreaterThan(-1)
   expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('cli:impact_analysis:revenue'))
   expect(logs.some(line => line.includes('impact_analysis(fct_orders, column: revenue) · read by 2 models'))).toBe(true)
+})
+
+test('each cd in a command moves the folder it reads from, after any separator or blank line', () => {
+  expect(commandDir('cd a && cd "b c"; cd /abs\n  cd rel', '/repo')).toBe('/abs/rel')
+  expect(commandDir('ls;\n\n   cd models | cat', '/repo')).toBe('/repo/models')
+  expect(commandDir('echo cd nowhere', '/repo')).toBe('/repo')
+})
+
+test('a very long run of blank lines before a command is read at once', () => {
+  const began = Date.now()
+  expect(commandDir(`${'\n'.repeat(64000)}cd models`, '/repo')).toBe('/repo/models')
+  expect(commandDir(`${'\n'.repeat(64000)}dbt run -s orders`, '/repo')).toBe('/repo')
+  expect(Date.now() - began).toBeLessThan(500)
 })
