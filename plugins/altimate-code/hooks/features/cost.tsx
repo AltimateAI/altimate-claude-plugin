@@ -10,7 +10,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
-import { runTool } from '../altimate-cli'
+import { runTool, within } from '../altimate-cli'
 import { parseDbtCommand, type DbtInvocation } from '../dbt-command'
 import { setStatusPart } from '../status-line'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
@@ -21,6 +21,11 @@ import type { BandUi, FeatureContext } from './index'
 const DEFAULT_MAX_SCAN_BYTES = 10 * 1024 ** 3
 /** The adapter may have to start (dbt deps, a parse) for the first estimate. */
 const ESTIMATE_BUDGET_MS = 120_000
+/**
+ * How long the gate waits for estimates, in all: inside the tool chain's 5 s phase deadline, past which the call
+ * runs unchecked. An estimate that is not done by then goes on, and the command is refused until it is.
+ */
+const GATE_WAIT_MS = 4_000
 /** The dbt subcommands that run SQL a person pays for. */
 const SCANNING = new Set(['run', 'build', 'show'])
 /** A selector that is one plain model name: no graph operator, tag, path, package or wildcard. */
@@ -38,6 +43,10 @@ const FRESH: CostState = { unsupportedAdapter: null, lastEstimate: null, held: n
 let limitBytes = DEFAULT_MAX_SCAN_BYTES
 /** The lines to show under an estimated command's Bash row, by command; each gate pass replaces the last. Taken by bashAfter. */
 const notes = new Map<string, string[]>()
+/** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
+const inflight = new Map<string, { answer: Promise<Answer>; doneAt: number | null }>()
+/** An answer nobody took within this long is dropped: the model may have changed since. */
+const ANSWER_KEEP_MS = 60_000
 
 /** Adds this feature's own hooks. */
 export function register(on: On, context: FeatureContext) {
@@ -76,6 +85,7 @@ export function register(on: On, context: FeatureContext) {
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
   notes.clear()
+  inflight.clear()
   await update($, costAtom, () => ({ ...FRESH }))
   await setStatusPart($, 'cost', null)
   await $.command.register({ name: 'allow-scan', description: 'Let the dbt command held for its BigQuery scan size run once, when run again unchanged' })
@@ -118,8 +128,12 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   const lines: string[] = []
   let estimated = false
   const over: { label: string; bytes: number; point: number; display: string }[] = []
-  // One budget for the whole command, however many queries it names.
-  const until = (await $.clock.now()) + ESTIMATE_BUDGET_MS
+  // One wait for the whole command, however many queries it names.
+  const waitUntil = (await $.clock.now()) + GATE_WAIT_MS
+  const pending: string[] = []
+  // What this pass already has, so the same query named twice on the line is asked for once.
+  const taken = new Map<string, Answer>()
+  let failed = false
   for (const invocation of invocations) {
     const target = targetOf(e.command, invocation, all)
     if (!target.model && target.sql === undefined) {
@@ -127,16 +141,22 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       continue
     }
     const label = target.model ?? 'the inline query'
-    const answer = await estimate($, target.model ? { model: target.model } : { sql: target.sql }, until)
+    const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken)
+    if (answer === 'pending') {
+      pending.push(label)
+      continue
+    }
     if (answer.kind === 'unsupported') {
       // Nothing can be held on this warehouse, so a hold from before the verdict goes with it.
       await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter, held: null, allowOnce: false }))
       await setStatusPart($, 'cost', null)
       lines.push(`cost · no estimate on ${answer.adapter}: only BigQuery has a dry run`)
       over.length = 0
+      pending.length = 0
       break
     }
     if (answer.kind === 'none') {
+      failed = true
       lines.push(`cost · no estimate for ${label}: ${answer.reason}`)
       continue
     }
@@ -144,6 +164,17 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     await rememberEstimate($, label, answer.bytes, answer.display)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}`)
     else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
+  }
+
+  // An estimate still running decides nothing yet, and spends no allowance: the command is refused until it is in.
+  if (pending.length > 0) {
+    notes.delete(e.command)
+    return { deny: `The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.` }
+  }
+
+  // A command held earlier stays held while its estimate cannot be made again: only /allow-scan or an estimate under the limit frees it.
+  if (over.length === 0 && failed && state.held?.command === e.command && state.held.bytes > limitBytes) {
+    over.push({ label: state.held.target, bytes: state.held.bytes, point: state.held.bytes, display: state.held.display })
   }
 
   if (over.length > 0) {
@@ -349,6 +380,28 @@ async function estimate($: EngineInterface, args: { model?: string; sql?: string
   } catch (error) {
     return { kind: 'none', reason: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/** The estimate, started on the long budget if none is running for these arguments; `pending` when it is not done by `waitUntil`. */
+async function estimateWithin($: EngineInterface, args: { model?: string; sql?: string }, waitUntil: number, taken: Map<string, Answer>): Promise<Answer | 'pending'> {
+  const key = JSON.stringify(args)
+  const had = taken.get(key)
+  if (had) return had
+  let running = inflight.get(key)
+  if (running?.doneAt != null && (await $.clock.now()) - running.doneAt > ANSWER_KEEP_MS) running = undefined
+  if (!running) {
+    const entry: { answer: Promise<Answer>; doneAt: number | null } = { answer: estimate($, args, (await $.clock.now()) + ESTIMATE_BUDGET_MS), doneAt: null }
+    void entry.answer.then(async () => void (entry.doneAt = await $.clock.now()))
+    inflight.set(key, entry)
+    running = entry
+  }
+  const left = waitUntil - (await $.clock.now())
+  const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
+  if (!done) return 'pending'
+  // Taken: a later pass asks again.
+  if (inflight.get(key) === running) inflight.delete(key)
+  taken.set(key, done.answer)
+  return done.answer
 }
 
 async function rememberEstimate($: EngineInterface, target: string, bytes: number, display: string) {

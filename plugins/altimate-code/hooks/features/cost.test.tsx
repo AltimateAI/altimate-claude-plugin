@@ -10,6 +10,10 @@ type Options = {
   answers?: Record<string, Record<string, unknown> | 'unknown-tool'>
   /** The adapter's answer for everything else. */
   fallback?: Record<string, unknown>
+  /** The CLI answers only once this resolves. */
+  hold?: Promise<void>
+  /** With `hold`: only the estimate of this model or SQL waits. */
+  holdFor?: string
 }
 
 /** The session beneath the plugin, a CLI whose dbt_cost_estimate is scripted, and a Bash tool that records what ran. */
@@ -34,7 +38,7 @@ async function start($: any, on: any, options: Options = {}) {
     return <Box key="engine" />
   })
   on('fs.exists', () => ({ value: false }))
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     expect(tool).toBe('dbt_cost_estimate')
@@ -42,6 +46,7 @@ async function start($: any, on: any, options: Options = {}) {
     expect(e.argv).toContain('--allow-write')
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     const key = String(args.model ?? args.sql)
+    if (options.hold && (options.holdFor === undefined || options.holdFor === key)) await options.hold
     estimates.push(key)
     const answer = options.answers?.[key] ?? options.fallback
     if (answer === 'unknown-tool') {
@@ -390,4 +395,102 @@ test('a line with a great many dbt calls is not read call by call', async ($, on
   expect(result.context[0]).toContain('cost · no estimate')
   expect(result.context[5]).toBe('cost · 3995 more notes not shown')
   expect(Date.now() - began).toBeLessThan(3000)
+})
+
+test('an estimate not done within the gate wait refuses the command, and the finished answer is used on the next try', async ($, on) => {
+  let release!: () => void
+  const { clock, estimates, ran } = await start($, on, { answers: { orders: OVER }, hold: new Promise<void>(resolve => (release = resolve)) })
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  expect(ran).toEqual([])
+
+  release()
+  await clock.settle()
+  const second: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(second.deny).toContain('20.0 GiB')
+  // One estimate served both passes.
+  expect(estimates).toEqual(['orders'])
+  expect(ran).toEqual([])
+})
+
+test('a held command stays held when its estimate cannot be made again, until /allow-scan', async ($, on) => {
+  const answers: Record<string, any> = { orders: OVER }
+  const { clock, ran } = await start($, on, { answers })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('20.0 GiB')
+
+  answers.orders = { success: false, error: 'Access Denied' }
+  const again: any = await $.tool.call(bash('dbt run -s orders'))
+  expect(again.deny).toContain('20.0 GiB')
+  expect(ran).toEqual([])
+
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  const through: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(through.deny).toBeUndefined()
+  expect(ran).toEqual(['dbt run -s orders'])
+})
+
+test('an estimate still running spends no allowance: the held command stays held until every estimate is in', async ($, on) => {
+  const options: Options = { answers: { a: OVER, b: OVER } }
+  const { clock, ran } = await start($, on, options)
+  const both = 'dbt run -s a && dbt run -s b'
+  expect(((await $.tool.call(bash(both))) as any).deny).toContain('20.0 GiB')
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'b'
+  const slow = $.tool.call(bash(both))
+  await clock.advance(4_001)
+  expect(((await slow) as any).deny).toContain('still being estimated')
+  expect(ran).toEqual([])
+
+  // The allowance was not spent by the refusal: once b's estimate is in, the command goes through once.
+  release()
+  await clock.settle()
+  const through: any = await $.tool.call(bash(both))
+  await clock.settle()
+  expect(through.deny).toBeUndefined()
+  expect(ran).toEqual([both])
+})
+
+test('an answer nobody took is not used a minute later: the model may have changed', async ($, on) => {
+  const options: Options = { answers: { orders: OVER } }
+  const { clock, estimates, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+
+  await clock.advance(61_000)
+  options.answers = { orders: UNDER }
+  const later: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(later.deny).toBeUndefined()
+  expect(estimates).toEqual(['orders', 'orders'])
+  expect(ran).toEqual(['dbt run -s orders'])
+})
+
+test('the same model named twice on a line is estimated once, so a slow estimate does not refuse the retry forever', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const line = 'dbt run -s orders && dbt show -s orders'
+  const first = $.tool.call(bash(line))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  options.hold = undefined
+  const retry: any = await $.tool.call(bash(line))
+  await clock.settle()
+  expect(retry.deny).toBeUndefined()
+  expect(estimates).toEqual(['orders'])
+  expect(ran).toEqual([line])
 })
