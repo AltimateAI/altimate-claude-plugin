@@ -16,7 +16,14 @@ import {
 
 const engine = () => {
   const logs: string[] = []
-  return { logs, $: { ui: { log: (text: string) => void logs.push(text) } } as any }
+  // Enough of the engine for a feature that keeps state, reads files and registers commands; a stub needs none of it.
+  const $ = {
+    ui: { log: (text: string) => void logs.push(text) },
+    fs: { exists: async () => false, read: async () => '' },
+    state: { get: async () => ({ value: null }), set: async () => ({ isSet: true }), update: async () => ({ isSet: true }) },
+    command: { register: async () => {} },
+  }
+  return { logs, $: $ as any }
 }
 
 test('attempt logs a feature function that throws at once, one that rejects, and passes a value on', async () => {
@@ -47,6 +54,5 @@ test('with every feature a stub, each phase runs through the features and logs n
   expect(await featuresBashAfter($, bash, {} as any)).toEqual([])
   expect(await featuresEditAfter($, file, {} as any, { path: '/repo/models/a.sql', before: null })).toEqual([])
   expect(await featuresReadOrEditAfter($, file, {} as any, { path: '/repo/models/a.sql' })).toEqual([])
-  // to-model is a real feature: its start keeps state on a real engine, which this bare one does not have.
-  expect(logs.filter(line => !line.startsWith('toModel · sessionStart failed'))).toEqual([])
+  expect(logs).toEqual([])
 })

@@ -167,7 +167,7 @@ export async function attempt<T>($: EngineInterface, id: string, part: string, r
 
 /** Registers every feature's own hooks. */
 export function registerFeatures(on: On, context: FeatureContext) {
-  // One feature that throws while registering must not keep the others, or the tool chain after them, from registering.
+  // One feature's register throwing (a duplicate command, a refused matcher) must not stop the others or the tool hook after them.
   try {
     runsRegister(on, context)
   } catch {}
