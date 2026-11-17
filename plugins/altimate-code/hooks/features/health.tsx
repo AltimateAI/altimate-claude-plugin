@@ -15,6 +15,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { HealthInsight, HealthState } from '../../types'
 import { later, runTool, within } from '../altimate-cli'
 import { setStatusPart } from '../status-line'
+import { PHASE_TIMEOUT_MS } from '../tool-chain'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -24,6 +25,8 @@ type HealthRun = { insights: HealthInsight[] } | { problem: string }
 const COMMAND = 'health'
 /** A check can take minutes: the dbt adapter starts, then DataPilot reads the manifest. */
 const CHECK_MS = 9 * 60_000
+/** How long the push gate waits for a check: inside the tool chain's phase deadline, past which a gate is given up on and the push runs. */
+const GATE_WAIT_MS = PHASE_TIMEOUT_MS - 1_000
 /** How long /health waits for a running check before it answers with what it has. */
 const COMMAND_WAIT_MS = 3_000
 /** The most issues the push refusal and the report list. */
@@ -47,6 +50,8 @@ let enabled = false
 let eligible = false
 /** The problem told to the user last, so the same one is not told at every turn. */
 let toldProblem: string | null = null
+/** Which model each file belonged to in earlier checks: a deleted schema file or model no longer shows in the latest answer. */
+let known: HealthInsight[] = []
 /** Whether the status line carries the health part now. */
 let drawn = false
 /** dbt project roots by folder, null for a folder in no project. */
@@ -520,7 +525,8 @@ async function loop($: EngineInterface, mine: number) {
     let again = false
     for (let attempt = 0; ; attempt++) {
       const asked = new Set((await read($, healthAtom))?.touched ?? [])
-      const real = await canonical($, [...asked, ...run.insights.flatMap(i => [i.file, i.properties])])
+      const seen = [...known, ...run.insights]
+      const real = await canonical($, [...asked, ...seen.flatMap(i => [i.file, i.properties])])
       // A session that restarted meanwhile owns the state now: this check's answer is for the one before.
       if (mine !== generation) return
       let late = false
@@ -535,7 +541,7 @@ async function loop($: EngineInterface, mine: number) {
         }
         // A baseline that lands after edits (the first run failed, or the project was opened above the dbt
         // project) cannot tell the touched models' old issues from the new: all of theirs count as new.
-        const edited = modelsOfFiles(base.touched, run.insights, real)
+        const edited = modelsOfFiles(base.touched, seen, real)
         const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
         const issues = newIssues(run.insights, baseline, edited)
         return { ...base, baseline, issues, running: false, problem: null }
@@ -544,6 +550,8 @@ async function loop($: EngineInterface, mine: number) {
     }
     if (again) continue
     if (mine !== generation) return
+    const keep = new Set(known.map(i => `${i.uniqueId}\0${i.file}\0${i.properties}`))
+    for (const i of run.insights) if (!keep.has(`${i.uniqueId}\0${i.file}\0${i.properties}`)) known.push({ ...i, name: '', message: '', recommendation: '', severity: '' })
     toldProblem = null
     const issues = (await read($, healthAtom))?.issues ?? []
     await drawStatus($, issues)
@@ -606,6 +614,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   running = null
   enabled = false
   toldProblem = null
+  known = []
   projects.clear()
   await update($, healthAtom, () => fresh())
   // The status line outlives a process: a part an earlier one left is cleared whether or not this one drew it.
@@ -670,7 +679,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
   // With nothing changed this session there is nothing to wait for or hold.
   if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return null
-  if ((await wantsCheck($, true)) || running?.generation === generation) await within($, CHECK_MS, kick($))
+  if ((await wantsCheck($, true)) || running?.generation === generation) await within($, GATE_WAIT_MS, kick($))
   const state = await read($, healthAtom)
   // A check that failed or did not finish leaves the changes unchecked: a gate that fails open is no gate.
   if (state && enabled && (state.running || state.pending.length > 0 || state.baseline === null))
