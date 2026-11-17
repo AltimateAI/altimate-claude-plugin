@@ -494,3 +494,44 @@ test('the same model named twice on a line is estimated once, so a slow estimate
   expect(estimates).toEqual(['orders'])
   expect(ran).toEqual([line])
 })
+
+test('a compound command gets every answer over its retries, however long each estimate takes', async ($, on) => {
+  const options: Options = { answers: { a: UNDER, b: UNDER, c: UNDER } }
+  const { clock, estimates, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'c'
+  const all = 'dbt run -s a && dbt run -s b && dbt run -s c'
+  const first = $.tool.call(bash(all))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  const through: any = await $.tool.call(bash(all))
+  await clock.settle()
+  expect(through.deny).toBeUndefined()
+  // a and b were asked for once: the retry used their answers.
+  expect(estimates.filter(key => key === 'a')).toEqual(['a'])
+  expect(ran).toEqual([all])
+})
+
+test('an edit drops the estimates made before it', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+
+  options.answers = { orders: OVER }
+  await $.tool.call({ tool: 'Edit', file_path: '/repo/models/orders.sql', old_string: '1', new_string: '2' } as any)
+  await clock.settle()
+  const later: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(later.deny).toContain('20.0 GiB')
+  expect(estimates).toEqual(['orders', 'orders'])
+  expect(ran).toEqual([])
+})

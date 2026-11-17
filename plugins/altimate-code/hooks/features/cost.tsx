@@ -166,8 +166,16 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
   }
 
+  // A finished command's answers are taken: a later one asks again. A pending one keeps them for its retry.
+  if (pending.length === 0) for (const key of taken.keys()) inflight.delete(key)
+
   // An estimate still running decides nothing yet, and spends no allowance: the command is refused until it is in.
   if (pending.length > 0) {
+    // What is already known to be over the limit stays held, so a failed estimate on the retry cannot free it.
+    if (over.length > 0) {
+      const worst = over.reduce((a, b) => (b.bytes > a.bytes ? b : a))
+      await update($, costAtom, prev => ({ ...(prev ?? FRESH), held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }))
+    }
     notes.delete(e.command)
     return { deny: `The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.` }
   }
@@ -235,7 +243,10 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
 }
 
 /** `file.before` holds the text from before the edit only when `editReadsBefore` is true. */
-export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {}
+export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
+  // An edit can change what a model scans: no estimate made before it is reused.
+  inflight.clear()
+}
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}
 
@@ -398,8 +409,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const left = waitUntil - (await $.clock.now())
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) return 'pending'
-  // Taken: a later pass asks again.
-  if (inflight.get(key) === running) inflight.delete(key)
+  // Not dropped here: while another query of the command is pending, the retry still needs this answer.
   taken.set(key, done.answer)
   return done.answer
 }
