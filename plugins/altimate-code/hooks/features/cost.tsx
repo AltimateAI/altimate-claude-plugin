@@ -53,7 +53,7 @@ let generation = 0
 let unsupportedSince: number | null = null
 const UNSUPPORTED_KEEP_MS = 10 * 60_000
 /** Commands that can rewrite a model, the project or its profile from the shell: an estimate made before one is not reused. */
-const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
+const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+(-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|rm|mv|worktree)|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
 /** The dbt subcommands that change nothing in the project. */
 const READS_ONLY = new Set(['run', 'build', 'show', 'compile', 'ls', 'list', 'debug', 'parse'])
 
@@ -63,11 +63,11 @@ function mutates(command: string): boolean {
   if (all.some(i => i.subcommand !== null && !READS_ONLY.has(i.subcommand))) return true
   let rest = command
   for (const i of [...all].sort((a, b) => b.start - a.start)) rest = rest.slice(0, i.start) + ' ' + rest.slice(i.end)
+  // A redirect to another stream or to /dev/null writes nothing in the project.
+  rest = rest.replace(/\d*>&\d+|\d*>>?\s*\/dev\/null/g, ' ')
   return MAY_CHANGE_PROJECT.test(rest)
 }
 
-/** Files and variables that decide which warehouse a dbt command runs on. */
-const MOVES_TARGET = /profiles\.yml|dbt_project\.yml|dbt\.json|DBT_|--target|-t\s|\.env/
 /** An answer nobody took within this long is dropped: the model may have changed since. */
 const ANSWER_KEEP_MS = 60_000
 
@@ -149,7 +149,8 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
   if (mutates(e.command) && !refused.has(e.command)) {
     invalidate()
-    if (MOVES_TARGET.test(e.command)) await forgetUnsupported($)
+    // Any rewrite can bring back another target (a git restore does not name the profile).
+    await forgetUnsupported($)
   }
   const all = parseDbtCommand(e.command)
   const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
@@ -299,7 +300,8 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
   // A shell command can rewrite a model or the profile (a git restore, a sed): no earlier estimate is reused after one.
   if (mutates(e.command)) {
     invalidate()
-    if (MOVES_TARGET.test(e.command)) await forgetUnsupported($)
+    // Any rewrite can bring back another target (a git restore does not name the profile).
+    await forgetUnsupported($)
   }
   return lines
 }

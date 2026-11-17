@@ -641,6 +641,37 @@ test('a warehouse found to have no dry run is asked about again after an edit, a
   expect(ran.length).toBeGreaterThan(0)
 })
 
+test('a git read or a redirect to another stream does not drop the estimate the retry is waiting for', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  await $.tool.call(bash('git status'))
+  await $.tool.call(bash('git diff --stat 2>&1'))
+  await $.tool.call(bash('ls models 2>/dev/null'))
+  options.hold = undefined
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toBeUndefined()
+  expect(estimates).toEqual(['orders'])
+})
+
+test('a git restore that does not name the profile still makes the no-dry-run verdict forgotten', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  const run = () => $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  expect((await run()).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  await $.tool.call(bash('git checkout .'))
+  await clock.settle()
+  expect((await run()).deny).toContain('20.0 GiB')
+})
+
 test('a shell line that rewrites the model and also runs dbt voids the estimates made before it', async ($, on) => {
   const options: Options = { answers: { orders: UNDER, cheap: UNDER } }
   const { clock, estimates } = await start($, on, options)
