@@ -328,14 +328,13 @@ const readable = (metadata: unknown): RunView | null => {
  * Reads the last run of one project (and target folder) and keeps it when this call wrote it, else null.
  * `invocations` are the call's own for that folder: the file on disk is the last one's.
  */
-const AMBIGUOUS = Symbol('ambiguous')
 async function readRun(
   $: EngineInterface,
   invocations: Invocation[],
   all: Invocation[],
   began: number,
   ended: number,
-): Promise<{ run: RunRecord; order: number } | typeof AMBIGUOUS | null> {
+): Promise<{ run: RunRecord; order: number } | null> {
   const last = invocations[invocations.length - 1]!
   const args = { project_dir: last.projectDir, ...(last.targetPath ? { target_path: last.targetPath } : {}) }
   // The CLI's answer carries the rows: the plugin's MCP server offers only a fixed set of tools.
@@ -346,10 +345,6 @@ async function readRun(
   // one newer than the call is another command's, which would be recorded with this call's command line.
   const wrote = Date.parse(view.completedAt)
   if (wrote < began - CLOCK_SLACK_MS || wrote > ended + CLOCK_SLACK_MS) return null
-  // Several invocations of the writer's subcommand in the call (`dbt build -s a && dbt build -s b`, writing one artifact folder): the
-  // file cannot say which one ran when a chain stops early, so it is not recorded rather than guessed.
-  // A retry's file reports the subcommand it retried, so every retry is a candidate beside the matching subcommand.
-  if (invocations.filter(one => one.subcommand === view.command || one.subcommand === 'retry').length > 1) return AMBIGUOUS
   const written = writer(invocations, view.command)
   const run = written ? toRecord(view, written) : null
   return run && written ? { run, order: all.lastIndexOf(written) } : null
@@ -406,18 +401,21 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   const root = await $.session.root()
   const invocations = resultsInvocations(e.command, root, began.cwd)
   const mine = [...new Set(invocations.map(folderOf))]
+  // Several invocations writing one artifact folder (`dbt build -s a && dbt build -s b`, a retry beside another command):
+  // the file cannot say which one ran when a chain stops early, so nothing is recorded, whether the file can be read or not.
+  const groups = mine.map(folder => invocations.filter(one => folderOf(one) === folder))
+  if (groups.some(group => group.length > 1 && (new Set(group.map(one => one.subcommand)).size < group.length || group.some(one => one.subcommand === 'retry')))) {
+    await clearRetries($)
+    return null
+  }
   // One read for each folder, at the same time: a slow one does not take the others' time, a failed one does not stop them.
   const read = await Promise.all(
     mine.map(folder => readRun($, invocations.filter(one => folderOf(one) === folder), invocations, began.at, ended).catch(() => null)),
   )
   // Two spellings of one folder read one file: of its runs the later invocation's is the one that wrote it.
-  if (read.includes(AMBIGUOUS)) {
-    await clearRetries($)
-    return null
-  }
   const latest = new Map<string, { run: RunRecord; order: number }>()
   for (const one of read) {
-    if (one && one !== AMBIGUOUS && (latest.get(one.run.id)?.order ?? -1) < one.order) latest.set(one.run.id, one)
+    if (one && (latest.get(one.run.id)?.order ?? -1) < one.order) latest.set(one.run.id, one)
   }
   // Oldest first, so the history stays newest first.
   const runs = [...latest.values()].map(one => one.run).sort((a, b) => Date.parse(a.completedAt) - Date.parse(b.completedAt))

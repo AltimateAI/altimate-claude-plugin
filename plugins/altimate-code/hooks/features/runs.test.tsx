@@ -344,7 +344,7 @@ test('an overlap after a recorded run clears its Re-run failed command: the arti
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
-for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a && false && dbt build -s b', 'dbt retry --target dev; dbt retry --target prod', 'dbt build -s a; dbt retry --target dev; dbt retry --target prod']) {
+for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a; dbt retry', 'dbt build -s a && false && dbt build -s b', 'dbt retry --target dev; dbt retry --target prod', 'dbt build -s a; dbt retry --target dev; dbt retry --target prod']) {
   test(`a chain with two builds is not recorded, failed or not, and older retries are cleared: ${command}`, async ($, on) => {
     const { stored } = await start($, on, () => view('inv-a', [['model.shop.a', 'error', null]]))
     await $.tool.call({ tool: 'Bash', command: 'dbt build -s old' })
@@ -357,6 +357,18 @@ for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a && fa
 
 test('Re-run failed keeps --defer-state: dbt retry takes it from the command, not from the run it retries', () => {
   expect(resultsInvocations('dbt build --defer --defer-state /artifacts/prod', ROOT)[0]!.retryLine).toBe('cd /repo && dbt retry --defer-state /artifacts/prod')
+})
+
+test('a chain with two builds clears the stored retry even when its artifact cannot be read', async ($, on) => {
+  let fail = false
+  const { stored } = await start($, on, () => {
+    if (fail) throw new Error('unreadable')
+    return view('inv-a', [['model.shop.m', 'error', null]])
+  })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  fail = true
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s b && dbt build -s c', tool_use_id: 'chain' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
 test('a backgrounded dbt build clears the stored Re-run failed command: it may replace the artifact at any time', async ($, on) => {
