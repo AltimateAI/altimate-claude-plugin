@@ -26,7 +26,8 @@
       "type": "number",
       "title": "Largest BigQuery scan without asking",
       "description": "A dbt run, build or show that BigQuery estimates would scan more bytes than this is held until you allow it with /allow-scan. 0 never holds one. Other warehouses are never held.",
-      "default": 10737418240
+      "default": 10737418240,
+      "min": 0
     },
     "healthBlocksPush": {
       "type": "boolean",
@@ -44,7 +45,8 @@
       "type": "number",
       "title": "Team comments refresh (seconds)",
       "description": "How often the team's comments on shared docs are fetched again.",
-      "default": 900
+      "default": 900,
+      "min": 30
     },
     "commentsInContext": {
       "type": "boolean",
