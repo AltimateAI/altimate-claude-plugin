@@ -143,7 +143,7 @@ test('the pane shows threads by model; Resolve goes through the CLI with write p
   await ui.press({ key: '7:11-resolve' })
   await clock.settle()
   const resolved = cli.find(c => c.args.action === 'resolve')
-  expect(resolved).toEqual({ args: { tool: 'docs_share_comments', share_id: 7, group_id: 11, action: 'resolve' }, write: true })
+  expect(resolved).toEqual({ args: { tool: 'docs_share_comments', project: 'jaffle_shop', share_id: 7, group_id: 11, action: 'resolve' }, write: true })
   await ui.unmount()
 })
 
@@ -535,14 +535,34 @@ test('a post whose CLI call throws says so and reloads the list', async ($, on) 
   await ui.unmount()
 })
 
-test('the note telling the person to refresh goes away once the verification list freed the thread', async ($, on) => {
-  const { clock } = await start($, on, { timeoutPost: true })
+test('a list that cannot show the post yet leaves the thread locked; once the cache is old enough it is freed and the note goes', async ($, on) => {
+  const { clock, cli } = await start($, on, { timeoutPost: true })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await clock.settle()
   await ui.press({ key: '7:11-resolve' })
   for (let i = 0; i < 3; i++) await clock.settle()
-  expect(await ui.find({ type: 'Button', label: 'Resolve' })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /press Refresh/ })).toBeUndefined()
+  // The list still holds the thread: the post may have landed behind a cached answer, so no second press.
+  expect(await ui.find({ type: 'Text', text: /press Refresh later/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeUndefined()
+  await clock.advance(340_000)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /press Refresh later/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeDefined()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a resolved thread stays out of a list that is behind the post', async ($, on) => {
+  const { clock } = await start($, on)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  // Every list still holds the thread (a cache behind the post): it stays out.
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeUndefined()
   await ui.unmount()
 })
 

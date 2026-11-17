@@ -34,7 +34,7 @@ const MAX_BLOCK_CHARS = 6000
 export const FIRST_READ_WAIT_MS = 3_000
 // Files a docs thread can sit on: models, seeds, snapshots, their YAML and docs blocks.
 const MODEL_FILE = /\.(sql|ya?ml|py|md|csv)$/i
-const LOCKED_NOTE = ' The thread stays locked until the list is read again: press Refresh.'
+const LOCKED_NOTE = ' The thread stays locked until the list shows the post or a few minutes have passed (the list can lag): press Refresh later.'
 const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids'])
 const MIN_POLL_SECONDS = 30
 const MAX_POLL_SECONDS = 86_400
@@ -69,7 +69,11 @@ let firstWaitSpent = false
 // The project whose first load is scheduled but not started.
 let pendingFor: string | null = null
 // The thread of a post that may have landed: it stays busy until a list asked for after the post has been read.
-let uncertain: string | null = null
+let uncertain: { key: string; action: unknown; messages: number; at: number } | null = null
+// The service lists from a cache that can be five minutes behind a post: a list does not show a post until
+// then, so a resolved thread stays hidden and an unchecked post stays locked until its effect is seen or that long has passed.
+const LIST_LAG_MS = 330_000
+const resolvedAt = new Map<string, number>()
 // Folders already searched for a dbt project in vain.
 const searched = new Set<string>()
 
@@ -192,6 +196,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   firstWaitSpent = false
   pendingFor = null
   uncertain = null
+  resolvedAt.clear()
   // Work still running when an earlier session ended can never finish, so it must not block this one.
   loadRun = null
   posting = false
@@ -416,8 +421,11 @@ async function fetchThreads($: EngineInterface) {
       await change($, current => (mine !== generation ? current : { ...current, loading: false, error: oneLine(out.text) || 'Could not load the comments.' }))
       return
     }
-    const threads = listed.threads.map(toThread).filter((one): one is CommentsThread => one !== null)
     const now = await $.clock.now()
+    // A thread resolved here stays out until the cache has caught up with it.
+    const threads = listed.threads
+      .map(toThread)
+      .filter((one): one is CommentsThread => one !== null && !((resolvedAt.get(`${one.shareId}:${one.groupId}`) ?? 0) > now))
     // A post may have finished while this answer was being applied: the fresh list that follows it decides.
     await change($, current => {
       // A new session may have begun while the clock was read: its state is not written to.
@@ -425,7 +433,12 @@ async function fetchThreads($: EngineInterface) {
       if (wrote !== writes) return { ...current, loading: false }
       // A list asked for after an uncertain post shows what the docs hold: the thread is free again, and the
       // note that told the person to refresh no longer applies.
-      const freed = uncertain !== null
+      // Freed once the list shows the post's effect (a resolved thread is gone, a reply is in), or the cache
+      // is old enough to have caught up: a list before that may omit a post that landed.
+      const pending = uncertain
+      const there = pending ? threads.find(one => `${one.shareId}:${one.groupId}` === pending.key) : undefined
+      const seen = pending ? (pending.action === 'resolve' ? there === undefined : (there?.messages.length ?? 0) > pending.messages) : false
+      const freed = pending !== null && (seen || now - pending.at >= LIST_LAG_MS)
       if (freed) uncertain = null
       return { ...current, threads, loadedAt: now, loading: false, error: null, posting: freed ? null : current.posting, note: freed && current.note?.endsWith(LOCKED_NOTE) ? null : current.note }
     })
@@ -451,7 +464,8 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
   }
   posting = true
   const mine = generation
-  const root = (await get($)).root
+  const here = await get($)
+  const root = here.root
   // The pane may have moved to another project while the post ran: what it found is not about that one.
   const inView = async () => (await get($)).root === root
   let released = false
@@ -465,7 +479,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     const out = await runTool(
       $,
       TOOL,
-      { share_id: thread.shareId, group_id: thread.groupId, ...args },
+      { project: here.project, share_id: thread.shareId, group_id: thread.groupId, ...args },
       { write: true, until: (await $.clock.now()) + POST_TIMEOUT_MS },
     )
     if (mine !== generation) return
@@ -482,7 +496,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       if (!(await inView())) return
       // Any other failure, a timeout included, may have landed: the thread stays busy until a list asked for
       // after the post has been read, so another press cannot post it twice.
-      uncertain = key
+      uncertain = { key, action: args.action, messages: thread.messages.length, at: await $.clock.now() }
       writes++
       await change($, current => (mine !== generation ? current : { ...current, note: `${note}${LOCKED_NOTE}` }))
       await load($)
@@ -491,6 +505,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     writes++
     // A resolved thread is no longer open: it leaves the list now, whatever the refresh finds.
     const resolved = args.action === 'resolve'
+    if (resolved) resolvedAt.set(key, (await $.clock.now()) + LIST_LAG_MS)
     await change($, current =>
       mine !== generation
         ? current
@@ -503,8 +518,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
           },
     )
     // The buttons are back: the next press must not be dropped while the refresh runs.
-    // An uncertain post keeps its lock until a list read after it frees the thread.
-    if (uncertain !== key) release()
+    release()
     await load($)
   } catch (error) {
     if (mine !== generation) return
@@ -514,7 +528,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       note: `Could not confirm the post, it may have gone through (the list is reloaded): ${oneLine(String(error))}`,
     }))
     // A write that timed out may still have landed: the thread stays busy until a list asked for after it has been read.
-    uncertain = key
+    uncertain = { key, action: args.action, messages: thread.messages.length, at: await $.clock.now() }
     writes++
     await load($)
   } finally {
