@@ -35,13 +35,19 @@ field() { python3 -I -c 'import json,sys; print(json.load(sys.stdin).get(sys.arg
 SECRET="SENTINEL_SECRET_VALUE"
 
 # ─── PROFILE_TYPE ───────────────────────────────────────────────────────────────────────────────
-if python3 -c 'import yaml' 2>/dev/null; then
+# dbt always ships PyYAML; a bare python3 may not, so one with it is made in a throwaway venv when needed.
+YPY=python3
+if ! python3 -c 'import yaml' 2>/dev/null && python3 -m venv "$TMP/yaml-venv" >/dev/null 2>&1 \
+  && "$TMP/yaml-venv/bin/python" -m pip install -q pyyaml >/dev/null 2>&1; then
+  YPY="$TMP/yaml-venv/bin/python"
+fi
+if "$YPY" -c 'import yaml' 2>/dev/null; then
   printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
   # profile <name> <profiles.yml> <expected status> <expected target> <expected type> [VAR=value ...]; an empty target or type is one the script does not print
   profile() {
     local name="$1" yml="$2" want="$3" want_target="$4" want_type="$5" out got; shift 5
     printf '%s' "$yml" > "$TMP/profiles.yml"
-    out="$(env "$@" python3 -c "$(cat "$TMP/PROFILE_TYPE.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1)"
+    out="$(env "$@" "$YPY" -c "$(cat "$TMP/PROFILE_TYPE.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1)"
     case "$out" in *SENTINEL*) fail "profile: $name: a secret reached the output: $out" ;; esac
     got="$(printf '%s' "$out" | field status)"
     [ "$got" = "$want" ] || fail "profile: $name: expected status $want, got '$got' ($out)"
@@ -65,7 +71,7 @@ if python3 -c 'import yaml' 2>/dev/null; then
   profile "type that is no name" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "SENTINEL_SECRET_VALUE pw!"}\n' no_type dev ''
   profile "no such output" $'shop:\n  target: staging\n  outputs:\n    dev: {type: duckdb}\n' no_output staging ''
 else
-  missing "python3 has no PyYAML, so the PROFILE_TYPE checks cannot run"
+  missing "no python3 with PyYAML (and none could be installed into a venv), so the PROFILE_TYPE checks cannot run"
 fi
 
 # ─── MANIFEST_SLICE ─────────────────────────────────────────────────────────────────────────────
