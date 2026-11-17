@@ -11,6 +11,7 @@
 import type { On, ToolCallInput, ToolCallResult } from 'claude-code'
 
 import { within } from './altimate-cli'
+import { PHASE_TIMEOUT_MS } from './deadlines'
 import {
   EDIT_READS_BEFORE,
   featuresBashAfter,
@@ -44,7 +45,7 @@ export const PHASES: readonly Phase[] = ['bashRewrite', 'bashGate', 'bashAfter',
  * is given up on and the call runs. A gate that must hold the call therefore bounds its own check well inside
  * this and returns `{ deny }` when the check runs out of time.
  */
-export const PHASE_TIMEOUT_MS = 5_000
+export { PHASE_TIMEOUT_MS }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
 

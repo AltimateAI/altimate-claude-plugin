@@ -15,7 +15,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { HealthInsight, HealthState } from '../../types'
 import { later, runTool, within } from '../altimate-cli'
 import { setStatusPart } from '../status-line'
-import { PHASE_TIMEOUT_MS } from '../tool-chain'
+import { PHASE_TIMEOUT_MS } from '../deadlines'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -542,6 +542,10 @@ async function loop($: EngineInterface, mine: number) {
         // A baseline that lands after edits (the first run failed, or the project was opened above the dbt
         // project) cannot tell the touched models' old issues from the new: all of theirs count as new.
         const edited = modelsOfFiles(base.touched, seen, real)
+        // A deleted schema file names no model any more, and a model that had no insight before has no record
+        // of it: its new issues are told from the baseline, so every model counts.
+        const matched = new Set(seen.flatMap(i => [i.file, i.properties]).filter(Boolean).map(real))
+        if (base.touched.some(f => /\.ya?ml$/i.test(f) && !matched.has(real(f)))) for (const i of run.insights) edited.add(i.uniqueId)
         const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
         const issues = newIssues(run.insights, baseline, edited)
         return { ...base, baseline, issues, running: false, problem: null }
@@ -671,6 +675,7 @@ export function pushRefusal(blocks: unknown, command: string, issues: readonly H
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) return null
+  const startedAt = await $.clock.now()
   const hold = (why: string) => ({
     deny: `git push is held: ${why}\nRun /${COMMAND} to check again, or turn off "Project health blocks git push" in the plugin's settings.`,
   })
@@ -679,7 +684,9 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
   // With nothing changed this session there is nothing to wait for or hold.
   if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return null
-  if ((await wantsCheck($, true)) || running?.generation === generation) await within($, GATE_WAIT_MS, kick($))
+  // The wait is what is left of the gate's budget: the work above counts against the chain's deadline too.
+  const left = GATE_WAIT_MS - ((await $.clock.now()) - startedAt)
+  if (left > 0 && ((await wantsCheck($, true)) || running?.generation === generation)) await within($, left, kick($))
   const state = await read($, healthAtom)
   // A check that failed or did not finish leaves the changes unchecked: a gate that fails open is no gate.
   if (state && enabled && (state.running || state.pending.length > 0 || state.baseline === null))
