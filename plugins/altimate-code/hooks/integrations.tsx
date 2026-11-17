@@ -5,9 +5,9 @@ import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, Wo
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
 import { registerLineage, startLineage } from './lineage'
-import { setStatusPart } from './status-line'
-import { installToolChain } from './tool-chain'
+import { clearStatusParts, setStatusPart } from './status-line'
 import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
+import { installToolChain } from './tool-chain'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -566,6 +566,8 @@ export const register: Register = (on, options) => {
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
     await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
+    // An earlier session's status parts are not this one's.
+    await clearStatusParts($).catch(error => $.ui.log(`status line · could not clear: ${String(error)}`))
     // Each feature's own start (its commands); one failing is logged and the rest go on.
     await featuresSessionStart($, e)
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
@@ -818,12 +820,12 @@ export const register: Register = (on, options) => {
   })
 
   registerLineage(on)
+  registerTaskImpact(on)
 
   // The features after the lineage half; their Bash and file-edit handlers run through one ordered
   // tool.call hook (tool-chain.ts).
   registerFeatures(on, { options })
   installToolChain(on)
-  registerTaskImpact(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added

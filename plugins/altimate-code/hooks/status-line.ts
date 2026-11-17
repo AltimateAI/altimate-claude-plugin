@@ -31,3 +31,12 @@ export async function setStatusPart($: EngineInterface, id: StatusPartId, text: 
   })
   $.ui.status(statusLineOf(await read($, parts)))
 }
+
+/**
+ * Clears every part at a session's start: the parts outlive a session, so a part an earlier session
+ * set is not drawn again before its owner has set it in this one.
+ */
+export async function clearStatusParts($: EngineInterface) {
+  await update($, parts, () => ({}))
+  $.ui.status(undefined)
+}
