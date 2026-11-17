@@ -98,6 +98,23 @@ export function setRedactions(root: string, values: string[]): void {
 
 export const clearRedactions = (): void => redactions.clear()
 
+/** Every value held, for a script that must cut them out of text before it truncates it. */
+export const redactionValues = (): string[] => [...new Set([...redactions.values()].flat())]
+
+/** Text that was cut to length, without a trailing fragment (6 or more characters) that is the start of a value held: the cut ran through it. */
+export function withoutValueFragment(text: string): string {
+  let longest = 0
+  for (const form of new Set(redactionValues().flatMap(redactionForms))) {
+    for (let length = Math.min(form.length - 1, text.length); length >= Math.max(6, longest + 1); length--) {
+      if (text.endsWith(form.slice(0, length))) {
+        longest = length
+        break
+      }
+    }
+  }
+  return longest ? text.slice(0, text.length - longest) : text
+}
+
 /** A value as dbt may print it: as is, JSON-escaped, or as a Python repr (a line break is a literal `\n`), whole and by each line of 6 or more characters. */
 export function redactionForms(value: string): string[] {
   const forms = new Set<string>()
@@ -484,6 +501,12 @@ const versionedName = (id: string) => {
   return id.startsWith('model.') && parts.length >= 4 ? parts[2] : parts.pop()
 }
 
+/** A run_results message as it is kept: the profile's values out of it, cut to 2000 characters, and no start of a value left at a cut. */
+function cutMessage(raw: string): string {
+  const clean = scrubDbt(raw)
+  return (raw.length >= 2000 ? withoutValueFragment(clean) : clean).slice(0, 2000)
+}
+
 /** The failed nodes of a run_results.json: errors, failed tests and failed snapshots, first failed first. */
 export function failuresFrom(runResults: unknown, manifest?: { nodes?: Record<string, any> } | null): DbtFailure[] {
   const results: any[] = Array.isArray((runResults as any)?.results) ? (runResults as any).results : []
@@ -499,7 +522,7 @@ export function failuresFrom(runResults: unknown, manifest?: { nodes?: Record<st
       name: typeof node?.name === 'string' ? node.name : (id.startsWith('test.') ? id.split('.')[2] : versionedName(id)) ?? id,
       kind: id.split('.')[0] ?? 'node',
       status: status === 'fail' ? 'fail' : 'error',
-      message: scrubDbt(stripAnsi(String(one?.message ?? '')).trim()).slice(0, 2000),
+      message: cutMessage(stripAnsi(String(one?.message ?? '')).trim()),
       path: typeof node?.original_file_path === 'string' ? node.original_file_path : null,
       failures: typeof one?.failures === 'number' ? one.failures : null,
     })

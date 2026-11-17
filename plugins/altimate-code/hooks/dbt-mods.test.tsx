@@ -20,6 +20,7 @@ import {
   scrubDbt,
   setRedactions,
   withoutDropped,
+  withoutValueFragment,
   modelContext,
   modelContextNote,
   nodeForFile,
@@ -168,6 +169,8 @@ type Options = {
   storeGetFails?: () => boolean
   /** The values the project's Python prints for the redaction script. */
   redact?: string[]
+  /** Collects what is written to the redaction-aware run_results script's standard input. */
+  stdins?: { argv: string[]; stdin: string | undefined }[]
   /** The same, for the profiles.yml at one path (the script's second argument). */
   redactBy?: Record<string, string[]>
   /** What the project's Python prints for the profile script; the default is an ok duckdb output. */
@@ -340,8 +343,9 @@ async function start($: any, on: any, options: Options = {}) {
   })
   let held = false
   let shows = 0
-  on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string } }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string } }) => {
     runs.push([...e.argv])
+    if (e.argv[2] === RUN_FAILURES) options.stdins?.push({ argv: [...e.argv], stdin: e.init?.stdin })
     cwds.push(e.init?.cwd ?? '')
     // The first dbt show waits until the test lets it go.
     if (options.holdShow && !held && e.argv.includes('show') && shows++ >= (options.holdShowAfter ?? 0)) {
@@ -3696,4 +3700,71 @@ kitTest('env_var calls are read in the decoded values, and identifier keys are n
   expect(PROFILE_REDACT).toContain('scan(profiles)')
   expect(PROFILE_REDACT).toContain("IDENTIFIERS = ('schema', 'database', 'dataset', 'project', 'catalog', 'warehouse', 'role', 'user')")
   expect(PROFILE_REDACT).toContain('key not in IDENTIFIERS')
+})
+
+// ─── Templates are rendered, not matched; a cut never leaves the start of a value ────────────────
+
+kitTest('PROFILE_REDACT and PROFILE_TYPE render templates with a plain jinja2 Environment that has env_var alone', () => {
+  for (const script of [PROFILE_REDACT, PROFILE_TYPE]) {
+    expect(script).toContain('jinja2.Environment()')
+    expect(script).toContain("engine.globals['env_var']")
+    expect(script).not.toMatch(/exec\(|eval\(|extensions|SandboxedEnvironment|globals\['var'\]/)
+  }
+  expect(PROFILE_REDACT).toContain('render(name)')
+})
+
+const CUT_SECRET = 'SENTINEL_LONG_SECRET_VALUE_CROSSING_THE_CUT'
+const CUT_RESULTS = (message: string) => ({ exitCode: 0, stdout: JSON.stringify({ results: [{ unique_id: 'test.shop.not_null_orders_amount.106140f9fd', status: 'error', message }], metadata: { invocation_id: 'inv-cut', generated_at: 'x' } }) })
+
+test('the profile values go to the run_results script on stdin, never in its argv', async ($, on) => {
+  const stdins: { argv: string[]; stdin: string | undefined }[] = []
+  const options: any = { runResultsSize: 9 * 1024 * 1024, runResultsAt: 9_000_000, redact: [CUT_SECRET], runFailures: { exitCode: 0, stdout: JSON.stringify({ results: [] }) }, stdins }
+  const { clock, setBash } = await start($, on, options)
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  expect(stdins.length).toBeGreaterThan(0)
+  for (const one of stdins) {
+    expect(JSON.parse(one.stdin ?? 'null')).toEqual([CUT_SECRET])
+    expect(one.argv.join(' ')).not.toContain(CUT_SECRET)
+  }
+})
+
+test('a message cut at 2000 characters through a secret holds no start of it, in the band, Explain or Fix', async ($, on) => {
+  // What an older script would give: the message cut through the value.
+  const cut = `${'x'.repeat(1990)}${CUT_SECRET.slice(0, 10)}`
+  // The artifact the command wrote: another invocation than the one seen before it.
+  const options: any = { runResultsSize: 9 * 1024 * 1024, runResultsAt: 9_000_000, redact: [CUT_SECRET], runFailures: { exitCode: 0, stdout: JSON.stringify({ results: [] }) }, duringBash: async () => void (options.runFailures = CUT_RESULTS(cut)) }
+  const { clock, prompts, setBash } = await start($, on, options)
+  setBash({ stdout: BUILD_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-explain' })
+  await band.press({ key: 'dbt-fix' })
+  await clock.settle()
+  expect(prompts.length).toBe(2)
+  for (const prompt of prompts) {
+    expect(prompt).toContain('xxxx')
+    expect(prompt).not.toContain('SENTINEL')
+  }
+  await band.unmount()
+})
+
+kitTest('a fragment of 6 or more characters at the end of a cut text that starts a held value is dropped', () => {
+  clearRedactions()
+  setRedactions('/p', [CUT_SECRET])
+  expect(withoutValueFragment(`text ${CUT_SECRET.slice(0, 12)}`)).toBe('text ')
+  expect(withoutValueFragment(`text ${CUT_SECRET.slice(0, 5)}`)).toBe(`text ${CUT_SECRET.slice(0, 5)}`)
+  expect(withoutValueFragment('text SENTINEL_X')).toBe('text SENTINEL_X')
+  clearRedactions()
+})
+
+kitTest('a run_results message cut at 2000 characters through a held value keeps no start of it', () => {
+  clearRedactions()
+  setRedactions('/p', [CUT_SECRET])
+  const cut = `${'x'.repeat(1990)}${CUT_SECRET.slice(0, 10)}`
+  const [failure] = failuresFrom(CUT_RESULTS(cut).stdout ? JSON.parse(CUT_RESULTS(cut).stdout) : null, MANIFEST)
+  expect(failure!.message).toBe('x'.repeat(1990))
+  clearRedactions()
 })

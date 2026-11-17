@@ -31,6 +31,7 @@ import {
   PROFILES_UNREADABLE,
   scrubDbt,
   redactValues,
+  redactionValues,
   setRedactions,
   flagOf,
   profilesDirOf,
@@ -318,11 +319,26 @@ print(json.dumps(out))
 export const RUN_FAILURES = `import sys; sys.path = [p for p in sys.path if p not in ('', '.')]
 import json
 r = json.load(open(sys.argv[1]))
+# The profile's secret values arrive on stdin, never in argv or the environment: they are cut out of a message before it is cut to length.
+try:
+    values = [v for v in json.load(sys.stdin) if isinstance(v, str) and v]
+except Exception:
+    values = []
+forms = set()
+for v in values:
+    for part in [v] + [line for line in v.splitlines() if len(line) >= 6]:
+        repr_form = part.replace('\\\\', '\\\\\\\\').replace('\\n', '\\\\n').replace('\\r', '\\\\r').replace('\\t', '\\\\t')
+        forms.update([part, json.dumps(part)[1:-1], repr_form, repr_form.replace("'", "\\\\'")])
+forms = sorted((f for f in forms if f), key=len, reverse=True)
+def clean(text):
+    for f in forms:
+        text = text.replace(f, '\\u2039redacted\\u203a')
+    return text
 keep = ('unique_id', 'status', 'message', 'failures')
 bad = [{k: x[k] for k in keep if k in x} for x in (r.get('results') or []) if x.get('status') not in ('success', 'pass', 'skipped')]
 for x in bad:
     if isinstance(x.get('message'), str):
-        x['message'] = x['message'][:2000]
+        x['message'] = clean(x['message'])[:2000]
 meta = r.get('metadata') or {}
 print(json.dumps({'results': bad, 'metadata': {k: meta.get(k) for k in ('invocation_id', 'generated_at')}}))
 `
@@ -637,7 +653,7 @@ async function seenInvocation($: EngineInterface, root: string): Promise<string 
 async function readRunResults($: EngineInterface, root: string, path: string, size: number): Promise<unknown> {
   if (size <= MAX_MANIFEST_BYTES) return $.fs.read(path).then(JSON.parse).catch(() => null)
   try {
-    const run = await $.process.run([await pythonFor($, root), '-c', RUN_FAILURES, path], { cwd: root, timeoutMs: 60_000 })
+    const run = await $.process.run([await pythonFor($, root), '-c', RUN_FAILURES, path], { cwd: root, timeoutMs: 60_000, stdin: JSON.stringify(redactionValues()) })
     return run.exitCode === 0 && !run.isStdoutTruncated ? JSON.parse(run.stdout) : null
   } catch {
     return null
@@ -924,7 +940,19 @@ import yaml
 def out(status, **rest):
     print(json.dumps(dict(status=status, **rest)))
     sys.exit(0)
+try:
+    import jinja2
+    engine = jinja2.Environment()
+    engine.globals['env_var'] = lambda name, default=None: os.environ.get(name, default) if os.environ.get(name, default) is not None else ''
+except Exception:
+    engine = None
 def settle(text):
+    # Rendered as dbt renders it (env_var alone: nothing else is called, so any other call leaves the template unsettled).
+    if engine is not None:
+        try:
+            return engine.from_string(text).render() or None
+        except Exception:
+            return None
     call = re.fullmatch(r"\\s*\\{\\{\\s*env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)\\s*\\}\\}\\s*", text)
     return (os.environ.get(call.group(2)) or call.group(4)) if call else None
 def load(path):
@@ -942,6 +970,8 @@ name = os.environ.get('DBT_PROFILE') or project.get('profile')
 # A name is echoed only when it is written in the file as a plain literal: one an env var or a template gave may be a secret.
 named = isinstance(name, str) and not os.environ.get('DBT_PROFILE') and '{{' not in name
 shown = name if named else ''
+if isinstance(name, str) and '{{' in name:
+    name = settle(name)
 profile = profiles.get(name) if isinstance(name, str) else None
 if not isinstance(profile, dict):
     out('no_profile', profile=shown)
@@ -973,16 +1003,23 @@ out('ok', profile=name, target=target, type=kind)
 `
 
 // Prints the secrets in a profile that dbt's errors may echo back: every string under the profile's outputs (all of
-// them, aliases resolved) and the value and default of each env var profiles.yml names, found in its decoded values.
-// Identifiers (schema, database, user…) are not secrets and are left out, as an env var used only under one. Stdout
-// only, to the plugin.
+// them, aliases resolved), rendered as dbt would render it, and the value and default of each env_var the profile
+// calls. Templates are rendered with jinja2 (dbt's own engine, always installed beside it) in a plain Environment
+// with an env_var global and nothing else: no extensions, nothing executed, any other call is an error and the
+// string is taken as written. Identifiers (schema, database, user…) are not secrets, nor is an env var used only
+// under one. Stdout only, to the plugin.
 export const PROFILE_REDACT = `import sys; sys.path = [p for p in sys.path if p not in ('', '.')]
 import json, os, re
 try:
     import yaml
 except Exception:
     yaml = None
+try:
+    import jinja2
+except Exception:
+    jinja2 = None
 found = []
+recorded = []
 PLAIN = ('type', 'threads', 'method', 'port')
 IDENTIFIERS = ('schema', 'database', 'dataset', 'project', 'catalog', 'warehouse', 'role', 'user')
 def keep(value):
@@ -995,30 +1032,53 @@ def keep(value):
         return
     if value not in found:
         found.append(value)
-def walk(node):
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key not in PLAIN and key not in IDENTIFIERS:
-                walk(value)
-    elif isinstance(node, list):
-        for value in node:
-            walk(value)
-    else:
-        keep(node)
+def env_var(name, default=None):
+    value = os.environ.get(name, default)
+    recorded.extend([os.environ.get(name), default])
+    value = '' if value is None else str(value)
+    recorded.append(value)
+    return value
+engine = None
+if jinja2 is not None:
+    try:
+        engine = jinja2.Environment()
+        engine.globals['env_var'] = env_var
+    except Exception:
+        engine = None
 CALL = re.compile(r"env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)")
-def calls(text):
+def render(text):
+    # The rendered string, or None when it cannot be rendered; what the calls read is in recorded either way.
+    del recorded[:]
+    if engine is not None:
+        try:
+            return engine.from_string(text).render()
+        except Exception:
+            return None
     for call in CALL.finditer(text):
-        keep(os.environ.get(call.group(2)))
-        keep(call.group(4))
-def scan(node, key=None):
+        recorded.extend([os.environ.get(call.group(2)), call.group(4)])
+    return None
+def handle(text, key, secret):
+    rendered = text
+    del recorded[:]
+    if '{{' in text or '{%' in text:
+        rendered = render(text)
+    if key in IDENTIFIERS:
+        return
+    for value in recorded:
+        keep(value)
+    if secret and key not in PLAIN:
+        keep(rendered if rendered is not None else text)
+def scan(node, key=None, secret=False):
     if isinstance(node, dict):
         for name, value in node.items():
-            scan(value, name)
+            scan(value, name, secret)
     elif isinstance(node, list):
         for value in node:
-            scan(value, key)
-    elif isinstance(node, str) and key not in IDENTIFIERS:
-        calls(node)
+            scan(value, key, secret)
+    elif isinstance(node, str):
+        handle(node, key, secret)
+    elif secret and key not in PLAIN and key not in IDENTIFIERS:
+        keep(node)
 def load(path):
     try:
         with open(path) as f:
@@ -1026,20 +1086,27 @@ def load(path):
     except Exception:
         return ''
 text = load(sys.argv[2])
+profiles = None
 try:
     profiles = yaml.safe_load(text) if yaml else None
     project = (yaml.safe_load(load(sys.argv[1])) if yaml else None) or {}
     name = (sys.argv[3] if len(sys.argv) > 3 else None) or os.environ.get('DBT_PROFILE') or project.get('profile')
+    # A profile name a template gives is rendered the same way; its env vars are not secrets.
+    if isinstance(name, str) and ('{{' in name or '{%' in name):
+        name = render(name)
+        del recorded[:]
     profile = profiles.get(name) if isinstance(profiles, dict) and isinstance(name, str) else None
-    if isinstance(profile, dict):
-        walk(profile.get('outputs'))
 except Exception:
-    profiles = None
-# The env_var calls are read in the decoded values (a quoted string may escape its quotes); a file that does not parse is scanned as written.
+    profile = None
 if isinstance(profiles, dict):
+    # Every env_var the file calls, under any key but an identifier; then the strings of the profile's outputs as rendered.
     scan(profiles)
+    if isinstance(profile, dict):
+        scan(profile.get('outputs'), None, True)
 else:
-    calls(text)
+    for call in CALL.finditer(text):
+        keep(os.environ.get(call.group(2)))
+        keep(call.group(4))
 print(json.dumps(dict(redact=found)))
 `
 
@@ -1483,9 +1550,9 @@ export async function dbtModsCallStart($: EngineInterface, e: { tool: string; ag
   const ready = (async () => {
     const first = runs[0] ? await placeOf($, base, runs[0]) : null
     if (!first) return null
-    const seen = await seenInvocation($, first.root).catch(() => null)
+    // The values come first: the snapshot reads run_results.json through the script that cuts them out.
     await ensureForRuns($, base, runs)
-    return seen
+    return seenInvocation($, first.root).catch(() => null)
   })()
   // Nobody awaits it if the call never reaches its after phase.
   ready.catch(() => {})

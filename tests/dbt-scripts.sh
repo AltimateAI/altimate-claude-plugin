@@ -73,6 +73,11 @@ if "$YPY" -c 'import yaml' 2>/dev/null; then
   profile "env_var target with no such output" $'shop:\n  target: "{{ env_var(\'T\') }}"\n  outputs:\n    dev: {type: duckdb}\n' no_output '' '' T=SENTINEL_TARGET_FROM_ENV
   profile "DBT_TARGET with no such output" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n' no_output '' '' DBT_TARGET=SENTINEL_TARGET_FROM_ENV
   profile "profile named by DBT_PROFILE with no such profile" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n' no_profile '' '' DBT_PROFILE=SENTINEL_PROFILE_FROM_ENV
+  printf "name: 'shop'\nprofile: \"{{ env_var('P') }}\"\n" > "$TMP/dbt_project.yml"
+  profile "profile named by an env_var in dbt_project.yml" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n' ok dev duckdb P=shop
+  printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
+  profile "a nested filter in the target" $'shop:\n  target: "{{ env_var(\'T\') | trim }}"\n  outputs:\n    dev: {type: duckdb}\n' ok dev duckdb "T= dev "
+  profile "a default holding the opposite quote" $'shop:\n  target: "{{ env_var(\'T\', \\"d\'ev\\") }}"\n  outputs:\n    "d\'ev": {type: duckdb}\n' ok "d'ev" duckdb
   profile "no such output" $'shop:\n  target: staging\n  outputs:\n    dev: {type: duckdb}\n' no_output staging ''
 else
   missing "no python3 with PyYAML (and none could be installed into a venv), so the PROFILE_TYPE checks cannot run"
@@ -109,6 +114,16 @@ assert (want == "-" and not found) or want in found, found
   redact "identifier keys" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, schema: analytics_prod, database: warehouse_db, dataset: some_dataset, project: some_project, catalog: some_catalog, warehouse: some_warehouse, role: some_role_name, user: some_user_name}\n' -
   redact "an env var used only under an identifier key" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, schema: "{{ env_var(\'SCH\', \'default_schema\') }}"}\n' - SCH=SENTINEL_SCHEMA
   redact "an env var used under an identifier and a secret key" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, schema: "{{ env_var(\'SCH\') }}", password: "{{ env_var(\'SCH\') }}"}\n' SENTINEL_SCHEMA SCH=SENTINEL_SCHEMA
+  # Templates are rendered with jinja2, not matched: a default holding the other quote, nested filters, a profile name from an env var.
+  redact "a default holding the opposite quote" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\', \\"SENTINEL\'PASSWORD\\") }}"\n' "SENTINEL'PASSWORD"
+  redact "a nested filter: the env value" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\') | trim }}"\n' SENTINEL_FILTERED X="  SENTINEL_FILTERED  "
+  redact "a nested filter: the rendered field" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\') | trim | upper }}"\n' SENTINEL_UPPER X=sentinel_upper
+  redact "a template that errors is taken as written" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ var(\'SENTINEL_UNDEFINED\') }}"\n' "{{ var('SENTINEL_UNDEFINED') }}"
+  redact "a template that errors still gives the env_var before it" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\') ~ var(\'y\') }}"\n' SENTINEL_BEFORE_ERROR X=SENTINEL_BEFORE_ERROR
+  # profile named by an env var in dbt_project.yml
+  printf "name: 'shop'\nprofile: \"{{ env_var('P') }}\"\n" > "$TMP/dbt_project.yml"
+  redact "a profile named by an env_var in dbt_project.yml" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, password: SENTINEL_NAMED_BY_ENV}\n' SENTINEL_NAMED_BY_ENV P=shop
+  printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
   redact "nothing but short values, types and ports" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, method: password, port: 5432, threads: 1234567, user: me}\n' -
 else
   missing "python3 has no PyYAML, so the PROFILE_REDACT checks cannot run"
@@ -175,9 +190,12 @@ results = {
 json.dump(results, open(sys.argv[1] + '/run_results.json', 'w'))
 long = dict(results); long['results'] = [dict(results['results'][2], message='x' * 5000)]
 json.dump(long, open(sys.argv[1] + '/run_results-long.json', 'w'))
+# A message whose secret starts before the cut at 2000 characters and ends after it.
+crossing = dict(results); crossing['results'] = [dict(results['results'][2], message='x' * 1990 + 'SENTINEL_LONG_SECRET_VALUE_CROSSING_THE_CUT' + ' tail')]
+json.dump(crossing, open(sys.argv[1] + '/run_results-crossing.json', 'w'))
 open(sys.argv[1] + '/run_results-broken.json', 'w').write('{"results": [{"message": "' + secret + '"')
 PY
-out="$(script RUN_FAILURES "$TMP/run_results.json" 2>&1)"
+out="$(script RUN_FAILURES "$TMP/run_results.json" <<<'[]' 2>&1)"
 case "$out" in *SENTINEL*) fail "run failures: a secret reached the output" ;; esac
 printf '%s' "$out" | python3 -I -c '
 import json, sys
@@ -186,9 +204,13 @@ assert [x["unique_id"] for x in r["results"]] == ["model.shop.bad", "test.shop.u
 assert set(r["results"][0]) <= {"unique_id", "status", "message", "failures"}
 assert r["metadata"] == {"invocation_id": "inv-1", "generated_at": "2026-11-17T00:00:00Z"}, r["metadata"]
 ' || fail "run failures: only the failed results, with their message and the run's invocation, are given"
-out="$(script RUN_FAILURES "$TMP/run_results-long.json" 2>&1)"
+out="$(script RUN_FAILURES "$TMP/run_results-long.json" <<<'[]' 2>&1)"
 printf '%s' "$out" | python3 -I -c 'import json, sys; assert len(json.load(sys.stdin)["results"][0]["message"]) == 2000' || fail "run failures: a message is cut at 2000 characters"
-out="$(script RUN_FAILURES "$TMP/run_results-broken.json" 2>&1)"; code=$?
+# The profile's values arrive on stdin and are cut out before the message is cut: no part of one is left at the cut.
+out="$(script RUN_FAILURES "$TMP/run_results-crossing.json" <<<'["SENTINEL_LONG_SECRET_VALUE_CROSSING_THE_CUT"]' 2>&1)"
+case "$out" in *SENTINEL*) fail "run failures: a secret crossing the cut left its start in the message" ;; esac
+printf '%s' "$out" | python3 -I -c 'import json, sys; m = json.load(sys.stdin)["results"][0]["message"]; assert "redacted" in m and len(m) <= 2000' || fail "run failures: the secret is replaced before the message is cut"
+out="$(script RUN_FAILURES "$TMP/run_results-broken.json" <<<'[]' 2>&1)"; code=$?
 [ "$code" -ne 0 ] || fail "run failures: a broken file did not fail"
 case "$out" in *SENTINEL*) fail "run failures: the error for a broken file quotes it" ;; esac
 
