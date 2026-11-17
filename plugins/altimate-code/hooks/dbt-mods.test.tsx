@@ -3610,6 +3610,28 @@ for (const [what, command] of [
   })
 }
 
+test('an inherited relative DBT_PROFILES_DIR is read from the folder the command ran in: that profile\'s value is removed', async ($, on) => {
+  const secret = 'SENTINEL_ALT_PROFILE'
+  const { clock, prompts, setBash } = await start($, on, {
+    runResultsAt: 1,
+    now: 900_000,
+    env: { DBT_PROFILES_DIR: './config' },
+    // dbt run from /proj/caller reads /proj/caller/config/profiles.yml, not the project's config folder.
+    files: { 'caller/config/profiles.yml': ALT_PROFILE, 'config/profiles.yml': 'shop:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n' },
+    redactBy: { '/proj/caller/config/profiles.yml': [secret] },
+  })
+  setBash({ stdout: `${HEADER}\n${ALIAS_ERR(secret)}`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'cd caller && dbt build --project-dir /proj -s orders' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).not.toContain(secret)
+  await band.unmount()
+})
+
 test('Re-run of a command that names another profiles folder removes that profile\'s value from the pane and the saved history', async ($, on) => {
   const secret = 'SENTINEL_ALT_PROFILE'
   const { clock, store, setBash } = await start($, on, {

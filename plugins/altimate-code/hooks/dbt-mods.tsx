@@ -1132,16 +1132,17 @@ type ProfilesFrom = { dir: string; profilesDir: string | null; profile?: string 
 
 /**
  * The profiles.yml files dbt may read, the first existing one being the one it does: the invocation's own
- * `--profiles-dir` (or `DBT_PROFILES_DIR` set for it), relative to the folder it ran in; else the plugin's
- * DBT_PROFILES_DIR (relative to the project); else, by default, the folder it ran in, the project folder, then ~/.dbt.
+ * `--profiles-dir` (or `DBT_PROFILES_DIR` set for it); else the inherited DBT_PROFILES_DIR; a relative one is read from
+ * the folder it ran in. With neither, by default: the folder it ran in, the project folder, then ~/.dbt.
  */
 async function profileCandidates($: EngineInterface, root: string, from?: ProfilesFrom): Promise<string[]> {
   const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
   const home = await env('HOME')
-  // A relative DBT_PROFILES_DIR is the project's (dbt runs there); `~` is the home folder.
+  // A relative profiles folder, named by the command or inherited from DBT_PROFILES_DIR, is read from the folder dbt
+  // ran in (the project folder for the plugin's own runs); `~` is the home folder.
   const rawDir = from?.profilesDir ?? (await env('DBT_PROFILES_DIR'))
   const expanded = rawDir.startsWith('~') && home ? `${home}${rawDir.slice(1)}` : rawDir
-  const profilesDir = expanded && !expanded.startsWith('/') ? normalize(`${from?.profilesDir ? from.dir : root}/${expanded}`) : expanded
+  const profilesDir = expanded && !expanded.startsWith('/') ? normalize(`${from?.dir ?? root}/${expanded}`) : expanded
   const wanted = profilesDir ? [`${profilesDir}/profiles.yml`] : [`${from?.dir ?? root}/profiles.yml`, `${root}/profiles.yml`, ...(home ? [`${home}/.dbt/profiles.yml`] : [])]
   const found: string[] = []
   for (const path of new Set(wanted.map(one => normalize(one)))) if (await $.fs.exists(path).catch(() => false)) found.push(path)
