@@ -32,6 +32,9 @@ const MAX_BLOCK_CHARS = 6000
 // The shared phase (tool-chain.ts) gives up at PHASE_TIMEOUT_MS and drops every feature's context, so this
 // stays well inside it, with room for the folder walk before.
 export const FIRST_READ_WAIT_MS = 3_000
+// Files a docs thread can sit on: models, seeds, snapshots, their YAML and docs blocks.
+const MODEL_FILE = /\.(sql|ya?ml|py|md|csv)$/i
+const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids'])
 const MIN_POLL_SECONDS = 30
 const MAX_POLL_SECONDS = 86_400
 const NEEDS_NEWER_CLI = 'Team comments need a newer altimate-code (this one has no docs_share_comments tool): npm install -g altimate-code@latest'
@@ -60,6 +63,10 @@ let posting = false
 let generation = 0
 // Counts the posts that changed the shared docs: a list requested before one is out of date once it is done.
 let writes = 0
+// The first-read wait is spent once per session.
+let firstWaitSpent = false
+// The project whose first load is scheduled but not started.
+let pendingFor: string | null = null
 // Folders already searched for a dbt project in vain.
 const searched = new Set<string>()
 
@@ -179,6 +186,8 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   poll = null
   loadAgain = false
   generation++
+  firstWaitSpent = false
+  pendingFor = null
   // Work still running when an earlier session ended can never finish, so it must not block this one.
   loadRun = null
   posting = false
@@ -245,14 +254,17 @@ export async function readOrEditAfter($: EngineInterface, e: FileCall, result: T
   let current = await get($)
   if (!current.root || current.needs) return null
   // The first read can come before the first load is done: wait for it, briefly, so the review is seen before an edit.
-  if (current.loadedAt === null && current.error === null) {
+  // It is spent once per session, and not on a file that cannot hold a thread.
+  if (current.loadedAt === null && current.error === null && !firstWaitSpent && MODEL_FILE.test(file.path)) {
+    firstWaitSpent = true
+    if (pendingFor === current.root) pendingFor = null
     const run = loadRun ?? load($)
     await Promise.race([run, $.clock.sleep(FIRST_READ_WAIT_MS)])
     current = await get($)
   }
   const root = current.root
   if (root === null || current.threads.length === 0) return null
-  const here = threadsOnFile(current.threads, root, file.path)
+  const here = threadsOnFile(current.threads, root, file.path, current.project)
   if (here.length === 0) return null
   const text = await $.fs.read(file.path).catch(() => null)
   return [contextBlock(relativePath(root, file.path), here, text)]
@@ -286,7 +298,9 @@ const dirOf = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 
 /** Finds the dbt project from a folder when none is known yet, and starts its first load and the poll. */
 async function attach($: EngineInterface, dir: string) {
-  if ((await get($)).root) return
+  const known = (await get($)).root
+  // A folder inside the project already loaded belongs to it; one outside may belong to another project.
+  if (known && (slashes(dir) === slashes(known) || slashes(dir).startsWith(`${slashes(known).replace(/\/+$/, '')}/`))) return
   // A file of an installed package belongs to that package's own project, not to the one being worked on.
   if (searched.has(dir) || /[\\/](dbt_packages|dbt_modules|node_modules)[\\/]/.test(dir)) return
   const found = await projectOf($, dir)
@@ -294,8 +308,19 @@ async function attach($: EngineInterface, dir: string) {
     searched.add(dir)
     return
   }
-  await change($, current => ({ ...current, ...found }))
-  later($, () => load($))
+  if (known && slashes(known) === slashes(found.root)) return
+  // Another project (a monorepo): what was loaded for the first one is not shown for this one, and a list
+  // still running for the first is dropped.
+  if (known) writes++
+  await change($, current => (known ? { ...INITIAL, drafts: current.drafts, ...found } : { ...current, ...found }))
+  // The first load of a project: a read that is waiting on it has already joined it, so this one is not asked twice.
+  pendingFor = found.root
+  later($, async () => {
+    // A read waiting on this project's first load has taken it over: it is not asked twice.
+    if (pendingFor !== found.root) return
+    pendingFor = null
+    await load($)
+  })
   // A `-p` run or the SDK has nobody at a pane: it loads once and does not poll.
   if (interactive && poll === null) poll = $.clock.every(pollSeconds * 1000, () => later($, () => load($)))
 }
@@ -342,17 +367,27 @@ async function fetchThreads($: EngineInterface) {
     if (mine !== generation || wrote !== writes) return
     if (!out.ok || !Array.isArray(listed?.threads)) {
       if (lacksTool(out.text)) {
-        await change($, current => ({ ...current, needs: NEEDS_NEWER_CLI, loading: false }))
+        await change($, current => (mine !== generation ? current : { ...current, needs: NEEDS_NEWER_CLI, loading: false }))
         return
       }
+      // Signed out, refused or no such route: asking again later gets the same answer, so the poll stops.
+      // Refresh and /comments are how the person tries again.
+      if (/\b40[134]\b|sign(ed)? in|credentials|unauthori[sz]ed|forbidden/i.test(out.text) && mine === generation) {
+        poll?.cancel()
+        poll = null
+      }
       // Keep what was shown: a failed refresh is no reason to hide the threads already fetched.
-      await change($, current => ({ ...current, loading: false, error: oneLine(out.text) || 'Could not load the comments.' }))
+      await change($, current => (mine !== generation ? current : { ...current, loading: false, error: oneLine(out.text) || 'Could not load the comments.' }))
       return
     }
     const threads = listed.threads.map(toThread).filter((one): one is CommentsThread => one !== null)
     const now = await $.clock.now()
     // A post may have finished while this answer was being applied: the fresh list that follows it decides.
-    await change($, current => (wrote !== writes ? { ...current, loading: false } : { ...current, threads, loadedAt: now, loading: false, error: null }))
+    await change($, current => {
+      // A new session may have begun while the clock was read: its state is not written to.
+      if (mine !== generation) return current
+      return wrote !== writes ? { ...current, loading: false } : { ...current, threads, loadedAt: now, loading: false, error: null }
+    })
   } catch (error) {
     if (mine !== generation) return
     const missing = /ENOENT|not found|no such file/i.test(String(error))
@@ -387,6 +422,12 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     const sent = out.ok && (out.metadata as { success?: boolean } | null)?.success !== false
     if (!sent) {
       await change($, current => ({ ...current, posting: null, note: oneLine(out.text) || 'The comment service did not accept that.' }))
+      // Only a refusal the tool names (no write permission, no text, no ids) is known not to have posted.
+      // Any other failure, a timeout included, may have landed: show what the docs hold before another press.
+      const code = (out.metadata as { error?: unknown } | null)?.error
+      if (typeof code === 'string' && REFUSALS.has(code)) return
+      release()
+      await load($)
       return
     }
     writes++
@@ -467,9 +508,14 @@ export function toThread(raw: unknown): CommentsThread | null {
 }
 
 /** The threads that sit on this file (their path is relative to the project folder). */
-export function threadsOnFile(threads: CommentsThread[], root: string, path: string): CommentsThread[] {
+export function threadsOnFile(threads: CommentsThread[], root: string, path: string, project: string | null = null): CommentsThread[] {
   const rel = relativePath(root, path)
-  return threads.filter(thread => thread.filePath !== undefined && slashes(thread.filePath).replace(/^\.\//, '') === rel)
+  return threads.filter(thread => {
+    if (thread.filePath === undefined || slashes(thread.filePath).replace(/^\.\//, '') !== rel) return false
+    // An installed package's model has a path relative to that package: its unique id (`model.<package>.<name>`) says whose.
+    const owner = project && thread.uniqueId ? /^[a-z_]+\.([^.]+)\./i.exec(thread.uniqueId)?.[1] : undefined
+    return owner === undefined || owner === project
+  })
 }
 
 /**

@@ -28,7 +28,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -42,10 +42,11 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
   on('ui.open', () => ({ value: {} }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${projectDir}/dbt_project.yml` }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${projectDir}/dbt_project.yml` || (options.otherProject !== undefined && e.path === `${options.otherProject}/dbt_project.yml`) }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${projectDir}/dbt_project.yml`) return { value: "name: 'jaffle_shop'\nversion: '1.0'\n" }
+    if (options.otherProject !== undefined && e.path === `${options.otherProject}/dbt_project.yml`) return { value: "name: 'other_shop'\n" }
     const files = options.files ?? { [FILE]: SQL }
     if (e.path in files) return { value: files[e.path] }
     throw new Error('ENOENT ' + e.path)
@@ -68,7 +69,8 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
       return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }
     }
     if (options.holdPost) return options.holdPost.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'done', metadata: { success: true } }), stderr: '' } }))
-    if (options.failPost) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'posting needs write permission', metadata: { success: false } }), stderr: '' } }
+    if (options.timeoutPost) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'Could not resolve the thread: timed out. The resolve may already have been posted: run list to check before trying again.', metadata: { success: false, error: 'timed out' } }), stderr: '' } }
+    if (options.failPost) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'posting needs write permission', metadata: { success: false, error: options.failPostCode ?? 'read_only' } }), stderr: '' } }
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'done', metadata: { success: true } }), stderr: '' } }
   })
   on('tool.call', () => ({ result: { ok: true } }))
@@ -323,4 +325,58 @@ test('a Resolve during a poll whose follow-up list fails still leaves the thread
   const read: any = await $.tool.call({ tool: 'Read', file_path: FILE })
   expect(read.context ?? []).toEqual([])
   await ui.unmount()
+})
+
+test('a package model’s thread is not shown on the project’s own file with the same relative path', () => {
+  const own = toThread({ ...RAW, unique_id: 'model.jaffle_shop.orders' })!
+  const pkg = toThread({ ...RAW, group_id: 12, unique_id: 'model.some_pkg.orders' })!
+  const bare = toThread({ ...RAW, group_id: 13 })!
+  expect(threadsOnFile([own, pkg, bare], ROOT, FILE, 'jaffle_shop')).toEqual([own, bare])
+})
+
+test('only the first read waits for the first list, and only on a file that can hold a thread', async ($, on) => {
+  const { clock } = await start($, on, { holdList: new Promise<void>(() => {}), settle: false, files: { [FILE]: SQL, [`${ROOT}/notes.txt`]: 'x' } })
+  let done = 0
+  const read = (file: string) => $.tool.call({ tool: 'Read', file_path: file }).then(() => void done++)
+  void read(`${ROOT}/notes.txt`)
+  await clock.advance(100)
+  expect(done).toBe(1)
+  void read(FILE)
+  await clock.advance(100)
+  expect(done).toBe(1)
+  await clock.advance(FIRST_READ_WAIT_MS)
+  expect(done).toBe(2)
+  // The wait was spent: a second read of the model does not wait again.
+  void read(FILE)
+  await clock.advance(100)
+  expect(done).toBe(3)
+})
+
+test('a post the CLI reports as failed without refusing it is followed by a fresh list; a refusal is not', async ($, on) => {
+  const timed = await start($, on, { timeoutPost: true })
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await timed.clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await timed.clock.settle()
+  // A post that timed out may have landed: the list is asked again before another press.
+  expect(timed.cli.filter(c => c.args.action === 'list').length).toBe(2)
+  await ui.unmount()
+})
+
+test('a refused post (read-only) is not followed by a list', async ($, on) => {
+  const { clock, cli } = await start($, on, { failPost: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').length).toBe(1)
+  await ui.unmount()
+})
+
+test('a read in a second dbt project loads that project’s threads, not only the first one’s', async ($, on) => {
+  const other = '/other'
+  const { clock, cli } = await start($, on, { otherProject: other, files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
+  await $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop'])
 })
