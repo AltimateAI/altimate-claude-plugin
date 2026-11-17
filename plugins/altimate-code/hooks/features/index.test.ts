@@ -51,13 +51,30 @@ test('attempt logs a feature function that throws at once, one that rejects, and
   expect(logs).toEqual(['runs · sessionStart failed: Error: at once', 'defer · bandLine failed: Error: later'])
 })
 
-test('each phase runs through the features, which find nothing to report and log nothing', async () => {
+test('no feature fails in any phase: every failure would be logged, and none is', async () => {
   const { $, logs } = engine()
   // The engine does record a failure: a feature function that throws is logged through it.
   await attempt($, 'runs', 'sessionStart', () => {
     throw new Error('broken')
   })
   expect(logs.splice(0)).toEqual(['runs · sessionStart failed: Error: broken'])
+  const bash = { tool: 'Bash', command: 'dbt run -s a' } as any
+  const file = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
+  await featuresSessionStart($, {} as any)
+  await featuresTurnStart($, {} as any)
+  await featureBandLines($, {} as any)
+  await featuresBashRewrite($, bash)
+  await featuresBashGate($, bash)
+  await featuresBashAfter($, bash, {} as any)
+  await featuresEditAfter($, file, {} as any, { path: '/repo/models/a.sql', before: null })
+  await featuresReadOrEditAfter($, file, {} as any, { path: '/repo/models/a.sql' })
+  await featuresTurnComplete($, {} as any, {} as any)
+  await featuresSessionEnd($, {} as any)
+  expect(logs).toEqual([])
+})
+
+test('each phase runs through the features, which find nothing to report and log nothing', async () => {
+  const { $, logs } = engine()
   const bash = { tool: 'Bash', command: 'dbt run -s a' } as any
   const file = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
   await featuresSessionStart($, {} as any)
