@@ -94,7 +94,10 @@ export function buildPrompt(view: ToModelState): string {
   ]
   if (matched.length === 0) lines.push('  (none matched)')
   for (const row of matched) {
-    const note = row.match === 'partial' ? ' (partial match: the SQL names fewer parts than the relation; confirm with me if the schema differs)' : ''
+    const best = row.candidates.filter(c => c.match === row.match)
+    const ambiguous = best.length > 1 ? ` (${best.length} relations match equally: ${best.map(c => oneLine(c.replaceWith)).join(' or ')}; ask me which one before using it)` : ''
+    const partial = row.match === 'partial' ? ' (partial match: the SQL names fewer parts than the relation; confirm with me if the schema differs)' : ''
+    const note = partial + ambiguous
     const self = row.replaceWith.includes(`ref('${view.name}')`) || row.replaceWith.includes(`ref("${view.name}")`)
     lines.push(`  ${quote(row.raw)} -> ${oneLine(row.replaceWith)}${note}${self ? ' (this is the model being written: do not make it read itself; ask me what to do)' : ''}`)
   }
@@ -214,7 +217,15 @@ export function register(on: On, context: FeatureContext) {
     if (rows.length === 0) return { text: 'No tables found in that SQL: nothing to map to ref() or source().' }
 
     const dialect = typeof (result.metadata as { dialect?: unknown } | null)?.dialect === 'string' ? (result.metadata as { dialect: string }).dialect : null
-    const view: ToModelState = { name: parsed.name, source: got.source, dialect, rows: sortRows(rows), sql: got.sql, modelsDir: got.modelsDir }
+    // When the CLI picked the project itself, the models folder is the one of the manifest it used.
+    const used = (result.metadata as { manifest_path?: unknown } | null)?.manifest_path
+    let modelsDir = got.modelsDir
+    if (!modelsDir && typeof used === 'string') {
+      const root = await $.session.root().catch(() => null)
+      const full = /^([\\/]|[A-Za-z]:)/.test(used) || !root ? used : `${root.replace(/[\\/]$/, '')}/${used}`
+      modelsDir = (await projectNear($, full, root)).modelsDir
+    }
+    const view: ToModelState = { name: parsed.name, source: got.source, dialect, rows: sortRows(rows), sql: got.sql, modelsDir }
     await update($, stateAtom, () => view)
     try {
       await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true })
@@ -223,7 +234,7 @@ export function register(on: On, context: FeatureContext) {
     }
     // The host refuses a submit made inside a command's own hook, so it goes out right after this one returns.
     later($, () => $.prompt.submit({ text: buildPrompt(view) }))
-    return { text: `${summary(view.rows)}. Asked Claude to write ${got.modelsDir ?? 'models'}/<layer>/${parsed.name}.sql.` }
+    return { text: `${summary(view.rows)}. Asked Claude to write ${modelsDir ?? 'models'}/<layer>/${parsed.name}.sql.` }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

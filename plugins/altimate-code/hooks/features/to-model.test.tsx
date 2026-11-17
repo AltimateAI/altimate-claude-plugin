@@ -208,6 +208,18 @@ test("a templated target-path is read at its env_var default; any other template
   expect(unreadable.text).toContain('is a template this command cannot read')
 })
 
+test("a table that several relations match equally is not handed over as a single replacement, and the CLI's project gives the models folder", async ($, on) => {
+  const two = { raw: 'orders', replaceWith: "{{ ref('sales_orders') }}", match: 'partial', candidates: [
+    { replaceWith: "{{ ref('sales_orders') }}", kind: 'model', name: 'sales_orders', relationName: '"d"."sales"."orders"', match: 'partial' },
+    { replaceWith: "{{ ref('support_orders') }}", kind: 'model', name: 'support_orders', relationName: '"d"."support"."orders"', match: 'partial' },
+  ] }
+  const { clock, prompts } = await start($, on, { mappings: [two] })
+  await run($, 'm q.sql')
+  await clock.settle()
+  expect(prompts[0]).toContain('2 relations match equally')
+  expect(prompts[0]).toContain("ref('support_orders')")
+})
+
 test('a table mapped to the model being written is flagged so Claude does not make it read itself', async ($, on) => {
   const { clock, prompts } = await start($, on)
   await run($, 'orders q.sql')
