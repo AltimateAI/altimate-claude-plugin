@@ -134,15 +134,15 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 ## Settings
 
-The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). None of them does anything yet: the features they belong to are not built, so changing one has no effect today.
+The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`).
 
-| Setting | Default | What it will control | Active |
-| --- | --- | --- | --- |
-| `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it is held for `/allow-scan` (0 never holds one; at least 0). | Not yet |
-| `healthBlocksPush` | off | Refusing `git push` while the project health check finds new issues in the models you changed. | Not yet |
-| `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. | Not yet |
-| `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). | Not yet |
-| `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. | Not yet |
+| Setting | Default | What it controls |
+| --- | --- | --- |
+| `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it is held for `/allow-scan` (0 never holds one; at least 0). Other warehouses are never held. |
+| `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. |
+| `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. Empty uses the default checks. |
+| `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). |
+| `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. |
 
 ## Example prompts
 
