@@ -7,11 +7,20 @@
 // reported as literal values. In particular, these give no invocation:
 //   - a line that can't be read (an unclosed quote, substitution or parenthesis, an operator or
 //     redirection with nothing after it, a heredoc outside a `$(…)` substitution);
-//   - `command -v dbt …` / `command -V dbt …` (a lookup), and `env` followed by any option word
-//     (`env -u X`, `env -i`, `env -S`); `env` with only NAME=value words is read;
+//   - a prefix word with an option outside its grammar. Only these are read: `command -p`, `exec -c`,
+//     `exec -l`, `exec -a NAME`, `time -p`, and `--` after `command`, `exec`, `nohup` or `env`. So
+//     `command -v dbt …` (a lookup), `command --help dbt run`, `nohup --help dbt run`, `env -u X …`,
+//     `env -i …` and `time -f …` give none; `env` with only NAME=value words (and `--`) is read;
+//   - a launcher option outside the known grammar of `uv`/`uvx`/`poetry`/`pipenv`/`pdm`/`hatch`/`rye`
+//     `run` (an unknown option may take a value, so what runs is not known), a help or version
+//     option, or a word other than dbt after the launcher's `--` (`uv run -- --project x dbt run`);
 //   - a NAME=value word right after `nohup`, `command`, `exec` (it is the command's name, not an
 //     assignment), and a quoted NAME=value or quoted shell keyword (`"DBT_TARGET=prod" dbt run`,
 //     `"if" dbt run`), which is a command's name too;
+//   - a shell keyword other than `time` where it is a program's name, not a keyword: after a prefix
+//     command (`env if dbt run`, `nohup ! dbt run`) or after an assignment (`X=1 if dbt run`); and
+//     `command` or `exec` (shell builtins) as the program `env` or `nohup` runs;
+//   - a backslash as the line's last character;
 //   - a binary or subcommand word that holds an expansion (`dbt $CMD`, `$(which dbt) run`);
 //   - a redirection among the arguments with another argument after it (`dbt run > log -s a`): an
 //     unsupported form, since cutting the invocation out would cut the redirection too. A trailing
@@ -20,6 +29,9 @@
 // unquoted `~`, brace list or pathname pattern, or a `$'…'` word with an escape, outside single quotes;
 // a word holding one is a single word, whatever it holds.
 
+// Only what is written on the command is read: a DBT_TARGET exported earlier, inherited from the
+// session or loaded by a launcher (`uv run --env-file .env`) is not seen, so a null target or target
+// path means "none written here", not "none".
 export type DbtInvocation = {
   /** How dbt is launched, as written: `dbt`, `.venv/bin/dbt`, `uv run dbt`, `poetry run dbt`. */
   binary: string
@@ -245,8 +257,11 @@ function lex(line: string): Token[] | null {
     }
     if (start < 0) start = i
     if (c === '\\') {
+      // A backslash ending the line escapes nothing the shell can read here; inserting after it would
+      // be escaped.
+      if (i + 1 >= line.length) return null
       quote()
-      text += line[i + 1] ?? ''
+      text += line[i + 1]!
       i += 2
     } else if (c === "'") {
       const close = line.indexOf("'", i + 1)
@@ -331,10 +346,48 @@ const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
 const KEYWORDS = new Set(['!', '{', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time'])
 // Commands that run their first argument that is no option: a NAME=value there is the command's name.
 const WRAPPERS = new Set(['command', 'exec', 'nohup', 'env'])
-// Options of those words and of `time` that take a value, so the value is not read as the command.
-const PREFIX_VALUE_FLAGS = new Set(['-C', '--chdir', '-f', '--format', '-o', '--output', '-a'])
+// The options each prefix word has: whether one takes a value. Any other option gives no invocation.
+const PREFIX_OPTIONS: Record<string, Record<string, 'flag' | 'value'>> = {
+  command: { '-p': 'flag' },
+  exec: { '-c': 'flag', '-l': 'flag', '-cl': 'flag', '-lc': 'flag', '-a': 'value' },
+  time: { '-p': 'flag' },
+}
+// Prefix words that end their options at `--`; `time` and the other keywords take no `--`.
+const ENDS_AT_DASHES = new Set(['command', 'exec', 'nohup', 'env'])
 // Launchers whose `run` subcommand runs the command after their own options.
 const RUNNERS = new Set(['uv', 'poetry', 'pipenv', 'pdm', 'hatch', 'rye', 'uvx'])
+// Launcher options that take no value. With RUNNER_VALUE_FLAGS, the only launcher options read: an
+// unknown one may take a value, so which word runs is not known.
+const RUNNER_FLAGS = new Set([
+  '-q',
+  '--quiet',
+  '-v',
+  '--verbose',
+  '-n',
+  '--no-interaction',
+  '--ansi',
+  '--no-ansi',
+  '--no-plugins',
+  '--no-cache',
+  '--no-sync',
+  '--frozen',
+  '--locked',
+  '--isolated',
+  '--active',
+  '--no-project',
+  '--all-extras',
+  '--all-packages',
+  '--no-dev',
+  '--no-env-file',
+  '--offline',
+  '--exact',
+  '--refresh',
+  '--native-tls',
+  '--no-config',
+  '--recreate',
+  '-s',
+  '--site-packages',
+])
 // Launcher options that take a value, so the value is not read as the command.
 const RUNNER_VALUE_FLAGS = new Set([
   '--with',
@@ -344,6 +397,7 @@ const RUNNER_VALUE_FLAGS = new Set([
   '--directory',
   '--python',
   '-p',
+  '-P',
   '--env-file',
   '--extra',
   '--group',
@@ -628,6 +682,11 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
     // A quoted word is a command's name, never a keyword or a prefix command.
     const unquoted = word.quotedAt < 0
     if (unquoted && (KEYWORDS.has(word.text) || WRAPPERS.has(word.text))) {
+      // After a prefix command or an assignment, a keyword is the name of a program to run (`env if`);
+      // only `time` is one that exists (`X=1 time dbt run` runs the external time).
+      if (KEYWORDS.has(word.text) && word.text !== 'time' && (wrapped || firstAssignment !== null)) return null
+      // `env` and `nohup` run a program: the shell builtins `command` and `exec` are none.
+      if ((prefix === 'env' || prefix === 'nohup') && (word.text === 'command' || word.text === 'exec')) return null
       prefix = word.text
       wrapped = WRAPPERS.has(word.text)
       optionsOpen = true
@@ -635,11 +694,17 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       continue
     }
     if (unquoted && word.text.startsWith('-') && prefix !== null && optionsOpen) {
-      // `env` with an option (`-u X`, `-i`, `-S …`) may clear or change what dbt sees: not read.
-      if (prefix === 'env') return null
-      // `command -v dbt` and `command -V dbt` look the command up; they do not run it.
-      if (prefix === 'command' && /^-[A-Za-z]*[vV]/.test(word.text)) return null
-      if (PREFIX_VALUE_FLAGS.has(word.text)) i++
+      if (word.text === '--' && ENDS_AT_DASHES.has(prefix)) {
+        // The next word is the command, or, after `env`, a NAME=value.
+        optionsOpen = false
+        firstAssignment = null
+        continue
+      }
+      // Only the prefix's own options are read: `command -v` looks dbt up, `env -u X` changes what dbt
+      // sees, and `--help` prints usage, so none of them runs dbt as written.
+      const takes = PREFIX_OPTIONS[prefix]?.[word.text]
+      if (!takes) return null
+      if (takes === 'value') i++
       firstAssignment = null
       continue
     }
@@ -660,12 +725,17 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
     }
     while (i < words.length && words[i]!.text.startsWith('-')) {
       const flag = words[i]!.text
-      // The launcher prints its help or version and runs nothing.
-      if (flag === '-h' || flag === '--help' || flag === '-V' || flag === '--version') return null
-      i += RUNNER_VALUE_FLAGS.has(flag) && !flag.includes('=') ? 2 : 1
+      // `uv run --` ends the launcher's options: the next word is the command, whatever it looks like.
+      if (flag === '--') {
+        i++
+        break
+      }
+      const name = flag.includes('=') ? flag.slice(0, flag.indexOf('=')) : flag
+      // An unknown option may take a value, or print help or a version and run nothing.
+      if (RUNNER_VALUE_FLAGS.has(name)) i += flag.includes('=') ? 1 : 2
+      else if (!flag.includes('=') && (RUNNER_FLAGS.has(flag) || /^-[qv]+$/.test(flag))) i++
+      else return null
     }
-    // `uv run --` ends the launcher's options.
-    if (words[i]?.text === '--') i++
     if (i >= words.length || !isDbt(words[i]!.text)) return null
     binaryEnd = i
   } else return null

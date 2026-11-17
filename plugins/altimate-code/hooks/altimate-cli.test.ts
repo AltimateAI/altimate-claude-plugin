@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { runTool } from './altimate-cli'
+import { runTool, within } from './altimate-cli'
 
 /** A stand-in for `$` whose CLI answers every call and whose MCP connection attempts go through `connect`. */
 function standIn(connect: () => unknown, now = 0) {
@@ -49,4 +49,26 @@ test('a write call never asks the MCP server, even when one is connected', async
   expect(connects).toBe(1)
   expect(mcpCalls()).toBe(1)
   expect(argvs.map(argv => argv.slice(1))[1]).toEqual(['tool', 'run', 'dbt_manifest', '--args', '{}', '--json'])
+})
+
+test('within handles the work\'s rejection before it sets the deadline, so a throwing clock leaves none unhandled', async () => {
+  let handled = false
+  // A work that rejects, recording when a rejection handler is attached.
+  const rejected = Promise.reject(new Error('rewrite failed'))
+  const work = {
+    then: (ok: (v: string) => unknown, failed?: (e: unknown) => unknown) => {
+      handled = typeof failed === 'function'
+      return rejected.then(ok, failed)
+    },
+  } as unknown as Promise<string>
+  const $: any = {
+    clock: {
+      after: () => {
+        expect(handled).toBe(true)
+        throw new Error('clock failed')
+      },
+    },
+  }
+  await expect(within($, 10, work)).rejects.toThrow('clock failed')
+  expect(handled).toBe(true)
 })
