@@ -14,6 +14,8 @@ type Options = {
   hold?: Promise<void>
   /** With `hold`: only the estimate of this model or SQL waits. */
   holdFor?: string
+  /** Drawing the status line throws. */
+  statusFails?: boolean
   /** The Bash tool runs this command only once this resolves. */
   holdBash?: { command: string; until: Promise<void> }
 }
@@ -32,6 +34,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.root', () => ({ value: ROOT }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.status', (_: unknown, e: { text?: string }) => {
+    if (options.statusFails) throw new Error('no status line')
     statuses.push(e.text)
     return { value: undefined }
   })
@@ -684,6 +687,51 @@ test('a command that is rewriting the model voids the estimates before it ends, 
   expect(estimates).toEqual(['orders', 'orders'])
   finish()
   await rewrite
+})
+
+test('a slow estimate for a line that also redirects its output is used on the retry, not asked for again', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const line = 'dbt run -s orders > run.log'
+  const first = $.tool.call(bash(line))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  options.hold = undefined
+  const retry: any = await $.tool.call(bash(line))
+  await clock.settle()
+  expect(retry.deny).toBeUndefined()
+  expect(estimates).toEqual(['orders'])
+  expect(ran).toEqual([line])
+})
+
+test('a no-dry-run answer that an edit made void is not kept as the warehouse', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(1_000)
+  await $.tool.call(EDIT)
+  release()
+  await clock.settle()
+  expect(((await first) as any).deny).toContain('The project changed')
+  options.hold = undefined
+  options.answers = { orders: OVER }
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+})
+
+test('a status line that cannot be drawn does not let a scan over the limit through', async ($, on) => {
+  const { clock, ran } = await start($, on, { answers: { orders: OVER }, statusFails: true })
+  const result: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(result.deny).toContain('20.0 GiB')
+  expect(ran).toEqual([])
 })
 
 test('an edit drops the estimates made before it', async ($, on) => {

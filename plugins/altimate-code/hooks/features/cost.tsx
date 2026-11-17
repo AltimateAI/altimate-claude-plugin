@@ -45,6 +45,8 @@ let limitBytes = DEFAULT_MAX_SCAN_BYTES
 const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
 const inflight = new Map<string, { answer: Promise<Answer>; doneAt: number | null; generation: number }>()
+/** Commands the gate refused while their estimate was running: they have not run, so a retry changes nothing. */
+const refused = new Set<string>()
 /** Moves on whenever the project may have changed: an estimate started before it is never taken as an answer. */
 let generation = 0
 /** When the session found a warehouse with no dry run; null once forgotten. That finding is kept only so long, since the target can change. */
@@ -108,6 +110,7 @@ export function register(on: On, context: FeatureContext) {
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
   notes.clear()
   inflight.clear()
+  refused.clear()
   generation++
   unsupportedSince = null
   await update($, costAtom, () => ({ ...FRESH }))
@@ -143,7 +146,8 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
   // Before it runs, not only after: another call can ask while a long command is rewriting the project.
-  if (mutates(e.command)) {
+  // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
+  if (mutates(e.command) && !refused.has(e.command)) {
     invalidate()
     if (MOVES_TARGET.test(e.command)) await forgetUnsupported($)
   }
@@ -178,6 +182,8 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     }
     const label = target.model ?? 'the inline query'
     const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken)
+    // The project changed while this was being asked: nothing it says is published, and the command is refused below.
+    if (generation !== startedAt) break
     if (answer === 'pending') {
       if (!pending.includes(label)) pending.push(label)
       continue
@@ -185,8 +191,9 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     if (answer.kind === 'unsupported') {
       // Nothing can be held on this warehouse, so a hold from before the verdict goes with it.
       unsupportedSince = await $.clock.now()
+      if (generation !== startedAt) break
       await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter, held: null, allowOnce: false }))
-      await setStatusPart($, 'cost', null)
+      await showStatus($, null)
       lines.push(`cost · no estimate on ${answer.adapter}: only BigQuery has a dry run`)
       over.length = 0
       pending.length = 0
@@ -225,6 +232,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       })
     }
     notes.delete(e.command)
+    refused.add(e.command)
     return { deny: `The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.` }
   }
 
@@ -250,7 +258,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       return null
     }
     notes.delete(e.command)
-    await setStatusPart($, 'cost', `scan held ≈ ${worst.display}`)
+    await showStatus($, `scan held ≈ ${worst.display}`)
     // The hold is decided on the upper bound, and the display is the rounded point estimate: either can read
     // as not over the limit when the scan is just past it.
     const scanned =
@@ -268,7 +276,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   if (estimated && (state.held || state.allowOnce)) {
     await update($, costAtom, prev => (prev?.held || prev?.allowOnce ? { ...prev, held: null, allowOnce: false } : prev))
     const last = (await read($, costAtom))?.lastEstimate
-    await setStatusPart($, 'cost', last ? `scan ≈ ${last.display}` : null)
+    await showStatus($, last ? `scan ≈ ${last.display}` : null)
   }
   keepNotes(e.command, lines)
   return null
@@ -287,6 +295,7 @@ function keepNotes(command: string, lines: string[]) {
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   const lines = notes.get(e.command)
   notes.delete(e.command)
+  refused.delete(e.command)
   // A shell command can rewrite a model or the profile (a git restore, a sed): no earlier estimate is reused after one.
   if (mutates(e.command)) {
     invalidate()
@@ -493,8 +502,18 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
 }
 
 async function rememberEstimate($: EngineInterface, target: string, bytes: number, display: string) {
-  await update($, costAtom, prev => ({ ...(prev ?? FRESH), lastEstimate: { target, bytes, display } }))
-  await setStatusPart($, 'cost', `scan ≈ ${display}`)
+  // What is shown never decides the gate: a failure here must not let a scan the gate knows is over the limit through.
+  try {
+    await update($, costAtom, prev => ({ ...(prev ?? FRESH), lastEstimate: { target, bytes, display } }))
+    await setStatusPart($, 'cost', `scan ≈ ${display}`)
+  } catch {}
+}
+
+/** The status line's cost part; a failure to draw it is dropped. */
+async function showStatus($: EngineInterface, text: string | null) {
+  try {
+    await setStatusPart($, 'cost', text)
+  } catch {}
 }
 
 /** What an estimate means against the limit, as a sentence tail for /scan-cost. */
