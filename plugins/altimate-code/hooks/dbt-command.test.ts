@@ -131,6 +131,29 @@ test("quotes in a heredoc inside a substitution are text, so Claude's commit for
   expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
 })
 
+test('the commands of a `$(…)` or backtick substitution run too, quoted or not, nested or not', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('echo "$(dbt run -s orders)"')).toEqual([{ ...run, select: ['orders'] }])
+  expect(shape('echo `dbt run`')).toEqual([run])
+  expect(shape('x=$(dbt build); dbt test')).toEqual([
+    { ...base, binary: 'dbt', subcommand: 'build' },
+    { ...base, binary: 'dbt', subcommand: 'test' },
+  ])
+  expect(shape('echo $(echo $(dbt run))')).toEqual([run])
+  expect(shape("echo '$(dbt run)'")).toEqual([])
+  const line = 'echo "$(dbt run -s a)"'
+  expect(parseDbtCommand(line).map(({ start, end }) => line.slice(start, end))).toEqual(['dbt run -s a'])
+})
+
+test('quotes decide what a substitution is: an apostrophe inside double quotes hides nothing, single quotes hide it, and the commands come in the order written', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape(`echo "it's $(dbt run)"`)).toEqual([run])
+  expect(shape(`echo "it's"'$(dbt run)'`)).toEqual([])
+  expect(shape('dbt run --vars "$(dbt ls)"').map(i => i.subcommand)).toEqual(['run', 'ls'])
+  // A substitution in a leading assignment is written before the command it feeds.
+  expect(shape('TARGET=$(dbt run-operation get_target) dbt run').map(i => i.subcommand)).toEqual(['run-operation', 'run'])
+})
+
 test('a here-string inside a substitution is no heredoc', () => {
   const line = `dbt run -s a && echo "$(cat <<< text\n)"`
   expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
