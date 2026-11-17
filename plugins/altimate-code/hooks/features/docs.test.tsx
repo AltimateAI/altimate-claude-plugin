@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { applyPrompt, candidatesFrom, changedDescriptions, columnDescriptions, modelPaths, sentGroups } from './docs'
+import { PHASE_TIMEOUT_MS } from '../tool-chain'
+import { ROUND_MS, applyPrompt, candidatesFrom, changedDescriptions, columnDescriptions, modelPaths, sentGroups } from './docs'
 
 const ROOT = '/repo'
 const MANIFEST_PATH = `${ROOT}/target/manifest.json`
@@ -275,7 +276,8 @@ test('a written description is traced, only Original and Alias columns are offer
   const result: any = await $.tool.call(EDIT)
   await clock.settle()
 
-  expect(calls).toContain('mcp:impact_analysis:customer_id')
+  expect(calls).toContain('cli:impact_analysis')
+  expect(calls.some(call => call.startsWith('mcp:'))).toBe(false)
   expect(result.context).toContain('◆ docs · "customer_id": 2 downstream columns can take this description · /propagate ("fct_orders.customer_id", "dim_customers.id")')
 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as any)
@@ -433,7 +435,7 @@ test('a model that selects * says that only the manifest columns are counted, ev
   const { clock } = await start($, on, { coverage })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/staging/stg_orders.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(result.context.join('\n')).toContain('the model selects `*`, so only the columns the manifest lists are counted')
+  expect(result.context.join('\n')).toContain('so only the columns the manifest lists are counted')
 })
 
 test('Apply clears the offers it sent, not a group whose columns were all unticked', () => {
@@ -448,4 +450,37 @@ test('Apply clears the offers it sent, not a group whose columns were all untick
   const [a, b] = [make('order_id'), make('customer_id')]
   expect(sentGroups([a, b], [`${MANIFEST_PATH}|stg_orders.order_id>fct_orders.order_id`])).toEqual([b])
   expect(sentGroups([a, b], [])).toEqual([a, b])
+})
+
+test('a description is attributed to its own column and model whatever order the keys come in', () => {
+  const yaml = [
+    'models:',
+    '  - description: Orders, one row each',
+    '    columns:',
+    '      - name: a',
+    '        description: Column A',
+    '      - data_type: integer',
+    '        description: Column B',
+    '        name: b',
+    '      - description: Column C',
+    '        name: c',
+    '    name: orders',
+    '  - name: customers',
+    '    columns:',
+    '      - data_type: text',
+    '        name: id',
+    '        description: Customer key',
+    '',
+  ].join('\n')
+  expect([...columnDescriptions(yaml)]).toEqual([
+    ['orders.a', 'Column A'],
+    ['orders.b', 'Column B'],
+    ['orders.c', 'Column C'],
+    ['customers.id', 'Customer key'],
+  ])
+  expect(changedDescriptions(yaml, yaml.replace('Column B', 'New B'))).toEqual([{ model: 'orders', column: 'b', description: 'New B' }])
+})
+
+test('the wait for a description\'s downstream columns ends inside the edit phase, so its context line is not dropped', () => {
+  expect(ROUND_MS).toBeLessThan(PHASE_TIMEOUT_MS)
 })

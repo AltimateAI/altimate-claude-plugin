@@ -18,7 +18,7 @@ const PANE = 'altimate-docs'
 const PANE_TITLE = 'Altimate docs'
 const COMMAND = 'propagate'
 // What an edit waits for the column reach of the descriptions it wrote; the edit goes ahead after.
-const ROUND_MS = 8_000
+export const ROUND_MS = 3_500
 // The most descriptions one edit traces.
 const MAX_COLUMNS = 3
 // The most pending descriptions the pane keeps.
@@ -140,12 +140,17 @@ function describedColumns(yaml: string): { model: string; column: string; descri
   const lines = yaml.replace(/\r\n?/g, '\n').split('\n')
   let inModels = false
   let modelDash = -1
+  let modelOpen = false
   let model: string | null = null
   let modelKey = -1
+  let modelFrom = 0
   let inColumns = false
   let columnDash = -1
+  let columnOpen = false
   let column: string | null = null
   let columnKey = -1
+  let described: string | null = null
+  const nameOf = inlineValue
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]!
     const body = raw.trim()
@@ -154,41 +159,64 @@ function describedColumns(yaml: string): { model: string; column: string; descri
     if (indent === 0 && !body.startsWith('-')) {
       inModels = /^models\s*:\s*(#.*)?$/.test(body)
       modelDash = -1
+      modelOpen = columnOpen = inColumns = false
       model = column = null
-      inColumns = false
       continue
     }
     if (!inModels) continue
 
-    const item = /^-\s+name\s*:\s*(.*)$/.exec(body)
-    if (item && (modelDash < 0 || indent === modelDash)) {
+    // A list item starts a model or a column whatever key it opens with: `name` need not come first.
+    const dash = /^-\s+(.*)$/.exec(body)
+    const text = dash ? dash[1]! : body
+    const at = dash ? indent + body.length - text.length : indent
+    if (dash && (modelDash < 0 || indent === modelDash)) {
       modelDash = indent
-      model = inlineValue(item[1]!)
-      modelKey = raw.indexOf('name')
+      modelKey = at
+      modelOpen = true
+      model = null
+      modelFrom = out.length
       inColumns = false
+      columnOpen = false
       column = null
-      continue
-    }
-    if (item && model !== null && inColumns && indent > modelDash && (columnDash < 0 || indent === columnDash)) {
+      described = null
+    } else if (dash && modelOpen && inColumns && indent > modelDash && (columnDash < 0 || indent === columnDash)) {
       columnDash = indent
-      column = inlineValue(item[1]!)
-      columnKey = raw.indexOf('name')
-      continue
-    }
-    const key = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(body)
-    if (!key || model === null) continue
-    if (indent === modelKey) {
-      // A key of the model itself: `columns:` opens the column list; any other ends the column in hand.
+      columnKey = at
+      columnOpen = true
       column = null
-      inColumns = key[1] === 'columns'
-      if (inColumns) columnDash = -1
-    } else if (inColumns && column !== null && indent === columnKey && key[1] === 'description') {
-      const { value, last } = valueAt(lines, i, indent, key[2]!)
-      if (value) out.push({ model, column, description: value })
-      i = last
+      described = null
+    }
+    const key = /^([A-Za-z_][\w-]*)\s*:\s*(.*)$/.exec(text)
+    if (!key || !modelOpen) continue
+    if (at === modelKey) {
+      if (key[1] === 'name') {
+        // The name can come after the columns: what was read for this model so far takes it.
+        model = nameOf(key[2]!)
+        for (let j = modelFrom; j < out.length; j++) out[j]!.model = model
+      } else {
+        // A key of the model itself: `columns:` opens the column list; any other ends the column in hand.
+        columnOpen = false
+        column = null
+        described = null
+        inColumns = key[1] === 'columns'
+        if (inColumns) columnDash = -1
+      }
+    } else if (inColumns && columnOpen && at === columnKey) {
+      if (key[1] === 'name') {
+        column = nameOf(key[2]!)
+        if (described) out.push({ model: model ?? '', column, description: described })
+        described = null
+      } else if (key[1] === 'description') {
+        const { value, last } = valueAt(lines, i, at, key[2]!)
+        if (value) {
+          if (column !== null) out.push({ model: model ?? '', column, description: value })
+          else described = value
+        }
+        i = last
+      }
     }
   }
-  return out
+  return out.filter(one => one.model !== '')
 }
 
 /** The descriptions `after` writes that `before` did not (new or changed), `before` being null for a file that did not exist. */
@@ -359,7 +387,7 @@ async function schemaEdited($: EngineInterface, file: EditedFile): Promise<strin
   const until = (await $.clock.now()) + ROUND_MS
   const traced = await Promise.all(
     changed.map(async one => {
-      const result = await runTool($, 'impact_analysis', { manifest_path: project.manifest, model: one.model, column: one.column, change_type: 'modify' }, { until }).catch(() => null)
+      const result = await runTool($, 'impact_analysis', { manifest_path: project.manifest, model: one.model, column: one.column, change_type: 'modify' }, { until, cliOnly: true }).catch(() => null)
       return { one, result }
     }),
   )
@@ -371,7 +399,7 @@ async function schemaEdited($: EngineInterface, file: EditedFile): Promise<strin
   for (const { one, result } of traced) {
     if (now.get(`${one.model}.${one.column}`) !== one.description) continue
     if (result && (!result.ok || !result.metadata)) {
-      lines.push(`◆ docs · could not find the downstream columns of ${JSON.stringify(`${one.model}.${one.column}`)}: ${JSON.stringify(result.text.split('\n')[0]!.slice(0, 160))}`)
+      lines.push(`◆ docs · could not find the downstream columns of ${JSON.stringify(`${one.model}.${one.column}`)}: altimate-code did not give an answer to copy from`)
       continue
     }
     if (!result?.metadata) continue
@@ -418,7 +446,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
     return []
   }
   const view: DocsCoverageView = {
-    model: String(meta.model),
+    model: typeof meta.model === 'string' && meta.model ? meta.model : model,
     percent: Number.isFinite(Number(meta.percent)) ? Number(meta.percent) : 0,
     documented: Array.isArray(meta.documented) ? meta.documented.length : 0,
     total: Array.isArray(meta.output_columns) ? meta.output_columns.length : 0,
@@ -428,8 +456,8 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   await update($, docsAtom, prev => ({ ...(prev ?? empty()), coverage: view }))
   await showStatus($)
   const gaps = [...(view.hasDescription ? [] : ['the model itself']), ...view.missing]
-  // A model that selects `*` is counted by the manifest's columns only.
-  const star = meta.source === 'manifest_columns' ? " · the model selects `*`, so only the columns the manifest lists are counted" : ''
+  // A select list that is not plain column names (a `*`, an unaliased expression, a UNION) is counted by the manifest's columns only.
+  const star = meta.source === 'manifest_columns' ? " · the model's select list is not plain column names (a `*`, an unaliased expression or a UNION), so only the columns the manifest lists are counted" : ''
   if (!gaps.length && !star) return []
   // Names come from the project and this line goes to Claude, so each is a quoted string.
   const shown = gaps.slice(0, MAX_NAMES).map(one => JSON.stringify(one)).join(', ') + (gaps.length > MAX_NAMES ? `, +${gaps.length - MAX_NAMES} more` : '')
