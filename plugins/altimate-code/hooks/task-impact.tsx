@@ -5,7 +5,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { PlanImpactView, TaskSummaryView } from '../types'
-import { later, runAltimate } from './altimate-cli'
+import { later, runAltimate, runTool, within } from './altimate-cli'
 import {
   answerOf,
   changedColumns,
@@ -25,7 +25,6 @@ import {
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
-import { runTool, within } from './altimate-cli'
 import { modelsNamed, openPane, projectRoot } from './lineage'
 
 export const REPORT_COMMAND = 'lineage-report'
@@ -636,7 +635,7 @@ export async function taskBeforeTool($: EngineInterface, e: any) {
   if (!file || !/\.sql$/i.test(file)) return
   const t = (task ??= newTask())
   if (t.originals.has(file)) return
-  const root = await projectRoot($, file, { cliOnly: true }).catch(() => null)
+  const root = await projectRoot($, file, true).catch(() => null)
   if (!root) return
   // A project first touched mid-task has its manifest copied now, before the edit.
   await within($, 20_000, prepareRoot($, t, root))
