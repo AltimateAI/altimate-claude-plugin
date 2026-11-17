@@ -502,7 +502,7 @@ export function register(on: On, context: FeatureContext) {
     const { Box, Button, Text } = $.ui.resolve(e)
     const state = (await read($, docsAtom)) ?? empty()
     const groups = state.groups.filter(group => group.candidates.length > 0)
-    const prompt = applyPrompt(groups, state.skipped)
+    const drawn = new Set(groups.map(group => `${groupKey(group.manifest, group.model, group.column)}|${group.description}`))
     const picked = groups.reduce((sum, group) => sum + group.candidates.filter(one => !state.skipped.includes(candidateKey(group, one))).length, 0)
     const coverage = state.coverage
     return (
@@ -547,7 +547,8 @@ export function register(on: On, context: FeatureContext) {
                   if (applying) return
                   // What is ticked now, not what was drawn: a tick or a withdrawn offer may have landed since the render.
                   const state = (await read($, docsAtom)) ?? empty()
-                  const groups = state.groups.filter(group => group.candidates.length > 0)
+                  // An offer that arrived after the draw waits for the next Apply: it was never shown.
+                  const groups = state.groups.filter(group => group.candidates.length > 0 && drawn.has(`${groupKey(group.manifest, group.model, group.column)}|${group.description}`))
                   const prompt = applyPrompt(groups, state.skipped)
                   if (!prompt || applying) return
                   applying = true

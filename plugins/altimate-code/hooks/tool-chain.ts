@@ -147,7 +147,7 @@ export function installToolChain(on: On) {
       log: text => $.ui.log(text, { to: 'debug' }),
     }
     // The chain failing never stops the call: it then runs as it came, and its result goes back as is.
-    const pre = await beforeCall(input, steps).catch(() => ({ e: input, deny: null, before: null, beforeUnknown: false }))
+    const pre = await beforeCall(input, steps).catch(() => ({ e: input, deny: null, before: null, beforeUnknown: true }))
     if (pre.deny) return pre.deny
     const result = await next(pre.e)
     return afterCall(pre.e, result, pre.before, steps, pre.beforeUnknown).catch(() => result)
