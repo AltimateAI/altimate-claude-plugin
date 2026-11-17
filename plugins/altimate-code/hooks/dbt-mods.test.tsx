@@ -3100,7 +3100,8 @@ kitTest('a saved query is measured in UTF-8 bytes; with no rows left its columns
   expect(new TextEncoder().encode(JSON.stringify(fit)).length).toBeLessThanOrEqual(32 * 1024)
   const big = fitSaved({ columns: Array.from({ length: 2000 }, (_, i) => `col${i}`.padEnd(40, 'x')), rows: [], error: null, inline: 'q'.repeat(40_000) })
   expect(big.inline).toBe('q'.repeat(40_000))
-  expect(big.columns.length).toBeLessThan(2000)
+  // The inline SQL alone is over the cap: dropping columns would not cure it, so they stay.
+  expect(big.columns.length).toBe(2000)
   const small = fitSaved({ columns: Array.from({ length: 2000 }, (_, i) => `col${i}`.padEnd(40, 'x')), rows: [], error: null, inline: 'select 1' })
   expect(small.inline).toBe('select 1')
   expect(small.columns.length).toBeGreaterThan(0)
@@ -3137,4 +3138,37 @@ test('a refused write that dropping unbookmarked entries cannot cure drops the o
   // The newest bookmarks stay.
   expect(history.some(one => one.title === 'mark0')).toBe(true)
   expect(history.some(one => one.title === 'mark7')).toBe(false)
+})
+
+test('a dbt deps that fails because git is not found, as dash and busybox say it, does not make dbt unrunnable', async ($, on) => {
+  const { clock, runs } = await start($, on, { interactive: true, files: { 'packages.yml': 'packages: []' }, depsFails: 'sh: 1: git: not found', depsExit: 127 })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  await band.unmount()
+  const result: any = await editOrders($)
+  await clock.settle()
+  expect(runs.some(argv => argv[1] === 'show')).toBe(true)
+  expect(noteOf(result)).not.toContain('dbt could not be run here')
+})
+
+test('a bare exit 127 that says something is not found does not make dbt unrunnable', async ($, on) => {
+  const { clock, runs } = await start($, on, { interactive: true, files: { 'packages.yml': 'packages: []' }, depsFails: 'could not exec helper: not found', depsExit: 127 })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  await band.unmount()
+  const result: any = await editOrders($)
+  await clock.settle()
+  expect(runs.some(argv => argv[1] === 'show')).toBe(true)
+  expect(noteOf(result)).not.toContain('dbt could not be run here')
+})
+
+kitTest('a query whose uncuttable fields are over the cap keeps its rows and columns', () => {
+  const inline = 'q'.repeat(40_000)
+  const entry = { id: JSON.stringify(['/proj', null, inline, []]), inline, columns: ['a', 'b'], rows: [[1, 2], [3, 4]], error: null }
+  const fit = fitSaved(entry)
+  expect(fit.rows).toEqual(entry.rows)
+  expect(fit.columns).toEqual(['a', 'b'])
+  expect(fit.inline).toBe(inline)
 })

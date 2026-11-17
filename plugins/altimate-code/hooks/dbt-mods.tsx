@@ -209,10 +209,12 @@ const unrunnable = new Set<string>()
 function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): boolean {
   if (run.exitCode === -1) return !/time(?:d)?[ -]?out/i.test(run.stderr)
   if (run.exitCode === 0) return false
-  // zsh says `zsh: command not found: dbt`, bash and sh `bash: dbt: command not found`: the name is the command's, never the shell's.
-  const names = [...run.stderr.matchAll(/command not found: ([\w./\\-]+)|([\w./\\-]+): command not found/gi)].map(one => (one[1] ?? one[2])!)
+  // zsh says `zsh: command not found: dbt`, bash `bash: dbt: command not found`, dash and busybox `sh: 1: dbt: not found`:
+  // the name is the command's, never the shell's.
+  const names = [/command not found: ([\w./\\-]+)/gi, /([\w./\\-]+): command not found/gi, /\bsh: \d+: ([\w./\\-]+): not found/gi].flatMap(pattern => [...run.stderr.matchAll(pattern)].map(one => one[1]!))
   const missing = names.filter(name => !/^-?(?:ba|z|da|k|c|fi)?sh$/i.test(name)).map(name => name.split(/[\\/]/).pop()!.replace(/\.exe$/i, ''))
-  return missing.length > 0 ? missing.includes('dbt') : run.exitCode === 127
+  // A bare 127 counts only when nothing else is said to be missing.
+  return missing.length > 0 ? missing.includes('dbt') : run.exitCode === 127 && !/not found|no such file or directory/i.test(run.stderr)
 }
 
 /** Runs the project's dbt in the project, after any dbt this plugin already started there. */

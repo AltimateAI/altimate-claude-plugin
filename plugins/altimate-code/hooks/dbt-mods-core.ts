@@ -835,6 +835,8 @@ export function savedRows(rows: unknown[][], limit: number): unknown[][] {
 export function fitSaved<T extends { rows: unknown[][]; error: string | null; columns?: string[]; inline?: string | null }>(entry: T): T {
   const next = { ...entry, error: entry.error ? entry.error.slice(0, 2000) : entry.error, rows: [...entry.rows] }
   const over = () => utf8Bytes(JSON.stringify(next)) > SAVED_ENTRY_BYTES
+  // What cannot be cut (the inline SQL and the query's id, with the error cut above) over the cap by itself: dropping every row and column would not cure it, so they stay, and the history's total budget bounds it.
+  if (utf8Bytes(JSON.stringify({ ...next, rows: [], columns: [] })) > SAVED_ENTRY_BYTES) return next
   while (next.rows.length > 0 && over()) next.rows.pop()
   if (over() && next.columns) {
     const columns = [...next.columns]
