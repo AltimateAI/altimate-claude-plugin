@@ -17,10 +17,11 @@ import type { BandUi, FeatureContext } from './index'
 
 const deferAtom = atom({ plugin: 'altimate-code', key: 'defer' } as const, null as DeferState | null)
 
-// Commands that do not defer (dbt before 1.8 refuses the option on some of them, and `retry` reads the
-// previous run's results from `--state`, which would point at the wrong ones) and commands that take no target.
-const NO_DEFER = new Set(['deps', 'clean', 'debug', 'init', 'retry', 'docs', 'source'])
-const NO_TARGET = new Set(['deps', 'clean', 'init', 'retry'])
+// The commands that take `--defer` in every dbt version this reads state for (dbt before 1.8 refuses the option on
+// `ls`, `parse`, `seed`, `run-operation` and others, and `retry` reads the previous run's results from `--state`).
+const DEFERS = new Set(['build', 'run', 'test', 'compile', 'show'])
+// Commands that take no target, or take it after a second word (`source freshness`, `docs generate`) this does not read.
+const NO_TARGET = new Set(['deps', 'clean', 'init', 'retry', 'docs', 'source'])
 
 const quote = (text: string) => (/^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`)
 
@@ -53,7 +54,7 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
     // may be among them: such an invocation is left as the user wrote it, as the parser's contract asks.
     if (one.dynamic) continue
     const flags: string[] = []
-    if (stateDir && !exportedState && !NO_DEFER.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command.slice(one.start, one.end))) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
+    if (stateDir && !exportedState && DEFERS.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command.slice(one.start, one.end))) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
     if (target && !NO_TARGET.has(one.subcommand) && target !== defaultTarget && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
     if (flags.length === 0) continue
     out = `${out.slice(0, one.subcommandEnd)} ${flags.join(' ')}${out.slice(one.subcommandEnd)}`
@@ -92,6 +93,25 @@ async function findProject($: EngineInterface): Promise<string | null> {
   return below.length === 1 ? below[0]! : null
 }
 
+/** The folders below the project (down to three levels) that hold a dbt_project.yml of their own. */
+async function nestedProjects($: EngineInterface, projectDir: string): Promise<Set<string>> {
+  const found = new Set<string>()
+  let level = [projectDir]
+  for (let depth = 0; depth < 3 && level.length > 0; depth++) {
+    const next: string[] = []
+    for (const dir of level) {
+      for (const entry of await $.fs.list(dir).catch(() => [])) {
+        if (entry.kind !== 'dir' || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dbt_packages' || entry.name === 'target') continue
+        const child = `${dir}/${entry.name}`
+        if (await $.fs.exists(`${child}/dbt_project.yml`).catch(() => false)) found.add(child)
+        else next.push(child)
+      }
+    }
+    level = next
+  }
+  return found
+}
+
 // Where a command runs from: the session folder, moved by each `cd` or `pushd` in the command.
 const CD = /(?:^|[;&|(\n{!]\s*|\b(?:if|elif|while|until|then|do|else|time)\s+)(?:cd|pushd)[ \t]+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
 const PROJECT_DIR = /(?:--project-dir[ =]|\bDBT_PROJECT_DIR=)("[^"]+"|'[^']+'|[^\s;&|)]+)/g
@@ -117,7 +137,7 @@ function resolvePath(base: string, target: string): string | null {
  * Whether the command's dbt runs in the project the settings were read for: not when it moves to another
  * folder (`cd`, `pushd`, `--project-dir`, `DBT_PROJECT_DIR`, uv's `--directory`) or one it cannot work out.
  */
-export function runsInProject(command: string, root: string, projectDir: string): boolean {
+export function runsInProject(command: string, root: string, projectDir: string, isProject: (dir: string) => boolean = () => false): boolean {
   // A folder change this does not follow (`popd`, `env -C`, `command cd`, a `cd` with no folder) leaves the folder unknown.
   // Quotes and backslashes are dropped for this check: `command 'cd' ../b` and `env "-C" ../b` change folder like their plain forms.
   const plain = command.replace(/["'\\]/g, '')
@@ -132,7 +152,13 @@ export function runsInProject(command: string, root: string, projectDir: string)
   const first = [...invocations].sort((a, b) => a.start - b.start)[0]
   const project = resolvePath(projectDir, '.')
   if (!first || !project) return false
-  const inside = (dir: string | null) => !!dir && (dir === project || dir.startsWith(`${project.replace(/\/+$/, '')}/`))
+  const base = project.replace(/\/+$/, '')
+  // A folder below the project that holds a dbt project of its own has its own settings.
+  const ownsProject = (dir: string) => {
+    for (let d = dir; d.startsWith(`${base}/`); d = dirname(d)) if (isProject(d)) return true
+    return false
+  }
+  const inside = (dir: string | null) => !!dir && (dir === project || (dir.startsWith(`${base}/`) && !ownsProject(dir)))
   let dir = resolvePath(root, '.')
   let before = dir
   for (const match of command.matchAll(CD)) {
@@ -343,8 +369,12 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   if (!/\bdbt\b/.test(e.command) || parseDbtCommand(e.command).length === 0) return null
   const state = await ensure($)
   if (!state.projectDir) return null
-  const root = await $.session.root().catch(() => null)
-  if (!root || !runsInProject(e.command, root, state.projectDir)) return null
+  // The folder the session's shell is in now: an earlier `cd` in the session moves it, which the project root does not.
+  const root = (await $.session.cwd().catch(() => null)) ?? (await $.session.root().catch(() => null))
+  if (!root) return null
+  // Only a command that starts or moves below the project can end up in a dbt project of its own.
+  const nested = root !== state.projectDir || /\b(?:cd|pushd)\b/.test(e.command) ? await nestedProjects($, state.projectDir) : new Set<string>()
+  if (!runsInProject(e.command, root, state.projectDir, dir => nested.has(dir))) return null
   const command = rewriteDeferCommand(e.command, effective(state))
   return command === e.command ? null : command
 }

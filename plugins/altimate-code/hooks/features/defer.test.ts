@@ -36,9 +36,12 @@ test('defer off or no dbt command: no rewrite', () => {
 
 test('commands that do not defer are left without --defer, and the target goes to every command that takes one', () => {
   const both = { ...on, target: 'qa', defaultTarget: 'dev' }
-  expect(rewriteDeferCommand('dbt ls -s x', on)).toBe('dbt ls --defer --state /work/prod-state -s x')
+  expect(rewriteDeferCommand('dbt ls -s x', on)).toBe('dbt ls -s x')
+  expect(rewriteDeferCommand('dbt seed', on)).toBe('dbt seed')
+  expect(rewriteDeferCommand('dbt build -s x', on)).toBe('dbt build --defer --state /work/prod-state -s x')
   expect(rewriteDeferCommand('dbt deps', both)).toBe('dbt deps')
-  expect(rewriteDeferCommand('dbt source freshness', both)).toBe('dbt source --target qa freshness')
+  expect(rewriteDeferCommand('dbt source freshness', both)).toBe('dbt source freshness')
+  expect(rewriteDeferCommand('dbt docs generate', both)).toBe('dbt docs generate')
   expect(rewriteDeferCommand('dbt debug', both)).toBe('dbt debug --target qa')
   expect(rewriteDeferCommand('dbt retry', both)).toBe('dbt retry')
 })
@@ -57,6 +60,10 @@ test('a command for another project, by cd or --project-dir, is not rewritten', 
   expect(runsInProject('dbt run && cd ../b && dbt test', '/repo/a', '/repo/a')).toBe(false)
   expect(runsInProject('dbt run --project-dir ../b', '/repo/a', '/repo/a')).toBe(false)
   expect(runsInProject('DBT_PROJECT_DIR=../b dbt run', '/repo/a', '/repo/a')).toBe(false)
+  // A folder below the project with a dbt project of its own is not this project.
+  expect(runsInProject('cd nested && dbt build', '/repo/a', '/repo/a', dir => dir === '/repo/a/nested')).toBe(false)
+  expect(runsInProject('dbt build', '/repo/a/nested/deeper', '/repo/a', dir => dir === '/repo/a/nested')).toBe(false)
+  expect(runsInProject('cd models && dbt build', '/repo/a', '/repo/a', dir => dir === '/repo/a/nested')).toBe(true)
   // An escaped space ends the raw match early: `./a\ b` is not the project `./a`.
   expect(runsInProject('dbt run --project-dir ./a\\ b', '/repo', '/repo/a')).toBe(false)
   expect(runsInProject('dbt run', '/repo', '/repo/a')).toBe(false)
@@ -110,7 +117,7 @@ test('DBT_STATE or DBT_TARGET exported earlier in the line is left alone, and an
   expect(rewriteDeferCommand('export OTHER="a;b" DBT_STATE=/mine DBT_TARGET=prod && dbt build', { ...on, target: 'qa', defaultTarget: 'dev' })).toBe('export OTHER="a;b" DBT_STATE=/mine DBT_TARGET=prod && dbt build')
   expect(rewriteDeferCommand('export DBT_TARGET=prod && dbt build', { target: 'qa', defaultTarget: 'dev' })).toBe('export DBT_TARGET=prod && dbt build')
   // The outer one holds a process substitution, which the parser cannot read, so it is left as written; the inner keeps its place.
-  expect(rewriteDeferCommand('dbt ls <(dbt ls)', on)).toBe('dbt ls <(dbt ls --defer --state /work/prod-state)')
+  expect(rewriteDeferCommand('dbt build <(dbt build)', on)).toBe('dbt build <(dbt build --defer --state /work/prod-state)')
 })
 
 test('a Windows session folder, with either slash, is the project it names', () => {
