@@ -32,7 +32,7 @@ const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_order
 })
 
 /** The session beneath the plugin: a store in memory, and the CLI answering `dbt_run_results` with `answer(args)`. */
-async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; slow?: string; slowMs?: number; rootDelay?: number; duringRead?: () => Promise<unknown> } = {}) {
+async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; refused?: string; slow?: string; slowMs?: number; rootDelay?: number; duringRead?: () => Promise<unknown> } = {}) {
   const clock = mock.clock(on, { now: T0 })
   const stored = new Map<string, unknown>()
   const filled: string[] = []
@@ -73,6 +73,7 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
   on('tool.call', async (_: unknown, e: { tool_use_id?: string }) => {
     await clock.advance(e.tool_use_id !== undefined && e.tool_use_id === options.slow ? (options.slowMs ?? 600) : 100)
     if (e.tool_use_id !== undefined && e.tool_use_id === options.denied) throw new Error('cancelled')
+    if (e.tool_use_id !== undefined && e.tool_use_id === options.refused) return { deny: 'held by the cost gate' }
     return { result: { ok: true } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
@@ -416,6 +417,15 @@ test('a backgrounded dbt call keeps running after its tool returns: a later call
   expect(first.context ?? []).toEqual([])
   expect(second.context).toEqual([NOT_RECORDED])
   expect(stored.has('runs')).toBe(false)
+})
+
+test('a call whose result is a refusal never ran: a later run is recorded, not taken for an overlap', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-after-hold', undefined, 'build', AFTER), { refused: 'held' })
+  const held: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders', tool_use_id: 'held' })
+  expect(held.deny).toBe('held by the cost gate')
+  const rerun: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders', tool_use_id: 'rerun' })
+  expect(rerun.context).toEqual(['build: 1 ok'])
+  expect(kept(stored).map(run => run.id)).toEqual(['inv-after-hold'])
 })
 
 test('a call whose folder cannot be told still counts as a dbt call that overlaps', async ($, on) => {

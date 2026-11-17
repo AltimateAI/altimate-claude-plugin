@@ -14,6 +14,7 @@ import { within } from './altimate-cli'
 import {
   EDIT_READS_BEFORE,
   featuresBashAfter,
+  featuresBashDropped,
   featuresBashGate,
   featuresBashRewrite,
   featuresEditAfter,
@@ -70,6 +71,8 @@ export type ChainSteps = {
   bashRewrite: (e: BashCall) => Promise<string>
   bashGate: (e: BashCall) => Promise<{ deny: string } | null>
   bashAfter: (e: BashCall, result: ToolCallResult) => Promise<string[]>
+  /** Told when a Bash call will not reach bashAfter because a gate refused it or its result is a refusal. */
+  bashDropped?: (e: BashCall) => Promise<void>
   editAfter: (e: FileCall, result: ToolCallResult, file: EditedFile) => Promise<string[]>
   readOrEditAfter: (e: FileCall, result: ToolCallResult, file: { path: string }) => Promise<string[]>
   /** The file's text before an edit; called only when `readsBefore` is set. */
@@ -82,7 +85,7 @@ export type ChainSteps = {
 }
 
 /** The phase's value, or `fallback` (logged) when it ran out of time, failed or threw. */
-async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore', fallback: T, run: () => Promise<T>): Promise<T> {
+async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore' | 'bashDropped', fallback: T, run: () => Promise<T>): Promise<T> {
   try {
     // Wrapped, so a legitimate null value is told apart from the deadline's null.
     const done = await steps.limit(Promise.resolve().then(run).then(value => ({ value })))
@@ -106,7 +109,10 @@ export async function beforeCall(input: ToolCallInput, steps: ChainSteps): Promi
     const command = await bounded(steps, 'bashRewrite', bash.command, () => steps.bashRewrite(bash))
     if (command !== bash.command) e = { ...e, command } as ToolCallInput
     const deny = await bounded(steps, 'bashGate', null, () => steps.bashGate({ ...bash, command }))
-    if (deny) return { e, deny, before: null }
+    if (deny) {
+      await bounded<void>(steps, 'bashDropped', undefined, async () => steps.bashDropped?.({ ...bash, command }))
+      return { e, deny, before: null }
+    }
   }
   const path = filePathOf(e)
   const before = path && EDIT_TOOLS.has(e.tool) && steps.readsBefore ? await bounded(steps, 'readBefore', null, () => steps.readBefore(path)) : null
@@ -115,7 +121,11 @@ export async function beforeCall(input: ToolCallInput, steps: ChainSteps): Promi
 
 /** The phases after the call ran: bashAfter, editAfter, readOrEditAfter; their lines go to `context`. */
 export async function afterCall(e: ToolCallInput, result: ToolCallResult, before: string | null, steps: ChainSteps): Promise<ToolCallResult> {
-  if (result.deny !== undefined) return result
+  if (result.deny !== undefined) {
+    const dropped = bashCallOf(e)
+    if (dropped) await bounded<void>(steps, 'bashDropped', undefined, async () => steps.bashDropped?.(dropped))
+    return result
+  }
   const lines: string[] = []
   const bash = bashCallOf(e)
   if (bash) lines.push(...(await bounded<string[]>(steps, 'bashAfter', [], () => steps.bashAfter(bash, result))))
@@ -137,6 +147,7 @@ export function installToolChain(on: On) {
       bashRewrite: e => featuresBashRewrite($, e),
       bashGate: e => featuresBashGate($, e),
       bashAfter: (e, result) => featuresBashAfter($, e, result),
+      bashDropped: e => featuresBashDropped($, e),
       editAfter: (e, result, file) => featuresEditAfter($, e, result, file),
       readOrEditAfter: (e, result, file) => featuresReadOrEditAfter($, e, result, file),
       readBefore: path => $.fs.read(path),

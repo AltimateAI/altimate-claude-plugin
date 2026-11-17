@@ -18,6 +18,7 @@ import {
   bashRewrite as runsBashRewrite,
   bashGate as runsBashGate,
   bashAfter as runsBashAfter,
+  bashDropped as runsBashDropped,
   editAfter as runsEditAfter,
   readOrEditAfter as runsReadOrEditAfter,
   editReadsBefore as runsEditReadsBefore,
@@ -300,6 +301,11 @@ export async function featuresBashGate($: EngineInterface, e: BashCall): Promise
 }
 
 /** The context lines every feature adds after a Bash call ran. */
+/** A Bash call that a gate refused, or whose result is a refusal, never reaches bashAfter: the features that kept it let go. */
+export async function featuresBashDropped($: EngineInterface, e: BashCall): Promise<void> {
+  await attempt($, 'runs', 'bashAfter', () => runsBashDropped($, e))
+}
+
 export async function featuresBashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<string[]> {
   const lines: string[] = []
   addLines(lines, await attempt($, 'runs', 'bashAfter', () => runsBashAfter($, e, result)))

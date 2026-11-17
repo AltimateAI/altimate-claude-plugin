@@ -536,7 +536,7 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   if (!runsDbt(e.command)) return null
   const cwd = await $.session.cwd()
   started.set(startKey(e), { at: await $.clock.now(), cwd, writes: writesResults(e.command) })
-  // A call that never reaches bashAfter (refused, cancelled) leaves its entry: only the newest are kept.
+  // A call refused by a gate is dropped by bashDropped; one cancelled otherwise leaves its entry: only the newest are kept.
   while (started.size > 50) started.delete(started.keys().next().value as string)
   return null
 }
@@ -547,6 +547,11 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   return null
+}
+
+/** A call that never ran (a gate refused it, or its result is a refusal) is no longer in flight. */
+export async function bashDropped($: EngineInterface, e: BashCall): Promise<void> {
+  started.delete(startKey(e))
 }
 
 /** A dbt command that wrote run_results.json is recorded; Claude gets one line with its outcome. */
