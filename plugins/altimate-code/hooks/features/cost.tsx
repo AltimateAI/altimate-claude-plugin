@@ -45,8 +45,8 @@ let limitBytes = DEFAULT_MAX_SCAN_BYTES
 const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
 const inflight = new Map<string, { answer: Promise<Answer>; doneAt: number | null; generation: number }>()
-/** Commands the gate refused while their estimate was running: they have not run, so a retry changes nothing. */
-const refused = new Set<string>()
+/** Commands the gate refused while their estimate was running, and when it last did: they have not run, so a retry changes nothing. */
+const refused = new Map<string, number>()
 /** Moves on whenever the project may have changed: an estimate started before it is never taken as an answer. */
 let generation = 0
 /** When the session found a warehouse with no dry run; null once forgotten. That finding is kept only so long, since the target can change. */
@@ -182,7 +182,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       continue
     }
     const label = target.model ?? 'the inline query'
-    const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken)
+    const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken, refused.get(e.command))
     // The project changed while this was being asked: nothing it says is published, and the command is refused below.
     if (generation !== startedAt) break
     if (answer === 'pending') {
@@ -233,7 +233,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
       })
     }
     notes.delete(e.command)
-    refused.add(e.command)
+    refused.set(e.command, await $.clock.now())
     return { deny: `The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.` }
   }
 
@@ -487,14 +487,16 @@ async function estimate($: EngineInterface, args: { model?: string; sql?: string
 }
 
 /** The estimate, started on the long budget if none is running for these arguments; `pending` when it is not done by `waitUntil`. */
-async function estimateWithin($: EngineInterface, args: { model?: string; sql?: string }, waitUntil: number, taken: Map<string, Answer>): Promise<Answer | 'pending'> {
+async function estimateWithin($: EngineInterface, args: { model?: string; sql?: string }, waitUntil: number, taken: Map<string, Answer>, refusedAt: number | undefined): Promise<Answer | 'pending'> {
   const key = JSON.stringify(args)
   const had = taken.get(key)
   if (had) return had
   // The look-up and the insert below are one step: nothing is awaited between them, or two passes would each start one.
   const now = await $.clock.now()
   let running = inflight.get(key)
-  if (running?.doneAt != null && now - running.doneAt > ANSWER_KEEP_MS) running = undefined
+  // A command whose retries keep coming keeps what it waited for however long the others took: a later answer expiring an earlier one would never let it finish.
+  const retrying = refusedAt != null && now - refusedAt <= ANSWER_KEEP_MS
+  if (running?.doneAt != null && !retrying && now - running.doneAt > ANSWER_KEEP_MS) running = undefined
   if (!running) {
     // The wait is spent: nothing new starts. Each estimate may start the adapter (dbt deps), and two at once in one project collide.
     if (waitUntil - now <= 0) return 'pending'

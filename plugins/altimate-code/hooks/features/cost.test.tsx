@@ -487,6 +487,34 @@ test('an estimate still running spends no allowance: the held command stays held
   expect(ran).toEqual([both])
 })
 
+test('a command being retried keeps its finished answers however long the later estimate took', async ($, on) => {
+  const options: Options = { answers: { a: UNDER, b: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  const both = 'dbt run -s a && dbt run -s b'
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'b'
+  const first = $.tool.call(bash(both))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  // b takes longer than the answer for a is kept for a command nobody retries.
+  const waiting = [] as any[]
+  for (let i = 0; i < 7; i++) {
+    await clock.advance(10_000)
+    const again = $.tool.call(bash(both))
+    await clock.advance(4_001)
+    waiting.push((await again) as any)
+  }
+  expect(waiting.every(w => w.deny.includes('still being estimated'))).toBe(true)
+  release()
+  await clock.settle()
+  options.hold = undefined
+  const retry: any = await $.tool.call(bash(both))
+  await clock.settle()
+  expect(retry.deny).toBeUndefined()
+  expect(estimates).toEqual(['a', 'b'])
+})
+
 test('an answer nobody took is not used a minute later: the model may have changed', async ($, on) => {
   const options: Options = { answers: { orders: OVER } }
   const { clock, estimates, ran } = await start($, on, options)
