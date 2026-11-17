@@ -69,6 +69,8 @@ let firstWaitSpent = false
 let pendingFor: string | null = null
 // The thread of a post that may have landed: it stays busy until a list asked for after the post has been read.
 let uncertain: string | null = null
+// Counts the switches to another dbt project: a post begun before one is not about the project now in view.
+let projectEpoch = 0
 // Folders already searched for a dbt project in vain.
 const searched = new Set<string>()
 
@@ -342,6 +344,7 @@ async function attach($: EngineInterface, dir: string) {
     // its lock would never be freed by a list of this one. Going back lists the first project again.
     uncertain = null
     posting = false
+    projectEpoch++
   }
   // The first load of a project: a read that is waiting on it has already joined it, so this one is not asked twice.
   pendingFor = found.root
@@ -446,6 +449,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
   if (posting || uncertain !== null) return
   posting = true
   const mine = generation
+  const epoch = projectEpoch
   let released = false
   const release = () => {
     if (!released && mine === generation) posting = false
@@ -470,6 +474,8 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
         await change($, current => (mine !== generation ? current : { ...current, posting: null, note }))
         return
       }
+      // The project in view changed meanwhile: that post is not about this one, and nothing here can be locked for it.
+      if (epoch !== projectEpoch) return
       // Any other failure, a timeout included, may have landed: the thread stays busy until a list asked for
       // after the post has been read, so another press cannot post it twice.
       uncertain = key
@@ -502,6 +508,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       ...current,
       note: `Could not confirm the post, it may have gone through (the list is reloaded): ${oneLine(String(error))}`,
     }))
+    if (epoch !== projectEpoch) return
     // A write that timed out may still have landed: the thread stays busy until a list asked for after it has been read.
     uncertain = key
     writes++

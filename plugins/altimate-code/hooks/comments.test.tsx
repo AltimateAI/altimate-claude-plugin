@@ -28,7 +28,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[] } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void> } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -71,6 +71,7 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
       return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }
     }
     if (options.holdPost) return options.holdPost.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'done', metadata: { success: true } }), stderr: '' } }))
+    if (options.holdTimeoutPost) return options.holdTimeoutPost.then(() => ({ value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'timed out. The resolve may already have been posted.', metadata: { success: false, error: 'timed out' } }), stderr: '' } }))
     if (options.timeoutPost) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'Could not resolve the thread: timed out. The resolve may already have been posted: run list to check before trying again.', metadata: { success: false, error: 'timed out' } }), stderr: '' } }
     if (options.failPost) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'posting needs write permission', metadata: { success: false, error: options.failPostCode ?? 'read_only' } }), stderr: '' } }
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'done', metadata: { success: true } }), stderr: '' } }
@@ -502,5 +503,23 @@ test('an unchecked post does not lock posting for good when a read moves the pan
   await ui.press({ key: '7:11-resolve' })
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'resolve').length).toBeGreaterThanOrEqual(2)
+  await ui.unmount()
+})
+
+test('a post that times out after the pane moved to another project does not lock that project', async ($, on) => {
+  const other = '/other'
+  let release!: () => void
+  const { clock, cli } = await start($, on, { otherProject: other, holdTimeoutPost: new Promise<void>(resolve => (release = resolve)), files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  await clock.advance(10)
+  await $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
+  for (let i = 0; i < 4; i++) await clock.advance(FIRST_READ_WAIT_MS)
+  release()
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve').length).toBe(2)
   await ui.unmount()
 })
