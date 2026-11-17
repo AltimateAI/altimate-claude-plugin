@@ -166,9 +166,15 @@ function describedColumns(yaml: string): { model: string; column: string; descri
     if (!inModels) continue
 
     // A list item starts a model or a column whatever key it opens with: `name` need not come first.
-    const dash = /^-\s+(.*)$/.exec(body)
-    const text = dash ? dash[1]! : body
-    const at = dash ? indent + body.length - text.length : indent
+    const dash = /^-(?:\s+(.*))?$/.exec(body)
+    const text = dash ? (dash[1] ?? '') : body
+    let at = dash ? indent + body.length - text.length : indent
+    if (dash && text === '') {
+      // A bare `-` holds its item on the lines below: the item's keys sit where the next line starts.
+      let next = i + 1
+      while (next < lines.length && (lines[next]!.trim() === '' || lines[next]!.trim().startsWith('#'))) next++
+      if (next < lines.length && indentOf(lines[next]!) > indent) at = indentOf(lines[next]!)
+    }
     if (dash && (modelDash < 0 || indent === modelDash)) {
       modelDash = indent
       modelKey = at
@@ -360,7 +366,8 @@ async function schemaEdited($: EngineInterface, file: EditedFile): Promise<strin
   const after = await $.fs.read(file.path).catch(() => null)
   // A file that is gone writes nothing, so what was offered from it no longer holds.
   const written = columnDescriptions(after ?? '')
-  const fresh = after === null ? [] : changedDescriptions(file.before, after)
+  // A before-text that could not be read says nothing about what changed: no offer rather than every description.
+  const fresh = after === null || file.beforeUnknown ? [] : changedDescriptions(file.before, after)
   // Writing the description Apply asked for is the copy being made, not a new description to offer;
   // any other text written to that column is a new description.
   const all = fresh.filter(one => {
@@ -537,6 +544,11 @@ export function register(on: On, context: FeatureContext) {
               label={`Apply to ${plural(picked, 'column')}`}
               onPress={() =>
                 later($, async () => {
+                  if (applying) return
+                  // What is ticked now, not what was drawn: a tick or a withdrawn offer may have landed since the render.
+                  const state = (await read($, docsAtom)) ?? empty()
+                  const groups = state.groups.filter(group => group.candidates.length > 0)
+                  const prompt = applyPrompt(groups, state.skipped)
                   if (!prompt || applying) return
                   applying = true
                   const marks: string[] = []

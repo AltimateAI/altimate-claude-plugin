@@ -344,7 +344,7 @@ function lex(line: string): Token[] | null {
 }
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
-// Shell keywords after which a command still starts: assignments may follow them.
+// Shell keywords after which a command still starts: assignments may follow them, and a `(` opens a subshell.
 const KEYWORDS = new Set(['!', '{', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time'])
 // Commands that run their first argument that is no option: a NAME=value there is the command's name.
 const WRAPPERS = new Set(['command', 'exec', 'nohup', 'env'])
@@ -499,8 +499,6 @@ export function parseDbtCommand(line: string): DbtInvocation[] {
 
 const isRedirect = (token: Token) => token.kind === 'op' && /[<>]/.test(token.text)
 
-// Words after which a command still starts, so a `(` there opens a subshell.
-const COMMAND_KEYWORDS = new Set(['!', '{', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time'])
 const NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/
 
 /**
@@ -545,7 +543,7 @@ function readable(tokens: Token[]): Set<number> | null {
       else if (!words.length && word === 'case') {
         open.push('case')
         caseHead = 'case'
-      } else if (words.length || !COMMAND_KEYWORDS.has(word)) words.push(token.text)
+      } else if (words.length || !KEYWORDS.has(word)) words.push(token.text)
       continue
     }
     if (isRedirect(token)) {

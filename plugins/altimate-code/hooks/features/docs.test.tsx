@@ -484,3 +484,22 @@ test('a description is attributed to its own column and model whatever order the
 test('the wait for a description\'s downstream columns ends inside the edit phase, so its context line is not dropped', () => {
   expect(ROUND_MS).toBeLessThan(PHASE_TIMEOUT_MS)
 })
+
+test('a bare `-` list item starts its own model or column, its keys on the lines below', () => {
+  const yaml = `models:
+  - name: orders
+    columns:
+      - name: order_id
+        description: Order identifier
+  -
+    name: customers
+    columns:
+      -
+        name: customer_id
+        description: Customer identifier
+`
+  expect([...columnDescriptions(yaml)]).toEqual([
+    ['orders.order_id', 'Order identifier'],
+    ['customers.customer_id', 'Customer identifier'],
+  ])
+})
