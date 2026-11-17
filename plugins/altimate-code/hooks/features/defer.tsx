@@ -150,6 +150,8 @@ function resolvePath(base: string, target: string): string | null {
 /**
  * Whether the command's dbt runs in the project the settings were read for: not when it moves to another
  * folder (`cd`, `pushd`, `--project-dir`, `DBT_PROJECT_DIR`, uv's `--directory`) or one it cannot work out.
+ * The check reads the command's text, not the filesystem: a link that leads into another project's folders, and a
+ * `DBT_PROJECT_DIR` inherited from the session's own environment, are not seen. That is the known limit of this check.
  */
 export function runsInProject(command: string, root: string, projectDir: string, isProject: (dir: string) => boolean = () => false): boolean {
   // A folder change this does not follow (`popd`, `env -C`, `command cd`, a `cd` with no folder) leaves the folder unknown.
@@ -162,6 +164,8 @@ export function runsInProject(command: string, root: string, projectDir: string,
   const cdWords = plain.match(/(?:^|[\s;&|(){}!`])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
   if (cdWords !== [...command.matchAll(CD)].length) return false
   if (cdWords > 0 && control) return false
+  // A `&` (not `&&` or a redirection) sends the commands before it to a background shell: the folder the rest runs in is unknown.
+  if (cdWords > 0 && /&/.test(command.replace(/&&|>&|&>|\d*[<>]&\d*/g, ''))) return false
   // A folder change is trusted only as the leading `cd a && cd b && dbt ...` chain: after it, only a command that runs because every `cd` worked.
   // A `cd` after a `;`, a newline, a comment, `||`, a pipe or anywhere later may be skipped, fail or run elsewhere.
   if (cdWords > 0) {
@@ -178,7 +182,12 @@ export function runsInProject(command: string, root: string, projectDir: string,
   const base = project.replace(/\/+$/, '')
   // A folder below the project that holds a dbt project of its own has its own settings.
   const ownsProject = (dir: string) => {
-    for (let d = dir; d.startsWith(`${base}/`); d = dirname(d)) if (isProject(d)) return true
+    for (let d = dir; d.startsWith(`${base}/`); ) {
+      if (isProject(d)) return true
+      const up = dirname(d)
+      if (up === d) break
+      d = up
+    }
     return false
   }
   const inside = (dir: string | null) => !!dir && (dir === project || (dir.startsWith(`${base}/`) && !ownsProject(dir)))
@@ -204,12 +213,13 @@ export function runsInProject(command: string, root: string, projectDir: string,
     if (!/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length))) return false
     const word = match[1]!.replace(UNQUOTE, '')
     // `cd -P dir`, `cd -`: not a folder this can work out.
-    dir = word.startsWith('-') ? null : resolvePath(dir, word)
+    dir = /^[-+]/.test(word) ? null : resolvePath(dir, word)
     if (match.index < first.start) before = dir
     else if (!inside(dir)) return false
   }
   // A project named outright is the one to judge; otherwise the folder the command runs from.
-  const named = [...command.matchAll(PROJECT_DIR)].filter(match => !quoted(command, match.index))
+  // An option word starts after whitespace: `--exclude=--project-dir=x` is another option's value.
+  const named = [...command.matchAll(PROJECT_DIR)].filter(match => !quoted(command, match.index) && (match.index === 0 || /\s/.test(command[match.index - 1]!)))
   // A project option written with quotes (`"--project-dir" ../b`) is only seen in the plain copy: unknown.
   if (named.length !== (plain.match(/--project-dir[\s=]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
   // A path word that goes on after its quotes (`--project-dir "."/../b`) is not one this can work out.
