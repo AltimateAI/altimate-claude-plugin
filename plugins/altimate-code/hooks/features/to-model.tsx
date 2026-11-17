@@ -108,7 +108,7 @@ export function buildPrompt(view: ToModelState): string {
       'Ask me before adding a source for them, and leave them as written until I answer.',
     )
   }
-  lines.push('', 'Keep the rest of the query as it is, then run dbt compile on the new model.')
+  lines.push('', 'Keep the rest of the query as it is, except that a column written with a replaced table\'s own name (schema.table.column) must use that table\'s alias or new name, so it still resolves. Then run dbt compile on the new model.')
   lines.push('', `${fence}sql`, view.sql.trimEnd(), fence)
   return lines.join('\n')
 }

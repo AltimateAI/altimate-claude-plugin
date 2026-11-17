@@ -94,7 +94,7 @@ test('the file is mapped and one instruction carries exactly the replacements, a
       'These tables match no model or source: "raw.events".',
       'Ask me before adding a source for them, and leave them as written until I answer.',
       '',
-      'Keep the rest of the query as it is, then run dbt compile on the new model.',
+      'Keep the rest of the query as it is, except that a column written with a replaced table\'s own name (schema.table.column) must use that table\'s alias or new name, so it still resolves. Then run dbt compile on the new model.',
       '',
       '```sql',
       SQL,
