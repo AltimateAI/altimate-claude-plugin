@@ -109,10 +109,14 @@ test('the plugin registers the chain: one tool.call hook for Bash and the file t
   expect(['Bash', 'Read', 'Edit', 'Write', 'MultiEdit'].every(name => tool.test(name))).toBe(true)
   expect(tool.test('Grep')).toBe(false)
   // With every feature a stub, the chain hands the call on unchanged and passes its result back.
+  // The deadline never fires, so every phase reaches its stub and none is given up on.
   const seen: any[] = []
-  const result = await chains[0]!.handler({ fs: { read: async () => null }, clock: quick.clock, ui: { log: () => {} } }, { tool: 'Bash', command: 'dbt run -s orders' }, async (e: any) => (seen.push(e), ok))
+  const logged: string[] = []
+  const $ = { fs: { read: async () => null }, clock: { after: () => {} }, ui: { log: (text: string) => void logged.push(text) } }
+  const result = await chains[0]!.handler($, { tool: 'Bash', command: 'dbt run -s orders' }, async (e: any) => (seen.push(e), ok))
   expect(seen).toEqual([{ tool: 'Bash', command: 'dbt run -s orders' }])
   expect(result).toBe(ok)
+  expect(logged.filter(text => text.startsWith('tool chain ·'))).toEqual([])
 })
 
 /** Phases bounded by a real `within` on a clock whose deadline passes at once, so the test is fast. */
@@ -156,4 +160,22 @@ test('a phase that throws at once is treated like one that timed out', async () 
   })
   const pre = await beforeCall({ tool: 'Bash', command: 'dbt run' } as any, steps)
   expect((pre.e as any).command).toBe('dbt run')
+})
+
+test('a deadline or a logger that throws drops only that phase: the gate after it still runs', async () => {
+  let limits = 0
+  const { seen, steps } = recording({
+    // The first phase's deadline throws, the way a missing clock would.
+    limit: (async (work: Promise<unknown>) => {
+      if (limits++ === 0) throw new Error('no clock')
+      return work
+    }) as any,
+    log: () => {
+      throw new Error('no log')
+    },
+    bashGate: async e => (seen.push(`bashGate:${e.command}`), { deny: 'refused' }),
+  })
+  const pre = await beforeCall({ tool: 'Bash', command: 'dbt run' } as any, steps)
+  expect(pre.deny).toEqual({ deny: 'refused' })
+  expect(seen).toEqual(['bashRewrite:dbt run', 'bashGate:dbt run'])
 })

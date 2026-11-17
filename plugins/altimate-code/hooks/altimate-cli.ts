@@ -67,8 +67,9 @@ export function within<T>($: EngineInterface, ms: number, work: Promise<T>): Pro
       settled = true
       resolve(value)
     }
-    $.clock.after(ms, () => settle(null))
+    // The work's rejection is handled first, so a deadline that throws leaves none unhandled.
     work.then(settle, () => settle(null))
+    $.clock.after(ms, () => settle(null))
   })
 }
 
