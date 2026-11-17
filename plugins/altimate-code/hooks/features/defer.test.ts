@@ -57,6 +57,8 @@ test('a command for another project, by cd or --project-dir, is not rewritten', 
   expect(runsInProject('dbt run && cd ../b && dbt test', '/repo/a', '/repo/a')).toBe(false)
   expect(runsInProject('dbt run --project-dir ../b', '/repo/a', '/repo/a')).toBe(false)
   expect(runsInProject('DBT_PROJECT_DIR=../b dbt run', '/repo/a', '/repo/a')).toBe(false)
+  // An escaped space ends the raw match early: `./a\ b` is not the project `./a`.
+  expect(runsInProject('dbt run --project-dir ./a\\ b', '/repo', '/repo/a')).toBe(false)
   expect(runsInProject('dbt run', '/repo', '/repo/a')).toBe(false)
   expect(runsInProject('cd ~/other && dbt run', '/repo/a', '/repo/a')).toBe(false)
   expect(runsInProject('ls', '/repo/a', '/repo/a')).toBe(false)

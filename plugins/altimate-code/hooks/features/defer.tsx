@@ -150,6 +150,8 @@ export function runsInProject(command: string, root: string, projectDir: string)
   // A project option written with quotes (`"--project-dir" ../b`) is only seen in the plain copy: unknown.
   if (named.length !== (plain.match(/--project-dir[ =]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
   // A path word that goes on after its quotes (`--project-dir "."/../b`) is not one this can work out.
+  // An escaped word (`./a\ b`) is cut short by this pattern at the escaped space: not a path this can work out.
+  if (named.some(match => match[1]!.includes('\\'))) return false
   if (named.some(match => !/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length)))) return false
   if (named.length === 0) return inside(before)
   // Only a single dbt invocation, with the project named inside it, is judged: elsewhere in the line it is another command's.

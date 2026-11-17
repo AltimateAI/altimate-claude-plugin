@@ -462,8 +462,8 @@ export function parseDbtCommand(line: string): DbtInvocation[] {
 
 const isRedirect = (token: Token) => token.kind === 'op' && /[<>]/.test(token.text)
 
-// Words after which a command still starts, so a `(` there opens a subshell.
-const COMMAND_KEYWORDS = new Set(['!', '{', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time'])
+// Words after which a command still starts, so a `(` there opens a subshell (the same words as KEYWORDS).
+const COMMAND_KEYWORDS = KEYWORDS
 const NAME = /^[A-Za-z_][A-Za-z0-9_-]*$/
 
 /**
