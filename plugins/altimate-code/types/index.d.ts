@@ -386,7 +386,6 @@ declare module 'claude-code' {
       /** The shown model's SQL file changed after the manifest was written, said so; null when it didn't. */
       lineageStale: string | null
       lineageLoading: boolean
-      isLineageBandHidden: boolean
       /** Compile-and-validate's answer for the last model Claude edited. */
       dbtCheck: CheckView | null
       /** The last failed dbt run, test, build, seed, snapshot or retry Claude ran; null once a passing run of the same kind, selection, project and context (or a whole-project build, or a build with the same selection) clears it or it is dismissed. A passing `dbt retry` never clears it, and neither does a run whose output shows no passing summary or cannot be split per command (piped through `tail`, headers cut off). A compound command (`run+test`) is cleared only by the same command again or a whole-project build. */

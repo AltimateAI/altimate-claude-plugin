@@ -63,21 +63,28 @@ export function showPreview(stdout: string, uniqueId?: string): { columns: strin
 /** What stands in for dbt's error about a profiles.yml it could not read: that error quotes the lines around the fault, a password line among them. */
 export const PROFILES_UNREADABLE = 'profiles.yml could not be parsed; run `dbt debug` yourself to see the error'
 
+// What dbt prints for a profiles.yml it could not load, parse, validate or render: each quotes the offending value.
+const PROFILE_MARKERS = /Credentials in profile|Profile loading failed|Could not render|error while trying to read your profiles\.yml|Runtime Error in profile|Env var required but not provided/i
+// `dbt debug` states where profiles.yml is and that it is fine: not an error about it.
+const PROFILE_STATUS = /^\s*(?:\d\d:\d\d:\d\d\s+)?(?:Using profiles\.yml file at|profiles\.yml file \[OK)/i
+// A numbered line of the file as dbt quotes it: its content is the user's, never dbt's own.
+const QUOTED_LINE = /^\s*\d+\s*\|/
+
 /**
- * Whether dbt's text is its error for a profiles.yml it could not read: its own heading, or a YAML syntax error
- * that names profiles.yml. dbt prints the same error with no heading and no file name in `dbt debug` (`loose`):
- * a syntax error that quotes numbered lines and names no other YAML file.
+ * Whether dbt's text is about a profiles.yml it could not use. Decided on what dbt prints itself (its headings,
+ * its error classes, the file's name outside a quoted line), never on the quoted content. dbt prints the same
+ * YAML error with no heading and no file name in `dbt debug` (`loose`): a syntax error that quotes numbered
+ * lines and names no other YAML file in its own lines.
  */
 export function profilesError(text: string, loose = true): boolean {
   // JSON log lines are read as the text they carry: their line breaks are escaped in the raw output.
   const plain = stripAnsi(logText(text))
-  if (/error while trying to read your profiles\.yml/i.test(plain)) return true
-  if (/profiles\.yml[\s\S]{0,400}\b(?:yaml|syntax error|ScannerError|ParserError)\b|\b(?:yaml|syntax error|ScannerError|ParserError)\b[\s\S]{0,400}profiles\.yml/i.test(plain)) return true
-  // Without the heading or the file's name: a syntax error that quotes numbered lines and names no other YAML file.
-  return loose && /Syntax error near line \d+/.test(plain) && /^\s*\d+\s+\|/m.test(plain) && !/[\w./-]+\.ya?ml\b/i.test(plain.replace(/profiles\.yml/gi, ''))
+  const own = plain.split('\n').filter(line => !QUOTED_LINE.test(line) && !PROFILE_STATUS.test(line)).join('\n')
+  if (PROFILE_MARKERS.test(plain) || /profiles\.yml/i.test(own)) return true
+  return loose && /Syntax error near line \d+/.test(plain) && plain.split('\n').some(line => QUOTED_LINE.test(line)) && !/[\w./-]+\.ya?ml\b/i.test(own)
 }
 
-/** dbt's text as it may be shown and sent on: the fixed line in place of an unreadable-profiles error. */
+/** dbt's text as it may be shown and sent on: the fixed line in place of any error about the profile, whose text quotes its values. */
 export const scrubDbt = (text: string, loose = true): string => (profilesError(text, loose) ? PROFILES_UNREADABLE : text)
 
 /** The errors a dbt command logged as JSON lines: level error, the message without colour. */
@@ -585,7 +592,7 @@ export function failuresFromText(output: string): DbtFailure[] {
       .filter(Boolean)
       .join('\n')
     // dbt's error for a profiles.yml it could not read is a project error; its lines quote the file.
-    const failure: DbtFailure = { id: `${kind}.${name}${match[4] ? `@${match[4]}` : ''}`, name, kind, status: 'error', message: `${match[1]} Error\n${unreadable && kind === 'project' ? PROFILES_UNREADABLE : message}`.slice(0, 2000), path: match[4] ?? null, failures: null }
+    const failure: DbtFailure = { id: `${kind}.${name}${match[4] ? `@${match[4]}` : ''}`, name, kind, status: 'error', message: `${match[1]} Error\n${unreadable && kind === 'project' ? PROFILES_UNREADABLE : scrubDbt(message, false)}`.slice(0, 2000), path: match[4] ?? null, failures: null }
     if (!out.some(one => sameFailure(one, failure))) out.push(failure)
   }
   const failedTest = /^\s*(?:\d\d:\d\d:\d\d\s+)?Failure in test (\S+) \(([^)]+)\)/gm
@@ -778,7 +785,7 @@ export function debugInfo(output: string): { adapterType: string | null; connect
   const adapterType = /adapter type:\s*(\S+)/i.exec(text)?.[1] ?? /\btype:\s*(\w+)/.exec(text)?.[1] ?? null
   const ok = /Connection test:\s*\[OK/i.test(text)
   const failed = /Connection test:\s*\[ERROR|Connection test:\s*\[FAIL|Could not find profile|Profile loading failed/i.exec(text)
-  const detail = failed ? text.slice(failed.index, failed.index + 300).split('\n').slice(0, 3).join(' ').trim() : null
+  const detail = failed ? (profilesError(text) ? PROFILES_UNREADABLE : text.slice(failed.index, failed.index + 300).split('\n').slice(0, 3).join(' ').trim()) : null
   const pythonVersion = /python version:\s*(\S+)/i.exec(text)?.[1] ?? null
   return { adapterType, connection: ok ? 'ok' : failed ? 'failed' : null, detail, pythonVersion }
 }

@@ -28,6 +28,7 @@ import {
   nodeForFile,
   profilesError,
   PROFILES_UNREADABLE,
+  scrubDbt,
   projectPaths,
   replayArgv,
   budgetHistory,
@@ -190,10 +191,27 @@ function runQueued($: EngineInterface, root: string, argv: () => Promise<string[
     .catch(() => {})
     .then(async () => {
       if (options.wanted && !options.wanted()) return SKIPPED
-      return $.process.run(await argv(), { cwd: options.cwd ?? root, timeoutMs: options.timeoutMs ?? DBT_TIMEOUT_MS })
+      const command = await argv()
+      const started = await $.clock.now()
+      const done = await $.process.run(command, { cwd: options.cwd ?? root, timeoutMs: options.timeoutMs ?? DBT_TIMEOUT_MS })
+      if (command.some(word => word === 'show' || word === 'ls')) await noteOwnRun($, root, started).catch(() => {})
+      return done
     })
   queues.set(root, run.catch(() => {}))
   return run
+}
+
+// The invocation of the run_results.json the plugin's own last dbt show or ls wrote in a project: an artifact
+// of that invocation is never the result of a command Claude ran.
+const ownInvocation = new Map<string, string>()
+
+/** Remembers the invocation in run_results.json when the plugin's dbt wrote it, at or after `started`. */
+async function noteOwnRun($: EngineInterface, root: string, started: number) {
+  const path = `${await targetOf($, root)}/run_results.json`
+  const stat = await $.fs.stat(path).catch(() => null)
+  if (!stat || stat.mtimeMs < started) return
+  const id = invocationOf(await readRunResults($, root, path, stat.size))
+  if (id) ownInvocation.set(root, id)
 }
 
 // Projects where the last dbt the plugin started could not be run at all (no such program, not on PATH): an
@@ -203,7 +221,7 @@ const unrunnable = new Set<string>()
 /**
  * Whether a dbt run says there was no dbt to run: the spawn failed (a run that rejected, other than by its
  * timeout), or it exited non-zero with the shell saying dbt itself is not found (exit 127 naming no other
- * command). A run that exited 0 never is, whatever its rows say, and another command not found (git, in
+ * command), or a wrapper's own report that it cannot start dbt or its interpreter. A run that exited 0 never is, whatever its rows say, and another command not found (git, in
  * `dbt deps`) is not dbt.
  */
 function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): boolean {
@@ -213,6 +231,9 @@ function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): b
   // the name is the command's, never the shell's.
   const names = [/command not found: ([\w./\\-]+)/gi, /([\w./\\-]+): command not found/gi, /\bsh: \d+: ([\w./\\-]+): not found/gi].flatMap(pattern => [...run.stderr.matchAll(pattern)].map(one => one[1]!))
   const missing = names.filter(name => !/^-?(?:ba|z|da|k|c|fi)?sh$/i.test(name)).map(name => name.split(/[\\/]/).pop()!.replace(/\.exe$/i, ''))
+  // A wrapper or shim that cannot start dbt says so itself: the line names dbt or its interpreter.
+  const wrapped = run.stderr.split('\n').some(line => (/bad interpreter|cannot execute: required file not found/i.test(line) && /\b(?:dbt|python[\d.]*)\b/i.test(line)) || /^\W*dbt(?:\.exe)?\W+is not recognized as an internal or external command/i.test(line))
+  if (wrapped) return true
   // A bare 127 counts only when nothing else is said to be missing.
   return missing.length > 0 ? missing.includes('dbt') : run.exitCode === 127 && !/not found|no such file or directory/i.test(run.stderr)
 }
@@ -465,7 +486,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   const nothingShown = run.exitCode === 0 && !preview
   // A manifest that is there but could not be read (too big to slice, no interpreter) says nothing about this file.
   const manifestUnread = !after && (await $.fs.stat(`${await targetOf($, root)}/manifest.json`).catch(() => null))?.kind === 'file'
-  if (nothingShown && node) errors.push(`dbt show selected nothing for ${rel} (the model ${named ?? model}), so nothing was compiled or run. ${stripAnsi(run.stdout).split('\n').map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? ''}`.trim())
+  if (nothingShown && node) errors.push(`dbt show selected nothing for ${rel} (the model ${named ?? model}), so nothing was compiled or run. ${scrubDbt(stripAnsi(run.stdout)).split('\n').map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? ''}`.trim())
   const documentedColumns = node ? Object.values<any>(node.node.columns ?? {}) : []
   const documented = documentedColumns.map(column => String(column.name))
   const returned = preview && preview.rows.length > 0 ? preview.columns : null
@@ -595,11 +616,11 @@ function invocationOf(runResults: any): string | null {
   return typeof id === 'string' && id ? id : null
 }
 
-/** The run_results.json of a project as it stands now: its invocation, read only when it is small enough to read here. */
+/** The run_results.json of a project as it stands now: its invocation, read through Python when it is over 4 MiB. */
 async function seenInvocation($: EngineInterface, root: string): Promise<string | null> {
   const path = `${await targetOf($, root)}/run_results.json`
   const stat = await $.fs.stat(path).catch(() => null)
-  return stat && stat.size <= MAX_MANIFEST_BYTES ? invocationOf(await readRunResults($, root, path, stat.size)) : null
+  return stat ? invocationOf(await readRunResults($, root, path, stat.size)) : null
 }
 
 /** The parsed run_results.json; over 4 MiB (more than $.fs.read takes) only its failed results, through the project's Python. Null when unreadable. */
@@ -637,7 +658,7 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
     // The artifact this run wrote has an invocation of its own: the one it held before the command is an
     // older run's, whatever its timestamp says (a clock that ran ahead, or another writer).
     const id = invocationOf(runResults)
-    if (!(id !== null && id === seen)) {
+    if (!(id !== null && (id === seen || id === ownInvocation.get(root)))) {
       const manifest = await readManifest($, root)
       failures = failuresFrom(runResults, manifest?.manifest)
     }
@@ -664,15 +685,22 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
 
 async function loadHistory($: EngineInterface) {
   const saved = await $.store.get(HISTORY_KEY).catch(() => null)
-  await update($, historyAtom, () => (Array.isArray(saved) ? (saved as SavedQuery[]) : []))
+  await update($, historyAtom, () => (Array.isArray(saved) ? (saved as SavedQuery[]).map(one => (one?.error ? { ...one, error: scrubDbt(one.error) } : one)) : []))
 }
 
 /** Saves the history atom to the store, as it stands after the update that called this. */
 async function persistHistory($: EngineInterface) {
-  const history = budgetHistory(await read($, historyAtom))
+  const all = await read($, historyAtom)
+  let history = budgetHistory(all)
   // The store refuses a write once its JSON passes 4 MiB in all: the oldest half goes (unbookmarked entries
-  // first, then bookmarks), and the write is tried once more.
-  await $.store.set(HISTORY_KEY, history).catch(() => $.store.set(HISTORY_KEY, dropOldest(history, Math.max(1, Math.floor(history.length / 2)))).catch(() => {}))
+  // first, then bookmarks), and the write is tried once more. The pane shows what was kept, never more.
+  await $.store.set(HISTORY_KEY, history).catch(() => {
+    history = dropOldest(history, Math.max(1, Math.floor(history.length / 2)))
+    return $.store.set(HISTORY_KEY, history).catch(error => $.ui.log(`dbt-results · the query history could not be saved: ${String(error?.message ?? error)}`))
+  })
+  const kept = new Set(history.map(one => one.id))
+  const gone = new Set(all.filter(one => !kept.has(one.id)).map(one => one.id))
+  if (gone.size) await update($, historyAtom, current => current.filter(one => !gone.has(one.id)))
 }
 
 /** The history as it is kept: the newest plain queries, and the newest bookmarks (a bookmark past the cap is no longer one). */
@@ -731,7 +759,7 @@ async function runShowWith($: EngineInterface, base: Omit<QueryResult, 'columns'
     const done = await run().catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
     const ms = (await $.clock.now()) - started
     const preview = done.exitCode === 0 ? showPreview(done.stdout) : null
-    const error = preview ? null : (logErrors(done.stdout)[0] ?? (dbtTail(done, 4) || 'dbt show returned no rows'))
+    const error = preview ? null : scrubDbt(logErrors(done.stdout)[0] ?? (dbtTail(done, 4) || 'dbt show returned no rows'))
     const result: QueryResult = { ...base, columns: preview?.columns ?? [], rows: preview?.rows ?? [], ms, at: await $.clock.now(), error }
     await showResult($, result, true, asked)
     return result
@@ -1097,6 +1125,7 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
   pendingNotes.splice(0)
   doctorNoteDue = null
   unrunnable.clear()
+  ownInvocation.clear()
   await loadHistory($)
   await $.command.register({ name: SHOW_COMMAND, description: 'Run dbt show for a model or a SQL query and open the rows in the Query results pane', argumentHint: '<model> | <select …>' })
   await $.command.register({ name: DOCTOR_COMMAND, description: 'Check the dbt environment: Python, dbt, adapter, packages, manifest freshness and the warehouse connection' })
@@ -1395,6 +1424,8 @@ export function registerDbtMods(on: On) {
   on('tool.call', { tool: 'Bash' }, dbtToolCall)
 
   on('command.run', { command: SHOW_COMMAND }, async ($, e) => {
+    // The conversation that asked, taken before the first wait: a /clear before the query runs keeps its answer out of the new one's pane.
+    const asked = generation
     const root = await sessionProject($)
     if (!root) return { text: 'No dbt project here: start Claude Code in a dbt project (a folder with dbt_project.yml).' }
     const args = e.args.trim()
@@ -1406,8 +1437,6 @@ export function registerDbtMods(on: On) {
     }
     if (!args) return { text: 'Query results are open. Run /dbt-show <model> or /dbt-show select … to query.' }
     const isSql = /\s/.test(args) || /^(select|with)\b/i.test(args)
-    // The conversation that asked: a /clear before this runs keeps its answer out of the new one's pane.
-    const asked = generation
     later($, () => runShow($, root, isSql ? null : args, isSql ? args : null, SHOW_LIMIT, asked))
     return { text: `Running dbt show for ${isSql ? 'your query' : args}; the rows open in the Query results pane.` }
   })
@@ -1523,8 +1552,9 @@ export function registerDbtMods(on: On) {
       warn: 'Compiles and runs, but its columns differ from schema.yml',
       error: 'dbt could not compile or run it',
     }[check.status]
-    const missing = new Set(check.missing.map(one => one.toLowerCase()))
-    const extra = new Set(check.undocumented.map(one => one.toLowerCase()))
+    // The exact names the core compared: a quoted column is not matched without case here.
+    const missing = new Set(check.missing)
+    const extra = new Set(check.undocumented)
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
@@ -1548,12 +1578,12 @@ export function registerDbtMods(on: On) {
             {check.columns === null ? <Text dimColor>The query returned no row, so its columns could not be read.</Text> : null}
             {check.returned.map(name => (
               <Text key={`col-${name}`}>
-                {check.status === 'partial' ? <Text dimColor>· </Text> : <Text color={extra.has(name.toLowerCase()) ? 'warning' : 'success'}>{extra.has(name.toLowerCase()) ? '+ ' : '✓ '}</Text>}
+                {check.status === 'partial' ? <Text dimColor>· </Text> : <Text color={extra.has(name) ? 'warning' : 'success'}>{extra.has(name) ? '+ ' : '✓ '}</Text>}
                 <Text>{name}</Text>
-                {extra.has(name.toLowerCase()) ? <Text dimColor>  returned, not documented</Text> : null}
+                {extra.has(name) ? <Text dimColor>  returned, not documented</Text> : null}
               </Text>
             ))}
-            {check.documented.filter(name => missing.has(name.toLowerCase())).map(name => (
+            {check.documented.filter(name => missing.has(name)).map(name => (
               <Text key={`miss-${name}`}>
                 <Text color="error">- </Text>
                 <Text>{name}</Text>

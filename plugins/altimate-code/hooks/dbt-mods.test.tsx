@@ -170,6 +170,10 @@ type Options = {
   manifestAfterShow?: unknown
   /** The first Edit waits for this before its result returns. */
   holdEdit?: Promise<void>
+  /** Collects what the plugin writes to the debug log. */
+  logs?: string[]
+  /** While set, a read of the session's root waits for it. */
+  holdRoot?: Promise<void>
   /** The first read of Claude's shell folder waits for this. */
   holdCwd?: Promise<void>
   /** The first dbt show waits for this. */
@@ -241,7 +245,10 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.end', () => ({ sessionId: 'test' }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
-  on('session.root', () => ({ value: options.sessionRoot ?? ROOT }))
+  on('session.root', async () => {
+    await options.holdRoot
+    return { value: options.sessionRoot ?? ROOT }
+  })
   // Where Claude's shell is: the session folder unless a test moved it.
   let cwdHeld = false
   on('session.cwd', async () => {
@@ -258,7 +265,10 @@ async function start($: any, on: any, options: Options = {}) {
     sizes.push({ id: e.id, title: e.title, columns: e.columns, rows: e.rows })
     return { value: { isPlaced: true } }
   })
-  on('ui.log', () => ({ value: undefined }))
+  on('ui.log', (_: unknown, e: { text: string }) => {
+    options.logs?.push(e.text)
+    return { value: undefined }
+  })
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', (_: unknown, e: { text: string }) => {
     toasts.push(e.text)
@@ -2500,12 +2510,12 @@ test('a run_results.json over 4 MiB gives its failures through the project\'s Py
   await band.unmount()
 })
 
-test('a run_results.json over 4 MiB that is older than the command is not read through the Python', async ($, on) => {
+test('a run_results.json over 4 MiB that is older than the command is read through the Python once, before the command, for its invocation, and not again', async ($, on) => {
   const old = await start($, on, { runResultsSize: 9 * 1024 * 1024, runResultsAt: 10 })
   old.setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
   await old.clock.settle()
-  expect(old.runs.some(argv => argv[2] === RUN_FAILURES)).toBe(false)
+  expect(old.runs.filter(argv => argv[2] === RUN_FAILURES).length).toBe(1)
 })
 
 test('a run_results.json over 4 MiB the Python cannot give leaves the failures dbt printed', async ($, on) => {
@@ -3171,4 +3181,205 @@ kitTest('a query whose uncuttable fields are over the cap keeps its rows and col
   expect(fit.rows).toEqual(entry.rows)
   expect(fit.columns).toEqual(['a', 'b'])
   expect(fit.inline).toBe(inline)
+})
+
+// ─── dbt's errors about the profile quote its values: none of them reaches a surface ─────────────
+
+const PROFILE_SHAPES: [string, string, string][] = [
+  ['an unquoted all-digit password', 'Runtime Error\n  Credentials in profile "shop", target "dev" invalid: 9912345 is not of type \'string\'\n', '9912345'],
+  ['a keyfile_json given as a string', 'Runtime Error\n  Credentials in profile "shop", target "dev" invalid: \'{"type": "service_account", "private_key": "SENTINEL_KEY"}\' is not valid under any of the given schemas\n', 'SENTINEL_KEY'],
+  ['a password written as a list', 'Runtime Error\n  Credentials in profile "shop", target "dev" invalid: [\'SENTINEL_LIST\'] is not valid under any of the given schemas\n', 'SENTINEL_LIST'],
+  ['a template that does not render', 'Compilation Error\n  Could not render {{ env_var(\'X\', \'SENTINEL_TPL\') | bad_filter }}\n', 'SENTINEL_TPL'],
+  ['a quoted line that itself names a .yml', 'Runtime Error\n  Syntax error near line 7\n  ------------------------------\n  6  |       path: shop.duckdb\n  7  |       password: SENTINEL_YML.yml: invalid\n  8  | \n  \n  Raw Error:\n  mapping values are not allowed in this context\n', 'SENTINEL_YML'],
+]
+
+for (const [shape, text, secret] of PROFILE_SHAPES) {
+  test(`dbt's error for ${shape} never reaches the edit note, the check pane, the band, Explain or Fix, /dbt-show, its history or the doctor`, async ($, on) => {
+    // An edit's check.
+    const check = await start($, on, { show: { raw: { exitCode: 2, stdout: text } } })
+    const result: any = await editOrders($)
+    await check.clock.settle()
+    expect(JSON.stringify(result)).not.toContain(secret)
+    expect(noteOf(result)).toContain(PROFILES_FIXED)
+    const pane = await $.ui.mount({ ...CHECK, surface: 'terminal' })
+    expect(await pane.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+    await pane.unmount()
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await band.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+    await band.unmount()
+    // /dbt-show: the pane and the saved history.
+    await $.command.run({ command: 'dbt-show', args: 'orders' })
+    await check.clock.settle()
+    const results = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+    expect(await results.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+    expect(await results.find({ type: 'Text', text: /profiles\.yml could not be parsed/ })).toBeDefined()
+    await results.unmount()
+    expect(JSON.stringify(check.store.get('dbt-results-history'))).not.toContain(secret)
+    expect(check.toasts.join('\n')).not.toContain(secret)
+  })
+
+  test(`dbt's error for ${shape} in Claude's own failed dbt command never reaches the band, Explain or Fix`, async ($, on) => {
+    const { clock, prompts, setBash } = await start($, on, { runResultsAt: 1, now: 900_000 })
+    setBash({ stdout: `${HEADER}\n${text}`, isError: true })
+    await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+    await clock.settle()
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await band.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+    await band.press({ key: 'dbt-explain' })
+    await band.press({ key: 'dbt-fix' })
+    await clock.settle()
+    expect(prompts.length).toBe(2)
+    for (const prompt of prompts) expect(prompt).not.toContain(secret)
+    await band.unmount()
+  })
+
+  test(`dbt's error for ${shape} in dbt debug never reaches the doctor's detail or the note sent with the next prompt`, async ($, on) => {
+    const { clock, prompts } = await start($, on, { debug: { exitCode: 2, stdout: `06:45:41  Profile loading failed:\n${text}` } })
+    await $.command.run({ command: 'dbt-doctor', args: '' })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+    await ui.unmount()
+    await $.prompt.submit({ text: 'hello' })
+    expect(prompts[0]).not.toContain(secret)
+    expect(debugInfo(`Profile loading failed:\n${text}`).detail).not.toContain(secret)
+  })
+
+  kitTest(`the helpers replace dbt's error for ${shape} whole`, () => {
+    for (const out of [text, errorLog(text)]) {
+      expect(profilesError(out)).toBe(true)
+      expect(logErrors(errorLog(text)).join('\n')).not.toContain(secret)
+      expect(JSON.stringify(failuresFromText(out))).not.toContain(secret)
+    }
+  })
+}
+
+kitTest('a syntax error in another YAML file, and the doctor\'s status lines for profiles.yml, are not profile errors', () => {
+  expect(profilesError('Runtime Error\n  Syntax error near line 3\n  3  | x: y.yml: z\n  in models/schema.yml')).toBe(false)
+  expect(profilesError('06:45:45  Using profiles.yml file at /home/me/.dbt/profiles.yml\n06:45:45    profiles.yml file [OK found and valid]\n06:45:45    Connection test: [ERROR]\n  could not connect to server')).toBe(false)
+})
+
+// ─── Review follow-ups: invocation ids, wrappers, history, the pane's names ──────────────────────
+
+const withInvocation = (id: string) => JSON.stringify({ ...RUN_RESULTS, metadata: { invocation_id: id, generated_at: '2026-11-17T00:00:00Z' } })
+const CUSTOMERS_FAILED = '\u001b[0m06:45:43  Compilation Error in model customers (models/customers.sql)\n  boom\nDone. PASS=0 WARN=0 ERROR=1 SKIP=0 NO-OP=0 TOTAL=1'
+
+test('a run_results.json over 4 MiB that is the one seen before the command is not this command\'s', async ($, on) => {
+  const earlier = JSON.stringify({ results: [{ unique_id: 'test.shop.not_null_orders_amount.106140f9fd', status: 'error', message: 'old failure' }], metadata: { invocation_id: 'earlier-run', generated_at: 'x' } })
+  const { clock, setBash } = await start($, on, { runResultsSize: 9 * 1024 * 1024, runResultsAt: 9_000_000, runFailures: { exitCode: 0, stdout: earlier } })
+  setBash({ stdout: CUSTOMERS_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s customers' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /customers/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /not_null_orders_amount/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('the artifact the plugin\'s own dbt show wrote while Claude\'s command ran is not that command\'s result', async ($, on) => {
+  let ctx: any
+  ctx = await start($, on, {
+    runResultsAt: 9_000_000,
+    // The plugin's check finishes while Claude's command is running; its show writes run_results.json.
+    duringBash: async () => {
+      ctx.files['target/run_results.json'] = withInvocation('plugin-show')
+      await editOrders($)
+      await ctx.clock.settle()
+    },
+  })
+  ctx.setBash({ stdout: CUSTOMERS_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s customers' })
+  await ctx.clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /customers/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /not_null_orders_amount/ })).toBeUndefined()
+  await band.unmount()
+})
+
+const WRAPPERS: [string, number, string][] = [
+  ['a bad interpreter', 126, 'bash: /proj/.venv/bin/dbt: /gone/bin/python: bad interpreter: No such file or directory'],
+  ['a shebang whose file is not found', 127, 'sh: /proj/.venv/bin/dbt: cannot execute: required file not found'],
+  ['Windows saying dbt is not recognized', 1, "'dbt' is not recognized as an internal or external command,\noperable program or batch file."],
+]
+for (const [what, exitCode, stderr] of WRAPPERS) {
+  test(`${what} is dbt that cannot be run: not checked, not FAILED, and not spawned again`, async ($, on) => {
+    const { clock, runs } = await start($, on, { show: { raw: { exitCode, stdout: '', stderr } } })
+    const first: any = await editOrders($)
+    await clock.settle()
+    expect(noteOf(first)).toContain('- not checked: dbt could not be run here.')
+    expect(noteOf(first)).not.toContain('FAILED')
+    const shows = () => runs.filter(argv => argv[1] === 'show').length
+    const after = shows()
+    await editOrders($)
+    await clock.settle()
+    expect(shows()).toBe(after)
+  })
+}
+
+test('the same words with exit 0 do not make dbt unrunnable', async ($, on) => {
+  const { clock } = await start($, on, { show: { raw: { exitCode: 0, stdout: 'bad interpreter', stderr: 'dbt: cannot execute: required file not found' } } })
+  const note: any = await editOrders($)
+  await clock.settle()
+  expect(noteOf(note)).not.toContain('dbt could not be run here')
+})
+
+test('a bad interpreter of another program does not make dbt unrunnable', async ($, on) => {
+  const { clock } = await start($, on, { show: { raw: { exitCode: 126, stdout: '', stderr: 'bash: ./hook.sh: /bin/sh^M: bad interpreter: No such file or directory' } } })
+  const note: any = await editOrders($)
+  await clock.settle()
+  expect(noteOf(note)).not.toContain('dbt could not be run here')
+})
+
+test('a history write that fails twice is logged', async ($, on) => {
+  const marked = Array.from({ length: 8 }, (_, i) => savedQuery(`mark${i}`, true, 'y'.repeat(150)))
+  const logs: string[] = []
+  const ctx = await start($, on, { stored: { 'dbt-results-history': marked }, storeLimit: 10, logs })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await ctx.clock.settle()
+  expect(logs.some(one => one.includes('query history could not be saved'))).toBe(true)
+})
+
+test('the pane drops from view what the store dropped', async ($, on) => {
+  const marked = Array.from({ length: 8 }, (_, i) => savedQuery(`mark${i}`, true, 'y'.repeat(150)))
+  const bytes = JSON.stringify(marked).length
+  const { clock, store } = await start($, on, { stored: { 'dbt-results-history': marked }, storeLimit: Math.floor(bytes * 0.7) })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  const kept = (store.get('dbt-results-history') as any[]).map(one => one.title)
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(kept.includes('mark7')).toBe(false)
+  expect(kept.includes('mark0')).toBe(true)
+  expect(await ui.find({ type: 'Button', text: /mark0/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /mark7/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the check pane marks only the column the core found undocumented: a quoted ID returned beside id', async ($, on) => {
+  const manifest = JSON.parse(JSON.stringify(MANIFEST))
+  manifest.nodes['model.shop.orders'].columns = { ID: { name: 'ID', quote: true } }
+  const { clock } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(manifest) }, show: { rows: [{ ID: 1, id: 2 }] } })
+  await editOrders($)
+  await clock.settle()
+  const pane = await $.ui.mount({ ...CHECK, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /^\+ id\s+returned, not documented/ })).toBeDefined()
+  expect(await pane.find({ type: 'Text', text: /^✓ ID\s*$/ })).toBeDefined()
+  await pane.unmount()
+})
+
+test('/dbt-show captures its generation at entry: a /clear during its first await keeps its rows out of the new conversation\'s pane', async ($, on) => {
+  let release: () => void = () => {}
+  const options: any = {}
+  const { clock } = await start($, on, options)
+  options.holdRoot = new Promise<void>(resolve => (release = resolve))
+  const running = $.command.run({ command: 'dbt-show', args: 'orders' })
+  // The command is under way, waiting for the session's root.
+  for (let i = 0; i < 50; i++) await Promise.resolve()
+  await $.session.end({ reason: 'clear' } as any)
+  options.holdRoot = undefined
+  release()
+  await running
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /1 row/ })).toBeUndefined()
+  await ui.unmount()
 })

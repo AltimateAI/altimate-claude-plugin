@@ -10,9 +10,14 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 FAILURES=0
 fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
 
+# A missing tool fails the run when CI is set, so CI never runs none of these checks; elsewhere it is a visible warning.
+missing() {
+  if [ -n "${CI:-}" ]; then echo "FAIL: dbt-scripts: $1, and CI is set"; FAILURES=$((FAILURES + 1)); else echo "SKIP: dbt-scripts: $1; these checks did not run"; fi
+}
+
 JS="$(command -v node || command -v bun || true)"
-[ -n "$JS" ] || { echo "dbt-scripts: skipped (no node or bun to read the scripts from the TypeScript source)"; exit 0; }
-command -v python3 >/dev/null || { echo "dbt-scripts: skipped (no python3)"; exit 0; }
+[ -n "$JS" ] || { missing "no node or bun to read the scripts from the TypeScript source"; exit "$FAILURES"; }
+command -v python3 >/dev/null || { missing "no python3"; exit "$FAILURES"; }
 
 # Each script is a template literal with no substitutions: read it the way JavaScript does.
 "$JS" -e '
@@ -32,31 +37,35 @@ SECRET="SENTINEL_SECRET_VALUE"
 # ─── PROFILE_TYPE ───────────────────────────────────────────────────────────────────────────────
 if python3 -c 'import yaml' 2>/dev/null; then
   printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
-  # profile <name> <profiles.yml> <expected status> [VAR=value ...]
+  # profile <name> <profiles.yml> <expected status> <expected target> <expected type> [VAR=value ...]; an empty target or type is one the script does not print
   profile() {
-    local name="$1" yml="$2" want="$3" out got; shift 3
+    local name="$1" yml="$2" want="$3" want_target="$4" want_type="$5" out got; shift 5
     printf '%s' "$yml" > "$TMP/profiles.yml"
     out="$(env "$@" python3 -c "$(cat "$TMP/PROFILE_TYPE.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1)"
     case "$out" in *SENTINEL*) fail "profile: $name: a secret reached the output: $out" ;; esac
     got="$(printf '%s' "$out" | field status)"
     [ "$got" = "$want" ] || fail "profile: $name: expected status $want, got '$got' ($out)"
+    got="$(printf '%s' "$out" | field target)"
+    [ "$got" = "$want_target" ] || fail "profile: $name: expected target '$want_target', got '$got' ($out)"
+    got="$(printf '%s' "$out" | field type)"
+    [ "$got" = "$want_type" ] || fail "profile: $name: expected type '$want_type', got '$got' ($out)"
   }
-  profile "plain output" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n' ok
-  profile "env_var default and DBT_TARGET" $'shop:\n  target: "{{ env_var(\'T\', \'dev\') }}"\n  outputs:\n    dev: {type: duckdb}\n    prod: {type: postgres}\n' ok X=1
-  profile "DBT_TARGET picks the output" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n    prod: {type: postgres}\n' ok DBT_TARGET=prod
+  profile "plain output" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n' ok dev duckdb
+  profile "env_var default and DBT_TARGET" $'shop:\n  target: "{{ env_var(\'T\', \'dev\') }}"\n  outputs:\n    dev: {type: duckdb}\n    prod: {type: postgres}\n' ok dev duckdb X=1
+  profile "DBT_TARGET picks the output" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n    prod: {type: postgres}\n' ok prod postgres DBT_TARGET=prod
   # An output's keys under `target:` by an indentation slip: a mapping, never echoed.
-  profile "target is a mapping holding a password" $'shop:\n  target:\n    type: postgres\n    password: SENTINEL_SECRET_VALUE\n  outputs:\n    dev: {type: duckdb}\n' no_target
-  profile "target is a list holding a password" $'shop:\n  target: [SENTINEL_SECRET_VALUE]\n  outputs:\n    dev: {type: duckdb}\n' no_target
+  profile "target is a mapping holding a password" $'shop:\n  target:\n    type: postgres\n    password: SENTINEL_SECRET_VALUE\n  outputs:\n    dev: {type: duckdb}\n' no_target '' ''
+  profile "target is a list holding a password" $'shop:\n  target: [SENTINEL_SECRET_VALUE]\n  outputs:\n    dev: {type: duckdb}\n' no_target '' ''
   # A line YAML cannot read, with the secret on it.
-  profile "malformed line with a password" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      password: SENTINEL_SECRET_VALUE: invalid\n' error
+  profile "malformed line with a password" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      password: SENTINEL_SECRET_VALUE: invalid\n' error '' ''
   # Templates dbt renders: never echoed, whatever is inside.
-  profile "target template naming a secret" $'shop:\n  target: "{{ foo(\'SENTINEL_SECRET_VALUE\') }}"\n  outputs:\n    dev: {type: duckdb}\n' template
-  profile "type template naming a secret" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "{{ var(\'SENTINEL_SECRET_VALUE\') }}"}\n' template
-  profile "type is a mapping" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: {password: SENTINEL_SECRET_VALUE}\n' no_type
-  profile "type that is no name" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "SENTINEL_SECRET_VALUE pw!"}\n' no_type
-  profile "no such output" $'shop:\n  target: staging\n  outputs:\n    dev: {type: duckdb}\n' no_output
+  profile "target template naming a secret" $'shop:\n  target: "{{ foo(\'SENTINEL_SECRET_VALUE\') }}"\n  outputs:\n    dev: {type: duckdb}\n' template '' ''
+  profile "type template naming a secret" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "{{ var(\'SENTINEL_SECRET_VALUE\') }}"}\n' template '' ''
+  profile "type is a mapping" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: {password: SENTINEL_SECRET_VALUE}\n' no_type dev ''
+  profile "type that is no name" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "SENTINEL_SECRET_VALUE pw!"}\n' no_type dev ''
+  profile "no such output" $'shop:\n  target: staging\n  outputs:\n    dev: {type: duckdb}\n' no_output staging ''
 else
-  echo "dbt-scripts: PROFILE_TYPE skipped (python3 has no PyYAML)"
+  missing "python3 has no PyYAML, so the PROFILE_TYPE checks cannot run"
 fi
 
 # ─── MANIFEST_SLICE ─────────────────────────────────────────────────────────────────────────────
@@ -137,5 +146,5 @@ out="$(script RUN_FAILURES "$TMP/run_results-broken.json" 2>&1)"; code=$?
 [ "$code" -ne 0 ] || fail "run failures: a broken file did not fail"
 case "$out" in *SENTINEL*) fail "run failures: the error for a broken file quotes it" ;; esac
 
-[ "$FAILURES" -eq 0 ] && echo "dbt-scripts: all checks passed"
+[ "$FAILURES" -eq 0 ] && echo "dbt-scripts: all checks that could run passed"
 exit "$FAILURES"
