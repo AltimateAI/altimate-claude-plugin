@@ -5,6 +5,7 @@ import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, Wo
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
 import { registerLineage, startLineage } from './lineage'
+import { startReviewNotices } from './review-notices'
 import { clearStatusParts, setStatusPart } from './status-line'
 import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 import { installToolChain } from './tool-chain'
@@ -581,6 +582,8 @@ export const register: Register = (on, options) => {
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
     if (e.isInteractive) void refresh($, 'detect')
+    // Decisions on the person's skill and knowledge requests, as toasts: only someone at the terminal reads them.
+    if (e.isInteractive) startReviewNotices($, e.cwd)
 
     return started
   })
