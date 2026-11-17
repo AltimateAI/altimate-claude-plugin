@@ -344,7 +344,7 @@ test('an overlap after a recorded run clears its Re-run failed command: the arti
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
-for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a; dbt retry', 'dbt build -s a && false && dbt build -s b', 'dbt retry --target dev; dbt retry --target prod', 'dbt build -s a; dbt retry --target dev; dbt retry --target prod']) {
+for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a; dbt retry', 'dbt build -s a; dbt build -s "$MODEL"', 'dbt build -s a && false && dbt build -s b', 'dbt retry --target dev; dbt retry --target prod', 'dbt build -s a; dbt retry --target dev; dbt retry --target prod']) {
   test(`a chain with two builds is not recorded, failed or not, and older retries are cleared: ${command}`, async ($, on) => {
     const { stored } = await start($, on, () => view('inv-a', [['model.shop.a', 'error', null]]))
     await $.tool.call({ tool: 'Bash', command: 'dbt build -s old' })
@@ -369,6 +369,13 @@ test('a chain with two builds clears the stored retry even when its artifact can
   fail = true
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s b && dbt build -s c', tool_use_id: 'chain' })
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+})
+
+test('two calls writing one explicit artifact folder from different project folders are ambiguous', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /repo/a --target-path /repo/b/target -s a && dbt build --project-dir /repo/b -s b' })
+  expect(result.context ?? []).toEqual([])
+  expect(stored.has('runs')).toBe(false)
 })
 
 test('a backgrounded dbt build clears the stored Re-run failed command: it may replace the artifact at any time', async ($, on) => {

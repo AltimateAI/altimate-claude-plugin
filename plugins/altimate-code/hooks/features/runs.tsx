@@ -304,11 +304,9 @@ export const runsDbt = (command: string) => parseDbtCommand(command).length > 0
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
 const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(^|[^&])&\s*$/.test(e.command.trim())
-/** The artifact folder a call writes to, as one string: the project's own `target` and an unnamed one are the same folder. */
-const folderOf = (one: Invocation) => {
-  const named = one.targetPath === null ? null : normalize(one.targetPath.startsWith('/') ? one.targetPath : `${one.projectDir}/${one.targetPath}`)
-  return named === null || named === normalize(`${one.projectDir}/target`) ? one.projectDir : named
-}
+/** The artifact folder a call writes to, as one string: where dbt puts run_results.json. */
+const folderOf = (one: Invocation) =>
+  normalize(one.targetPath === null ? `${one.projectDir}/target` : one.targetPath.startsWith('/') ? one.targetPath : `${one.projectDir}/${one.targetPath}`)
 const startKey = (e: BashCall) => e.tool_use_id
 
 /** Store updates one after another, so two recordings never overwrite each other's runs. */
@@ -400,6 +398,11 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   }
   const root = await $.session.root()
   const invocations = resultsInvocations(e.command, root, began.cwd)
+  // A call whose folder cannot be told may still have written: what was recorded before can no longer be retried from the file.
+  if (parseDbtCommand(e.command).filter(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand)).length > invocations.length) {
+    await clearRetries($)
+    return null
+  }
   const mine = [...new Set(invocations.map(folderOf))]
   // Several invocations writing one artifact folder (`dbt build -s a && dbt build -s b`, a retry beside another command):
   // the file cannot say which one ran when a chain stops early, so nothing is recorded, whether the file can be read or not.
