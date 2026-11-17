@@ -714,18 +714,20 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 /** A model file Bash writes (a `sed -i`, a redirect, a `git checkout -- file`) is checked like one Claude edited. */
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   const root = await $.session.root().catch(() => '')
-  for (const name of filesWrittenBy(e.command)) await markChanged($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`)
+  for (const name of filesWrittenBy(e.command)) await markChanged($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`, root)
 }
 
-async function markChanged($: EngineInterface, file: string) {
+async function markChanged($: EngineInterface, file: string, root: string) {
   const path = norm(file)
   if (!(await isModelFile($, path))) return
   // The CLI finds its project from the session's folder: a model of another project (a nested one, or one beside
   // the session's) is not covered by its check, so it is not counted as checked.
-  const root = await $.session.root().catch(() => '')
   const own = root ? await projectAbove($, norm(root)) : null
   const mine = await projectAbove($, path.replace(/\/[^/]*$/, ''))
-  if (own === null || mine === null || norm(own) !== norm(mine)) return
+  if (own === null || mine === null) return
+  // Compared as the system names the folders, the way `canonical` matches an edit to an insight's file.
+  const real = await canonical($, [`${own}/x`, `${mine}/x`])
+  if (real(`${own}/x`) !== real(`${mine}/x`)) return
   await update($, healthAtom, prev => {
     const base = prev ?? fresh()
     return {
@@ -741,7 +743,7 @@ async function markChanged($: EngineInterface, file: string) {
 /** A model file Claude changed is checked at the end of the turn. */
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
   const root = await $.session.root().catch(() => '')
-  await markChanged($, file.path.startsWith('/') || /^[A-Za-z]:/.test(file.path) ? file.path : `${root}/${file.path}`)
+  await markChanged($, file.path.startsWith('/') || /^[A-Za-z]:/.test(file.path) ? file.path : `${root}/${file.path}`, root)
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}

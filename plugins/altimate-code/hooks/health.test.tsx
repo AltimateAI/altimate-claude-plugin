@@ -152,6 +152,28 @@ test('a model inside an installed package with its own dbt_project.yml is not a 
   expect(calls).toHaveLength(1)
 })
 
+test('a model of a project nested in the session\'s own is not counted as checked: no second check runs', async ($, on) => {
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG]], projects: [ROOT, `${ROOT}/nested`] })
+  await $.tool.call(edit(`${ROOT}/nested/models/x.sql`))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(1)
+})
+
+test('an edit spelled by the real path of the session\'s symlinked project is still an edit of its own project', async ($, on) => {
+  const real = '/private/shop'
+  const file = `${real}/models/staging/stg_orders.sql`
+  const stg = { ...NEW_STG, file, properties: '' }
+  const old = { ...OLD_STG, file, properties: '' }
+  const { clock, toasts } = await start($, on, {
+    runs: [[old], [old, stg]],
+    projects: [ROOT, real],
+    realFolders: { [ROOT]: real, [real]: real },
+  })
+  await $.tool.call(edit(file))
+  await endTurn($, clock, 't1')
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
 test('README, dbt_project.yml, profiles, CI and dbt_packages files are not model files: no check runs', async ($, on) => {
   const { clock, calls, toasts } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG]] })
   for (const file of [NOTES, `${ROOT}/dbt_project.yml`, `${ROOT}/profiles.yml`, `${ROOT}/.github/workflows/ci.yml`, `${ROOT}/dbt_packages/dep/models/x.sql`, `${ROOT}/target/compiled/x.sql`])
