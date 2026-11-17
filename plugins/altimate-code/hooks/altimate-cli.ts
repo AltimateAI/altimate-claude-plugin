@@ -1,6 +1,12 @@
 // The altimate CLI as both halves of the plugin call it.
 import type { EngineInterface } from 'claude-code'
 
+/**
+ * The oldest altimate-code release the plugin is made for: the first whose column answer reports what
+ * may carry the value, with a reason for each model (`may_carry`). Stated in README.md and CHANGELOG.md too.
+ */
+export const MIN_ALTIMATE_CODE = '0.12.11'
+
 // `altimate` is the name the standalone installer and npm v0.7.1+ put on PATH;
 // older npm installs only have `altimate-code`.
 const CLI_NAMES = ['altimate', 'altimate-code'] as const
@@ -112,7 +118,9 @@ export type RunToolOptions = {
   until?: number
   /**
    * The tool needs write permission (it starts the dbt adapter, or changes something): the call goes
-   * through the CLI with `--allow-write`, since the plugin's MCP server runs read-only.
+   * through the CLI with `--allow-write`, since the plugin's MCP server runs read-only. runTool asks
+   * nobody: a caller sets it only once the user has said yes to this write (README, "How it works",
+   * item 4), as the skill does before it adds `--allow-write`.
    */
   write?: boolean
 }

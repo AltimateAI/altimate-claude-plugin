@@ -1,7 +1,7 @@
 {
   "name": "altimate-code",
   "displayName": "Altimate Code",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Gives Claude Code altimate-code's model-free data tools (column-level lineage, impact analysis, PII detection, data-diff, FinOps, query equivalence, dialect translation, warehouse queries) through its MCP server, or through `altimate tool run` when MCP servers are not allowed, with delegation to the altimate-code agent for long dbt jobs, access to a linked Altimate workspace's knowledge, and the workspace's team rules in each session.",
   "author": {
     "name": "AltimateAI",
@@ -26,7 +26,8 @@
       "type": "number",
       "title": "Largest BigQuery scan without asking",
       "description": "A dbt run, build or show that BigQuery estimates would scan more bytes than this is held until you allow it with /allow-scan. 0 never holds one. Other warehouses are never held.",
-      "default": 10737418240
+      "default": 10737418240,
+      "min": 0
     },
     "healthBlocksPush": {
       "type": "boolean",
@@ -44,7 +45,8 @@
       "type": "number",
       "title": "Team comments refresh (seconds)",
       "description": "How often the team's comments on shared docs are fetched again.",
-      "default": 900
+      "default": 900,
+      "min": 30
     },
     "commentsInContext": {
       "type": "boolean",

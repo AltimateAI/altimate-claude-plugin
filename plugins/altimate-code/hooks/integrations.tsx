@@ -4,8 +4,9 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
-import { lineageBand, registerLineage, startLineage } from './lineage'
-import { setStatusPart } from './status-line'
+import { registerLineage, startLineage } from './lineage'
+import { clearStatusParts, setStatusPart } from './status-line'
+import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 import { installToolChain } from './tool-chain'
 
 const PANE = 'altimate-integrations'
@@ -564,6 +565,9 @@ export const register: Register = (on, options) => {
     })
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
+    await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
+    // An earlier session's status parts are not this one's.
+    await clearStatusParts($).catch(error => $.ui.log(`status line · could not clear: ${String(error)}`))
     // Each feature's own start (its commands); one failing is logged and the rest go on.
     await featuresSessionStart($, e)
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
@@ -586,11 +590,11 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    // One band per plugin: the lineage impact line rides under the integrations one, or alone; each
+    // One band per plugin: the end-of-task lineage summary rides under the integrations one, or alone; each
     // feature's line rides under the lineage one.
     if (e.props.hasSurvey) return next(e)
     const ui = $.ui.resolve(e)
-    const lineage = await lineageBand($, ui)
+    const lineage = await taskBand($, ui)
     const extra = await featureBandLines($, ui)
     const tail =
       extra.length === 0 ? (
@@ -816,6 +820,7 @@ export const register: Register = (on, options) => {
   })
 
   registerLineage(on)
+  registerTaskImpact(on)
 
   // The features after the lineage half; their Bash and file-edit handlers run through one ordered
   // tool.call hook (tool-chain.ts).

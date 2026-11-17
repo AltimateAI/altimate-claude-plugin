@@ -4,7 +4,7 @@
 // A plugin hooks each shared event once (a second hook on an event without a matcher is refused), and
 // the engine refuses `$` handed to anything but a function it can name, so this file calls every
 // feature's functions by name instead of looping over a list. A feature fills in its own file only.
-// A function that throws is logged and skipped: one feature's failure never stops another or the call.
+// A function that throws, at once or as a rejection, is logged and skipped: one feature's failure never stops another or the call.
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { BashCall, EditedFile, FileCall } from '../tool-chain'
@@ -153,105 +153,77 @@ function failed($: EngineInterface, id: string, part: string, error: unknown) {
   } catch {}
 }
 
-/** Registers that threw, logged at the next session start (there is no `$` while registering). */
-const registerFailures: [string, unknown][] = []
+/**
+ * Runs one feature function and logs a failure, whether it throws at once or rejects later, so a feature
+ * never breaks the phase it runs in. The function's value, or nothing when it failed.
+ */
+export async function attempt<T>($: EngineInterface, id: string, part: string, run: () => T | Promise<T>): Promise<Awaited<T> | void> {
+  try {
+    return await run()
+  } catch (error) {
+    failed($, id, part, error)
+  }
+}
 
-/** Registers every feature's own hooks; one feature's failure never skips the rest. */
+/** Registers every feature's own hooks. */
 export function registerFeatures(on: On, context: FeatureContext) {
-  try {
-    runsRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['runs', error])
-  }
-  try {
-    deferRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['defer', error])
-  }
-  try {
-    toModelRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['toModel', error])
-  }
-  try {
-    commentsRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['comments', error])
-  }
-  try {
-    costRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['cost', error])
-  }
-  try {
-    healthRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['health', error])
-  }
-  try {
-    sqlGraphRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['sqlGraph', error])
-  }
-  try {
-    docsRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['docs', error])
-  }
-  try {
-    cteProfileRegister(on, context)
-  } catch (error) {
-    registerFailures.push(['cteProfile', error])
-  }
+  runsRegister(on, context)
+  deferRegister(on, context)
+  toModelRegister(on, context)
+  commentsRegister(on, context)
+  costRegister(on, context)
+  healthRegister(on, context)
+  sqlGraphRegister(on, context)
+  docsRegister(on, context)
+  cteProfileRegister(on, context)
 }
 
 export async function featuresSessionStart($: EngineInterface, e: Args<'session.start'>) {
-  for (const [id, error] of registerFailures.splice(0)) failed($, id, 'register', error)
-  await runsSessionStart($, e).catch(error => failed($, 'runs', 'sessionStart', error))
-  await deferSessionStart($, e).catch(error => failed($, 'defer', 'sessionStart', error))
-  await toModelSessionStart($, e).catch(error => failed($, 'toModel', 'sessionStart', error))
-  await commentsSessionStart($, e).catch(error => failed($, 'comments', 'sessionStart', error))
-  await costSessionStart($, e).catch(error => failed($, 'cost', 'sessionStart', error))
-  await healthSessionStart($, e).catch(error => failed($, 'health', 'sessionStart', error))
-  await sqlGraphSessionStart($, e).catch(error => failed($, 'sqlGraph', 'sessionStart', error))
-  await docsSessionStart($, e).catch(error => failed($, 'docs', 'sessionStart', error))
-  await cteProfileSessionStart($, e).catch(error => failed($, 'cteProfile', 'sessionStart', error))
+  await attempt($, 'runs', 'sessionStart', () => runsSessionStart($, e))
+  await attempt($, 'defer', 'sessionStart', () => deferSessionStart($, e))
+  await attempt($, 'toModel', 'sessionStart', () => toModelSessionStart($, e))
+  await attempt($, 'comments', 'sessionStart', () => commentsSessionStart($, e))
+  await attempt($, 'cost', 'sessionStart', () => costSessionStart($, e))
+  await attempt($, 'health', 'sessionStart', () => healthSessionStart($, e))
+  await attempt($, 'sqlGraph', 'sessionStart', () => sqlGraphSessionStart($, e))
+  await attempt($, 'docs', 'sessionStart', () => docsSessionStart($, e))
+  await attempt($, 'cteProfile', 'sessionStart', () => cteProfileSessionStart($, e))
 }
 
 export async function featuresTurnStart($: EngineInterface, e: Args<'turn.start'>) {
-  await runsTurnStart($, e).catch(error => failed($, 'runs', 'turnStart', error))
-  await deferTurnStart($, e).catch(error => failed($, 'defer', 'turnStart', error))
-  await toModelTurnStart($, e).catch(error => failed($, 'toModel', 'turnStart', error))
-  await commentsTurnStart($, e).catch(error => failed($, 'comments', 'turnStart', error))
-  await costTurnStart($, e).catch(error => failed($, 'cost', 'turnStart', error))
-  await healthTurnStart($, e).catch(error => failed($, 'health', 'turnStart', error))
-  await sqlGraphTurnStart($, e).catch(error => failed($, 'sqlGraph', 'turnStart', error))
-  await docsTurnStart($, e).catch(error => failed($, 'docs', 'turnStart', error))
-  await cteProfileTurnStart($, e).catch(error => failed($, 'cteProfile', 'turnStart', error))
+  await attempt($, 'runs', 'turnStart', () => runsTurnStart($, e))
+  await attempt($, 'defer', 'turnStart', () => deferTurnStart($, e))
+  await attempt($, 'toModel', 'turnStart', () => toModelTurnStart($, e))
+  await attempt($, 'comments', 'turnStart', () => commentsTurnStart($, e))
+  await attempt($, 'cost', 'turnStart', () => costTurnStart($, e))
+  await attempt($, 'health', 'turnStart', () => healthTurnStart($, e))
+  await attempt($, 'sqlGraph', 'turnStart', () => sqlGraphTurnStart($, e))
+  await attempt($, 'docs', 'turnStart', () => docsTurnStart($, e))
+  await attempt($, 'cteProfile', 'turnStart', () => cteProfileTurnStart($, e))
 }
 
 export async function featuresTurnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {
-  await runsTurnComplete($, e, out).catch(error => failed($, 'runs', 'turnComplete', error))
-  await deferTurnComplete($, e, out).catch(error => failed($, 'defer', 'turnComplete', error))
-  await toModelTurnComplete($, e, out).catch(error => failed($, 'toModel', 'turnComplete', error))
-  await commentsTurnComplete($, e, out).catch(error => failed($, 'comments', 'turnComplete', error))
-  await costTurnComplete($, e, out).catch(error => failed($, 'cost', 'turnComplete', error))
-  await healthTurnComplete($, e, out).catch(error => failed($, 'health', 'turnComplete', error))
-  await sqlGraphTurnComplete($, e, out).catch(error => failed($, 'sqlGraph', 'turnComplete', error))
-  await docsTurnComplete($, e, out).catch(error => failed($, 'docs', 'turnComplete', error))
-  await cteProfileTurnComplete($, e, out).catch(error => failed($, 'cteProfile', 'turnComplete', error))
+  await attempt($, 'runs', 'turnComplete', () => runsTurnComplete($, e, out))
+  await attempt($, 'defer', 'turnComplete', () => deferTurnComplete($, e, out))
+  await attempt($, 'toModel', 'turnComplete', () => toModelTurnComplete($, e, out))
+  await attempt($, 'comments', 'turnComplete', () => commentsTurnComplete($, e, out))
+  await attempt($, 'cost', 'turnComplete', () => costTurnComplete($, e, out))
+  await attempt($, 'health', 'turnComplete', () => healthTurnComplete($, e, out))
+  await attempt($, 'sqlGraph', 'turnComplete', () => sqlGraphTurnComplete($, e, out))
+  await attempt($, 'docs', 'turnComplete', () => docsTurnComplete($, e, out))
+  await attempt($, 'cteProfile', 'turnComplete', () => cteProfileTurnComplete($, e, out))
 }
 
 export async function featuresSessionEnd($: EngineInterface, e: Args<'session.end'>) {
-  await runsSessionEnd($, e).catch(error => failed($, 'runs', 'sessionEnd', error))
-  await deferSessionEnd($, e).catch(error => failed($, 'defer', 'sessionEnd', error))
-  await toModelSessionEnd($, e).catch(error => failed($, 'toModel', 'sessionEnd', error))
-  await commentsSessionEnd($, e).catch(error => failed($, 'comments', 'sessionEnd', error))
-  await costSessionEnd($, e).catch(error => failed($, 'cost', 'sessionEnd', error))
-  await healthSessionEnd($, e).catch(error => failed($, 'health', 'sessionEnd', error))
-  await sqlGraphSessionEnd($, e).catch(error => failed($, 'sqlGraph', 'sessionEnd', error))
-  await docsSessionEnd($, e).catch(error => failed($, 'docs', 'sessionEnd', error))
-  await cteProfileSessionEnd($, e).catch(error => failed($, 'cteProfile', 'sessionEnd', error))
+  await attempt($, 'runs', 'sessionEnd', () => runsSessionEnd($, e))
+  await attempt($, 'defer', 'sessionEnd', () => deferSessionEnd($, e))
+  await attempt($, 'toModel', 'sessionEnd', () => toModelSessionEnd($, e))
+  await attempt($, 'comments', 'sessionEnd', () => commentsSessionEnd($, e))
+  await attempt($, 'cost', 'sessionEnd', () => costSessionEnd($, e))
+  await attempt($, 'health', 'sessionEnd', () => healthSessionEnd($, e))
+  await attempt($, 'sqlGraph', 'sessionEnd', () => sqlGraphSessionEnd($, e))
+  await attempt($, 'docs', 'sessionEnd', () => docsSessionEnd($, e))
+  await attempt($, 'cteProfile', 'sessionEnd', () => cteProfileSessionEnd($, e))
 }
 
 /** Each feature's band line, in order, with its id; a feature with nothing to say is left out. */
@@ -260,15 +232,15 @@ export async function featureBandLines($: EngineInterface, ui: BandUi): Promise<
   const add = (id: string, line: RenderElement | null | void) => {
     if (line) lines.push({ id, line })
   }
-  add('runs', await runsBandLine($, ui).catch(error => failed($, 'runs', 'bandLine', error)))
-  add('defer', await deferBandLine($, ui).catch(error => failed($, 'defer', 'bandLine', error)))
-  add('toModel', await toModelBandLine($, ui).catch(error => failed($, 'toModel', 'bandLine', error)))
-  add('comments', await commentsBandLine($, ui).catch(error => failed($, 'comments', 'bandLine', error)))
-  add('cost', await costBandLine($, ui).catch(error => failed($, 'cost', 'bandLine', error)))
-  add('health', await healthBandLine($, ui).catch(error => failed($, 'health', 'bandLine', error)))
-  add('sqlGraph', await sqlGraphBandLine($, ui).catch(error => failed($, 'sqlGraph', 'bandLine', error)))
-  add('docs', await docsBandLine($, ui).catch(error => failed($, 'docs', 'bandLine', error)))
-  add('cteProfile', await cteProfileBandLine($, ui).catch(error => failed($, 'cteProfile', 'bandLine', error)))
+  add('runs', await attempt($, 'runs', 'bandLine', () => runsBandLine($, ui)))
+  add('defer', await attempt($, 'defer', 'bandLine', () => deferBandLine($, ui)))
+  add('toModel', await attempt($, 'toModel', 'bandLine', () => toModelBandLine($, ui)))
+  add('comments', await attempt($, 'comments', 'bandLine', () => commentsBandLine($, ui)))
+  add('cost', await attempt($, 'cost', 'bandLine', () => costBandLine($, ui)))
+  add('health', await attempt($, 'health', 'bandLine', () => healthBandLine($, ui)))
+  add('sqlGraph', await attempt($, 'sqlGraph', 'bandLine', () => sqlGraphBandLine($, ui)))
+  add('docs', await attempt($, 'docs', 'bandLine', () => docsBandLine($, ui)))
+  add('cteProfile', await attempt($, 'cteProfile', 'bandLine', () => cteProfileBandLine($, ui)))
   return lines
 }
 
@@ -278,15 +250,15 @@ export async function featuresBashRewrite($: EngineInterface, e: BashCall): Prom
   const take = (next: string | null | void) => {
     if (typeof next === 'string' && next.trim() !== '') command = next
   }
-  take(await runsBashRewrite($, { ...e, command }).catch(error => failed($, 'runs', 'bashRewrite', error)))
-  take(await deferBashRewrite($, { ...e, command }).catch(error => failed($, 'defer', 'bashRewrite', error)))
-  take(await toModelBashRewrite($, { ...e, command }).catch(error => failed($, 'toModel', 'bashRewrite', error)))
-  take(await commentsBashRewrite($, { ...e, command }).catch(error => failed($, 'comments', 'bashRewrite', error)))
-  take(await costBashRewrite($, { ...e, command }).catch(error => failed($, 'cost', 'bashRewrite', error)))
-  take(await healthBashRewrite($, { ...e, command }).catch(error => failed($, 'health', 'bashRewrite', error)))
-  take(await sqlGraphBashRewrite($, { ...e, command }).catch(error => failed($, 'sqlGraph', 'bashRewrite', error)))
-  take(await docsBashRewrite($, { ...e, command }).catch(error => failed($, 'docs', 'bashRewrite', error)))
-  take(await cteProfileBashRewrite($, { ...e, command }).catch(error => failed($, 'cteProfile', 'bashRewrite', error)))
+  take(await attempt($, 'runs', 'bashRewrite', () => runsBashRewrite($, { ...e, command })))
+  take(await attempt($, 'defer', 'bashRewrite', () => deferBashRewrite($, { ...e, command })))
+  take(await attempt($, 'toModel', 'bashRewrite', () => toModelBashRewrite($, { ...e, command })))
+  take(await attempt($, 'comments', 'bashRewrite', () => commentsBashRewrite($, { ...e, command })))
+  take(await attempt($, 'cost', 'bashRewrite', () => costBashRewrite($, { ...e, command })))
+  take(await attempt($, 'health', 'bashRewrite', () => healthBashRewrite($, { ...e, command })))
+  take(await attempt($, 'sqlGraph', 'bashRewrite', () => sqlGraphBashRewrite($, { ...e, command })))
+  take(await attempt($, 'docs', 'bashRewrite', () => docsBashRewrite($, { ...e, command })))
+  take(await attempt($, 'cteProfile', 'bashRewrite', () => cteProfileBashRewrite($, { ...e, command })))
   return command
 }
 
@@ -296,30 +268,30 @@ export async function featuresBashGate($: EngineInterface, e: BashCall): Promise
   const take = (next: { deny: string } | null | void) => {
     if (!gate && next && typeof next.deny === 'string') gate = { deny: next.deny }
   }
-  if (!gate) take(await runsBashGate($, e).catch(error => failed($, 'runs', 'bashGate', error)))
-  if (!gate) take(await deferBashGate($, e).catch(error => failed($, 'defer', 'bashGate', error)))
-  if (!gate) take(await toModelBashGate($, e).catch(error => failed($, 'toModel', 'bashGate', error)))
-  if (!gate) take(await commentsBashGate($, e).catch(error => failed($, 'comments', 'bashGate', error)))
-  if (!gate) take(await costBashGate($, e).catch(error => failed($, 'cost', 'bashGate', error)))
-  if (!gate) take(await healthBashGate($, e).catch(error => failed($, 'health', 'bashGate', error)))
-  if (!gate) take(await sqlGraphBashGate($, e).catch(error => failed($, 'sqlGraph', 'bashGate', error)))
-  if (!gate) take(await docsBashGate($, e).catch(error => failed($, 'docs', 'bashGate', error)))
-  if (!gate) take(await cteProfileBashGate($, e).catch(error => failed($, 'cteProfile', 'bashGate', error)))
+  if (!gate) take(await attempt($, 'runs', 'bashGate', () => runsBashGate($, e)))
+  if (!gate) take(await attempt($, 'defer', 'bashGate', () => deferBashGate($, e)))
+  if (!gate) take(await attempt($, 'toModel', 'bashGate', () => toModelBashGate($, e)))
+  if (!gate) take(await attempt($, 'comments', 'bashGate', () => commentsBashGate($, e)))
+  if (!gate) take(await attempt($, 'cost', 'bashGate', () => costBashGate($, e)))
+  if (!gate) take(await attempt($, 'health', 'bashGate', () => healthBashGate($, e)))
+  if (!gate) take(await attempt($, 'sqlGraph', 'bashGate', () => sqlGraphBashGate($, e)))
+  if (!gate) take(await attempt($, 'docs', 'bashGate', () => docsBashGate($, e)))
+  if (!gate) take(await attempt($, 'cteProfile', 'bashGate', () => cteProfileBashGate($, e)))
   return gate
 }
 
 /** The context lines every feature adds after a Bash call ran. */
 export async function featuresBashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<string[]> {
   const lines: string[] = []
-  addLines(lines, await runsBashAfter($, e, result).catch(error => failed($, 'runs', 'bashAfter', error)))
-  addLines(lines, await deferBashAfter($, e, result).catch(error => failed($, 'defer', 'bashAfter', error)))
-  addLines(lines, await toModelBashAfter($, e, result).catch(error => failed($, 'toModel', 'bashAfter', error)))
-  addLines(lines, await commentsBashAfter($, e, result).catch(error => failed($, 'comments', 'bashAfter', error)))
-  addLines(lines, await costBashAfter($, e, result).catch(error => failed($, 'cost', 'bashAfter', error)))
-  addLines(lines, await healthBashAfter($, e, result).catch(error => failed($, 'health', 'bashAfter', error)))
-  addLines(lines, await sqlGraphBashAfter($, e, result).catch(error => failed($, 'sqlGraph', 'bashAfter', error)))
-  addLines(lines, await docsBashAfter($, e, result).catch(error => failed($, 'docs', 'bashAfter', error)))
-  addLines(lines, await cteProfileBashAfter($, e, result).catch(error => failed($, 'cteProfile', 'bashAfter', error)))
+  addLines(lines, await attempt($, 'runs', 'bashAfter', () => runsBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'defer', 'bashAfter', () => deferBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'toModel', 'bashAfter', () => toModelBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'comments', 'bashAfter', () => commentsBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'cost', 'bashAfter', () => costBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'health', 'bashAfter', () => healthBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'sqlGraph', 'bashAfter', () => sqlGraphBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'docs', 'bashAfter', () => docsBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'cteProfile', 'bashAfter', () => cteProfileBashAfter($, e, result)))
   return lines
 }
 
@@ -329,30 +301,30 @@ export const EDIT_READS_BEFORE: boolean = runsEditReadsBefore || deferEditReadsB
 /** The context lines every feature adds after an edit landed. */
 export async function featuresEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<string[]> {
   const lines: string[] = []
-  addLines(lines, await runsEditAfter($, e, result, runsEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'runs', 'editAfter', error)))
-  addLines(lines, await deferEditAfter($, e, result, deferEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'defer', 'editAfter', error)))
-  addLines(lines, await toModelEditAfter($, e, result, toModelEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'toModel', 'editAfter', error)))
-  addLines(lines, await commentsEditAfter($, e, result, commentsEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'comments', 'editAfter', error)))
-  addLines(lines, await costEditAfter($, e, result, costEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'cost', 'editAfter', error)))
-  addLines(lines, await healthEditAfter($, e, result, healthEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'health', 'editAfter', error)))
-  addLines(lines, await sqlGraphEditAfter($, e, result, sqlGraphEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'sqlGraph', 'editAfter', error)))
-  addLines(lines, await docsEditAfter($, e, result, docsEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'docs', 'editAfter', error)))
-  addLines(lines, await cteProfileEditAfter($, e, result, cteProfileEditReadsBefore ? file : { path: file.path, before: null }).catch(error => failed($, 'cteProfile', 'editAfter', error)))
+  addLines(lines, await attempt($, 'runs', 'editAfter', () => runsEditAfter($, e, result, runsEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'defer', 'editAfter', () => deferEditAfter($, e, result, deferEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'toModel', 'editAfter', () => toModelEditAfter($, e, result, toModelEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'comments', 'editAfter', () => commentsEditAfter($, e, result, commentsEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'cost', 'editAfter', () => costEditAfter($, e, result, costEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'health', 'editAfter', () => healthEditAfter($, e, result, healthEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'sqlGraph', 'editAfter', () => sqlGraphEditAfter($, e, result, sqlGraphEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'docs', 'editAfter', () => docsEditAfter($, e, result, docsEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'cteProfile', 'editAfter', () => cteProfileEditAfter($, e, result, cteProfileEditReadsBefore ? file : { path: file.path, before: null })))
   return lines
 }
 
 /** The context lines every feature adds after a read or an edit succeeded. */
 export async function featuresReadOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<string[]> {
   const lines: string[] = []
-  addLines(lines, await runsReadOrEditAfter($, e, result, file).catch(error => failed($, 'runs', 'readOrEditAfter', error)))
-  addLines(lines, await deferReadOrEditAfter($, e, result, file).catch(error => failed($, 'defer', 'readOrEditAfter', error)))
-  addLines(lines, await toModelReadOrEditAfter($, e, result, file).catch(error => failed($, 'toModel', 'readOrEditAfter', error)))
-  addLines(lines, await commentsReadOrEditAfter($, e, result, file).catch(error => failed($, 'comments', 'readOrEditAfter', error)))
-  addLines(lines, await costReadOrEditAfter($, e, result, file).catch(error => failed($, 'cost', 'readOrEditAfter', error)))
-  addLines(lines, await healthReadOrEditAfter($, e, result, file).catch(error => failed($, 'health', 'readOrEditAfter', error)))
-  addLines(lines, await sqlGraphReadOrEditAfter($, e, result, file).catch(error => failed($, 'sqlGraph', 'readOrEditAfter', error)))
-  addLines(lines, await docsReadOrEditAfter($, e, result, file).catch(error => failed($, 'docs', 'readOrEditAfter', error)))
-  addLines(lines, await cteProfileReadOrEditAfter($, e, result, file).catch(error => failed($, 'cteProfile', 'readOrEditAfter', error)))
+  addLines(lines, await attempt($, 'runs', 'readOrEditAfter', () => runsReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'defer', 'readOrEditAfter', () => deferReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'toModel', 'readOrEditAfter', () => toModelReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'comments', 'readOrEditAfter', () => commentsReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'cost', 'readOrEditAfter', () => costReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'health', 'readOrEditAfter', () => healthReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'sqlGraph', 'readOrEditAfter', () => sqlGraphReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'docs', 'readOrEditAfter', () => docsReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'cteProfile', 'readOrEditAfter', () => cteProfileReadOrEditAfter($, e, result, file)))
   return lines
 }
 
