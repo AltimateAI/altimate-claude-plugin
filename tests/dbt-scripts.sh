@@ -92,7 +92,8 @@ if python3 -c 'import yaml' 2>/dev/null; then
   redact() {
     local name="$1" yml="$2" want="$3" out; shift 3
     printf '%s' "$yml" > "$TMP/profiles.yml"
-    out="$(env "$@" python3 -c "$(cat "$TMP/PROFILE_REDACT.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1)"
+    # The assignments set for the command arrive on stdin (REDACT_STDIN), as the plugin sends them.
+    out="$(env "$@" python3 -c "$(cat "$TMP/PROFILE_REDACT.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1 <<<"${REDACT_STDIN:-{\}}")"
     printf '%s' "$out" | python3 -I -c '
 import json, sys
 want = sys.argv[1]
@@ -124,6 +125,11 @@ assert (want == "-" and not found) or want in found, found
   printf "name: 'shop'\nprofile: \"{{ env_var('P') }}\"\n" > "$TMP/dbt_project.yml"
   redact "a profile named by an env_var in dbt_project.yml" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, password: SENTINEL_NAMED_BY_ENV}\n' SENTINEL_NAMED_BY_ENV P=shop
   printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
+  # Python's own reprs of a value: dbt prints a non-ASCII or control-byte secret in a bytes repr, `\xNN` escapes among it.
+  redact "a non-ASCII value as a bytes repr" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: trino\n      jwt_token: "SENTINEL_\u20ac_TOKEN"\n' 'SENTINEL_\xe2\x82\xac_TOKEN'
+  redact "a control byte as a repr" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: trino\n      jwt_token: "SENTINEL_TOKEN\\x07\\ttail"\n' 'SENTINEL_TOKEN\x07\ttail'
+  # Assignments set for the command (DB_PASSWORD=x dbt run) are what dbt renders with.
+  REDACT_STDIN='{"env": {"DB_PASSWORD": "SENTINEL_COMMAND_ENV"}}' redact "an env var set for the command" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      sslmode: "{{ env_var(\'DB_PASSWORD\') }}"\n' SENTINEL_COMMAND_ENV
   redact "nothing but short values, types and ports" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, method: password, port: 5432, threads: 1234567, user: me}\n' -
 else
   missing "python3 has no PyYAML, so the PROFILE_REDACT checks cannot run"

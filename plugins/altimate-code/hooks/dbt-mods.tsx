@@ -698,7 +698,8 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
   }
   // Nothing dbt itself reported (a command the permission check refused, a missing binary): no band.
   if (failures.length === 0) return null
-  const view: FailureView = { command, root, verb, select, options, failures, at: await $.clock.now() }
+  // The command as shown and sent: a value set in it (DB_PASSWORD=… dbt run) is a value of the profile too.
+  const view: FailureView = { command: redactValues(command), root, verb, select, options, failures, at: await $.clock.now() }
   // A run that finished after a /clear belongs to the conversation that ran it.
   if (generation !== mineGeneration) return null
   await update($, failureAtom, () => view)
@@ -775,7 +776,10 @@ async function showResult($: EngineInterface, result: QueryResult, open: boolean
   // A query that finishes after a /clear is kept in the history, but does not fill the pane of the new conversation.
   if (generation === asked) await update($, resultAtom, () => result)
   await remember($, result)
-  if (open && generation === asked) await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...(await paneRequest($, RESULTS_PANE, RESULTS_SIZES)), closeOnEscape: true }).catch(() => null)
+  if (!open || generation !== asked) return
+  const request = await paneRequest($, RESULTS_PANE, RESULTS_SIZES)
+  // The conversation may have ended while the saved size was read.
+  if (generation === asked) await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...request, closeOnEscape: true }).catch(() => null)
 }
 
 /** Runs a dbt show and puts its rows in the pane: /dbt-show's query, or a re-run of one in the history. */
@@ -1020,6 +1024,12 @@ except Exception:
     jinja2 = None
 found = []
 recorded = []
+# What dbt will render with: the plugin's environment under the assignments set for the command (read from stdin, never argv or env).
+ENV = dict(os.environ)
+try:
+    ENV.update({k: v for k, v in (json.load(sys.stdin).get('env') or {}).items() if isinstance(k, str) and isinstance(v, str)})
+except Exception:
+    pass
 PLAIN = ('type', 'threads', 'method', 'port')
 IDENTIFIERS = ('schema', 'database', 'dataset', 'project', 'catalog', 'warehouse', 'role', 'user')
 def keep(value):
@@ -1033,8 +1043,8 @@ def keep(value):
     if value not in found:
         found.append(value)
 def env_var(name, default=None):
-    value = os.environ.get(name, default)
-    recorded.extend([os.environ.get(name), default])
+    value = ENV.get(name, default)
+    recorded.extend([ENV.get(name), default])
     value = '' if value is None else str(value)
     recorded.append(value)
     return value
@@ -1055,7 +1065,7 @@ def render(text):
         except Exception:
             return None
     for call in CALL.finditer(text):
-        recorded.extend([os.environ.get(call.group(2)), call.group(4)])
+        recorded.extend([ENV.get(call.group(2)), call.group(4)])
     return None
 def handle(text, key, secret):
     rendered = text
@@ -1090,7 +1100,7 @@ profiles = None
 try:
     profiles = yaml.safe_load(text) if yaml else None
     project = (yaml.safe_load(load(sys.argv[1])) if yaml else None) or {}
-    name = (sys.argv[3] if len(sys.argv) > 3 else None) or os.environ.get('DBT_PROFILE') or project.get('profile')
+    name = (sys.argv[3] if len(sys.argv) > 3 else None) or ENV.get('DBT_PROFILE') or project.get('profile')
     # A profile name a template gives is rendered the same way; its env vars are not secrets.
     if isinstance(name, str) and ('{{' in name or '{%' in name):
         name = render(name)
@@ -1105,13 +1115,20 @@ if isinstance(profiles, dict):
         scan(profile.get('outputs'), None, True)
 else:
     for call in CALL.finditer(text):
-        keep(os.environ.get(call.group(2)))
+        keep(ENV.get(call.group(2)))
         keep(call.group(4))
-print(json.dumps(dict(redact=found)))
+# The forms Python prints a value in (a repr, a bytes repr with \\xNN escapes), by the rules that print them.
+result = list(found)
+for value in found:
+    for part in [value] + [line for line in value.splitlines() if len(line) >= 6]:
+        for form in (repr(part)[1:-1], repr(part.encode('utf-8'))[2:-1]):
+            if len(form) >= 6 and form not in result:
+                result.append(form)
+print(json.dumps(dict(redact=result)))
 `
 
 /** Where an invocation reads its profiles.yml from, by its own words: the folder it ran in, and the folder it names. */
-type ProfilesFrom = { dir: string; profilesDir: string | null; profile?: string | null }
+type ProfilesFrom = { dir: string; profilesDir: string | null; profile?: string | null; env?: string[] }
 
 /**
  * The profiles.yml files dbt may read, the first existing one being the one it does: the invocation's own
@@ -1158,13 +1175,15 @@ async function ensureRedactions($: EngineInterface, root: string, from?: Profile
     const paths = new Set<string>(await profileCandidates($, root))
     if (from) for (const path of await profileCandidates($, root, from)) paths.add(path)
     for (const path of paths) {
-      const key = `${path}|${from?.profile ?? ''}`
+      // The assignments set for the command change what the profile renders to: another load for them. The key stays in memory.
+      const env = Object.fromEntries((from?.env ?? []).map(one => [one.slice(0, one.indexOf('=')), one.slice(one.indexOf('=') + 1)]))
+      const key = `${path}|${from?.profile ?? ''}|${JSON.stringify(env)}`
       const stat = await $.fs.stat(path).catch(() => null)
       const now = await $.clock.now()
       const seen = redactionLoaded.get(key)
       if (seen && stat && seen.mtimeMs === stat.mtimeMs && now - seen.at < REDACTION_REFRESH_MS) continue
       redactionLoaded.set(key, { mtimeMs: stat?.mtimeMs ?? 0, at: now })
-      const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path, ...(from?.profile ? [from.profile] : [])], { cwd: root, timeoutMs: 30_000 })
+      const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path, ...(from?.profile ? [from.profile] : [])], { cwd: root, timeoutMs: 30_000, stdin: JSON.stringify({ env }) })
       if (run.exitCode !== 0) continue
       const answer = JSON.parse(run.stdout) as { redact?: unknown }
       if (Array.isArray(answer.redact)) setRedactions(key, answer.redact.filter((one): one is string => typeof one === 'string'))
@@ -1527,7 +1546,7 @@ async function placeOf($: EngineInterface, base: string, one: DbtCommand): Promi
 async function ensureForRuns($: EngineInterface, base: string, runs: DbtCommand[]): Promise<void> {
   for (const one of runs) {
     const place = await placeOf($, base, one)
-    if (place) await ensureRedactions($, place.root, { dir: place.dir, profilesDir: one.profilesDir, profile: one.profile })
+    if (place) await ensureRedactions($, place.root, { dir: place.dir, profilesDir: one.profilesDir, profile: one.profile, env: one.assignments })
   }
 }
 

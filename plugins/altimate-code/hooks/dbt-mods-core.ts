@@ -241,6 +241,8 @@ export type DbtCommand = {
   profilesDir: string | null
   /** The profile it names with `--profile`; null when it does not (or the value holds an expansion). */
   profile: string | null
+  /** The `NAME=value` assignments set for it, as written: for rendering its profiles.yml as dbt will. Held in memory for that and never kept; `env` is what is compared and named. */
+  assignments: string[]
 }
 
 // Flags that decide where and how a command runs: two runs differing in them are not the same run.
@@ -352,7 +354,7 @@ function commandOf(command: string, one: DbtInvocation): DbtCommand | null {
     !one.dynamic &&
     !one.commented &&
     !words.some(word => /[$`~]/.test(word) || word.includes('--env-file'))
-  return { verb: verb!, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: one.start, cds: one.cds, end: one.subcommandEnd, argv: words, replayable, env, profilesDir: profilesDirOf(words, one.env), profile: flagOf(words, '--profile') }
+  return { verb: verb!, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: one.start, cds: one.cds, end: one.subcommandEnd, argv: words, replayable, env, profilesDir: profilesDirOf(words, one.env), profile: flagOf(words, '--profile'), assignments: one.env }
 }
 
 // Random for each session and never stored, so a hash cannot be guessed offline from anything on disk.

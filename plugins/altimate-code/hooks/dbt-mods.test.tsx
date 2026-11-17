@@ -171,6 +171,8 @@ type Options = {
   redact?: string[]
   /** Collects what is written to the redaction-aware run_results script's standard input. */
   stdins?: { argv: string[]; stdin: string | undefined }[]
+  /** The values the redaction script prints, given the assignments it was sent on stdin. */
+  redactFrom?: (env: Record<string, string>) => string[]
   /** The same, for the profiles.yml at one path (the script's second argument). */
   redactBy?: Record<string, string[]>
   /** What the project's Python prints for the profile script; the default is an ok duckdb output. */
@@ -251,6 +253,7 @@ async function start($: any, on: any, options: Options = {}) {
   const exists = (path: string) => path === ROOT || (path.startsWith(`${ROOT}/`) && (path.slice(ROOT.length + 1) in files || Object.keys(files).some(one => one.startsWith(`${path.slice(ROOT.length + 1)}/`))))
   const registered: string[] = []
   const storeGets: string[] = []
+  const redactSent: { argv: string[]; stdin: string | undefined }[] = []
   on('command.register', (_: unknown, e: { name: string }) => {
     registered.push(e.name)
     return { value: { command: e.name } }
@@ -345,6 +348,7 @@ async function start($: any, on: any, options: Options = {}) {
   let shows = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string } }) => {
     runs.push([...e.argv])
+    if (e.argv[2] === PROFILE_REDACT) redactSent.push({ argv: [...e.argv], stdin: e.init?.stdin })
     if (e.argv[2] === RUN_FAILURES) options.stdins?.push({ argv: [...e.argv], stdin: e.init?.stdin })
     cwds.push(e.init?.cwd ?? '')
     // The first dbt show waits until the test lets it go.
@@ -368,7 +372,7 @@ async function start($: any, on: any, options: Options = {}) {
       // The script itself is checked below; here the interpreter answers what it would print.
       return { value: { ...(options.profileAnswer ?? { exitCode: 0, stdout: '{"status":"ok","profile":"shop","target":"dev","type":"duckdb"}' }), stderr: '' } }
     }
-    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_REDACT) return { value: { exitCode: 0, stdout: JSON.stringify({ redact: options.redactBy?.[e.argv[4] as string] ?? options.redact ?? [] }), stderr: '' } }
+    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_REDACT) return { value: { exitCode: 0, stdout: JSON.stringify({ redact: options.redactFrom?.(JSON.parse(e.init?.stdin ?? '{}').env ?? {}) ?? options.redactBy?.[e.argv[4] as string] ?? options.redact ?? [] }), stderr: '' } }
     if (bin === python && verb === '-c' && e.argv[2] === RUN_FAILURES) return { value: { ...(options.runFailures ?? { exitCode: 0, stdout: JSON.stringify({ results: [] }) }), stderr: '' } }
     if (bin === python && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
     if (bin === python && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
@@ -424,7 +428,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { clock, runs, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
+  return { redactSent, clock, runs, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -472,8 +476,8 @@ kitTest('a failed dbt command is read from run_results.json by node name, and fr
 })
 
 kitTest('dbt commands are found behind a cd, a venv path or uv run, with their selection; other text is not one', () => {
-  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], identity: [], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [], profilesDir: null, profile: null })
-  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], identity: ['--limit 5'], at: 8, cds: ['x'], end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [], profilesDir: null, profile: null })
+  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], identity: [], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [], profilesDir: null, profile: null, assignments: [] })
+  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], identity: ['--limit 5'], at: 8, cds: ['x'], end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [], profilesDir: null, profile: null, assignments: [] })
   // Redirections are the shell's: they are neither selection nor argv.
   expect(dbtCommand('dbt show -s orders 2>&1 | tail -20')?.argv).toEqual(['dbt', 'show', '-s', 'orders'])
   expect(dbtCommand('dbt run -s orders > out.txt 2> err.txt')?.select).toBe('orders')
@@ -481,7 +485,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommand('DBT_PROFILES_DIR=. dbt show -s x')?.replayable).toBe(false)
   expect(dbtCommand('dbt show --target $T -s x')?.replayable).toBe(false)
   // A command split with `\` across lines is one command.
-  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], identity: ['--limit 10'], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [], profilesDir: null, profile: null })
+  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], identity: ['--limit 10'], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [], profilesDir: null, profile: null, assignments: [] })
   // A redirection inside quoted SQL is SQL.
   expect(dbtCommand('dbt show --inline "select 1 as \\"2>1\\"" -s x')?.inline).toBe('select 1 as "2>1"')
   // Comments and background `&` end it; anything the shell would expand or change turns Re-run off.
@@ -3768,3 +3772,49 @@ kitTest('a run_results message cut at 2000 characters through a held value keeps
   expect(failure!.message).toBe('x'.repeat(1990))
   clearRedactions()
 })
+
+// ─── Bytes reprs, and the assignments set for a command ─────────────────────────────────────────
+
+test('a non-ASCII secret printed as a bytes repr is removed: the matcher cuts the \\xNN form the script lists', async ($, on) => {
+  const { clock, setBash, prompts } = await start($, on, {
+    runResultsAt: 1,
+    now: 900_000,
+    // What the script lists for the value: itself and the form Python prints it in.
+    redact: ['SENTINEL_\u20ac_TOKEN', 'SENTINEL_\\xe2\\x82\\xac_TOKEN'],
+  })
+  setBash({ stdout: `${HEADER}\nRuntime Error\n  Invalid header value b'Bearer SENTINEL_\\xe2\\x82\\xac_TOKEN'\n`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /SENTINEL/ })).toBeUndefined()
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts[0]).not.toContain('SENTINEL')
+  expect(prompts[0]).toContain('Invalid header value')
+  await band.unmount()
+})
+
+for (const [what, command] of [
+  ['a prefix', 'DB_PASSWORD=SENTINEL_CMD_ENV_VALUE dbt build -s orders'],
+  ['env', 'env DB_PASSWORD=SENTINEL_CMD_ENV_VALUE dbt build -s orders'],
+  ['an earlier export', 'export DB_PASSWORD=SENTINEL_CMD_ENV_VALUE && dbt build -s orders'],
+] as const) {
+  test(`a value set for the command by ${what} is removed from the band, Explain and Fix: the script is sent it on stdin, never in argv`, async ($, on) => {
+    const secret = 'SENTINEL_CMD_ENV_VALUE'
+    const { clock, prompts, setBash, redactSent } = await start($, on, { runResultsAt: 1, now: 900_000, redactFrom: env => (env.DB_PASSWORD ? [env.DB_PASSWORD] : []) })
+    setBash({ stdout: `${HEADER}\nDatabase Error\n  invalid sslmode value: "${secret}"\n`, isError: true })
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await band.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+    await band.press({ key: 'dbt-explain' })
+    await band.press({ key: 'dbt-fix' })
+    await clock.settle()
+    expect(prompts.length).toBe(2)
+    for (const prompt of prompts) expect(prompt).not.toContain(secret)
+    const sent = redactSent.filter(one => one.stdin?.includes(secret))
+    expect(sent.length).toBeGreaterThan(0)
+    for (const one of sent) expect(one.argv.join(' ')).not.toContain(secret)
+    await band.unmount()
+  })
+}
