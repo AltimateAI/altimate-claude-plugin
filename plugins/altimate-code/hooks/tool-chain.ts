@@ -83,10 +83,18 @@ export type ChainSteps = {
 
 /** The phase's value, or `fallback` (logged) when it ran out of time, failed or threw. */
 async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore', fallback: T, run: () => Promise<T>): Promise<T> {
-  // Wrapped, so a legitimate null value is told apart from the deadline's null.
-  const done = await steps.limit(Promise.resolve().then(run).then(value => ({ value })))
-  if (done) return done.value
-  steps.log(`tool chain · ${phase} did not finish within ${PHASE_TIMEOUT_MS} ms or failed: the call goes on unchanged`)
+  try {
+    // Wrapped, so a legitimate null value is told apart from the deadline's null.
+    const done = await steps.limit(Promise.resolve().then(run).then(value => ({ value })))
+    if (done) return done.value
+  } catch {
+    // The deadline itself failed: only this phase is dropped, the later ones (the gate) still run.
+  }
+  try {
+    steps.log(`tool chain · ${phase} did not finish within ${PHASE_TIMEOUT_MS} ms or failed: the call goes on unchanged`)
+  } catch {
+    // A logger that throws does not drop the phases after this one.
+  }
   return fallback
 }
 
