@@ -25,7 +25,6 @@ import {
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
-import { runTool, within } from './altimate-cli'
 import { modelsNamed, openPane, projectRoot } from './lineage'
 
 export const REPORT_COMMAND = 'lineage-report'
