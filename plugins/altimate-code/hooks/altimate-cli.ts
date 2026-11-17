@@ -184,5 +184,7 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
   if (result.exitCode === 0 && (!data || typeof data !== 'object' || typeof data.status !== 'string')) {
     return { metadata: null as any, text: 'the answer could not be read', ok: false }
   }
-  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? '', ok: result.exitCode === 0 && data?.status !== 'error' }
+  // A crash, or a failure the CLI prints as plain text, has no answer object: its first line is what to show.
+  const said = data && typeof data === 'object' ? '' : (result.stdout.trim() || String(result.stderr ?? '').trim()).split('\n')[0]!.slice(0, 500)
+  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? said, ok: result.exitCode === 0 && data?.status !== 'error' }
 }
