@@ -25,7 +25,8 @@ import {
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
-import { modelsNamed, openPane, projectRoot, runTool, within } from './lineage'
+import { runTool, within } from './altimate-cli'
+import { modelsNamed, openPane, projectRoot } from './lineage'
 
 export const REPORT_COMMAND = 'lineage-report'
 // Under the project's target/, which dbt already keeps out of git.
@@ -197,7 +198,7 @@ async function ask($: EngineInterface, done: Finished, change: ModelChange, colu
   // named apart from its model.
   const args = { manifest_path: manifestOf(done, change.root), model: change.model, ...(column && { column }), change_type: 'modify', direction }
   // Through the CLI: nobody asked for these calls by name, and a call over MCP can raise a permission dialog.
-  const result = await runTool($, 'impact_analysis', args, true).catch(() => null)
+  const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
   return result?.ok ? result.metadata : null
 }
 
@@ -440,7 +441,7 @@ async function planReady($: EngineInterface, e: { plan?: unknown; planFilePath?:
     shown.map(one => async () => {
       const args = { manifest_path: `${root}/target/manifest.json`, model: one.id, change_type: 'modify', direction: 'downstream' }
       // Through the CLI: over MCP this could raise a permission dialog on top of the plan's.
-      const result = await runTool($, 'impact_analysis', args, true).catch(() => null)
+      const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
       const meta = result?.ok ? (result.metadata as any) : null
       const consumers = consumersOf(meta)
       return {
@@ -524,7 +525,7 @@ async function buildColumnReport($: EngineInterface, model: string, column: stri
   if (!(await $.fs.exists(manifest).catch(() => false))) return { error: 'This project has no target/manifest.json yet. Run `dbt parse` or `dbt compile`, then ask again.' }
   const args = { manifest_path: manifest, model, column, change_type: 'modify' }
   // Through the CLI, as for a task: nobody asked for these calls by name.
-  const [down, up] = await Promise.all((['downstream', 'upstream'] as const).map(direction => runTool($, 'impact_analysis', { ...args, direction }, true).catch(() => null)))
+  const [down, up] = await Promise.all((['downstream', 'upstream'] as const).map(direction => runTool($, 'impact_analysis', { ...args, direction }, { cliOnly: true }).catch(() => null)))
   for (const result of [down, up]) {
     const meta = result?.metadata as any
     // The model isn't in the manifest: the CLI's own words, which name some that are.
