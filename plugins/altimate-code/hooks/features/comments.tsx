@@ -70,7 +70,7 @@ let firstWaitSpent = false
 // The project whose first load is scheduled but not started.
 let pendingFor: string | null = null
 // The thread of a post that may have landed: it stays busy until a list asked for after the post has been read.
-let uncertain: { key: string; action: unknown; text: string; root: string | null; at: number } | null = null
+let uncertain: { key: string; action: unknown; text: string; root: string | null; at: number; before: Set<number> } | null = null
 // The service lists from a cache that can be five minutes behind a post: a list does not show a post until
 // then, so a resolved thread stays hidden and an unchecked post stays locked until its effect is seen or that long has passed.
 const LIST_LAG_MS = 330_000
@@ -441,7 +441,7 @@ async function fetchThreads($: EngineInterface) {
       const seen =
         pending !== null &&
         current.root === pending.root &&
-        (pending.action === 'resolve' ? there === undefined : there?.messages.some(message => sameText(message.text, pending.text)) === true)
+        (pending.action === 'resolve' ? there === undefined : there?.messages.some(message => !pending.before.has(message.id) && sameText(message.text, pending.text)) === true)
       const freed = pending !== null && (seen || now - pending.at >= LIST_LAG_MS)
       if (freed) uncertain = null
       return {
@@ -508,7 +508,10 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       }
       // Any other failure, a timeout included, may have landed: posting stays locked until a list of this
       // project shows the post, so another press cannot post it twice, here or after a switch.
-      uncertain = { key, action: args.action, text: String(args.text ?? ''), root, at: await $.clock.now() }
+      const at = await $.clock.now()
+      // A session that began during that read must not inherit this post's lock.
+      if (mine !== generation) return
+      uncertain = { key, action: args.action, text: String(args.text ?? ''), root, at, before: new Set(thread.messages.map(message => message.id)) }
       writes++
       // The project in view changed meanwhile: its pane is not told about this post.
       if (!(await inView())) return
@@ -537,7 +540,9 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
   } catch (error) {
     if (mine !== generation) return
     // A write that timed out may still have landed: posting stays locked until a list shows it.
-    uncertain = { key, action: args.action, text: String(args.text ?? ''), root, at: await $.clock.now() }
+    const at = await $.clock.now()
+    if (mine !== generation) return
+    uncertain = { key, action: args.action, text: String(args.text ?? ''), root, at, before: new Set(thread.messages.map(message => message.id)) }
     writes++
     if (!(await inView())) return
     await change($, current => ({
