@@ -93,7 +93,7 @@ async function findProject($: EngineInterface): Promise<string | null> {
   return below.length === 1 ? below[0]! : null
 }
 
-/** The folders below the project (down to three levels) that hold a dbt_project.yml of their own. */
+/** The folders below the project (down to three levels, `dbt_packages` included) that hold a dbt_project.yml of their own, in the form `runsInProject` compares. */
 async function nestedProjects($: EngineInterface, projectDir: string): Promise<Set<string>> {
   const found = new Set<string>()
   let level = [projectDir]
@@ -101,9 +101,9 @@ async function nestedProjects($: EngineInterface, projectDir: string): Promise<S
     const next: string[] = []
     for (const dir of level) {
       for (const entry of await $.fs.list(dir).catch(() => [])) {
-        if (entry.kind !== 'dir' || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'dbt_packages' || entry.name === 'target') continue
+        if (entry.kind !== 'dir' || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'target') continue
         const child = `${dir}/${entry.name}`
-        if (await $.fs.exists(`${child}/dbt_project.yml`).catch(() => false)) found.add(child)
+        if (await $.fs.exists(`${child}/dbt_project.yml`).catch(() => false)) found.add(resolvePath(child, '.') ?? child)
         else next.push(child)
       }
     }

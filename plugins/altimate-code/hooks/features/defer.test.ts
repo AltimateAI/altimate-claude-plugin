@@ -151,7 +151,7 @@ test('the override decides, and the status text shows target and defer', () => {
 const ROOT = '/repo'
 
 /** A dbt project at /repo whose defer setting the CLI reports as `answer`; Bash commands are recorded. */
-function start($: any, on: any, answer: Record<string, unknown>, fail: { times: number } = { times: 0 }) {
+function start($: any, on: any, answer: Record<string, unknown>, fail: { times: number } = { times: 0 }, projects: string[] = [ROOT]) {
   const bash: string[] = []
   const statuses: (string | undefined)[] = []
   const reads: string[] = []
@@ -159,7 +159,7 @@ function start($: any, on: any, answer: Record<string, unknown>, fail: { times: 
   on('command.register', (_: unknown, e: any) => ({ value: { command: e.name } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: projects.some(dir => e.path === `${dir}/dbt_project.yml`) }))
   on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
     if (!e.argv.includes('dbt_defer_state')) return { value: { exitCode: 0, stdout: '{}', stderr: '' } }
     reads.push(e.argv.join(' '))
@@ -188,6 +188,20 @@ test('through the plugin, Claude’s dbt commands run with --defer --state when 
   await $.tool.call({ tool: 'Bash', command: 'dbt build --state ./mine' })
   expect(seen.bash).toEqual(['dbt build --defer --state /work/prod-state --favor-state -s x', 'dbt build --state ./mine'])
   expect(seen.statuses.at(-1)).toContain('dbt dev · defer prod-state')
+})
+
+test('a dbt project below the project, even under dbt_packages, keeps its own settings; the shell folder from an earlier cd counts', async ($, on) => {
+  const seen = start($, on, DEFER, { times: 0 }, [ROOT, `${ROOT}/dbt_packages/pkg`, `${ROOT}/nested`])
+  let cwd = ROOT
+  on('session.cwd', () => ({ value: cwd }))
+  on('fs.list', (_: unknown, e: { path: string }) => ({ value: e.path === ROOT ? [{ name: 'nested', kind: 'dir' }, { name: 'dbt_packages', kind: 'dir' }] : e.path === `${ROOT}/dbt_packages` ? [{ name: 'pkg', kind: 'dir' }] : [] }))
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Bash', command: 'cd nested && dbt build' })
+  cwd = `${ROOT}/dbt_packages/pkg`
+  await $.tool.call({ tool: 'Bash', command: 'dbt build' })
+  cwd = `${ROOT}/models`
+  await $.tool.call({ tool: 'Bash', command: 'dbt build' })
+  expect(seen.bash).toEqual(['cd nested && dbt build', 'dbt build', 'dbt build --defer --state /work/prod-state --favor-state'])
 })
 
 test('/defer off stops the rewrite for the session, /defer on brings it back, /target adds --target', async ($, on) => {
