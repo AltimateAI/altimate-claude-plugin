@@ -29,6 +29,9 @@ import {
   profilesError,
   PROFILES_UNREADABLE,
   scrubDbt,
+  setRedactions,
+  withoutDropped,
+  clearRedactions,
   projectPaths,
   replayArgv,
   budgetHistory,
@@ -192,9 +195,18 @@ function runQueued($: EngineInterface, root: string, argv: () => Promise<string[
     .then(async () => {
       if (options.wanted && !options.wanted()) return SKIPPED
       const command = await argv()
-      const started = await $.clock.now()
+      // The values of the profile dbt may echo in its errors are known before any of its output is read.
+      await ensureRedactions($, root)
+      // The artifact's invocation right before the plugin's dbt runs and right after it exits: it is the plugin's
+      // own only when it changed across the process, and when dbt printed its own id, only that one is.
+      const tracked = command.some(word => word === 'show' || word === 'ls')
+      const before = tracked ? await seenInvocation($, root).catch(() => null) : null
       const done = await $.process.run(command, { cwd: options.cwd ?? root, timeoutMs: options.timeoutMs ?? DBT_TIMEOUT_MS })
-      if (command.some(word => word === 'show' || word === 'ls')) await noteOwnRun($, root, started).catch(() => {})
+      if (tracked) {
+        const after = await seenInvocation($, root).catch(() => null)
+        const own = printedInvocation(done.stdout) ?? (after !== null && after !== before ? after : null)
+        if (own) ownInvocation.set(root, own)
+      }
       return done
     })
   queues.set(root, run.catch(() => {}))
@@ -205,14 +217,8 @@ function runQueued($: EngineInterface, root: string, argv: () => Promise<string[
 // of that invocation is never the result of a command Claude ran.
 const ownInvocation = new Map<string, string>()
 
-/** Remembers the invocation in run_results.json when the plugin's dbt wrote it, at or after `started`. */
-async function noteOwnRun($: EngineInterface, root: string, started: number) {
-  const path = `${await targetOf($, root)}/run_results.json`
-  const stat = await $.fs.stat(path).catch(() => null)
-  if (!stat || stat.mtimeMs < started) return
-  const id = invocationOf(await readRunResults($, root, path, stat.size))
-  if (id) ownInvocation.set(root, id)
-}
+/** The invocation id dbt's own JSON log lines carry, when the command printed them. */
+const printedInvocation = (stdout: string): string | null => /"invocation_id"\s*:\s*"([^"]+)"/.exec(stdout)?.[1] ?? null
 
 // Projects where the last dbt the plugin started could not be run at all (no such program, not on PATH): an
 // edit's check does not start it again until a dbt runs there.
@@ -232,7 +238,8 @@ function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): b
   const names = [/command not found: ([\w./\\-]+)/gi, /([\w./\\-]+): command not found/gi, /\bsh: \d+: ([\w./\\-]+): not found/gi].flatMap(pattern => [...run.stderr.matchAll(pattern)].map(one => one[1]!))
   const missing = names.filter(name => !/^-?(?:ba|z|da|k|c|fi)?sh$/i.test(name)).map(name => name.split(/[\\/]/).pop()!.replace(/\.exe$/i, ''))
   // A wrapper or shim that cannot start dbt says so itself: the line names dbt or its interpreter.
-  const wrapped = run.stderr.split('\n').some(line => (/bad interpreter|cannot execute: required file not found/i.test(line) && /\b(?:dbt|python[\d.]*)\b/i.test(line)) || /^\W*dbt(?:\.exe)?\W+is not recognized as an internal or external command/i.test(line))
+  // The script that failed to start is dbt itself (a path ending in /dbt): another script's bad interpreter is not.
+  const wrapped = run.stderr.split('\n').some(line => (/bad interpreter|cannot execute: required file not found/i.test(line) && /(?:^|[\s'"(:])(?:[^\s:'"]*[\\/])?dbt(?:\.exe)?(?=:)/i.test(line)) || /^\W*dbt(?:\.exe)?\W+is not recognized as an internal or external command/i.test(line))
   if (wrapped) return true
   // A bare 127 counts only when nothing else is said to be missing.
   return missing.length > 0 ? missing.includes('dbt') : run.exitCode === 127 && !/not found|no such file or directory/i.test(run.stderr)
@@ -257,7 +264,7 @@ function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DB
 
 /** The last lines of dbt's output; the fixed line when it is the unreadable-profiles error, whose lines quote the file. */
 function dbtTail(run: { stdout: string; stderr: string }, lines: number, loose = true, joiner = '\n'): string {
-  return profilesError(`${run.stdout}\n${run.stderr}`, loose) ? PROFILES_UNREADABLE : stripAnsi(run.stderr || run.stdout).trim().split('\n').slice(-lines).join(joiner)
+  return profilesError(`${run.stdout}\n${run.stderr}`, loose) ? PROFILES_UNREADABLE : scrubDbt(stripAnsi(run.stderr || run.stdout)).trim().split('\n').slice(-lines).join(joiner)
 }
 
 // Reads a manifest too big for $.fs.read with the project's Python, and prints only what the helpers need
@@ -699,8 +706,9 @@ async function persistHistory($: EngineInterface) {
     return $.store.set(HISTORY_KEY, history).catch(error => $.ui.log(`dbt-results · the query history could not be saved: ${String(error?.message ?? error)}`))
   })
   const kept = new Set(history.map(one => one.id))
-  const gone = new Set(all.filter(one => !kept.has(one.id)).map(one => one.id))
-  if (gone.size) await update($, historyAtom, current => current.filter(one => !gone.has(one.id)))
+  // What was dropped is dropped as it was then: an entry replaced during the write (same id, newer) stays.
+  const gone = all.filter(one => !kept.has(one.id))
+  if (gone.length) await update($, historyAtom, current => withoutDropped(current, gone))
 }
 
 /** The history as it is kept: the newest plain queries, and the newest bookmarks (a bookmark past the cap is no longer one). */
@@ -954,10 +962,60 @@ if not re.fullmatch(r"\\w+", kind):
 out('ok', profile=name, target=target, type=kind)
 `
 
-/** The adapter type the project's profile names, from the profiles.yml dbt itself would read; a problem when it cannot be read, null when there is no such profile. */
-async function profileType($: EngineInterface, root: string): Promise<string | null | ProfileProblem> {
+// Prints the strings in a profile that dbt's errors may echo back: every string under the profile's outputs (all of
+// them, aliases resolved) and the value and default of each env var profiles.yml names. Stdout only, to the plugin.
+export const PROFILE_REDACT = `import sys; sys.path = [p for p in sys.path if p not in ('', '.')]
+import json, os, re
+try:
+    import yaml
+except Exception:
+    yaml = None
+found = []
+def keep(value):
+    if isinstance(value, bool):
+        return
+    if isinstance(value, (int, float)):
+        value = str(value)
+    # Short values (and so every number under 6 digits) are skipped: too common to cut from dbt's text.
+    if not isinstance(value, str) or len(value) < 6:
+        return
+    if value not in found:
+        found.append(value)
+def walk(node):
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key not in ('type', 'threads', 'method', 'port'):
+                walk(value)
+    elif isinstance(node, list):
+        for value in node:
+            walk(value)
+    else:
+        keep(node)
+def load(path):
+    try:
+        with open(path) as f:
+            return f.read()
+    except Exception:
+        return ''
+text = load(sys.argv[2])
+for call in re.finditer(r"env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)", text):
+    keep(os.environ.get(call.group(2)))
+    keep(call.group(4))
+try:
+    profiles = yaml.safe_load(text) if yaml else None
+    project = (yaml.safe_load(load(sys.argv[1])) if yaml else None) or {}
+    name = os.environ.get('DBT_PROFILE') or project.get('profile')
+    profile = profiles.get(name) if isinstance(profiles, dict) and isinstance(name, str) else None
+    if isinstance(profile, dict):
+        walk(profile.get('outputs'))
+except Exception:
+    pass
+print(json.dumps(dict(redact=found)))
+`
+
+/** The profiles.yml dbt itself would read: DBT_PROFILES_DIR's, else the project folder's when it has one, else ~/.dbt's; null when there is none. */
+async function profilesPath($: EngineInterface, root: string): Promise<string | null> {
   const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
-  // dbt reads one profiles.yml: DBT_PROFILES_DIR's, else the project folder's when it has one, else ~/.dbt's.
   const home = await env('HOME')
   // A relative DBT_PROFILES_DIR is the project's (dbt runs there); `~` is the home folder.
   const rawDir = await env('DBT_PROFILES_DIR')
@@ -965,7 +1023,38 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   const profilesDir = expanded && !expanded.startsWith('/') ? normalize(`${root}/${expanded}`) : expanded
   const local = `${root}/profiles.yml`
   const path = profilesDir ? `${profilesDir}/profiles.yml` : (await $.fs.exists(local).catch(() => false)) ? local : home ? `${home}/.dbt/profiles.yml` : null
-  if (!path || !(await $.fs.exists(path).catch(() => false))) return null
+  return path && (await $.fs.exists(path).catch(() => false)) ? path : null
+}
+
+// What was loaded for a project's profile: when, and the file's time then.
+const redactionLoaded = new Map<string, { mtimeMs: number; at: number }>()
+const REDACTION_REFRESH_MS = 30_000
+
+/**
+ * Loads, per project, the values of its profiles.yml (and of the env vars it names) that dbt's errors may echo, before any
+ * dbt output of the project is read. Again when the file changed, or after 30 seconds (an env var may have). Whatever
+ * stops the script leaves what was loaded, or nothing: the fixed-message scrub still applies.
+ */
+async function ensureRedactions($: EngineInterface, root: string): Promise<void> {
+  try {
+    const path = await profilesPath($, root)
+    if (!path) return
+    const stat = await $.fs.stat(path).catch(() => null)
+    const now = await $.clock.now()
+    const seen = redactionLoaded.get(root)
+    if (seen && stat && seen.mtimeMs === stat.mtimeMs && now - seen.at < REDACTION_REFRESH_MS) return
+    redactionLoaded.set(root, { mtimeMs: stat?.mtimeMs ?? 0, at: now })
+    const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path], { cwd: root, timeoutMs: 30_000 })
+    if (run.exitCode !== 0) return
+    const answer = JSON.parse(run.stdout) as { redact?: unknown }
+    if (Array.isArray(answer.redact)) setRedactions(root, answer.redact.filter((one): one is string => typeof one === 'string'))
+  } catch {}
+}
+
+/** The adapter type the project's profile names, from the profiles.yml dbt itself would read; a problem when it cannot be read, null when there is no such profile. */
+async function profileType($: EngineInterface, root: string): Promise<string | null | ProfileProblem> {
+  const path = await profilesPath($, root)
+  if (!path) return null
   // Whatever stops the parser (no interpreter, no PyYAML, a file it cannot read) is "could not tell", never a guess.
   const unread: ProfileProblem = { problem: 'error', profile: '', target: '' }
   try {
@@ -1076,7 +1165,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     checks.push(
       debug.exitCode === 0 && parsed.connection !== 'failed'
         ? { id: 'connection', label: 'Connection', status: 'ok', detail: `${parsed.adapterType ?? (typeof type === 'string' ? type : null) ?? 'warehouse'} connection test passed`, fix: null }
-        : { id: 'connection', label: 'Connection', status: 'fail', detail: (profilesError(`${debug.stdout}\n${debug.stderr}`) ? PROFILES_UNREADABLE : (parsed.detail ?? stripAnsi(debug.stdout || debug.stderr).trim().split('\n').slice(-3).join(' '))).slice(0, 300), fix: 'check profiles.yml credentials; run dbt debug' },
+        : { id: 'connection', label: 'Connection', status: 'fail', detail: (profilesError(`${debug.stdout}\n${debug.stderr}`) ? PROFILES_UNREADABLE : scrubDbt(parsed.detail ?? stripAnsi(debug.stdout || debug.stderr).trim().split('\n').slice(-3).join(' '))).slice(0, 300), fix: 'check profiles.yml credentials; run dbt debug' },
     )
   } else if (previous?.root === root) {
     const kept = previous.checks.find(one => one.id === 'connection')
@@ -1126,6 +1215,7 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
   doctorNoteDue = null
   unrunnable.clear()
   ownInvocation.clear()
+  clearRedactions()
   await loadHistory($)
   await $.command.register({ name: SHOW_COMMAND, description: 'Run dbt show for a model or a SQL query and open the rows in the Query results pane', argumentHint: '<model> | <select …>' })
   await $.command.register({ name: DOCTOR_COMMAND, description: 'Check the dbt environment: Python, dbt, adapter, packages, manifest freshness and the warehouse connection' })
@@ -1286,6 +1376,8 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   const firstRun = places[0] ?? null
   // The invocation the run's artifact held before the command: an older run's.
   const seen = firstRun ? await seenInvocation($, firstRun.root).catch(() => null) : null
+  // The profile's values are loaded before the command's output is read.
+  if (firstRun) await ensureRedactions($, firstRun.root)
   const result = await next(e)
   if (result.deny) return result
 
@@ -1391,6 +1483,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
  */
 export async function endDbtMods($: EngineInterface) {
   generation++
+  clearRedactions()
   slices.clear()
   parsed = null
   forcedWhileBusy = null

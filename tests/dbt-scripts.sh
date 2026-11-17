@@ -23,7 +23,7 @@ command -v python3 >/dev/null || { missing "no python3"; exit "$FAILURES"; }
 "$JS" -e '
 const fs = require("fs")
 const source = fs.readFileSync(process.argv[1], "utf8")
-for (const name of ["PROFILE_TYPE", "MANIFEST_SLICE", "RUN_FAILURES"]) {
+for (const name of ["PROFILE_TYPE", "PROFILE_REDACT", "MANIFEST_SLICE", "RUN_FAILURES"]) {
   const found = new RegExp("export const " + name + " = `([\\s\\S]*?)`\\n").exec(source)
   if (!found) { console.error("no " + name + " in " + process.argv[1]); process.exit(1) }
   fs.writeFileSync(process.argv[2] + "/" + name + ".py", eval("`" + found[1] + "`"))
@@ -72,6 +72,35 @@ if "$YPY" -c 'import yaml' 2>/dev/null; then
   profile "no such output" $'shop:\n  target: staging\n  outputs:\n    dev: {type: duckdb}\n' no_output staging ''
 else
   missing "no python3 with PyYAML (and none could be installed into a venv), so the PROFILE_TYPE checks cannot run"
+fi
+
+# ─── PROFILE_REDACT ─────────────────────────────────────────────────────────────────────────────
+# The strings dbt's errors may echo back: every string under the profile's outputs (aliases resolved) and the env vars
+# profiles.yml names. The script prints them to the plugin only.
+if python3 -c 'import yaml' 2>/dev/null; then
+  printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
+  # redact <name> <profiles.yml> <value that must be listed> [VAR=value ...]; a value of "-" means none must be listed
+  redact() {
+    local name="$1" yml="$2" want="$3" out; shift 3
+    printf '%s' "$yml" > "$TMP/profiles.yml"
+    out="$(env "$@" python3 -c "$(cat "$TMP/PROFILE_REDACT.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1)"
+    printf '%s' "$out" | python3 -I -c '
+import json, sys
+want = sys.argv[1]
+found = json.load(sys.stdin)["redact"]
+assert (want == "-" and not found) or want in found, found
+' "$want" || fail "redact: $name: expected $want in the list ($out)"
+  }
+  redact "a connection URL as the host" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      host: "postgresql://alice:SENTINEL_HOST@db.example/d"\n' 'postgresql://alice:SENTINEL_HOST@db.example/d'
+  redact "sslmode read from the wrong variable" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      sslmode: "{{ env_var(\'DB_PASSWORD\') }}"\n' SENTINEL_SSLMODE DB_PASSWORD=SENTINEL_SSLMODE
+  redact "target read from an env var" $'shop:\n  target: "{{ env_var(\"DB_PASSWORD\", \"SENTINEL_DEFAULT\") }}"\n  outputs:\n    dev: {type: duckdb}\n' SENTINEL_TARGET DB_PASSWORD=SENTINEL_TARGET
+  redact "an env_var default literal" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb, path: "{{ env_var(\'P\', \'SENTINEL_DEFAULT\') }}"}\n' SENTINEL_DEFAULT
+  redact "a password reused through an alias" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: &pw SENTINEL_ALIAS\n      threads: *pw\n' SENTINEL_ALIAS
+  redact "a JWT with a line break" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: trino\n      method: jwt\n      jwt_token: "eyJSENTINEL_JWT\\n.sig"\n' $'eyJSENTINEL_JWT\n.sig'
+  redact "an output that is not the active target" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n    prod: {type: postgres, password: SENTINEL_PROD}\n' SENTINEL_PROD
+  redact "nothing but short values, types and ports" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, method: password, port: 5432, threads: 1234567, user: me}\n' -
+else
+  missing "python3 has no PyYAML, so the PROFILE_REDACT checks cannot run"
 fi
 
 # ─── MANIFEST_SLICE ─────────────────────────────────────────────────────────────────────────────

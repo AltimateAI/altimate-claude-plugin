@@ -84,8 +84,46 @@ export function profilesError(text: string, loose = true): boolean {
   return loose && /Syntax error near line \d+/.test(plain) && plain.split('\n').some(line => QUOTED_LINE.test(line)) && !/[\w./-]+\.ya?ml\b/i.test(own)
 }
 
-/** dbt's text as it may be shown and sent on: the fixed line in place of any error about the profile, whose text quotes its values. */
-export const scrubDbt = (text: string, loose = true): string => (profilesError(text, loose) ? PROFILES_UNREADABLE : text)
+/** What stands in for a value of the project's profile found in dbt's text. */
+export const REDACTED = '‹redacted›'
+
+// The values of each project's profiles.yml (and the env vars it names) that dbt's errors may echo. Held in
+// memory only, by project root; cleared when the conversation ends. Never logged, stored or sent.
+const redactions = new Map<string, string[]>()
+
+export function setRedactions(root: string, values: string[]): void {
+  redactions.set(root, values.filter(one => typeof one === 'string' && one.length > 0))
+}
+
+export const clearRedactions = (): void => redactions.clear()
+
+/** A value as dbt may print it: as is, JSON-escaped, or as a Python repr (a line break is a literal `\n`), whole and by each line of 6 or more characters. */
+export function redactionForms(value: string): string[] {
+  const forms = new Set<string>()
+  for (const part of [value, ...value.split(/\r?\n/).filter(line => line.length >= 6)]) {
+    forms.add(part)
+    forms.add(JSON.stringify(part).slice(1, -1))
+    const repr = part.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')
+    forms.add(repr)
+    forms.add(repr.replace(/'/g, "\\'"))
+  }
+  return [...forms].filter(one => one.length > 0)
+}
+
+/** The text with every value of a loaded profile replaced, longest first so a value holding another is cut whole. */
+export function redactValues(text: string): string {
+  const forms = [...new Set([...redactions.values()].flat().flatMap(redactionForms))].sort((a, b) => b.length - a.length)
+  return forms.reduce((out, form) => (out.includes(form) ? out.split(form).join(REDACTED) : out), text)
+}
+
+/**
+ * dbt's text as it may be shown, saved and sent on: every value of the project's profile removed, and the fixed
+ * line in place of any error about the profile, whose text quotes its values.
+ */
+export const scrubDbt = (text: string, loose = true): string => {
+  const clean = redactValues(text)
+  return profilesError(clean, loose) ? PROFILES_UNREADABLE : clean
+}
 
 /** The errors a dbt command logged as JSON lines: level error, the message without colour. */
 export function logErrors(stdout: string): string[] {
@@ -785,7 +823,7 @@ export function debugInfo(output: string): { adapterType: string | null; connect
   const adapterType = /adapter type:\s*(\S+)/i.exec(text)?.[1] ?? /\btype:\s*(\w+)/.exec(text)?.[1] ?? null
   const ok = /Connection test:\s*\[OK/i.test(text)
   const failed = /Connection test:\s*\[ERROR|Connection test:\s*\[FAIL|Could not find profile|Profile loading failed/i.exec(text)
-  const detail = failed ? (profilesError(text) ? PROFILES_UNREADABLE : text.slice(failed.index, failed.index + 300).split('\n').slice(0, 3).join(' ').trim()) : null
+  const detail = failed ? (profilesError(text) ? PROFILES_UNREADABLE : scrubDbt(text.slice(failed.index, failed.index + 300).split('\n').slice(0, 3).join(' ').trim(), false)) : null
   const pythonVersion = /python version:\s*(\S+)/i.exec(text)?.[1] ?? null
   return { adapterType, connection: ok ? 'ok' : failed ? 'failed' : null, detail, pythonVersion }
 }
@@ -850,6 +888,11 @@ export function fitSaved<T extends { rows: unknown[][]; error: string | null; co
     while (columns.length > 0 && (next.columns = columns, over())) columns.pop()
   }
   return next
+}
+
+/** The history without the entries that were dropped from the store: only the very entries (same id, same time), never a newer run of the same query. */
+export function withoutDropped<T extends { id: string; at: number }>(current: T[], dropped: T[]): T[] {
+  return current.filter(one => !dropped.some(gone => gone.id === one.id && gone.at === one.at))
 }
 
 /** The history without its `count` oldest entries: unbookmarked ones first, bookmarks only when those are gone. The list is newest first. */
