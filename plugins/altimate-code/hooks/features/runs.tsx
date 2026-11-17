@@ -135,7 +135,11 @@ function moved(text: string, from: string): string | null {
 const quote = (path: string) => (/^[\w./-]+$/.test(path) ? path : `'${path.replace(/'/g, `'\\''`)}'`)
 
 /** A leading `NAME=value` that holds a secret is replayed as `NAME="$NAME"`: the value is never stored. */
-const SECRET_ASSIGNMENT = /(^|\s)((?=[A-Za-z_])[A-Za-z0-9_]*(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]*)=("[^"]*"|'[^']*'|\S*)/gi
+const SECRET_ASSIGNMENT = /(^|\s)((?=[A-Za-z_])[A-Za-z0-9_]*(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)[A-Za-z0-9_]*)=((?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[^\s"'\\])*)/gi
+/** A `--vars` value that names a secret: the command is not recorded, since a replay would store and show it. */
+const VARS_VALUE = /(?:^|\s)--vars(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g
+const SECRET_NAME = /(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)/i
+const varsHoldSecret = (body: string) => [...body.matchAll(VARS_VALUE)].some(match => SECRET_NAME.test(match[1]!))
 const redact = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 
 /** The flags `dbt retry` does not take from the run it retries. */
@@ -163,7 +167,10 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     const subcommand = one.subcommand
     if (subcommand === null || !WRITES_RESULTS.has(subcommand)) continue
     const dir = moved(command.slice(0, one.start), cwd)
+    // A quoted subcommand is not told apart in the source text: the replay line could not be built from it.
+    if (command.slice(one.subcommandEnd - subcommand.length, one.subcommandEnd) !== subcommand) continue
     const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
+    if (varsHoldSecret(body)) continue
     const flagged = PROJECT_DIR_FLAG.exec(body)?.[1]?.replace(/^['"]|['"]$/g, '')
     // A folder that cannot be told, or a target folder the shell expands, is not guessed: the run is not recorded
     // rather than recorded for another project or replayed from another folder.
@@ -412,9 +419,17 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
     return null
   }
   // One read for each folder, at the same time: a slow one does not take the others' time, a failed one does not stop them.
+  let unreadable = false
   const read = await Promise.all(
-    mine.map(folder => readRun($, invocations.filter(one => folderOf(one) === folder), invocations, began.at, ended).catch(() => null)),
+    mine.map(folder =>
+      readRun($, invocations.filter(one => folderOf(one) === folder), invocations, began.at, ended).catch(() => {
+        unreadable = true
+        return null
+      }),
+    ),
   )
+  // This call may have replaced the artifact and it could not be read: what was recorded can no longer be retried from it.
+  if (unreadable) await clearRetries($)
   // Two spellings of one folder read one file: of its runs the later invocation's is the one that wrote it.
   const latest = new Map<string, { run: RunRecord; order: number }>()
   for (const one of read) {

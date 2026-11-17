@@ -356,6 +356,32 @@ for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a; dbt 
   })
 }
 
+test('a single build whose artifact cannot be read clears the stored retry: it may have replaced the file', async ($, on) => {
+  let fail = false
+  const { stored } = await start($, on, () => {
+    if (fail) throw new Error('unreadable')
+    return view('inv-a', [['model.shop.m', 'error', null]])
+  })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  expect(kept(stored)[0]!.retryLine).toBe('cd /repo && dbt retry')
+  fail = true
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s b', tool_use_id: 'second' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+})
+
+test('a secret is redacted whole, quotes and escapes in its value included; a --vars value that names one is not recorded; a quoted subcommand is not guessed', () => {
+  for (const value of ['"one\\"two"', "'one'\\''two'", '"a b"\'c\'d', 'plain']) {
+    const found = resultsInvocations(`SNOWFLAKE_PASSWORD=${value} dbt build`, ROOT)[0]!
+    expect(found.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt build')
+    expect(found.retryLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt retry')
+  }
+  expect(resultsInvocations(`dbt build --vars '{"api_token":"s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations('dbt build --vars "{db_password: s3cret}"', ROOT)).toEqual([])
+  expect(resultsInvocations('dbt build --vars=\'{"limit": 3}\' -s a', ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt 'build' -s orders`, ROOT)).toEqual([])
+  expect(resultsInvocations('dbt "build" -s orders', ROOT)).toEqual([])
+})
+
 test('Re-run failed keeps --defer-state: dbt retry takes it from the command, not from the run it retries', () => {
   expect(resultsInvocations('dbt build --defer --defer-state /artifacts/prod', ROOT)[0]!.retryLine).toBe('cd /repo && dbt retry --defer-state /artifacts/prod')
 })
