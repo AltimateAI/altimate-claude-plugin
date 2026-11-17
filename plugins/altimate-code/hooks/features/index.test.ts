@@ -47,5 +47,6 @@ test('with every feature a stub, each phase runs through the features and logs n
   expect(await featuresBashAfter($, bash, {} as any)).toEqual([])
   expect(await featuresEditAfter($, file, {} as any, { path: '/repo/models/a.sql', before: null })).toEqual([])
   expect(await featuresReadOrEditAfter($, file, {} as any, { path: '/repo/models/a.sql' })).toEqual([])
-  expect(logs).toEqual([])
+  // health is implemented and needs a session's state, which this bare engine has none of; its own tests cover it.
+  expect(logs.filter(line => !line.startsWith('health · '))).toEqual([])
 })

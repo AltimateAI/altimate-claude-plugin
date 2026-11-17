@@ -144,6 +144,8 @@ async function start($: any, on: any, options: Options = {}) {
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '' } })
     const [bin] = argv
     if (bin === 'altimate' && argv[2] === 'report-event') return ok()
+    // The health feature's own check runs through the same CLI; it is not an impact lookup.
+    if (bin === 'altimate' && argv[3] === 'dbt_health') return ok(JSON.stringify({ status: 'ok', output: '', metadata: { model_insights: [] } }))
     if (bin === 'altimate') {
       const args = JSON.parse(String(argv[argv.indexOf('--args') + 1] ?? '{}'))
       if (options.cliFails) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'no', metadata: {} }), stderr: '' } }

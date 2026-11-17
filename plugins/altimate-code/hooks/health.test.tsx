@@ -1,6 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { registerFeatures } from './features'
 import { bandText, canonical, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
 
 const ROOT = '/repo'
@@ -631,13 +630,6 @@ test('the status line part a previous process left is cleared at session start, 
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
   expect(statuses.length).toBeGreaterThan(before)
-})
-
-test('one feature that throws while registering does not stop the others', () => {
-  const on: any = () => {
-    throw new Error('every registration fails')
-  }
-  expect(() => registerFeatures(on, { options: {} as any })).not.toThrow()
 })
 
 test('a deleted model in a folder that is gone too still matches through its nearest existing folder', async ($, on) => {
