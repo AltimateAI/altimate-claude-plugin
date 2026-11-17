@@ -7,13 +7,15 @@
 // reported as literal values. In particular, these give no invocation:
 //   - a line that can't be read (an unclosed quote, substitution or parenthesis, an operator or
 //     redirection with nothing after it, a heredoc outside a `$(…)` substitution);
-//   - a prefix word with an option outside its grammar. Only these are read: `command -p`, `exec -c`,
-//     `exec -l`, `exec -a NAME`, `time -p`, and `--` after `command`, `exec`, `nohup` or `env`. So
-//     `command -v dbt …` (a lookup), `command --help dbt run`, `nohup --help dbt run`, `env -u X …`,
-//     `env -i …` and `time -f …` give none; `env` with only NAME=value words (and `--`) is read;
-//   - a launcher option outside the known grammar of `uv`/`uvx`/`poetry`/`pipenv`/`pdm`/`hatch`/`rye`
-//     `run` (an unknown option may take a value, so what runs is not known), a help or version
-//     option, or a word other than dbt after the launcher's `--` (`uv run -- --project x dbt run`);
+//   - a prefix word with an option outside its grammar. Only these are read: `command -p`, `exec -l`,
+//     `exec -a NAME`, `time -p`, and `--` after `command`, `exec`, `nohup` or `env`. So `command -v
+//     dbt …` (a lookup), `command --help dbt run`, `nohup --help dbt run`, `exec -c …` and `env -i …`
+//     (they clear the environment), `env -u X …` and `time -f …` give none; `env` with only
+//     NAME=value words (and `--`) is read;
+//   - an option outside the grammar of that launcher's `run` (`uv`, `uvx`, `poetry`, `pipenv`, `pdm`,
+//     `hatch`, `rye`; each has its own table): an unknown option may take a value, or print help or a
+//     version, so what runs is not known; and a word other than dbt after the launcher's `--`
+//     (`uv run -- --project x dbt run`);
 //   - a NAME=value word right after `nohup`, `command`, `exec` (it is the command's name, not an
 //     assignment), and a quoted NAME=value or quoted shell keyword (`"DBT_TARGET=prod" dbt run`,
 //     `"if" dbt run`), which is a command's name too;
@@ -349,66 +351,47 @@ const WRAPPERS = new Set(['command', 'exec', 'nohup', 'env'])
 // The options each prefix word has: whether one takes a value. Any other option gives no invocation.
 const PREFIX_OPTIONS: Record<string, Record<string, 'flag' | 'value'>> = {
   command: { '-p': 'flag' },
-  exec: { '-c': 'flag', '-l': 'flag', '-cl': 'flag', '-lc': 'flag', '-a': 'value' },
+  // `exec -c` clears the environment dbt starts with: what it sees is not known, so it is not read.
+  exec: { '-l': 'flag', '-a': 'value' },
   time: { '-p': 'flag' },
 }
 // Prefix words that end their options at `--`; `time` and the other keywords take no `--`.
 const ENDS_AT_DASHES = new Set(['command', 'exec', 'nohup', 'env'])
-// Launchers whose `run` subcommand runs the command after their own options.
-const RUNNERS = new Set(['uv', 'poetry', 'pipenv', 'pdm', 'hatch', 'rye', 'uvx'])
-// Launcher options that take no value. With RUNNER_VALUE_FLAGS, the only launcher options read: an
-// unknown one may take a value, so which word runs is not known.
-const RUNNER_FLAGS = new Set([
-  '-q',
-  '--quiet',
-  '-v',
-  '--verbose',
-  '-n',
-  '--no-interaction',
-  '--ansi',
-  '--no-ansi',
-  '--no-plugins',
-  '--no-cache',
-  '--no-sync',
-  '--frozen',
-  '--locked',
-  '--isolated',
-  '--active',
-  '--no-project',
-  '--all-extras',
-  '--all-packages',
-  '--no-dev',
-  '--no-env-file',
-  '--offline',
-  '--exact',
-  '--refresh',
-  '--native-tls',
-  '--no-config',
-  '--recreate',
-  '-s',
-  '--site-packages',
-])
-// Launcher options that take a value, so the value is not read as the command.
-const RUNNER_VALUE_FLAGS = new Set([
-  '--with',
-  '--with-editable',
-  '--with-requirements',
-  '--project',
-  '--directory',
-  '--python',
-  '-p',
-  '-P',
-  '--env-file',
-  '--extra',
-  '--group',
-  '--package',
-  '--index',
-  '--index-url',
-  '--from',
-  '-e',
-  '--env',
-  '-C',
-])
+// Launchers whose `run` subcommand (`uvx`: the launcher itself) runs the command after their own
+// options, and the options each one's `run` takes: `flags` take no value, `values` take one. These are
+// the only launcher options read: an unknown one may take a value, so which word runs is not known.
+const UV_RUN_FLAGS = ['-q', '--quiet', '-v', '--verbose', '--isolated', '--offline', '--refresh', '--native-tls', '--no-config', '--no-cache']
+const UV_RUN_VALUES = ['--with', '--with-editable', '--with-requirements', '--python', '-p', '--directory', '--project', '--index', '--index-url', '--env-file']
+const RUNNER_OPTIONS: Record<string, { flags: Set<string>; values: Set<string> }> = {
+  uv: {
+    flags: new Set([
+      ...UV_RUN_FLAGS,
+      '--no-sync',
+      '--frozen',
+      '--locked',
+      '--active',
+      '--no-project',
+      '--all-extras',
+      '--all-packages',
+      '--no-dev',
+      '--no-env-file',
+      '--exact',
+    ]),
+    values: new Set([...UV_RUN_VALUES, '--extra', '--group', '--package']),
+  },
+  uvx: { flags: new Set(UV_RUN_FLAGS), values: new Set([...UV_RUN_VALUES, '--from']) },
+  poetry: {
+    flags: new Set(['-q', '--quiet', '-v', '--verbose', '-n', '--no-interaction', '--ansi', '--no-ansi', '--no-plugins', '--no-cache']),
+    values: new Set(['-P', '--project', '-C', '--directory']),
+  },
+  pdm: {
+    flags: new Set(['-q', '--quiet', '-v', '--verbose', '-g', '--global', '-s', '--site-packages', '--recreate']),
+    values: new Set(['-p', '--project', '--venv']),
+  },
+  rye: { flags: new Set(), values: new Set(['--pyproject']) },
+  pipenv: { flags: new Set(), values: new Set() },
+  hatch: { flags: new Set(), values: new Set() },
+}
 // dbt options that take a value, so the value is not read as the subcommand or as a selector.
 const DBT_VALUE_FLAGS = new Set([
   '--log-format',
@@ -716,7 +699,7 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
   let binaryEnd: number
   if (isDbt(words[i]!.text)) {
     binaryEnd = i
-  } else if (RUNNERS.has(words[i]!.text.split('/').pop()!)) {
+  } else if (Object.hasOwn(RUNNER_OPTIONS, words[i]!.text.split('/').pop()!)) {
     const runner = words[i]!.text.split('/').pop()!
     i++
     if (runner !== 'uvx') {
@@ -732,8 +715,11 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       }
       const name = flag.includes('=') ? flag.slice(0, flag.indexOf('=')) : flag
       // An unknown option may take a value, or print help or a version and run nothing.
-      if (RUNNER_VALUE_FLAGS.has(name)) i += flag.includes('=') ? 1 : 2
-      else if (!flag.includes('=') && (RUNNER_FLAGS.has(flag) || /^-[qv]+$/.test(flag))) i++
+      const options = RUNNER_OPTIONS[runner]!
+      // Repeated short flags (`-qq`, `-vv`) are read when the launcher has the single one.
+      const repeated = /^-([a-z])\1+$/.exec(flag)
+      if (options.values.has(name)) i += flag.includes('=') ? 1 : 2
+      else if (!flag.includes('=') && (options.flags.has(flag) || (repeated && options.flags.has(`-${repeated[1]}`)))) i++
       else return null
     }
     if (i >= words.length || !isDbt(words[i]!.text)) return null

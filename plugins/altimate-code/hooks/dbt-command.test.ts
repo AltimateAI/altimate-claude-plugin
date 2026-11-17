@@ -199,18 +199,30 @@ test('a prefix or launcher option outside its grammar is no invocation: what run
     'uv run -h dbt run',
     'uvx --version dbt run',
     'pdm run -l dbt run',
+    // `exec -c` clears the environment, so the assignments in front are not what dbt sees.
+    'DBT_TARGET=prod DBT_STATE=a DBT_DEFER=1 exec -c dbt build',
+    'exec -cl dbt run',
+    // Each launcher reads only its own options.
+    'uv run --no-interaction dbt run',
+    'uv run --ansi dbt run',
+    'poetry run --frozen dbt run',
+    'pipenv run -q dbt run',
+    'hatch run --project x dbt run',
   ])
     expect(parseDbtCommand(line)).toEqual([])
   const run = { ...base, subcommand: 'run' }
   // Each prefix's own options are read.
   expect(shape('exec -a mydbt dbt run')).toEqual([{ ...run, binary: 'dbt' }])
-  expect(shape('exec -cl dbt run')).toEqual([{ ...run, binary: 'dbt' }])
+  expect(shape('exec -l dbt run')).toEqual([{ ...run, binary: 'dbt' }])
   expect(shape('time -p dbt run')).toEqual([{ ...run, binary: 'dbt' }])
   expect(shape('nohup -- dbt run')).toEqual([{ ...run, binary: 'dbt' }])
   // Known launcher options, with or without `=`, and `--` before dbt.
   expect(shape('uv run --project x --frozen -qq dbt run')).toEqual([{ ...run, binary: 'uv run --project x --frozen -qq dbt' }])
   expect(shape('uv run --with=dbt-duckdb -- dbt run')).toEqual([{ ...run, binary: 'uv run --with=dbt-duckdb -- dbt' }])
   expect(shape('poetry run -P x dbt run')).toEqual([{ ...run, binary: 'poetry run -P x dbt' }])
+  expect(shape('poetry run -n -vv dbt run')).toEqual([{ ...run, binary: 'poetry run -n -vv dbt' }])
+  expect(shape('pdm run -p x dbt run')).toEqual([{ ...run, binary: 'pdm run -p x dbt' }])
+  expect(shape('uvx --from dbt-core dbt run')).toEqual([{ ...run, binary: 'uvx --from dbt-core dbt' }])
 })
 
 test('a keyword where it is a program name is no invocation; time is a real program', () => {
