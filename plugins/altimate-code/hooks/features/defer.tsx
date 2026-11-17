@@ -36,7 +36,7 @@ export type RewriteOptions = {
 /**
  * The shell command with `--defer --state <dir>` (and `--favor-state`) and `--target <name>` inserted
  * right after the subcommand of each dbt invocation that does not already set them; the command itself
- * when nothing needs to change.
+ * when nothing needs to change. An invocation whose flags may come from an expansion is left as written.
  */
 export function rewriteDeferCommand(command: string, options: RewriteOptions): string {
   const { stateDir, favorState = false, target, defaultTarget } = options
@@ -48,8 +48,12 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
   const exportedTarget = /\bexport\b/.test(command) && /\bDBT_TARGET=/.test(command)
   // From the last invocation to the first, so the offsets of those before stay right.
   for (const one of [...parseDbtCommand(command)].sort((a, b) => b.subcommandEnd - a.subcommandEnd)) {
-    // An invocation with a word the parser cannot read (`$FLAGS`, `--target "$T"`) is left as the user wrote it.
-    if (!one.subcommand || one.dynamic) continue
+    if (!one.subcommand) continue
+    // A word that is itself an expansion (`$FLAGS`) may carry --state, --defer or --target, and a --target whose value
+    // is an expansion names a target this cannot read: such an invocation is left as the user wrote it.
+    // Other unreadable words (`~`, a glob, `-s "$MODEL"`) cannot change what the flags mean.
+    const text = command.slice(one.start, one.end)
+    if (one.dynamic && (/(?:^|\s)\$[{(\w@*]/.test(text) || /(?:--target[ =]|\s-t\s*|\bDBT_TARGET=)\S*[$`]/.test(text))) continue
     const flags: string[] = []
     if (stateDir && !exportedState && !NO_DEFER.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command.slice(one.start, one.end))) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
     if (target && !NO_TARGET.has(one.subcommand) && target !== defaultTarget && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))

@@ -107,8 +107,7 @@ test('DBT_STATE or DBT_TARGET exported earlier in the line is left alone, and an
   expect(rewriteDeferCommand('export OTHER="two words" DBT_STATE=/mine && dbt build', on)).toBe('export OTHER="two words" DBT_STATE=/mine && dbt build')
   expect(rewriteDeferCommand('export OTHER="a;b" DBT_STATE=/mine DBT_TARGET=prod && dbt build', { ...on, target: 'qa', defaultTarget: 'dev' })).toBe('export OTHER="a;b" DBT_STATE=/mine DBT_TARGET=prod && dbt build')
   expect(rewriteDeferCommand('export DBT_TARGET=prod && dbt build', { target: 'qa', defaultTarget: 'dev' })).toBe('export DBT_TARGET=prod && dbt build')
-  // The outer one holds a redirection word the parser cannot read, so it is left as written; the inner one keeps its place.
-  expect(rewriteDeferCommand('dbt ls <(dbt ls)', on)).toBe('dbt ls <(dbt ls --defer --state /work/prod-state)')
+  expect(rewriteDeferCommand('dbt ls <(dbt ls)', on)).toBe('dbt ls --defer --state /work/prod-state <(dbt ls --defer --state /work/prod-state)')
 })
 
 test('a Windows session folder, with either slash, is the project it names', () => {
@@ -265,10 +264,15 @@ test('a command that only mentions dbt does not read the setting', async ($, on)
   expect(seen.bash).toEqual(['cat dbt_project.yml', 'git commit -m "dbt"'])
 })
 
-test('an invocation with a word the parser cannot read is left as it is', () => {
+test('an invocation whose flags may come from an expansion is left as it is', () => {
   const both = { ...on, target: 'qa', defaultTarget: 'dev' }
   expect(rewriteDeferCommand('dbt --target "$T" run', both)).toBe('dbt --target "$T" run')
   expect(rewriteDeferCommand('dbt run $FLAGS', both)).toBe('dbt run $FLAGS')
+  expect(rewriteDeferCommand('dbt run -t $T', both)).toBe('dbt run -t $T')
+  // An unreadable word that cannot carry a flag does not stop the rewrite.
+  expect(rewriteDeferCommand('dbt run --profiles-dir ~/.dbt', on)).toBe('dbt run --defer --state /work/prod-state --profiles-dir ~/.dbt')
+  expect(rewriteDeferCommand('dbt build -s "$MODEL"', on)).toBe('dbt build --defer --state /work/prod-state -s "$MODEL"')
+  expect(rewriteDeferCommand('dbt run -s staging.*', on)).toBe('dbt run --defer --state /work/prod-state -s staging.*')
 })
 
 test('a project word that goes on after its quotes is not one the settings are judged for', () => {
