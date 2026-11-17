@@ -34,6 +34,7 @@ const MAX_BLOCK_CHARS = 6000
 export const FIRST_READ_WAIT_MS = 3_000
 // Files a docs thread can sit on: models, seeds, snapshots, their YAML and docs blocks.
 const MODEL_FILE = /\.(sql|ya?ml|py|md|csv)$/i
+const UNCONFIRMED_NOTE = 'An earlier post is not confirmed yet: press Refresh first.'
 const LOCKED_NOTE = ' The thread stays locked until the list shows the post or a few minutes have passed (the list can lag): press Refresh later.'
 const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids'])
 const MIN_POLL_SECONDS = 30
@@ -452,7 +453,7 @@ async function fetchThreads($: EngineInterface) {
         posting: freed ? null : current.posting,
         // A reply that is in the docs is sent: its draft is not kept to be sent again.
         drafts: freed && seen && pending.action === 'reply' ? { ...current.drafts, [pending.key]: '' } : current.drafts,
-        note: freed && current.note?.endsWith(LOCKED_NOTE) ? null : current.note,
+        note: freed && (current.note?.endsWith(LOCKED_NOTE) || current.note === UNCONFIRMED_NOTE) ? null : current.note,
       }
     })
   } catch (error) {
@@ -471,7 +472,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
   // One post at a time, and none while an earlier one may have landed and is not yet checked.
   if (posting || uncertain !== null) {
     // A press that cannot go out says so.
-    const wait = uncertain !== null ? 'An earlier post is not confirmed yet: press Refresh first.' : 'Another post is still running.'
+    const wait = uncertain !== null ? UNCONFIRMED_NOTE : 'Another post is still running.'
     await change($, current => ({ ...current, note: wait }))
     return
   }
@@ -566,8 +567,11 @@ async function resolve($: EngineInterface, thread: CommentsThread) {
 /** The service lists a message as one line, so a posted text is compared as one. */
 export const sameText = (listed: string, sent: string) => {
   const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
-  const want = flat(sent).slice(0, 200)
-  return want !== '' && flat(listed).startsWith(want)
+  const full = flat(sent)
+  if (full === '') return false
+  // A text the service may have cut is matched by its start; a short one only whole, so an older
+  // "Yes, agreed." does not confirm a reply of "Yes".
+  return full.length > 200 ? flat(listed).startsWith(full.slice(0, 200)) : flat(listed) === full
 }
 const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 240)
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)

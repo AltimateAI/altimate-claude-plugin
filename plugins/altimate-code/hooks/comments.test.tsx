@@ -534,6 +534,12 @@ test('a reply is confirmed by its own text, not by another message in the thread
   expect(sameText('Gross is fine.', '  Gross   is fine. ')).toBe(true)
   expect(sameText('Someone else wrote this', 'Gross is fine.')).toBe(false)
   expect(sameText('anything', '   ')).toBe(false)
+  // An older message that merely starts with the reply is not the reply.
+  expect(sameText('Yes, agreed.', 'Yes')).toBe(false)
+  // A long text the service may have cut is matched by its start.
+  const long = 'a'.repeat(300)
+  expect(sameText('a'.repeat(200), long)).toBe(true)
+  expect(sameText('b'.repeat(200), long)).toBe(false)
 })
 
 test('a post whose CLI call throws says so and reloads the list', async ($, on) => {
