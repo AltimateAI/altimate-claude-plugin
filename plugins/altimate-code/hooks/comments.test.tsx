@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { contextBlock, groupByModel, placeThread, projectName, readOptions, relativePath, threadsOnFile, toThread } from './features/comments'
+import { PHASE_TIMEOUT_MS } from './tool-chain'
+import { FIRST_READ_WAIT_MS, contextBlock, groupByModel, placeThread, projectName, readOptions, relativePath, threadsOnFile, toThread } from './features/comments'
 
 const ROOT = '/repo'
 const FILE = `${ROOT}/models/orders.sql`
@@ -222,6 +223,10 @@ test('a dbt project below the folder the session started in is found from the fi
   const result: any = await $.tool.call({ tool: 'Read', file_path: file })
   expect(cli.filter(c => c.args.action === 'list')).toHaveLength(1)
   expect(result.context?.[0]).toContain('line 3, model')
+})
+
+test('the first-read wait fits inside the shared phase deadline, or the review would be dropped', () => {
+  expect(FIRST_READ_WAIT_MS).toBeLessThan(PHASE_TIMEOUT_MS)
 })
 
 test('the first read of a model waits for the load still running, so the review is seen before an edit', async ($, on) => {

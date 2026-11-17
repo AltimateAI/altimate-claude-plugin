@@ -29,7 +29,9 @@ const MAX_MESSAGES_PER_THREAD = 6
 const MAX_FIELD_CHARS = 120
 const MAX_BLOCK_CHARS = 6000
 // The first read of a model waits this long for a load still in flight, so Claude sees the review before it edits.
-const FIRST_READ_WAIT_MS = 8_000
+// The shared phase (tool-chain.ts) gives up at PHASE_TIMEOUT_MS and drops every feature's context, so this
+// stays well inside it, with room for the folder walk before.
+export const FIRST_READ_WAIT_MS = 3_000
 const MIN_POLL_SECONDS = 30
 const MAX_POLL_SECONDS = 86_400
 const NEEDS_NEWER_CLI = 'Team comments need a newer altimate-code (this one has no docs_share_comments tool): npm install -g altimate-code@latest'
@@ -402,7 +404,14 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     await load($)
   } catch (error) {
     if (mine !== generation) return
-    await change($, current => ({ ...current, posting: null, note: `Could not post: ${oneLine(String(error))}` }))
+    await change($, current => ({
+      ...current,
+      posting: null,
+      note: `Could not confirm the post, it may have gone through (the list is reloaded): ${oneLine(String(error))}`,
+    }))
+    // A write that timed out may still have landed: show what the docs hold now before another press.
+    release()
+    await load($)
   } finally {
     release()
   }
