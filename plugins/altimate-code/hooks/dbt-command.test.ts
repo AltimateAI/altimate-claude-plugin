@@ -150,4 +150,6 @@ test('quotes decide what a substitution is: an apostrophe inside double quotes h
   expect(shape(`echo "it's $(dbt run)"`)).toEqual([run])
   expect(shape(`echo "it's"'$(dbt run)'`)).toEqual([])
   expect(shape('dbt run --vars "$(dbt ls)"').map(i => i.subcommand)).toEqual(['run', 'ls'])
+  // A substitution in a leading assignment is written before the command it feeds.
+  expect(shape('TARGET=$(dbt run-operation get_target) dbt run').map(i => i.subcommand)).toEqual(['run-operation', 'run'])
 })
