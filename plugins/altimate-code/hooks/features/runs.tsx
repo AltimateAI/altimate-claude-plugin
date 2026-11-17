@@ -206,7 +206,8 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     found.push({
       subcommand,
       commandLine: `${where}${head}${body}`.trim(),
-      retryLine: `${where}${head}retry${kept.length ? ` ${kept.join(' ')}` : ''}`.trim(),
+      // `dbt retry` reads the results of the state folder when one is set: the environment's is left out so it reads the target folder.
+      retryLine: `${where}${head.replace(/(^|\s)DBT_STATE=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[^\s"'\\])*\s*/g, '$1')}retry${kept.length ? ` ${kept.join(' ')}` : ''}`.trim(),
       projectDir,
       targetPath: one.targetPath,
     })
@@ -331,11 +332,11 @@ export const OVERLAP_LINE = 'run not recorded: overlapping dbt commands'
 /** Whether the command runs dbt at all, with any subcommand. */
 export const runsDbt = (command: string) => parseDbtCommand(command).length > 0
 /**
- * `dbt run-operation` and `dbt docs generate` replace run_results.json too, and `dbt clean` deletes it: they are no run
+ * `dbt run-operation`, `dbt show` and `dbt docs generate` replace run_results.json too, and `dbt clean` deletes it: they are no run
  * to record, but the stored runs can no longer be retried from the file.
  */
 const isOperation = (command: string, one: DbtInvocation) =>
-  one.subcommand === 'run-operation' || one.subcommand === 'clean' || (one.subcommand === 'docs' && /^\s+generate(?=\s|$)/.test(command.slice(one.subcommandEnd, one.end)))
+  one.subcommand === 'run-operation' || one.subcommand === 'clean' || one.subcommand === 'show' || (one.subcommand === 'docs' && /^\s+generate(?=\s|$)/.test(command.slice(one.subcommandEnd, one.end)))
 export const runsOperation = (command: string) => parseDbtCommand(command).some(one => isOperation(command, one))
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))

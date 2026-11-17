@@ -418,6 +418,16 @@ test('an operation before a build leaves that build retryable; one after it does
   expect(kept(stored).map(run => run.retryLine)).not.toContain('cd /repo && dbt retry')
 })
 
+test('dbt show clears the stored retry; Re-run failed leaves the environment state folder out', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show --select a', tool_use_id: 'show' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+  const found = resultsInvocations('DBT_STATE=prod-artifacts DBT_TARGET=dev dbt build --defer', ROOT)[0]!
+  expect(found.commandLine).toBe('cd /repo && DBT_STATE=prod-artifacts DBT_TARGET=dev dbt build --defer')
+  expect(found.retryLine).toBe('cd /repo && DBT_TARGET=dev dbt retry')
+})
+
 test('a secret continued onto the next line is redacted whole', () => {
   const plain = resultsInvocations('SNOWFLAKE_PASSWORD=abc123\\\ndef456 dbt build', ROOT)[0]!
   expect(plain.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt build')
