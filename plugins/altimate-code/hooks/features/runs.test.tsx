@@ -32,7 +32,7 @@ const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_order
 })
 
 /** The session beneath the plugin: a store in memory, and the CLI answering `dbt_run_results` with `answer(args)`. */
-async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; slow?: string; slowMs?: number; rootDelay?: number } = {}) {
+async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; slow?: string; slowMs?: number; rootDelay?: number; duringRead?: () => Promise<unknown> } = {}) {
   const clock = mock.clock(on, { now: T0 })
   const stored = new Map<string, unknown>()
   const filled: string[] = []
@@ -57,7 +57,8 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
     mcpCalls.push(e.tool)
     return { value: { content: [{ type: 'text', text: 'Unknown tool: dbt_run_results' }], isError: true } }
   })
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
+    if (e.argv[1] === 'tool') await options.duringRead?.()
     if (e.argv[1] !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     cli.push(args)
@@ -364,6 +365,19 @@ test('a backgrounded dbt build clears the stored Re-run failed command: it may r
   expect(kept(stored)[0]!.retryLine).toBe('cd /repo && dbt retry')
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s b &', tool_use_id: 'bg' })
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+})
+
+test('a recording still reading its artifact when a build is backgrounded stores its run without a Re-run failed command', async ($, on) => {
+  let once = true
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]), {
+    duringRead: async () => {
+      if (!once) return
+      once = false
+      await $.tool.call({ tool: 'Bash', command: 'dbt build -s b &', tool_use_id: 'bg' })
+    },
+  })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'a' })
+  expect(kept(stored).map(run => [run.id, run.retryLine])).toEqual([['inv-a', '']])
 })
 
 test('two spellings of one project folder overlap: /repo and /repo/models share one target', async ($, on) => {

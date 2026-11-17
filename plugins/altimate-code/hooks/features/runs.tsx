@@ -356,7 +356,10 @@ async function readRun(
 }
 
 /** The artifact on disk may now be a run that was not recorded: the stored runs of the project can no longer be retried from it. */
+/** Counts the clearings: a recording that began before one stores its run without a retry command. */
+let cleared = 0
 async function clearRetries($: EngineInterface): Promise<void> {
+  cleared++
   await serially(async () => {
     const all = await held($)
     const root = await $.session.root()
@@ -370,6 +373,7 @@ async function clearRetries($: EngineInterface): Promise<void> {
 
 /** Reads each project's last run that this call wrote and records them; Claude gets one line each, or null. */
 async function record($: EngineInterface, e: BashCall): Promise<string | null> {
+  const clearedAtStart = cleared
   const ended = await $.clock.now()
   // The bookkeeping below is one block with no await in it: two calls ending together each see the other.
   const began = started.get(startKey(e))
@@ -425,7 +429,7 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
     for (const run of runs) {
       // The same file as the last recording: nothing new was written.
       if (kept.find(one => one.project === run.project)?.id === run.id) continue
-      kept = withRun(kept, run)
+      kept = withRun(kept, cleared === clearedAtStart ? run : { ...run, retryLine: '' })
       noted.push(summaryLine(run))
     }
     if (noted.length === 0) return noted
