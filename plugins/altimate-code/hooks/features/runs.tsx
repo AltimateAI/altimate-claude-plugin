@@ -348,7 +348,9 @@ async function readRun(
   if (wrote < began - CLOCK_SLACK_MS || wrote > ended + CLOCK_SLACK_MS) return null
   // Several invocations of the writer's subcommand in the call (`dbt build -s a && dbt build -s b`, writing one artifact folder): the
   // file cannot say which one ran when a chain stops early, so it is not recorded rather than guessed.
-  if (invocations.filter(one => one.subcommand === view.command).length > 1) return AMBIGUOUS
+  // A retry's file reports the subcommand it retried, so with none of that subcommand the candidates are the retries.
+  const same = invocations.filter(one => one.subcommand === view.command)
+  if ((same.length > 0 ? same : invocations.filter(one => one.subcommand === 'retry')).length > 1) return AMBIGUOUS
   const written = writer(invocations, view.command)
   const run = written ? toRecord(view, written) : null
   return run && written ? { run, order: all.lastIndexOf(written) } : null

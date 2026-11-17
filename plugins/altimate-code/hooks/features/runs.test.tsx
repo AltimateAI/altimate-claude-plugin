@@ -343,7 +343,7 @@ test('an overlap after a recorded run clears its Re-run failed command: the arti
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
-for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a && false && dbt build -s b']) {
+for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a && false && dbt build -s b', 'dbt retry --target dev; dbt retry --target prod']) {
   test(`a chain with two builds is not recorded, failed or not, and older retries are cleared: ${command}`, async ($, on) => {
     const { stored } = await start($, on, () => view('inv-a', [['model.shop.a', 'error', null]]))
     await $.tool.call({ tool: 'Bash', command: 'dbt build -s old' })
