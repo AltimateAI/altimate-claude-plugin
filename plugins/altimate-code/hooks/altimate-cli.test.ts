@@ -5,6 +5,7 @@ import { runTool } from './altimate-cli'
 /** A stand-in for `$` whose CLI answers every call and whose MCP connection attempts go through `connect`. */
 function standIn(connect: () => unknown, now = 0) {
   const argvs: string[][] = []
+  let mcpCalls = 0
   const $: any = {
     process: {
       run: async (argv: string[]) => {
@@ -15,11 +16,12 @@ function standIn(connect: () => unknown, now = 0) {
     mcp: {
       connect: async () => connect(),
       // No answer: a call that does reach the server falls back to the CLI.
-      call: async () => null,
+      call: async () => (mcpCalls++, null),
     },
-    clock: { now: async () => now },
+    // A deadline that never fires, so the fallback is the no-answer one.
+    clock: { now: async () => now, after: () => {} },
   }
-  return { $, argvs }
+  return { $, argvs, mcpCalls: () => mcpCalls }
 }
 
 test('a read call goes without --allow-write; a write call goes through the CLI with it', async () => {
@@ -34,14 +36,17 @@ test('a read call goes without --allow-write; a write call goes through the CLI 
 
 test('a write call never asks the MCP server, even when one is connected', async () => {
   let connects = 0
-  const { $, argvs } = standIn(() => {
+  const { $, argvs, mcpCalls } = standIn(() => {
     connects++
     return { isConnected: true, server: 'altimate-code' }
   }, 10 * 60_000)
   await runTool($, 'dbt_manifest', {}, { write: true })
   expect(connects).toBe(0)
   expect(argvs).toHaveLength(1)
-  // The same call without `write` does ask the server: the test above can fail.
+  // The same call without `write` does ask the server: the test above can fail. It gets no answer, so
+  // it goes through the CLI without --allow-write.
   await runTool($, 'dbt_manifest', {})
   expect(connects).toBe(1)
+  expect(mcpCalls()).toBe(1)
+  expect(argvs.map(argv => argv.slice(1))[1]).toEqual(['tool', 'run', 'dbt_manifest', '--args', '{}', '--json'])
 })

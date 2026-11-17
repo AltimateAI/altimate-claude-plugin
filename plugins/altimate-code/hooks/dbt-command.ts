@@ -601,6 +601,8 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
   let hasState = false
   let envTarget: string | null = null
   let envTargetPath: string | null = null
+  // Whether any assignment dbt is given holds an expansion; prefix words do not clear it.
+  let assignmentDynamic = false
   // The prefix word whose options are being read (`env -u X`, `time -p`); whether it is a wrapper, after
   // which the next word that is no option is the command itself.
   let prefix: string | null = null
@@ -618,6 +620,7 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       if (name === 'DBT_STATE' || name === 'DBT_DEFER_STATE') hasState = true
       if (name === 'DBT_TARGET') envTarget = assigned
       if (name === 'DBT_TARGET_PATH') envTargetPath = assigned
+      if (word.dynamic) assignmentDynamic = true
       firstAssignment ??= i
       optionsOpen = false
       continue
@@ -743,7 +746,7 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
     select,
     target: targetDynamic ? null : (target ?? envTarget),
     targetPath: targetPathDynamic ? null : (targetPath ?? envTargetPath),
-    dynamic: words.slice(firstAssignment ?? launcherStart).some(one => one.dynamic),
+    dynamic: assignmentDynamic || words.slice(firstAssignment ?? launcherStart).some(one => one.dynamic),
     hasDefer,
     hasState,
     start,

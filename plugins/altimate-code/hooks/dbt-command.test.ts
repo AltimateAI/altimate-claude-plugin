@@ -202,6 +202,10 @@ test('an expansion is part of its word, and the invocation is dynamic; its value
   expect(shape('dbt run -s `echo a b` -s c')).toEqual([{ ...run, dynamic: true, select: ['c'] }])
   expect(shape('for m in a b; do dbt run -s $m; done')).toEqual([{ ...run, dynamic: true }])
   expect(shape('DBT_TARGET=$T dbt run')).toEqual([{ ...run, dynamic: true }])
+  // An expansion in an assignment ahead of a prefix word still reaches dbt's environment.
+  expect(shape('DBT_TARGET=$T time dbt run')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('DBT_TARGET_PATH=$P nohup dbt run')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('DBT_TARGET=prod time dbt run')).toEqual([{ ...run, target: 'prod' }])
   // The flag wins over the environment, but a dynamic flag value is unknown, not the environment's.
   expect(shape('DBT_TARGET=prod dbt run --target "$T"')).toEqual([{ ...run, dynamic: true }])
   expect(shape('dbt run --select=a,$x -s b')).toEqual([{ ...run, dynamic: true, select: ['b'] }])
