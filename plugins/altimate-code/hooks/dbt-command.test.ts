@@ -267,6 +267,12 @@ test('an expansion is part of its word, and the invocation is dynamic; its value
   expect(shape('DBT_TARGET=$T time dbt run')).toEqual([{ ...run, dynamic: true }])
   expect(shape('DBT_TARGET_PATH=$P nohup dbt run')).toEqual([{ ...run, dynamic: true }])
   expect(shape('DBT_TARGET=prod time dbt run')).toEqual([{ ...run, target: 'prod' }])
+  // An expansion in an unrelated assignment cannot add a flag to dbt.
+  expect(shape('START=$SECONDS time dbt run')).toEqual([run])
+  expect(shape('LOG_DIR=$LOG nohup dbt run')).toEqual([run])
+  // A combined short cluster of the launcher's flags is read.
+  expect(shape('uv run -qq dbt run')).toEqual([{ ...run, binary: 'uv run -qq dbt' }])
+  expect(shape('uv run -qv dbt run')).toEqual([{ ...run, binary: 'uv run -qv dbt' }])
   // The flag wins over the environment, but a dynamic flag value is unknown, not the environment's.
   expect(shape('DBT_TARGET=prod dbt run --target "$T"')).toEqual([{ ...run, dynamic: true }])
   expect(shape('dbt run --select=a,$x -s b')).toEqual([{ ...run, dynamic: true, select: ['b'] }])

@@ -102,6 +102,7 @@ export async function runsHere($: EngineInterface, command: string, root: string
   const asked = new Set<string>()
   // A first pass with no nested project: a nested one only narrows the answer, so a no here is final.
   if (!runsInProject(command, root, projectDir, dir => (asked.add(dir), false))) return false
+  if (asked.size === 0) return true
   const owned = new Set<string>()
   for (const dir of asked) if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) owned.add(dir)
   return runsInProject(command, root, projectDir, dir => owned.has(dir))
@@ -174,7 +175,8 @@ export function runsInProject(command: string, root: string, projectDir: string,
   // An escaped word (`./a\ b`) is cut short by this pattern at the escaped space: not a path this can work out.
   // On a Windows project path a backslash separates folders; elsewhere any backslash may be an escape.
   const windows = /^[A-Za-z]:/.test(projectDir)
-  if (named.some(match => (windows ? /\\$/.test(match[1]!) : match[1]!.includes('\\')))) return false
+  // In an unquoted word the shell eats a backslash as an escape, so only a quoted word keeps it as a separator.
+  if (named.some(match => (windows && /^['"]/.test(match[1]!) ? /\\$/.test(match[1]!) : match[1]!.includes('\\')))) return false
   if (named.some(match => !/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length)))) return false
   if (named.length === 0) return inside(before)
   // Only a single dbt invocation, with the project named inside it, is judged: elsewhere in the line it is another command's.

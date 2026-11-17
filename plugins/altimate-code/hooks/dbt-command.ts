@@ -638,7 +638,7 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
   let hasState = false
   let envTarget: string | null = null
   let envTargetPath: string | null = null
-  // Whether any assignment dbt is given holds an expansion; prefix words do not clear it.
+  // Whether a target assignment dbt is given holds an expansion; prefix words do not clear it.
   let assignmentDynamic = false
   // The prefix word whose options are being read (`env -u X`, `time -p`); whether it is a wrapper, after
   // which the next word that is no option is the command itself.
@@ -657,7 +657,8 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       if (name === 'DBT_STATE' || name === 'DBT_DEFER_STATE') hasState = true
       if (name === 'DBT_TARGET') envTarget = assigned
       if (name === 'DBT_TARGET_PATH') envTargetPath = assigned
-      if (word.dynamic) assignmentDynamic = true
+      // Only the target variables decide a `--target` insertion; another expansion cannot add a flag to dbt.
+      if (word.dynamic && (name === 'DBT_TARGET' || name === 'DBT_TARGET_PATH')) assignmentDynamic = true
       firstAssignment ??= i
       optionsOpen = false
       continue
@@ -716,10 +717,10 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       const name = flag.includes('=') ? flag.slice(0, flag.indexOf('=')) : flag
       // An unknown option may take a value, or print help or a version and run nothing.
       const options = RUNNER_OPTIONS[runner]!
-      // Repeated short flags (`-qq`, `-vv`) are read when the launcher has the single one.
-      const repeated = /^-([a-z])\1+$/.exec(flag)
+      // A combined short cluster (`-qv`) is read when each letter is a flag of the launcher.
+      const cluster = /^-[a-zA-Z]{2,}$/.test(flag) && [...flag.slice(1)].every(c => options.flags.has(`-${c}`))
       if (options.values.has(name)) i += flag.includes('=') ? 1 : 2
-      else if (!flag.includes('=') && (options.flags.has(flag) || (repeated && options.flags.has(`-${repeated[1]}`)))) i++
+      else if (!flag.includes('=') && (options.flags.has(flag) || cluster)) i++
       else return null
     }
     if (i >= words.length || !isDbt(words[i]!.text)) return null

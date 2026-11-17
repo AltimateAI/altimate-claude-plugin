@@ -321,7 +321,9 @@ test('on a Windows project path a nested dbt project is found in the form the co
 })
 
 test('a Windows --project-dir with backslashes names the project; an escaped space still does not', () => {
-  expect(runsInProject('dbt run --project-dir .\\repo', 'C:/repo', 'C:/repo/repo')).toBe(true)
+  expect(runsInProject('dbt run --project-dir ".\\repo"', 'C:/repo', 'C:/repo/repo')).toBe(true)
+  // Unquoted, the shell eats the backslash: `.\repo` is `.repo`.
+  expect(runsInProject('dbt run --project-dir .\\repo', 'C:/repo', 'C:/repo/repo')).toBe(false)
   expect(runsInProject('dbt run --project-dir "C:\\other"', 'C:/repo', 'C:/repo')).toBe(false)
   expect(runsInProject('dbt run --project-dir ./a\\ b', '/repo', '/repo/a')).toBe(false)
 })
