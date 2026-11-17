@@ -28,7 +28,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void> } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void>; throwPost?: boolean } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -62,17 +62,16 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
       const call = cli.filter(c => c.args.action === 'list').length - 1
       const threads = options.listThreads?.(call) ?? options.threads ?? [RAW]
       if ((options.failListFrom !== undefined && call >= options.failListFrom) || options.failListCalls?.includes(call)) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'service unavailable', metadata: {} }), stderr: '' } }
-      const heldList = options.holdLists?.[call]
-      if (heldList) return heldList.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }))
-      if (options.holdListCall && options.holdListCall.n === call) {
-        return options.holdListCall.until.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }))
-      }
-      if (options.holdList) return options.holdList.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads: options.threads ?? [RAW] } }), stderr: '' } }))
-      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }
+      const answer = () => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } })
+      const held = options.holdLists?.[call] ?? (options.holdListCall?.n === call ? options.holdListCall.until : options.holdList)
+      if (held) return held.then(answer)
+      return answer()
     }
+    const timedOut = { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'Could not resolve the thread: timed out. The resolve may already have been posted.', metadata: { success: false, error: 'timed out' } }), stderr: '' } }
     if (options.holdPost) return options.holdPost.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'done', metadata: { success: true } }), stderr: '' } }))
-    if (options.holdTimeoutPost) return options.holdTimeoutPost.then(() => ({ value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'timed out. The resolve may already have been posted.', metadata: { success: false, error: 'timed out' } }), stderr: '' } }))
-    if (options.timeoutPost) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'Could not resolve the thread: timed out. The resolve may already have been posted: run list to check before trying again.', metadata: { success: false, error: 'timed out' } }), stderr: '' } }
+    if (options.holdTimeoutPost) return options.holdTimeoutPost.then(() => timedOut)
+    if (options.throwPost) return { value: null }
+    if (options.timeoutPost) return timedOut
     if (options.failPost) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'posting needs write permission', metadata: { success: false, error: options.failPostCode ?? 'read_only' } }), stderr: '' } }
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'done', metadata: { success: true } }), stderr: '' } }
   })
@@ -522,4 +521,73 @@ test('a post that times out after the pane moved to another project does not loc
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'resolve').length).toBe(2)
   await ui.unmount()
+})
+
+test('a post whose CLI call throws says so and reloads the list', async ($, on) => {
+  const { clock, cli } = await start($, on, { throwPost: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Could not confirm the post/ })).toBeDefined()
+  // The first list, then the one that checks the post.
+  expect(cli.filter(c => c.args.action === 'list')).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('the note telling the person to refresh goes away once the verification list freed the thread', async ($, on) => {
+  const { clock } = await start($, on, { timeoutPost: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Button', label: 'Resolve' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /press Refresh/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a press that cannot go out while another post is unchecked says why', async ($, on) => {
+  const second = { ...RAW, group_id: 12, file_path: 'models/customers.sql' }
+  const { clock, cli } = await start($, on, { timeoutPost: true, failListFrom: 1, threads: [RAW, second] })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await ui.press({ key: '7:12-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: /not confirmed yet/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a post still running when a read moves the pane to another project cannot be doubled from there', async ($, on) => {
+  const other = '/other'
+  let release!: () => void
+  const { clock, cli } = await start($, on, { otherProject: other, holdPost: new Promise<void>(resolve => (release = resolve)), files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  await clock.advance(10)
+  await $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
+  for (let i = 0; i < 4; i++) await clock.advance(FIRST_READ_WAIT_MS)
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  release()
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await ui.unmount()
+})
+
+test('the first read of a second project waits for that project’s list, as the first did', async ($, on) => {
+  const other = '/other'
+  let release!: () => void
+  const { clock } = await start($, on, { otherProject: other, holdLists: { 1: new Promise<void>(resolve => (release = resolve)) }, files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  let done = false
+  void $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` }).then(() => (done = true))
+  await clock.advance(10)
+  expect(done).toBe(false)
+  release()
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(done).toBe(true)
 })

@@ -34,6 +34,7 @@ const MAX_BLOCK_CHARS = 6000
 export const FIRST_READ_WAIT_MS = 3_000
 // Files a docs thread can sit on: models, seeds, snapshots, their YAML and docs blocks.
 const MODEL_FILE = /\.(sql|ya?ml|py|md|csv)$/i
+const LOCKED_NOTE = ' The thread stays locked until the list is read again: press Refresh.'
 const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids'])
 const MIN_POLL_SECONDS = 30
 const MAX_POLL_SECONDS = 86_400
@@ -69,8 +70,6 @@ let firstWaitSpent = false
 let pendingFor: string | null = null
 // The thread of a post that may have landed: it stays busy until a list asked for after the post has been read.
 let uncertain: string | null = null
-// Counts the switches to another dbt project: a post begun before one is not about the project now in view.
-let projectEpoch = 0
 // Folders already searched for a dbt project in vain.
 const searched = new Set<string>()
 
@@ -327,7 +326,6 @@ async function attach($: EngineInterface, dir: string) {
     searched.add(dir)
     return
   }
-  if (known && slashes(known) === slashes(found.root)) return
   // Another project (a monorepo): what was loaded for the first one is not shown for this one, and a list
   // still running for the first is dropped.
   // Decided against the state as it is when written: two reads can discover projects at the same time.
@@ -342,9 +340,10 @@ async function attach($: EngineInterface, dir: string) {
     writes++
     // The project in view is a different one: an unchecked post of the first is no longer in view either, and
     // its lock would never be freed by a list of this one. Going back lists the first project again.
+    // A post still running keeps its own lock until it ends, so it cannot be doubled from the new project.
     uncertain = null
-    posting = false
-    projectEpoch++
+    // The first read of this project waits for its list, as the first project's did.
+    firstWaitSpent = false
   }
   // The first load of a project: a read that is waiting on it has already joined it, so this one is not asked twice.
   pendingFor = found.root
@@ -424,13 +423,11 @@ async function fetchThreads($: EngineInterface) {
       // A new session may have begun while the clock was read: its state is not written to.
       if (mine !== generation) return current
       if (wrote !== writes) return { ...current, loading: false }
-      // A list asked for after an uncertain post shows what the docs hold: the thread is free again.
-      const freed = uncertain !== null && current.posting === uncertain
-      if (freed) {
-        uncertain = null
-        posting = false
-      }
-      return { ...current, threads, loadedAt: now, loading: false, error: null, posting: freed ? null : current.posting }
+      // A list asked for after an uncertain post shows what the docs hold: the thread is free again, and the
+      // note that told the person to refresh no longer applies.
+      const freed = uncertain !== null
+      if (freed) uncertain = null
+      return { ...current, threads, loadedAt: now, loading: false, error: null, posting: freed ? null : current.posting, note: freed && current.note?.endsWith(LOCKED_NOTE) ? null : current.note }
     })
   } catch (error) {
     if (mine !== generation) return
@@ -446,10 +443,17 @@ async function fetchThreads($: EngineInterface) {
 async function post($: EngineInterface, thread: CommentsThread, args: Record<string, unknown>, done: string) {
   const key = `${thread.shareId}:${thread.groupId}`
   // One post at a time, and none while an earlier one may have landed and is not yet checked.
-  if (posting || uncertain !== null) return
+  if (posting || uncertain !== null) {
+    // A press that cannot go out says so.
+    const wait = uncertain !== null ? 'An earlier post is not confirmed yet: press Refresh first.' : 'Another post is still running.'
+    await change($, current => ({ ...current, note: wait }))
+    return
+  }
   posting = true
   const mine = generation
-  const epoch = projectEpoch
+  const root = (await get($)).root
+  // The pane may have moved to another project while the post ran: what it found is not about that one.
+  const inView = async () => (await get($)).root === root
   let released = false
   const release = () => {
     if (!released && mine === generation) posting = false
@@ -475,12 +479,12 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
         return
       }
       // The project in view changed meanwhile: that post is not about this one, and nothing here can be locked for it.
-      if (epoch !== projectEpoch) return
+      if (!(await inView())) return
       // Any other failure, a timeout included, may have landed: the thread stays busy until a list asked for
       // after the post has been read, so another press cannot post it twice.
       uncertain = key
       writes++
-      await change($, current => (mine !== generation ? current : { ...current, note: `${note} The thread stays locked until the list is read again: press Refresh.` }))
+      await change($, current => (mine !== generation ? current : { ...current, note: `${note}${LOCKED_NOTE}` }))
       await load($)
       return
     }
@@ -504,11 +508,11 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     await load($)
   } catch (error) {
     if (mine !== generation) return
+    if (!(await inView())) return
     await change($, current => ({
       ...current,
       note: `Could not confirm the post, it may have gone through (the list is reloaded): ${oneLine(String(error))}`,
     }))
-    if (epoch !== projectEpoch) return
     // A write that timed out may still have landed: the thread stays busy until a list asked for after it has been read.
     uncertain = key
     writes++
