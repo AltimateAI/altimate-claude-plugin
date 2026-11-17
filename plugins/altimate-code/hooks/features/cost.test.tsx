@@ -535,3 +535,23 @@ test('an edit drops the estimates made before it', async ($, on) => {
   expect(estimates).toEqual(['orders', 'orders'])
   expect(ran).toEqual([])
 })
+
+test('a pending estimate on another command does not carry /allow-scan over to it', async ($, on) => {
+  const options: Options = { answers: { a: OVER, b: OVER, c: UNDER } }
+  const { clock, ran } = await start($, on, options)
+  expect(((await $.tool.call(bash('dbt run -s a'))) as any).deny).toContain('20.0 GiB')
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'c'
+  const other = 'dbt run -s b && dbt run -s c'
+  const slow = $.tool.call(bash(other))
+  await clock.advance(4_001)
+  expect(((await slow) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  const retry: any = await $.tool.call(bash(other))
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(ran).toEqual([])
+})

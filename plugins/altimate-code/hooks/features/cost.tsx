@@ -174,7 +174,12 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     // What is already known to be over the limit stays held, so a failed estimate on the retry cannot free it.
     if (over.length > 0) {
       const worst = over.reduce((a, b) => (b.bytes > a.bytes ? b : a))
-      await update($, costAtom, prev => ({ ...(prev ?? FRESH), held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }))
+      await update($, costAtom, prev => {
+        const current = prev ?? FRESH
+        // An allowance belongs to the command it was given for: another command's hold does not inherit it.
+        const same = current.held?.command === e.command
+        return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+      })
     }
     notes.delete(e.command)
     return { deny: `The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.` }
