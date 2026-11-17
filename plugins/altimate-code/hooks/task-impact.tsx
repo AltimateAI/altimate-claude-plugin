@@ -5,7 +5,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { PlanImpactView, TaskSummaryView } from '../types'
-import { later, runAltimate, runTool, within } from './altimate-cli'
+import { later, runAltimate } from './altimate-cli'
 import {
   answerOf,
   changedColumns,
@@ -25,6 +25,7 @@ import {
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
+import { runTool, within } from './altimate-cli'
 import { modelsNamed, openPane, projectRoot } from './lineage'
 
 export const REPORT_COMMAND = 'lineage-report'

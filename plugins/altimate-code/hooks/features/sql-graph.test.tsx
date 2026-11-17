@@ -54,7 +54,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const [, command] = e.argv
     // The integrations half of the plugin asks the CLI for its status at session start.
-    if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    if (command !== 'tool' || e.argv[3] === 'docs_share_comments') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     cli.push([...e.argv])
     const asked = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}')).model as string
     // A test can hold one model's answer to make it arrive after a newer ask's.
