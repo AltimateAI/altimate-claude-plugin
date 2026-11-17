@@ -26,7 +26,8 @@
       "type": "number",
       "title": "Largest BigQuery scan without asking",
       "description": "A dbt run or build of one named model, or a show of one model or with --inline, that BigQuery estimates would scan more bytes than this is held until you allow it with /allow-scan. A whole-project run, a graph selection or a command with options that change the target, state, vars, project or refresh mode, or one run after a non-dbt command, is not estimated, so it is never held. 0 never holds one. Other warehouses are never held.",
-      "default": 10737418240
+      "default": 10737418240,
+      "min": 0
     },
     "healthBlocksPush": {
       "type": "boolean",
@@ -44,7 +45,8 @@
       "type": "number",
       "title": "Team comments refresh (seconds)",
       "description": "How often the team's comments on shared docs are fetched again.",
-      "default": 900
+      "default": 900,
+      "min": 30
     },
     "commentsInContext": {
       "type": "boolean",
