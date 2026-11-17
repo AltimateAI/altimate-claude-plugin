@@ -380,3 +380,35 @@ test('a read in a second dbt project loads that project’s threads, not only th
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop'])
 })
+
+test('after a post that may have landed, the thread stays busy until the verification list is done', async ($, on) => {
+  let release!: () => void
+  const { clock, cli } = await start($, on, { timeoutPost: true, holdListCall: { n: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.advance(10)
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  // The verification list is held: no second post can start meanwhile.
+  expect(await ui.find({ type: 'Text', text: /Posting/ })).toBeDefined()
+  release()
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  expect(await ui.find({ type: 'Button', label: 'Resolve' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a post still running when the session ends (/clear, no new start) does not block the next post', async ($, on) => {
+  const { clock, cli } = await start($, on, { holdPost: new Promise<void>(() => {}) })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  await clock.advance(10)
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await $.session.end({})
+  await clock.advance(10)
+  await ui.press({ key: '7:11-resolve' })
+  await clock.advance(10)
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(2)
+  await ui.unmount()
+})

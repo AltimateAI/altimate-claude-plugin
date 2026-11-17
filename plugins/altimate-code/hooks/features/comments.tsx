@@ -208,6 +208,14 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   poll?.cancel()
   poll = null
+  // /clear ends a session without starting another: work still running for it must neither block the next
+  // post or load nor write into what follows.
+  generation++
+  loadRun = null
+  loadAgain = false
+  posting = false
+  pendingFor = null
+  await change($, current => (current.posting === null ? current : { ...current, posting: null }))
 }
 
 /** The line under the lineage one while threads are open; null with none. */
@@ -311,8 +319,14 @@ async function attach($: EngineInterface, dir: string) {
   if (known && slashes(known) === slashes(found.root)) return
   // Another project (a monorepo): what was loaded for the first one is not shown for this one, and a list
   // still running for the first is dropped.
-  if (known) writes++
-  await change($, current => (known ? { ...INITIAL, drafts: current.drafts, ...found } : { ...current, ...found }))
+  // Decided against the state as it is when written: two reads can discover projects at the same time.
+  let switched = false
+  await change($, current => {
+    if (current.root === found.root) return current
+    switched = current.root !== null
+    return switched ? { ...INITIAL, drafts: current.drafts, ...found } : { ...current, ...found }
+  })
+  if (switched) writes++
   // The first load of a project: a read that is waiting on it has already joined it, so this one is not asked twice.
   pendingFor = found.root
   later($, async () => {
@@ -421,13 +435,17 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     if (mine !== generation) return
     const sent = out.ok && (out.metadata as { success?: boolean } | null)?.success !== false
     if (!sent) {
-      await change($, current => ({ ...current, posting: null, note: oneLine(out.text) || 'The comment service did not accept that.' }))
+      const note = oneLine(out.text) || 'The comment service did not accept that.'
       // Only a refusal the tool names (no write permission, no text, no ids) is known not to have posted.
-      // Any other failure, a timeout included, may have landed: show what the docs hold before another press.
       const code = (out.metadata as { error?: unknown } | null)?.error
-      if (typeof code === 'string' && REFUSALS.has(code)) return
-      release()
+      if (typeof code === 'string' && REFUSALS.has(code)) {
+        await change($, current => ({ ...current, posting: null, note }))
+        return
+      }
+      // Any other failure, a timeout included, may have landed: the thread stays busy until the list shows what the docs hold.
+      await change($, current => ({ ...current, note }))
       await load($)
+      if (mine === generation) await change($, current => ({ ...current, posting: null }))
       return
     }
     writes++
@@ -447,12 +465,11 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     if (mine !== generation) return
     await change($, current => ({
       ...current,
-      posting: null,
       note: `Could not confirm the post, it may have gone through (the list is reloaded): ${oneLine(String(error))}`,
     }))
-    // A write that timed out may still have landed: show what the docs hold now before another press.
-    release()
+    // A write that timed out may still have landed: the thread stays busy until the list shows what the docs hold.
     await load($)
+    if (mine === generation) await change($, current => ({ ...current, posting: null }))
   } finally {
     release()
   }
