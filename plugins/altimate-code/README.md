@@ -136,7 +136,7 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 ## Settings
 
-The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). None is used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each will control.
+The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). `commentsPollSeconds` and `commentsInContext` are used by the team comments in this version. `maxScanBytes`, `healthBlocksPush` and `healthConfigPath` are not used yet: the features that read them are not in this version, so changing them changes nothing. The table says what each controls.
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
