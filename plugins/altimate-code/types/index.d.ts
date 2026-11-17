@@ -248,6 +248,42 @@ export interface DocsState {}
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 export interface CteProfileState {}
+/** How far a changed column's value reaches downstream. */
+export type Reach = {
+  columns: number
+  models: number
+  ends: number
+  hops: number
+  mayCarry: number
+  unresolved: number
+  modelLevel: number | null
+  truncated: boolean
+}
+
+export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean }
+
+/** What the band shows after a task that changed models. */
+export type TaskSummaryView = {
+  state: 'tracing' | 'ready'
+  models: { name: string; modelLevel: number | null; columns: SummaryColumn[] }[]
+  /** Models whose SQL could not be read, across every column traced: the reach is a lower bound. */
+  unresolved: number
+  truncated: boolean
+  /** Where the report was written, once one was asked for. */
+  report: string | null
+  /** Tracing upstream and writing the report, after a press. */
+  building?: boolean
+  /** The report could not be opened: its path is shown as a link instead. */
+  openFailed: boolean
+}
+
+/** What the band shows for a plan: the models it names, at the model level. */
+export type PlanImpactView = {
+  state: 'tracing' | 'ready'
+  models: { name: string; modelLevel: number | null; tests: number | null; exposures: number | null; declared: number | null; failed: boolean }[]
+  /** Models the plan names past the ones looked up. */
+  more: number
+}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -281,7 +317,6 @@ declare module 'claude-code' {
       lineageView: 'graph' | 'ends' | 'folders' | 'list'
       /** The graph canvas's first visible column; null centres it on the followed model. */
       lineagePan: number | null
-      lineageImpact: Shaped<ImpactView | null>
       /** The dbt models Claude's last answer names, first named first. */
       lineageAnswer: AnswerModel[]
       /** Why there is no lineage to show, or what the last step reported. */
@@ -310,6 +345,10 @@ declare module 'claude-code' {
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */
       cteProfile: CteProfileState | null
+      /** The end-of-task column impact summary the band shows; null until a task changes a model. */
+      lineageTaskSummary: Shaped<TaskSummaryView | null>
+      lineagePlanImpact: Shaped<PlanImpactView | null>
+      isLineageSummaryHidden: boolean
     }
   }
 }
