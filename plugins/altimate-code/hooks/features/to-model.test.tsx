@@ -37,16 +37,18 @@ async function start($: any, on: any, setup: Setup = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  const files = new Set([`${ROOT}/transform/dbt_project.yml`, `${ROOT}/custom/dbt_project.yml`, `${ROOT}/bare/dbt_project.yml`, `${ROOT}/abs/dbt_project.yml`, `${ROOT}/dot/dbt_project.yml`, `${ROOT}/tpl/dbt_project.yml`])
+  const files = new Set([`${ROOT}/transform/dbt_project.yml`, `${ROOT}/custom/dbt_project.yml`, `${ROOT}/bare/dbt_project.yml`, `${ROOT}/abs/dbt_project.yml`, `${ROOT}/dot/dbt_project.yml`, `${ROOT}/tpl/dbt_project.yml`, `${ROOT}/tpl2/dbt_project.yml`, `${ROOT}/tpl3/dbt_project.yml`])
   if (setup.rootProject) files.add(`${ROOT}/dbt_project.yml`)
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: files.has(e.path) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${ROOT}/q.sql` || e.path === `${ROOT}/transform/analyses/q.sql`) return { value: SQL }
-    if ([`${ROOT}/custom/q.sql`, `${ROOT}/bare/q.sql`, `${ROOT}/abs/q.sql`, `${ROOT}/dot/q.sql`, `${ROOT}/tpl/q.sql`].includes(e.path)) return { value: SQL }
+    if ([`${ROOT}/custom/q.sql`, `${ROOT}/bare/q.sql`, `${ROOT}/abs/q.sql`, `${ROOT}/dot/q.sql`, `${ROOT}/tpl/q.sql`, `${ROOT}/tpl2/q.sql`, `${ROOT}/tpl3/q.sql`].includes(e.path)) return { value: SQL }
     if (e.path === `${ROOT}/abs/dbt_project.yml`) return { value: 'name: a\ntarget-path: /out/build\n' }
     if (e.path === `${ROOT}/dot/dbt_project.yml`) return { value: "name: d\nmodel-paths: ['.']\n" }
     if (e.path === `${ROOT}/custom/dbt_project.yml`) return { value: "name: c\ntarget-path: 'artifacts'  # built here\nmodel-paths: ['transforms']\n" }
     if (e.path === `${ROOT}/tpl/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{{ env_var('X', 'target') }}\"\nmodel-paths: ['transforms']\n" }
+    if (e.path === `${ROOT}/tpl2/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{{ env_var('ART', 'artifacts') }}/out\"\n" }
+    if (e.path === `${ROOT}/tpl3/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{{ var('x') }}\"\n" }
     if (e.path === `${ROOT}/dbt_project.yml`) return { value: "name: r\nmodel-paths: ['transforms']\n" }
     if (e.path === `${ROOT}/bare/dbt_project.yml`) return { value: 'name: b\n' }
     if (e.path === '/abs/trap.sql') return { value: TRAP }
@@ -195,6 +197,22 @@ test("a file outside any project takes the layout of the project at the session'
   await run($, 'm /abs/trap.sql')
   await clock.settle()
   expect(prompts[0]).toContain('write transforms/<layer>/m.sql')
+})
+
+test("a templated target-path is read at its env_var default; any other template is reported, never guessed", async ($, on) => {
+  const { clock, cliArgs } = await start($, on)
+  await run($, 'm tpl2/q.sql')
+  const unreadable = await run($, 'm tpl3/q.sql')
+  await clock.settle()
+  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/tpl2/artifacts/out/manifest.json` }])
+  expect(unreadable.text).toContain('is a template this command cannot read')
+})
+
+test('a table mapped to the model being written is flagged so Claude does not make it read itself', async ($, on) => {
+  const { clock, prompts } = await start($, on)
+  await run($, 'orders q.sql')
+  await clock.settle()
+  expect(prompts[0]).toContain('do not make it read itself')
 })
 
 test('an absolute target-path is used whole, a model-paths of "." names the project folder', async ($, on) => {

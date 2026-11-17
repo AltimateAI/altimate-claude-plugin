@@ -95,7 +95,8 @@ export function buildPrompt(view: ToModelState): string {
   if (matched.length === 0) lines.push('  (none matched)')
   for (const row of matched) {
     const note = row.match === 'partial' ? ' (partial match: the SQL names fewer parts than the relation; confirm with me if the schema differs)' : ''
-    lines.push(`  ${quote(row.raw)} -> ${oneLine(row.replaceWith)}${note}`)
+    const self = row.replaceWith.includes(`ref('${view.name}')`) || row.replaceWith.includes(`ref("${view.name}")`)
+    lines.push(`  ${quote(row.raw)} -> ${oneLine(row.replaceWith)}${note}${self ? ' (this is the model being written: do not make it read itself; ask me what to do)' : ''}`)
   }
   if (unmatched.length > 0) {
     lines.push(
@@ -118,7 +119,8 @@ async function sqlOf($: EngineInterface, path: string | null): Promise<{ sql: st
       if (!sql.trim()) return { error: `${path} is empty.` }
       // A file outside any project is mapped by the CLI against the project of the session's root: the prompt follows that one.
       const near = await projectNear($, full, root)
-      const project = near.modelsDir || !root ? near : await projectNear($, `${root.replace(/[\\/]$/, '')}/selection.sql`, root)
+      const project = near.modelsDir || near.error || !root ? near : await projectNear($, `${root.replace(/[\\/]$/, '')}/selection.sql`, root)
+      if (project.error) return { error: project.error }
       return { sql, source: path, ...project }
     } catch {
       return { error: `Could not read ${path}.` }
@@ -129,6 +131,7 @@ async function sqlOf($: EngineInterface, path: string | null): Promise<{ sql: st
     // A selection has no file: the project is the one at the session's root, if any.
     const root = await $.session.root().catch(() => null)
     const project = root ? await projectNear($, `${root.replace(/[\\/]$/, '')}/selection.sql`, root) : {}
+    if (project.error) return { error: project.error }
     return { sql: selected.text, source: 'selection', ...project }
   }
   return { error: `No SQL: pass a file path or select the SQL first. ${USAGE}` }
@@ -147,7 +150,7 @@ export function targetPathOf(yml: string): string {
  * manifest (where its `target-path` puts it; a missing file is the tool's error to report, not a cue to map
  * against another project's manifest) and the folder its models go in. Without a project the tool looks around the working directory.
  */
-async function projectNear($: EngineInterface, file: string, root: string | null): Promise<{ manifest?: string; modelsDir?: string }> {
+async function projectNear($: EngineInterface, file: string, root: string | null): Promise<{ manifest?: string; modelsDir?: string; error?: string }> {
   // `.` and `..` are resolved first, so the folders walked are the ones that really lie above the file.
   const kept: string[] = []
   for (const part of file.split(/[\\/]/)) {
@@ -166,8 +169,14 @@ async function projectNear($: EngineInterface, file: string, root: string | null
       // The models folder as the prompt names it: from the session's root, or whole when the project is outside it.
       const inside = dir === top ? '' : top === '' ? dir.replace(/^\//, '') : top && dir.startsWith(`${top}/`) ? dir.slice(top.length + 1) : null
       const modelsDir = inside === null ? [dir, models === '.' ? '' : models].filter(Boolean).join('/') : [inside, models === '.' ? '' : models].filter(Boolean).join('/') || '.'
-      // A templated target-path is not read here: dbt's default folder of this project stands in, so the tool never maps against another project's manifest.
-      return { manifest: target.includes('{{') ? `${dir}/target/manifest.json` : manifest, modelsDir }
+      if (target.includes('{{')) {
+        // `{{ env_var('NAME', 'default') }}[/more]` is read at its default; any other template is not read here, and the reply says so rather than mapping against a guessed manifest.
+        const simple = /^\{\{\s*env_var\(\s*(['"])[^'"]+\1\s*,\s*(['"])([^'"{}]*)\2\s*\)\s*\}\}([^{}]*)$/.exec(target)
+        if (!simple) return { error: `target-path in ${dir}/dbt_project.yml is a template this command cannot read, so it cannot tell which manifest to map against. Set it to a plain folder, or run dbt compile and try again.` }
+        const resolved = `${simple[3]}${simple[4]}`.replace(/^\.\//, '').replace(/[\\/]+$/, '') || 'target'
+        return { manifest: `${/^([\\/]|[A-Za-z]:)/.test(resolved) ? '' : `${dir}/`}${resolved}/manifest.json`, modelsDir }
+      }
+      return { manifest, modelsDir }
     }
     const parent = dir.replace(/[\\/][^\\/]*$/, '')
     if (parent === dir) return {}
