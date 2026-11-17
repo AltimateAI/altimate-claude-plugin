@@ -463,3 +463,28 @@ test('a project lookup that finishes after a new session began does not change t
   await clock.advance(FIRST_READ_WAIT_MS)
   expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).not.toContain('other_shop')
 })
+
+test('while a post that may have landed is unchecked, no other thread can post and unlock it', async ($, on) => {
+  const second = { ...RAW, group_id: 12, file_path: 'models/customers.sql' }
+  const { clock, cli } = await start($, on, { timeoutPost: true, failListFrom: 1, threads: [RAW, second] })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await ui.press({ key: '7:12-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: /Posting/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a read in a second project while the first project’s list is still loading still loads the second', async ($, on) => {
+  let release!: () => void
+  const other = '/other'
+  const { clock, cli } = await start($, on, { otherProject: other, settle: false, holdLists: { 0: new Promise<void>(resolve => (release = resolve)) }, files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
+  void $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
+  await clock.advance(10)
+  release()
+  for (let i = 0; i < 4; i++) await clock.advance(FIRST_READ_WAIT_MS)
+  expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toContain('other_shop')
+})

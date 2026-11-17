@@ -269,8 +269,10 @@ export async function readOrEditAfter($: EngineInterface, e: FileCall, result: T
   // It is spent once per session, and not on a file that cannot hold a thread.
   if (current.loadedAt === null && current.error === null && !firstWaitSpent && MODEL_FILE.test(file.path)) {
     firstWaitSpent = true
-    if (pendingFor === current.root) pendingFor = null
-    const run = loadRun ?? load($)
+    // A load for this project not yet started is started here; a running one is joined, unless it is another project's.
+    const takeover = pendingFor === current.root
+    if (takeover) pendingFor = null
+    const run = takeover ? load($) : loadRun ?? load($)
     await Promise.race([run, $.clock.sleep(FIRST_READ_WAIT_MS)])
     current = await get($)
   }
@@ -434,7 +436,8 @@ async function fetchThreads($: EngineInterface) {
 
 async function post($: EngineInterface, thread: CommentsThread, args: Record<string, unknown>, done: string) {
   const key = `${thread.shareId}:${thread.groupId}`
-  if (posting) return
+  // One post at a time, and none while an earlier one may have landed and is not yet checked.
+  if (posting || uncertain !== null) return
   posting = true
   const mine = generation
   let released = false
@@ -458,27 +461,31 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       // Only a refusal the tool names (no write permission, no text, no ids) is known not to have posted.
       const code = (out.metadata as { error?: unknown } | null)?.error
       if (typeof code === 'string' && REFUSALS.has(code)) {
-        await change($, current => ({ ...current, posting: null, note }))
+        await change($, current => (mine !== generation ? current : { ...current, posting: null, note }))
         return
       }
       // Any other failure, a timeout included, may have landed: the thread stays busy until a list asked for
       // after the post has been read, so another press cannot post it twice.
       uncertain = key
       writes++
-      await change($, current => ({ ...current, note: `${note} The thread stays locked until the list is read again: press Refresh.` }))
+      await change($, current => (mine !== generation ? current : { ...current, note: `${note} The thread stays locked until the list is read again: press Refresh.` }))
       await load($)
       return
     }
     writes++
     // A resolved thread is no longer open: it leaves the list now, whatever the refresh finds.
     const resolved = args.action === 'resolve'
-    await change($, current => ({
-      ...current,
-      posting: null,
-      note: done,
-      drafts: { ...current.drafts, [key]: '' },
-      threads: resolved ? current.threads.filter(one => one.shareId !== thread.shareId || one.groupId !== thread.groupId) : current.threads,
-    }))
+    await change($, current =>
+      mine !== generation
+        ? current
+        : {
+            ...current,
+            posting: null,
+            note: done,
+            drafts: { ...current.drafts, [key]: '' },
+            threads: resolved ? current.threads.filter(one => one.shareId !== thread.shareId || one.groupId !== thread.groupId) : current.threads,
+          },
+    )
     // The buttons are back: the next press must not be dropped while the refresh runs.
     // An uncertain post keeps its lock until a list read after it frees the thread.
     if (uncertain !== key) release()
