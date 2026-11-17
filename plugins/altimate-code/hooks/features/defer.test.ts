@@ -175,6 +175,15 @@ test('a cd that control flow, a pipeline, a background job or a glob may skip or
   expect(run('cd models && dbt run')).toBe(true)
 })
 
+test('a cd with a redirection before a pipe or &, a cd inside quotes and a short directory option are not trusted', () => {
+  const run = (command: string) => runsInProject(command, '/repo/a', '/repo/a')
+  expect(run('cd ../b; cd ../a >/dev/null | cat; dbt run')).toBe(false)
+  expect(run('cd ../b; cd ../a 2>/dev/null & wait; dbt run')).toBe(false)
+  expect(run("cd ../b; echo 'example; cd ../a '; dbt run")).toBe(false)
+  expect(run('poetry run -C ../b dbt run')).toBe(false)
+  expect(run('cd models 2>&1 && dbt run | tee out')).toBe(true)
+})
+
 test('the override decides, and the status text shows target and defer', () => {
   const state: any = { projectDir: '/p', enabled: true, favorState: false, mode: 'local', stateDir: '/work/prod', reason: null, override: null, defaultTarget: 'dev', targets: ['dev', 'prod'], target: null, failedAt: null }
   expect(statusText(state)).toBe('dbt dev · defer prod')

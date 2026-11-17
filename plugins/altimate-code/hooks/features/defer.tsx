@@ -113,6 +113,19 @@ export async function runsHere($: EngineInterface, command: string, root: string
   return runsInProject(command, root, projectDir, dir => owned.has(dir))
 }
 
+/** Whether the character at `index` is inside single or double quotes. */
+function quoted(text: string, index: number): boolean {
+  let open: string | null = null
+  for (let i = 0; i < index; i++) {
+    const c = text[i]!
+    if (open === null && c === '\\') i++
+    else if (open === null && (c === "'" || c === '"')) open = c
+    else if (open === '"' && c === '\\') i++
+    else if (c === open) open = null
+  }
+  return open !== null
+}
+
 // Where a command runs from: the session folder, moved by each `cd` or `pushd` in the command.
 const CD = /(?:^|[;&|(\n{!]\s*|\b(?:if|elif|while|until|then|do|else|time)\s+)(?:cd|pushd)[ \t]+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
 const PROJECT_DIR = /(?:--project-dir[\s=]|\bDBT_PROJECT_DIR=)("[^"]+"|'[^']+'|[^\s;&|)]+)/g
@@ -142,7 +155,7 @@ export function runsInProject(command: string, root: string, projectDir: string,
   // A folder change this does not follow (`popd`, `env -C`, `command cd`, a `cd` with no folder) leaves the folder unknown.
   // Quotes and backslashes are dropped for this check: `command 'cd' ../b` and `env "-C" ../b` change folder like their plain forms.
   const plain = command.replace(/["'\\]/g, '')
-  if (/\s--(?:directory|project)[\s=]/.test(plain)) return false
+  if (/\s--(?:directory|project)[\s=]|\s-C/.test(plain)) return false
   if (/(?:^|[\s;&|(){}!])(?:popd|chdir)(?=[\s;&|)]|$)|\benv\s+(?:\S+\s+)*(?:-C|--chdir)\b/.test(plain)) return false
   // Control flow (`if`, a loop, `case`) can skip a `cd`: the folder is unknown once a `cd` is among it.
   const control = /(?:^|[\s;&|(){}!])(?:if|then|else|elif|fi|while|until|do|done|for|case|esac|select)(?=[\s;&|)]|$)/.test(plain)
@@ -176,8 +189,11 @@ export function runsInProject(command: string, root: string, projectDir: string,
     const at = match.index + match[0].search(/(?:cd|pushd)[ \t]+/)
     const lead = command.slice(0, at)
     if (!/^\s*(?:(?:cd|pushd)[ \t]+\S+\s*&&\s*)*$/.test(lead.slice(Math.max(lead.lastIndexOf(';'), lead.lastIndexOf('\n')) + 1))) return false
-    // A `cd` in a pipeline or a background job runs in a subshell and leaves this folder as it was.
-    if (/^\s*(?:\|(?!\|)|&(?!&))/.test(command.slice(match.index + match[0].length))) return false
+    // A `cd` in a pipeline or a background job (a redirection may come first) runs in a subshell and leaves this folder as it was.
+    const rest = command.slice(match.index + match[0].length).split(/&&|\|\||;|\n/)[0]!.replace(/\d*>&\d*-?|&>>?|\d*[<>]+/g, ' ')
+    if (/[|&]/.test(rest)) return false
+    // A `cd` inside quotes is text another command prints, not a folder change.
+    if (quoted(command, at)) return false
     // A folder word that goes on after its quotes (`"."/..`) is not one this can work out.
     if (!/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length))) return false
     const word = match[1]!.replace(UNQUOTE, '')
@@ -342,7 +358,8 @@ export function register(on: On, context: FeatureContext) {
     }
     if (name === 'reset') {
       state = { ...state, target: null }
-      await publish($, state)
+      // A session that started while the setting was read has its own state.
+      if (started === generation) await publish($, state)
       return { text: `Target back to the profile default${state.defaultTarget ? ` (${state.defaultTarget})` : ''}.` }
     }
     if (!/^[\w.-]+$/.test(name)) return { text: `Not a target name: ${name}` }
