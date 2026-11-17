@@ -268,9 +268,8 @@ export function applyPrompt(groups: DocsGroup[], skipped: string[]): string | nu
   // Names come from the project, so each is written as a quoted string: data, not instructions.
   const name = (model: string, column: string) => JSON.stringify(`${model}.${column}`)
   const blocks: string[] = []
-  for (const group of groups) {
+  for (const group of sentGroups(groups, skipped)) {
     const picked = group.candidates.filter(one => !skipped.includes(candidateKey(group, one)))
-    if (!picked.length) continue
     blocks.push(
       [
         `Take the description of ${name(group.model, group.column)} as it is written in ${JSON.stringify(group.file)} (dbt project at ${JSON.stringify(group.manifest.replace(/\/target\/manifest\.json$/, ''))}), and put it on:`,
