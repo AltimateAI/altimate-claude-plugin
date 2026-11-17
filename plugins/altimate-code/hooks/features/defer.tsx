@@ -93,24 +93,18 @@ async function findProject($: EngineInterface): Promise<string | null> {
   return below.length === 1 ? below[0]! : null
 }
 
-/** The folders below the project (down to three levels, `dbt_packages` included) that hold a dbt_project.yml of their own, in the form `runsInProject` compares. */
-export async function nestedProjects($: EngineInterface, projectDir: string): Promise<Set<string>> {
-  const found = new Set<string>()
-  let level = [projectDir]
-  for (let depth = 0; depth < 3 && level.length > 0; depth++) {
-    const next: string[] = []
-    for (const dir of level) {
-      for (const entry of await $.fs.list(dir).catch(() => [])) {
-        // A link may lead to a dbt project of its own: the engine lists it as another kind than 'dir'.
-        if ((entry.kind !== 'dir' && !entry.isLink) || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'target') continue
-        const child = `${dir}/${entry.name}`
-        if (await $.fs.exists(`${child}/dbt_project.yml`).catch(() => false)) found.add(resolvePath(child, '.') ?? child)
-        else next.push(child)
-      }
-    }
-    level = next
-  }
-  return found
+/**
+ * Whether the command's dbt runs in the project: `runsInProject`, with the folders it asks about checked
+ * for a dbt_project.yml of their own. A folder below the project that holds one has its own settings, at any
+ * depth and through a link; no folder tree is scanned.
+ */
+export async function runsHere($: EngineInterface, command: string, root: string, projectDir: string): Promise<boolean> {
+  const asked = new Set<string>()
+  // A first pass with no nested project: a nested one only narrows the answer, so a no here is final.
+  if (!runsInProject(command, root, projectDir, dir => (asked.add(dir), false))) return false
+  const owned = new Set<string>()
+  for (const dir of asked) if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) owned.add(dir)
+  return runsInProject(command, root, projectDir, dir => owned.has(dir))
 }
 
 // Where a command runs from: the session folder, moved by each `cd` or `pushd` in the command.
@@ -375,14 +369,7 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   // The folder the session's shell is in now: an earlier `cd` in the session moves it, which the project root does not.
   const root = (await $.session.cwd().catch(() => null)) ?? (await $.session.root().catch(() => null))
   if (!root) return null
-  // Only a command that starts or moves below the project can end up in a dbt project of its own.
-  // A shell above or outside the project reaches one only by a `cd`, `pushd` or project option.
-  const project = resolvePath(state.projectDir, '.')?.replace(/\/+$/, '')
-  const here = resolvePath(root, '.')
-  const below = !!project && !!here && (here === project || here.startsWith(`${project}/`))
-  const moves = /\b(?:cd|pushd)\b|--project-dir|DBT_PROJECT_DIR/.test(e.command)
-  const nested = (below && here !== project) || moves ? await nestedProjects($, state.projectDir) : new Set<string>()
-  if (!runsInProject(e.command, root, state.projectDir, dir => nested.has(dir))) return null
+  if (!(await runsHere($, e.command, root, state.projectDir))) return null
   const command = rewriteDeferCommand(e.command, effective(state))
   return command === e.command ? null : command
 }
