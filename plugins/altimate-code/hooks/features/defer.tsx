@@ -45,7 +45,7 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
   let out = command
   // DBT_STATE or DBT_TARGET exported in the line is the user's own choice: none of its dbt commands gets the flag
   // (a line with an `export` and the variable anywhere in it counts, whatever the quoting).
-  const exportedState = /\bexport\b/.test(command) && /\bDBT_(?:STATE|DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command)
+  const exportedState = /\bexport\b/.test(command) && /\bDBT_(?:STATE|DEFER|DEFER_STATE)=/.test(command)
   const exportedTarget = /\bexport\b/.test(command) && /\bDBT_TARGET=/.test(command)
   // From the last invocation to the first, so the offsets of those before stay right.
   for (const one of [...parseDbtCommand(command)].sort((a, b) => b.subcommandEnd - a.subcommandEnd)) {
@@ -54,7 +54,11 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
     // may be among them: such an invocation is left as the user wrote it, as the parser's contract asks.
     if (one.dynamic) continue
     const flags: string[] = []
-    if (stateDir && !exportedState && DEFERS.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command.slice(one.start, one.end))) flags.push('--defer', '--state', quote(stateDir), ...(favorState && !/--(?:no-)?favor-state\b/.test(command.slice(one.start, one.end)) ? ['--favor-state'] : []))
+    if (stateDir && !exportedState && DEFERS.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE)=/.test(command.slice(one.start, one.end))) {
+      // The command's own favor-state choice, in a flag or the environment, stands.
+      const own = /--(?:no-)?favor-state\b|\bDBT_FAVOR_STATE=/.test(command.slice(one.start, one.end)) || (/\bexport\b/.test(command) && /\bDBT_FAVOR_STATE=/.test(command))
+      flags.push('--defer', '--state', quote(stateDir), ...(favorState && !own ? ['--favor-state'] : []))
+    }
     if (target && !NO_TARGET.has(one.subcommand) && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
     if (flags.length === 0) continue
     out = `${out.slice(0, one.subcommandEnd)} ${flags.join(' ')}${out.slice(one.subcommandEnd)}`
@@ -140,8 +144,11 @@ export function runsInProject(command: string, root: string, projectDir: string,
   const plain = command.replace(/["'\\]/g, '')
   if (/\s--(?:directory|project)[\s=]/.test(plain)) return false
   if (/(?:^|[\s;&|(){}!])(?:popd|chdir)(?=[\s;&|)]|$)|\benv\s+(?:\S+\s+)*(?:-C|--chdir)\b/.test(plain)) return false
+  // Control flow (`if`, a loop, `case`) can skip a `cd`: the folder is unknown once a `cd` is among it.
+  const control = /(?:^|[\s;&|(){}!])(?:if|then|else|elif|fi|while|until|do|done|for|case|esac|select)(?=[\s;&|)]|$)/.test(plain)
   const cdWords = plain.match(/(?:^|[\s;&|(){}!`])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
   if (cdWords !== [...command.matchAll(CD)].length) return false
+  if (cdWords > 0 && control) return false
   // A folder change inside a subshell or command substitution leaves the parent's folder unchanged or unknown.
   if (cdWords > 0 && /[(`]/.test(plain)) return false
   const invocations = parseDbtCommand(command)
@@ -163,10 +170,14 @@ export function runsInProject(command: string, root: string, projectDir: string,
     if (!dir) return false
     // A folder word with an escape (`nested\ project`) is cut short by the pattern: not a folder this can work out.
     if (/\\/.test(match[1]!) && !(windows && /^['"]/.test(match[1]!))) return false
+    // A glob in the folder word may name a folder this does not see.
+    if (/[*?[\]{}]/.test(match[1]!)) return false
     // A `cd` that may not run (after `||`, after another command in an `&&` list, inside `if`, `then` or a loop) leaves the folder unknown.
     const at = match.index + match[0].search(/(?:cd|pushd)[ \t]+/)
     const lead = command.slice(0, at)
     if (!/^\s*(?:(?:cd|pushd)[ \t]+\S+\s*&&\s*)*$/.test(lead.slice(Math.max(lead.lastIndexOf(';'), lead.lastIndexOf('\n')) + 1))) return false
+    // A `cd` in a pipeline or a background job runs in a subshell and leaves this folder as it was.
+    if (/^\s*(?:\|(?!\|)|&(?!&))/.test(command.slice(match.index + match[0].length))) return false
     // A folder word that goes on after its quotes (`"."/..`) is not one this can work out.
     if (!/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length))) return false
     const word = match[1]!.replace(UNQUOTE, '')

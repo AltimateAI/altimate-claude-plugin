@@ -158,6 +158,23 @@ test('a tab after --project-dir, an escaped folder word and a cd that may not ru
   expect(run('cd models && cd .. && dbt run')).toBe(true)
 })
 
+test('DBT_FAVOR_STATE keeps its own choice and does not stop the deferral', () => {
+  const options = { ...on, favorState: true }
+  expect(rewriteDeferCommand('DBT_FAVOR_STATE=false dbt run', options)).toBe('DBT_FAVOR_STATE=false dbt run --defer --state /work/prod-state')
+  expect(rewriteDeferCommand('export DBT_FAVOR_STATE=true; dbt run', options)).toBe('export DBT_FAVOR_STATE=true; dbt run --defer --state /work/prod-state')
+})
+
+test('a cd that control flow, a pipeline, a background job or a glob may skip or redirect is not trusted', () => {
+  const run = (command: string) => runsInProject(command, '/repo/a', '/repo/a')
+  expect(run('cd ../b\nif false; then\n  cd ../a\nfi\ndbt run')).toBe(false)
+  expect(run('if false; then echo skip; cd ../a; fi; dbt run')).toBe(false)
+  expect(run('for i in; do cd ../a; done; dbt run')).toBe(false)
+  expect(run('cd ../b; cd ../a | cat; dbt run')).toBe(false)
+  expect(run('cd ../b; cd ../a & dbt run')).toBe(false)
+  expect(run('cd nested* && dbt run')).toBe(false)
+  expect(run('cd models && dbt run')).toBe(true)
+})
+
 test('the override decides, and the status text shows target and defer', () => {
   const state: any = { projectDir: '/p', enabled: true, favorState: false, mode: 'local', stateDir: '/work/prod', reason: null, override: null, defaultTarget: 'dev', targets: ['dev', 'prod'], target: null, failedAt: null }
   expect(statusText(state)).toBe('dbt dev · defer prod')
