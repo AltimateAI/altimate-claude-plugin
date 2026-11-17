@@ -601,7 +601,7 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     // One band per plugin: the end-of-task lineage summary rides under the integrations one, or alone; each
-    // feature's line rides under the summary.
+    // feature's line rides under the lineage one.
     if (e.props.hasSurvey) return next(e)
     const ui = $.ui.resolve(e)
     const lineage = await taskBand($, ui)

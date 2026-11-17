@@ -86,7 +86,7 @@ test('the features are listed in the stated order, and the status line joins its
   expect(statusLineOf({ integrations: '', runs: '' })).toBeUndefined()
 })
 
-test('through the plugin, a Bash call passes unchanged, and only the features that are built add to its context', async ($, on) => {
+test('through the plugin, a Bash call passes unchanged while every feature is a stub', async ($, on) => {
   const calls: any[] = []
   on('tool.call', (_: unknown, e: any) => {
     calls.push(e)
@@ -94,7 +94,7 @@ test('through the plugin, a Bash call passes unchanged, and only the features th
   })
   const bash: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
   expect(calls.map(one => one.command ?? one.tool)).toEqual(['dbt run -s orders'])
-  expect((bash.context ?? []).filter((line: string) => !line.startsWith('cost · '))).toEqual([])
+  expect(bash.context ?? []).toEqual([])
 })
 
 test('the plugin registers the chain: one tool.call hook for Bash and the file tools, which runs the call it is given', async () => {

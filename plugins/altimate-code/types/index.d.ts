@@ -176,6 +176,43 @@ export type ImpactView = {
   truncated: boolean
 }
 
+/** How far a changed column's value reaches downstream. */
+export type Reach = {
+  columns: number
+  models: number
+  ends: number
+  hops: number
+  mayCarry: number
+  unresolved: number
+  modelLevel: number | null
+  truncated: boolean
+}
+
+export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean }
+
+/** What the band shows after a task that changed models. */
+export type TaskSummaryView = {
+  state: 'tracing' | 'ready'
+  models: { name: string; modelLevel: number | null; columns: SummaryColumn[] }[]
+  /** Models whose SQL could not be read, across every column traced: the reach is a lower bound. */
+  unresolved: number
+  truncated: boolean
+  /** Where the report was written, once one was asked for. */
+  report: string | null
+  /** Tracing upstream and writing the report, after a press. */
+  building?: boolean
+  /** The report could not be opened: its path is shown as a link instead. */
+  openFailed: boolean
+}
+
+/** What the band shows for a plan: the models it names, at the model level. */
+export type PlanImpactView = {
+  state: 'tracing' | 'ready'
+  models: { name: string; modelLevel: number | null; tests: number | null; exposures: number | null; declared: number | null; failed: boolean }[]
+  /** Models the plan names past the ones looked up. */
+  more: number
+}
+
 // ---------------------------------------------------------------------------------------------------
 // Runs (/runs): the dbt commands Claude ran and their results.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
@@ -225,7 +262,18 @@ export interface HealthState {}
 // SQL graph: the edited model's SQL graph.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface SqlGraphState {}
+export interface SqlGraphState {
+  /** The model Claude last read or edited, which /sql-graph shows when it is given no name. */
+  lastModel: string | null
+  /** The model the pane shows, with its graph once the tool answered; `request` is the ask that owns it, so an older ask's answer is dropped. */
+  shown: { model: string; request: number; graph: SqlGraphView | null; loading: boolean; message: string | null; selected: string | null } | null
+}
+
+/** What `dbt_sql_graph` returns: one node per CTE, relation or select, and the edges between them (input id, then consumer id). A node's `id` is unique; its `name` is only what is shown and can repeat. */
+export interface SqlGraphView {
+  nodes: { id: string; name: string; type: string; nodeId?: string; sql: string; columns: { name: string; datatype?: string; expression?: string }[] }[]
+  edges: [string, string][]
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Docs coverage and propagation: what the project documents.
@@ -238,42 +286,6 @@ export interface DocsState {}
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 export interface CteProfileState {}
-/** How far a changed column's value reaches downstream. */
-export type Reach = {
-  columns: number
-  models: number
-  ends: number
-  hops: number
-  mayCarry: number
-  unresolved: number
-  modelLevel: number | null
-  truncated: boolean
-}
-
-export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean }
-
-/** What the band shows after a task that changed models. */
-export type TaskSummaryView = {
-  state: 'tracing' | 'ready'
-  models: { name: string; modelLevel: number | null; columns: SummaryColumn[] }[]
-  /** Models whose SQL could not be read, across every column traced: the reach is a lower bound. */
-  unresolved: number
-  truncated: boolean
-  /** Where the report was written, once one was asked for. */
-  report: string | null
-  /** Tracing upstream and writing the report, after a press. */
-  building?: boolean
-  /** The report could not be opened: its path is shown as a link instead. */
-  openFailed: boolean
-}
-
-/** What the band shows for a plan: the models it names, at the model level. */
-export type PlanImpactView = {
-  state: 'tracing' | 'ready'
-  models: { name: string; modelLevel: number | null; tests: number | null; exposures: number | null; declared: number | null; failed: boolean }[]
-  /** Models the plan names past the ones looked up. */
-  more: number
-}
 
 declare module 'claude-code' {
   interface PluginState {
@@ -314,6 +326,10 @@ declare module 'claude-code' {
       /** The shown model's SQL file changed after the manifest was written, said so; null when it didn't. */
       lineageStale: string | null
       lineageLoading: boolean
+      /** The end-of-task column impact summary the band shows; null until a task changes a model. */
+      lineageTaskSummary: Shaped<TaskSummaryView | null>
+      lineagePlanImpact: Shaped<PlanImpactView | null>
+      isLineageSummaryHidden: boolean
       /** The status line's parts by owner, `integrations` and each feature's id (hooks/status-line.ts). */
       statusParts: Record<string, string>
       /** hooks/features/: RunsState. */
@@ -329,15 +345,11 @@ declare module 'claude-code' {
       /** hooks/features/: HealthState. */
       health: HealthState | null
       /** hooks/features/: SqlGraphState. */
-      sqlGraph: SqlGraphState | null
+      sqlGraph: Shaped<SqlGraphState | null>
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */
       cteProfile: CteProfileState | null
-      /** The end-of-task column impact summary the band shows; null until a task changes a model. */
-      lineageTaskSummary: Shaped<TaskSummaryView | null>
-      lineagePlanImpact: Shaped<PlanImpactView | null>
-      isLineageSummaryHidden: boolean
     }
   }
 }
