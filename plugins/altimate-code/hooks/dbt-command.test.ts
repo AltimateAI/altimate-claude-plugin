@@ -5,7 +5,7 @@ import { parseDbtCommand } from './dbt-command'
 /** The fields a caller decides on, without the offsets. */
 const shape = (line: string) => parseDbtCommand(line).map(({ start, end, subcommandEnd, ...rest }) => rest)
 
-const base = { select: [], target: null, targetPath: null, hasDefer: false, hasState: false }
+const base = { select: [], target: null, targetPath: null, hasDefer: false, hasState: false, dynamic: false }
 
 test('a plain dbt command: subcommand, selections, target and target path', () => {
   expect(shape('dbt build -s stg_orders --select +fct_orders -t prod --target-path tgt')).toEqual([
@@ -74,8 +74,8 @@ test('a heredoc, or an operator or redirection with nothing after it, makes the 
 })
 
 test('parentheses inside a quoted string in a substitution are text', () => {
-  expect(shape('dbt run $(printf "(") -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev' }])
-  expect(shape('dbt run "$(printf ")")" -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev' }])
+  expect(shape('dbt run $(printf "(") -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev', dynamic: true }])
+  expect(shape('dbt run "$(printf ")")" -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev', dynamic: true }])
 })
 
 test('short options joined to their value, and global options that take one before the subcommand', () => {
@@ -87,7 +87,7 @@ test('short options joined to their value, and global options that take one befo
 })
 
 test('env options that take a value; DBT_TARGET and DBT_TARGET_PATH in front of dbt, which the flags override', () => {
-  expect(shape('env -i -u FOO dbt run')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run' }])
+  expect(shape('env FOO=1 dbt run')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run' }])
   expect(shape('DBT_TARGET=prod DBT_TARGET_PATH=tgt dbt run')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'prod', targetPath: 'tgt' }])
   expect(shape('DBT_TARGET=prod dbt run -t dev')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', target: 'dev' }])
 })
@@ -107,7 +107,7 @@ test('subshells after a keyword, case patterns, process substitution, arrays and
     expect(shape(line)).toEqual([run])
   expect(shape('case $t in prod) dbt run -t prod;; *) dbt run;; esac')).toEqual([{ ...run, target: 'prod' }, run])
   expect(shape('case $t in (prod) dbt run -t prod;; esac')).toEqual([{ ...run, target: 'prod' }])
-  expect(shape('models=(orders users); for m in "${models[@]}"; do dbt run -s $m; done')).toEqual([{ ...run, select: ['$m'] }])
+  expect(shape('models=(orders users); for m in "${models[@]}"; do dbt run -s $m; done')).toEqual([{ ...run, dynamic: true }])
   const line = 'diff <(dbt ls -s a) <(dbt ls -s b)'
   const found = parseDbtCommand(line)
   expect(found.map(({ start, end }) => line.slice(start, end))).toEqual(['dbt ls -s a', 'dbt ls -s b'])
@@ -152,4 +152,144 @@ test('quotes decide what a substitution is: an apostrophe inside double quotes h
   expect(shape('dbt run --vars "$(dbt ls)"').map(i => i.subcommand)).toEqual(['run', 'ls'])
   // A substitution in a leading assignment is written before the command it feeds.
   expect(shape('TARGET=$(dbt run-operation get_target) dbt run').map(i => i.subcommand)).toEqual(['run-operation', 'run'])
+})
+
+test('a here-string inside a substitution is no heredoc', () => {
+  const line = `dbt run -s a && echo "$(cat <<< text\n)"`
+  expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
+})
+
+test('a heredoc right after an escaped < is still a heredoc, so its quotes are text', () => {
+  const line = `dbt run -s a && echo "$(cat \\<<<'EOF'\nit's\nEOF\n)"`
+  expect(shape(line)).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
+})
+
+test('the offsets leave out the keywords and prefix commands in front of dbt, but keep its assignments', () => {
+  const cut = (line: string) => parseDbtCommand(line).map(inv => line.slice(inv.start, inv.end))
+  expect(cut('if dbt run; then echo ok; fi')).toEqual(['dbt run'])
+  expect(cut('time dbt run -s a')).toEqual(['dbt run -s a'])
+  expect(cut('! nohup dbt test')).toEqual(['dbt test'])
+  expect(cut('env DBT_TARGET=prod dbt run -s a')).toEqual(['DBT_TARGET=prod dbt run -s a'])
+  expect(cut('env X=1 Y=2 dbt build')).toEqual(['X=1 Y=2 dbt build'])
+  expect(cut('X=1 nohup dbt run')).toEqual(['dbt run'])
+  // Splicing a rewrite in keeps the line valid shell.
+  const line = 'if dbt run; then echo ok; fi'
+  const [one] = parseDbtCommand(line)
+  expect(line.slice(0, one!.start) + 'dbt run --target dev' + line.slice(one!.end)).toBe('if dbt run --target dev; then echo ok; fi')
+})
+
+test('prefix options: a lookup, env with options and a NAME=value after a wrapper are no invocation', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  for (const line of [
+    'command -v dbt run',
+    'command -V dbt run',
+    'env -u X dbt run',
+    'env -i dbt run',
+    'env -S "dbt run" dbt run',
+    'env -u HOME X=1 dbt build',
+    'DBT_TARGET=prod env -u DBT_TARGET dbt build',
+    'nohup X=1 dbt run',
+    'command X=1 dbt run',
+    'exec X=1 dbt run',
+    'env -- dbt run',
+  ])
+    expect(parseDbtCommand(line)).toEqual([])
+  // `command -p` and `command --` still run the command; assignments after env's or a keyword stay assignments.
+  expect(shape('command -p dbt run')).toEqual([run])
+  expect(shape('command -- dbt run')).toEqual([run])
+  expect(shape('env X=1 Y=2 dbt run')).toEqual([run])
+  expect(shape('if X=1 dbt run; then :; fi')).toEqual([run])
+  expect(shape('time DBT_TARGET=prod dbt run')).toEqual([{ ...run, target: 'prod' }])
+  expect(shape('env DBT_TARGET=prod dbt run')).toEqual([{ ...run, target: 'prod' }])
+})
+
+test('a quoted word is never an assignment, a keyword or a prefix command, but a quoted dbt is dbt', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(parseDbtCommand('"DBT_TARGET=prod" dbt run')).toEqual([])
+  expect(parseDbtCommand("'DBT_TARGET=prod' dbt run")).toEqual([])
+  expect(parseDbtCommand('DBT_\\TARGET=prod dbt run')).toEqual([])
+  expect(parseDbtCommand('"if" dbt run')).toEqual([])
+  expect(parseDbtCommand('"nohup" dbt run')).toEqual([])
+  expect(parseDbtCommand("$'time' dbt run")).toEqual([])
+  expect(shape('"dbt" run')).toEqual([run])
+  // A quoted value is still an assignment's value.
+  expect(shape('DBT_TARGET="prod" dbt run')).toEqual([{ ...run, target: 'prod' }])
+})
+
+test('an expansion is part of its word, and the invocation is dynamic; its values are never reported', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('dbt run --target "$DBT_TARGET"')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run -t $T --target-path ${P:-a b}')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run -s "$(printf orders)"')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run -s $(printf a b)')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run -s `echo a b` -s c')).toEqual([{ ...run, dynamic: true, select: ['c'] }])
+  expect(shape('for m in a b; do dbt run -s $m; done')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('DBT_TARGET=$T dbt run')).toEqual([{ ...run, dynamic: true }])
+  // The flag wins over the environment, but a dynamic flag value is unknown, not the environment's.
+  expect(shape('DBT_TARGET=prod dbt run --target "$T"')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run --select=a,$x -s b')).toEqual([{ ...run, dynamic: true, select: ['b'] }])
+  // Single quotes and escapes hold no expansion.
+  expect(shape("dbt run -s '$literal'")).toEqual([{ ...run, select: ['$literal'] }])
+  expect(shape('dbt run -s \\$literal')).toEqual([{ ...run, select: ['$literal'] }])
+  // A bare $ is text; an expansion in the binary or the subcommand is no invocation.
+  expect(shape('dbt run -s a$')).toEqual([{ ...run, select: ['a$'] }])
+  expect(parseDbtCommand('dbt $CMD')).toEqual([])
+  expect(parseDbtCommand('dbt "$(echo run)" -s a')).toEqual([])
+  expect(parseDbtCommand('$(which dbt) run')).toEqual([])
+  expect(parseDbtCommand('"$DBT" run')).toEqual([])
+  // An unclosed ${ is unreadable.
+  expect(parseDbtCommand('dbt run -s ${a')).toEqual([])
+})
+
+test('a redirection among the arguments with an argument after it is unsupported; a trailing one is left out of the range', () => {
+  for (const line of ['dbt run > run.log -s orders', 'dbt run 2>/dev/null --target dev', 'DBT_TARGET=a > log dbt run'])
+    expect(parseDbtCommand(line)).toEqual([])
+  for (const line of ['dbt run -s orders > run.log', 'dbt run -s orders 2>&1 | tee x', 'dbt run -s orders >> run.log 2>&1']) {
+    const [one] = parseDbtCommand(line)
+    expect(line.slice(one!.start, one!.end)).toBe('dbt run -s orders')
+    expect(one!.select).toEqual(['orders'])
+  }
+  const lead = 'time 2>/dev/null dbt run -s a'
+  const [front] = parseDbtCommand(lead)
+  expect(lead.slice(front!.start, front!.end)).toBe('dbt run -s a')
+})
+
+test('global options that take a value come before the subcommand, and an unknown word does not hide the subcommand', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('dbt --partial-parse-file-path p run')).toEqual([run])
+  expect(shape('dbt --packages-install-path pk --partial-parse-file-path=p run -s a')).toEqual([{ ...run, select: ['a'] }])
+  // A flag this list does not know, with its value, in front of the subcommand.
+  expect(shape('dbt --some-new-option value build -s a')).toEqual([{ ...base, binary: 'dbt', subcommand: 'build', select: ['a'] }])
+  const line = 'dbt --some-new-option value test'
+  const [one] = parseDbtCommand(line)
+  expect(line.slice(one!.start, one!.subcommandEnd)).toBe(line)
+  // No known subcommand: the first word is reported, as before.
+  expect(shape('dbt frobnicate')).toEqual([{ ...base, binary: 'dbt', subcommand: 'frobnicate' }])
+})
+
+test('a backslash in double quotes is kept unless it escapes $, a backtick, a quote, a backslash or a newline', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('dbt run --target-path "target\\compiled"')).toEqual([{ ...run, targetPath: 'target\\compiled' }])
+  expect(shape('dbt run -t "p\\"rod" ')).toEqual([{ ...run, target: 'p"rod' }])
+  expect(shape('dbt run -t "pro\\\nd"')).toEqual([{ ...run, target: 'prod' }])
+  expect(shape('dbt run -t pro\\\nd')).toEqual([{ ...run, target: 'prod' }])
+})
+
+test('a $\'…\' word with an escape is not decoded: it is dynamic and reports no value', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape("dbt run -t $'pro\\x64'")).toEqual([{ ...run, dynamic: true }])
+  expect(shape("dbt run -t $'prod'")).toEqual([{ ...run, target: 'prod' }])
+})
+
+test('unquoted tilde, brace lists and patterns are expansions; $"…" is a quoted string; launcher help runs nothing', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('dbt run --target-path ~/dbt-target')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('DBT_TARGET_PATH=~/x dbt run')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run -s {orders,users}')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('dbt run -s models/*.sql -t dev')).toEqual([{ ...run, dynamic: true, target: 'dev' }])
+  expect(shape('dbt run -s "{orders,users}" --target-path "~/x" -t \\~')).toEqual([{ ...run, select: ['{orders,users}'], targetPath: '~/x', target: '~' }])
+  expect(shape('dbt run -t $"prod"')).toEqual([{ ...run, target: 'prod' }])
+  expect(shape('dbt run -t $-')).toEqual([{ ...run, dynamic: true }])
+  expect(parseDbtCommand('uv run --help dbt run')).toEqual([])
+  expect(parseDbtCommand('uvx --version dbt run')).toEqual([])
 })

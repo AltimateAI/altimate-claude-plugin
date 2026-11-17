@@ -905,6 +905,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
         const left = Math.min(HOLD_MS, deadline - (await $.clock.now()))
         if (left <= 0) return null
         const args = { manifest_path: manifest, model: id, column: col, change_type: 'modify' }
+        // Through the CLI, not MCP: no permission prompt in accept-edits mode, and no size cap on the answer.
         return within($, left, shared(`impact\u0000${manifest}\u0000${stat.mtimeMs}\u0000${id}\u0000${col}`, () => runTool($, 'impact_analysis', args, { cliOnly: true, until: deadline })))
       }),
     )
