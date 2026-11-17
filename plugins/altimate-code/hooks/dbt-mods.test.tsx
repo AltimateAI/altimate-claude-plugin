@@ -3383,3 +3383,24 @@ test('/dbt-show captures its generation at entry: a /clear during its first awai
   expect(await ui.find({ type: 'Text', text: /1 row/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a model\'s own missing env_var keeps dbt\'s error on the note, the pane and the band, and still says to fix the model', async ($, on) => {
+  const missing = "Compilation Error in model orders (models/orders.sql)\n  Env var required but not provided: 'START_DATE'"
+  const { clock } = await start($, on, { show: { error: missing } })
+  const result: any = await editOrders($)
+  await clock.settle()
+  const note = noteOf(result)
+  expect(note).toContain("Env var required but not provided: 'START_DATE'")
+  expect(note).not.toContain(PROFILES_FIXED)
+  expect(note).toContain('Fix the model before going on')
+  expect(note).not.toContain("may not be the model's fault")
+  const pane = await $.ui.mount({ ...CHECK, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /START_DATE/ })).toBeDefined()
+  await pane.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /START_DATE/ })).toBeDefined()
+  await band.unmount()
+  expect(profilesError(missing)).toBe(false)
+  // The same message in a profile's template is still the profile's.
+  expect(profilesError("Runtime Error\n  Could not render {{ env_var('X', 'S') }}: Env var required but not provided: 'X'")).toBe(true)
+})

@@ -64,7 +64,7 @@ export function showPreview(stdout: string, uniqueId?: string): { columns: strin
 export const PROFILES_UNREADABLE = 'profiles.yml could not be parsed; run `dbt debug` yourself to see the error'
 
 // What dbt prints for a profiles.yml it could not load, parse, validate or render: each quotes the offending value.
-const PROFILE_MARKERS = /Credentials in profile|Profile loading failed|Could not render|error while trying to read your profiles\.yml|Runtime Error in profile|Env var required but not provided/i
+const PROFILE_MARKERS = /Credentials in profile|Profile loading failed|Could not render|error while trying to read your profiles\.yml|Runtime Error in profile/i
 // `dbt debug` states where profiles.yml is and that it is fine: not an error about it.
 const PROFILE_STATUS = /^\s*(?:\d\d:\d\d:\d\d\s+)?(?:Using profiles\.yml file at|profiles\.yml file \[OK)/i
 // A numbered line of the file as dbt quotes it: its content is the user's, never dbt's own.
