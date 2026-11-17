@@ -1430,8 +1430,11 @@ export function registerDbtMods(on: On) {
     if (!root) return { text: 'No dbt project here: start Claude Code in a dbt project (a folder with dbt_project.yml).' }
     const args = e.args.trim()
     noteTerminal(e.presentation?.columns)
+    const request = await paneRequest($, RESULTS_PANE, RESULTS_SIZES)
+    // A /clear while the project or the size was being read ended the conversation that asked: open nothing in the new one.
+    if (asked !== generation) return { text: 'The conversation was cleared before the query started; run /dbt-show again.' }
     try {
-      await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...(await paneRequest($, RESULTS_PANE, RESULTS_SIZES)), focus: true, closeOnEscape: true })
+      await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...request, focus: true, closeOnEscape: true })
     } catch (error) {
       return { text: `Could not open the Query results pane: ${String(error)}` }
     }

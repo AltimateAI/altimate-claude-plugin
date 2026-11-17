@@ -3366,11 +3366,12 @@ test('the check pane marks only the column the core found undocumented: a quoted
   await pane.unmount()
 })
 
-test('/dbt-show captures its generation at entry: a /clear during its first await keeps its rows out of the new conversation\'s pane', async ($, on) => {
+test('/dbt-show captures its generation at entry: a /clear during its first await opens no pane and keeps its rows out of the new conversation', async ($, on) => {
   let release: () => void = () => {}
   const options: any = {}
-  const { clock } = await start($, on, options)
+  const { clock, opened } = await start($, on, options)
   options.holdRoot = new Promise<void>(resolve => (release = resolve))
+  const before = opened.length
   const running = $.command.run({ command: 'dbt-show', args: 'orders' })
   // The command is under way, waiting for the session's root.
   for (let i = 0; i < 50; i++) await Promise.resolve()
@@ -3379,6 +3380,8 @@ test('/dbt-show captures its generation at entry: a /clear during its first awai
   release()
   await running
   await clock.settle()
+  // Nor does it open an empty pane in the new conversation.
+  expect(opened.length).toBe(before)
   const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /1 row/ })).toBeUndefined()
   await ui.unmount()

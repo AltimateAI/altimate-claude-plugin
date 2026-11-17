@@ -13,7 +13,7 @@ All notable changes to this plugin will be documented in this file.
   - **Environment doctor.** At session start the plugin checks dbt, Python, the profile's adapter, installed packages and whether the manifest is older than the project's files, and offers **Run dbt parse** (or **Run dbt deps**). `/dbt-doctor` runs the checks with the warehouse connection test.
 - Compile and validate runs one `dbt show` per edit (with `dbt ls`, which runs no query, first when the manifest does not name the model). It skips a model whose path holds a space, says "dbt could not be run here" when dbt cannot be started, and asks Claude to fix the model only for errors that are the model's own.
 - No credentials from `profiles.yml` reach Claude or the panes through the helpers (a dbt command Claude runs itself still shows its output to Claude unchanged): dbt's errors about the profile are replaced with a fixed message; dbt's connection errors may still name the host or user. A target that is not a name is not echoed, and every dbt error that names profile loading, validation or rendering (credential validation, a template that does not render, a file it cannot read) is replaced by "profiles.yml could not be parsed; run `dbt debug` yourself to see the error", whatever the surface: the compile-and-validate note, the check pane, the band, Explain and Fix, `/dbt-show` and its saved history, and the doctor.
-- Saved queries cut long cells and keep at most 32 KiB each; bookmarks are capped at 50.
+- Saved queries cut long cells and drop rows to stay within 32 KiB each (a query whose SQL alone is larger is kept whole, within the history's 2 MiB total); bookmarks are capped at 50.
 - The `dbt_mods` option turns the dbt helpers off.
 
 ### Privacy
