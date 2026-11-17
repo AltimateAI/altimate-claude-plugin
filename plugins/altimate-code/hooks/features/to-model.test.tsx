@@ -1,5 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { targetPathOf } from './to-model'
+
 const ROOT = '/repo'
 const SQL = 'select o.id, c.name from analytics.public.orders o join "PUBLIC"."CUSTOMERS" c on c.id = o.customer_id join raw.events e on e.id = o.id'
 
@@ -35,9 +37,15 @@ async function start($: any, on: any, setup: Setup = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/transform/dbt_project.yml` }))
+  const files = new Set([`${ROOT}/transform/dbt_project.yml`, `${ROOT}/transform/target/manifest.json`, `${ROOT}/custom/dbt_project.yml`, `${ROOT}/custom/artifacts/manifest.json`, `${ROOT}/bare/dbt_project.yml`, `${ROOT}/abs/dbt_project.yml`, '/out/build/manifest.json', `${ROOT}/dot/dbt_project.yml`])
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: files.has(e.path) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${ROOT}/q.sql` || e.path === `${ROOT}/transform/analyses/q.sql`) return { value: SQL }
+    if ([`${ROOT}/custom/q.sql`, `${ROOT}/bare/q.sql`, `${ROOT}/abs/q.sql`, `${ROOT}/dot/q.sql`].includes(e.path)) return { value: SQL }
+    if (e.path === `${ROOT}/abs/dbt_project.yml`) return { value: 'name: a\ntarget-path: /out/build\n' }
+    if (e.path === `${ROOT}/dot/dbt_project.yml`) return { value: "name: d\nmodel-paths: ['.']\n" }
+    if (e.path === `${ROOT}/custom/dbt_project.yml`) return { value: "name: c\ntarget-path: 'artifacts'  # built here\nmodel-paths: ['transforms']\n" }
+    if (e.path === `${ROOT}/bare/dbt_project.yml`) return { value: 'name: b\n' }
     if (e.path === '/abs/trap.sql') return { value: TRAP }
     if (e.path === `${ROOT}/empty.sql`) return { value: '  \n' }
     throw new Error('ENOENT')
@@ -132,7 +140,7 @@ test('a CLI without the tool is told to upgrade and nothing is submitted', async
   expect(missing.prompts).toEqual([])
 })
 
-test('a tool error is reported by its first line, and a query with no tables maps nothing', async ($, on) => {
+test('a tool error is reported by its first line', async ($, on) => {
   const failed = await start($, on, { cli: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'No manifest at /repo/target/manifest.json.\nRun dbt parse.' }) } })
   expect((await run($, 'm q.sql')).text).toBe('/to-model could not map the tables: No manifest at /repo/target/manifest.json.')
   expect(failed.prompts).toEqual([])
@@ -151,6 +159,31 @@ test('a file in a dbt project below the root maps against that project\'s manife
   await run($, 'm q.sql')
   await clock.settle()
   expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/transform/target/manifest.json` }, { sql: SQL }, { sql: SQL }])
+})
+
+test("a project's own target-path and model-paths are used; a manifest missing there is left for the tool to report", async ($, on) => {
+  const { clock, cliArgs, prompts } = await start($, on)
+  await run($, 'm custom/q.sql')
+  await run($, 'm bare/q.sql')
+  await clock.settle()
+  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/custom/artifacts/manifest.json` }, { sql: SQL, manifest_path: `${ROOT}/bare/target/manifest.json` }])
+  expect(prompts[0]).toContain('write custom/transforms/<layer>/m.sql')
+  expect(prompts[1]).toContain('write bare/models/<layer>/m.sql')
+})
+
+test('an absolute target-path is used whole, a model-paths of "." names the project folder', async ($, on) => {
+  const { clock, cliArgs, prompts } = await start($, on)
+  await run($, 'm abs/q.sql')
+  await run($, 'm dot/q.sql')
+  await clock.settle()
+  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: '/out/build/manifest.json' }, { sql: SQL, manifest_path: `${ROOT}/dot/target/manifest.json` }])
+  expect(prompts[1]).toContain('write dot/<layer>/m.sql')
+})
+
+test('an answer whose match is named like an inherited property is rejected', async ($, on) => {
+  const odd = await start($, on, { mappings: [{ raw: 'a', replaceWith: 'a', match: 'toString', candidates: [] }] })
+  expect((await run($, 'm q.sql')).text).toContain('could not read')
+  expect(odd.prompts).toEqual([])
 })
 
 test('SQL that tries to close its own fence, or to pose as an instruction through a table name, stays data in the prompt', async ($, on) => {
@@ -213,4 +246,12 @@ test('the pane shows a case-only match, the extra candidates, the dialect, and s
   const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await again.find({ type: 'Text', text: /Run \/to-model/ })).toBeDefined()
   await again.unmount()
+})
+
+test('target-path reads quoted values, quoted # and Jinja whole, drops a trailing comment, and defaults to target', () => {
+  expect(targetPathOf("name: a\ntarget-path: 'build#dev'  # note\n")).toBe('build#dev')
+  expect(targetPathOf('target-path: "{{ env_var(\'DBT_TARGET_PATH\', \'target\') }}"\n')).toBe("{{ env_var('DBT_TARGET_PATH', 'target') }}")
+  expect(targetPathOf('target-path: out/dir # here\n')).toBe('out/dir')
+  expect(targetPathOf('name: a\n  target-path: nested\n')).toBe('target')
+  expect(targetPathOf('target-path:\nname: a\n')).toBe('target')
 })

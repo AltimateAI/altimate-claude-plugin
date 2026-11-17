@@ -635,7 +635,7 @@ export async function taskBeforeTool($: EngineInterface, e: any) {
   if (!file || !/\.sql$/i.test(file)) return
   const t = (task ??= newTask())
   if (t.originals.has(file)) return
-  const root = await projectRoot($, file, { cliOnly: true }).catch(() => null)
+  const root = await projectRoot($, file, true).catch(() => null)
   if (!root) return
   // A project first touched mid-task has its manifest copied now, before the edit.
   await within($, 20_000, prepareRoot($, t, root))

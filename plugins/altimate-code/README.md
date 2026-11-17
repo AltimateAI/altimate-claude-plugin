@@ -132,6 +132,10 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 - **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds). All of them run only in a linked folder (or below it), as recorded in altimate-code's link cache in your own state directory: nothing in the repository turns them on.
 - **`ALTIMATE_LEARN=0`** turns all of it off: the hooks start nothing.
 
+## Raw SQL to a dbt model
+
+`/to-model <model_name> [path/to/query.sql]` turns a query into a dbt model. With no path, it uses the SQL you selected. The `dbt_map_relations` tool of altimate-code maps each table of the query to a `ref()` or `source()` call from the project's manifest. The pane lists the tables that need a decision first (no match, or a match on fewer name parts than the relation has), and Claude is then asked to write the model in the project's model folder with exactly those calls, ask before adding a source for an unmatched table, and run `dbt compile` on it.
+
 ## Settings
 
 The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`).
