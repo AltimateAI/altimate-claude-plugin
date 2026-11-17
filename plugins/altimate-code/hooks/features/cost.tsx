@@ -44,7 +44,16 @@ let limitBytes = DEFAULT_MAX_SCAN_BYTES
 /** The lines to show under an estimated command's Bash row, by command; each gate pass replaces the last. Taken by bashAfter. */
 const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
-const inflight = new Map<string, { answer: Promise<Answer>; doneAt: number | null }>()
+const inflight = new Map<string, { answer: Promise<Answer>; doneAt: number | null; generation: number }>()
+/** Moves on whenever the project may have changed: an estimate started before it is never taken as an answer. */
+let generation = 0
+/** When the session found a warehouse with no dry run; null once forgotten. That finding is kept only so long, since the target can change. */
+let unsupportedSince: number | null = null
+const UNSUPPORTED_KEEP_MS = 10 * 60_000
+/** Commands that can rewrite a model, the project or its profile from the shell: an estimate made before one is not reused. */
+const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|dbt|make|sh|bash|dd|ed|ex)(\s|$)|>/
+/** Files and variables that decide which warehouse a dbt command runs on. */
+const MOVES_TARGET = /profiles\.yml|dbt_project\.yml|dbt\.json|DBT_|--target|-t\s|\.env/
 /** An answer nobody took within this long is dropped: the model may have changed since. */
 const ANSWER_KEEP_MS = 60_000
 
@@ -75,6 +84,7 @@ export function register(on: On, context: FeatureContext) {
     }
     const answer = await estimate($, { model: target }, (await $.clock.now()) + ESTIMATE_BUDGET_MS)
     if (answer.kind === 'bytes') {
+      await forgetUnsupported($)
       await rememberEstimate($, target, answer.bytes, answer.display)
       return { text: `${target} would scan ${answer.display}${verdict(answer.maxBytes)}` }
     }
@@ -86,6 +96,8 @@ export function register(on: On, context: FeatureContext) {
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
   notes.clear()
   inflight.clear()
+  generation++
+  unsupportedSince = null
   await update($, costAtom, () => ({ ...FRESH }))
   await setStatusPart($, 'cost', null)
   await $.command.register({ name: 'allow-scan', description: 'Let the dbt command held for its BigQuery scan size run once, when run again unchanged' })
@@ -122,8 +134,13 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
   if (invocations.length === 0) return null
   const state = (await read($, costAtom)) ?? FRESH
-  // A warehouse with no dry run was found out already: the command is never held, and nothing is asked again.
-  if (state.unsupportedAdapter) return null
+  // A warehouse with no dry run was found out already: the command is never held, and nothing is asked again,
+  // until an edit or a command that can move the target, or time, says it may have changed.
+  if (state.unsupportedAdapter) {
+    if (unsupportedSince != null && (await $.clock.now()) - unsupportedSince < UNSUPPORTED_KEEP_MS) return null
+    await forgetUnsupported($)
+    state.unsupportedAdapter = null
+  }
 
   const lines: string[] = []
   let estimated = false
@@ -148,6 +165,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     }
     if (answer.kind === 'unsupported') {
       // Nothing can be held on this warehouse, so a hold from before the verdict goes with it.
+      unsupportedSince = await $.clock.now()
       await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter, held: null, allowOnce: false }))
       await setStatusPart($, 'cost', null)
       lines.push(`cost · no estimate on ${answer.adapter}: only BigQuery has a dry run`)
@@ -244,13 +262,30 @@ function keepNotes(command: string, lines: string[]) {
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   const lines = notes.get(e.command)
   notes.delete(e.command)
+  // A shell command can rewrite a model or the profile (a git restore, a sed): no earlier estimate is reused after one.
+  if (MAY_CHANGE_PROJECT.test(e.command) && !parseDbtCommand(e.command).some(i => i.subcommand !== null && SCANNING.has(i.subcommand))) {
+    invalidate()
+    if (MOVES_TARGET.test(e.command)) await forgetUnsupported($)
+  }
   return lines
 }
 
 /** `file.before` holds the text from before the edit only when `editReadsBefore` is true. */
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
-  // An edit can change what a model scans: no estimate made before it is reused.
+  // An edit can change what a model scans, or the target it runs on: no estimate made before it is reused.
+  invalidate()
+  await forgetUnsupported($)
+}
+
+function invalidate() {
+  generation++
   inflight.clear()
+}
+
+/** Forgets a warehouse found to have no dry run, so the next dbt command is asked about again. */
+async function forgetUnsupported($: EngineInterface) {
+  unsupportedSince = null
+  await update($, costAtom, prev => (prev?.unsupportedAdapter ? { ...prev, unsupportedAdapter: null } : prev))
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}
@@ -403,12 +438,18 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const key = JSON.stringify(args)
   const had = taken.get(key)
   if (had) return had
+  // The look-up and the insert below are one step: nothing is awaited between them, or two passes would each start one.
+  const now = await $.clock.now()
   let running = inflight.get(key)
-  if (running?.doneAt != null && (await $.clock.now()) - running.doneAt > ANSWER_KEEP_MS) running = undefined
+  if (running?.doneAt != null && now - running.doneAt > ANSWER_KEEP_MS) running = undefined
   if (!running) {
     // The wait is spent: nothing new starts. Each estimate may start the adapter (dbt deps), and two at once in one project collide.
-    if (waitUntil - (await $.clock.now()) <= 0) return 'pending'
-    const entry: { answer: Promise<Answer>; doneAt: number | null } = { answer: estimate($, args, (await $.clock.now()) + ESTIMATE_BUDGET_MS), doneAt: null }
+    if (waitUntil - now <= 0) return 'pending'
+    const entry: { answer: Promise<Answer>; doneAt: number | null; generation: number } = {
+      answer: estimate($, args, now + ESTIMATE_BUDGET_MS),
+      doneAt: null,
+      generation,
+    }
     void entry.answer.then(async () => void (entry.doneAt = await $.clock.now())).catch(() => {})
     inflight.set(key, entry)
     running = entry
@@ -416,6 +457,11 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const left = waitUntil - (await $.clock.now())
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) return 'pending'
+  // The project may have changed while it ran: that answer is of the old one, and the next pass asks again.
+  if (running.generation !== generation) {
+    if (inflight.get(key) === running) inflight.delete(key)
+    return 'pending'
+  }
   // Not dropped here: while another query of the command is pending, the retry still needs this answer.
   taken.set(key, done.answer)
   return done.answer

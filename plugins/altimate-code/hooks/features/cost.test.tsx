@@ -542,6 +542,99 @@ test('a compound command gets every answer over its retries, however long each e
   expect(ran).toEqual([all])
 })
 
+const EDIT = { tool: 'Edit', file_path: '/repo/models/orders.sql', old_string: '1', new_string: '2' } as any
+const NO_DRY_RUN = { success: true, supported: false, adapter: 'duckdb' }
+
+test('an edit made while an estimate is running makes its answer void: the command is asked about again', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(1_000)
+  await $.tool.call(EDIT)
+  options.answers = { orders: OVER }
+  release()
+  await clock.settle()
+  expect(((await first) as any).deny).toContain('still being estimated')
+  expect(ran).toEqual([])
+
+  options.hold = undefined
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(estimates).toEqual(['orders', 'orders'])
+})
+
+test('a shell command that can rewrite the model drops the estimates made before it', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+
+  await $.tool.call(bash('git restore models/orders.sql'))
+  options.hold = undefined
+  options.answers = { orders: OVER }
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(ran).toEqual(['git restore models/orders.sql'])
+  expect(estimates).toEqual(['orders', 'orders'])
+})
+
+test('a read-only shell command keeps the answer waiting for the retry', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  await $.tool.call(bash('ls models'))
+  options.hold = undefined
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toBeUndefined()
+  expect(estimates).toEqual(['orders'])
+})
+
+test('a warehouse found to have no dry run is asked about again after an edit, a profile change or ten minutes', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock, ran } = await start($, on, options)
+  const run = () => $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  expect((await run()).deny).toBeUndefined()
+
+  // The default target is now BigQuery: the next command is estimated and held.
+  options.answers = { orders: OVER }
+  expect((await run()).deny).toBeUndefined()
+  await $.tool.call(EDIT)
+  expect((await run()).deny).toContain('20.0 GiB')
+
+  // The same by a shell command that names the profile.
+  options.answers = { orders: NO_DRY_RUN }
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  expect((await run()).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  await $.tool.call(bash('sed -i s/duckdb/bigquery/ profiles.yml'))
+  expect((await run()).deny).toContain('20.0 GiB')
+
+  // And by time alone.
+  options.answers = { orders: NO_DRY_RUN }
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  expect((await run()).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  await clock.advance(10 * 60_000 + 1)
+  expect((await run()).deny).toContain('20.0 GiB')
+  expect(ran.length).toBeGreaterThan(0)
+})
+
 test('an edit drops the estimates made before it', async ($, on) => {
   const options: Options = { answers: { orders: UNDER } }
   const { clock, estimates, ran } = await start($, on, options)
