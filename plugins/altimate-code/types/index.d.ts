@@ -287,6 +287,7 @@ export interface CteProfileState {
   status: 'listing' | 'running' | 'stopping' | 'done' | 'stopped' | 'failed'
   rows: CteRow[]
   message?: string
+}
 
 declare module 'claude-code' {
   interface PluginState {

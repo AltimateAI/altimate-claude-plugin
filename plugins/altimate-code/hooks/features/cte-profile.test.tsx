@@ -298,7 +298,7 @@ test('the finished profile goes to Claude once, with the next tool result of the
   expect(JSON.stringify(second.context ?? [])).not.toContain('CTE profile')
 })
 
-test('a second /profile-ctes while one runs starts nothing; a pane that will not open leaves no stuck run', async ($, on) => {
+test('a second /profile-ctes while one runs starts nothing', async ($, on) => {
   let release!: () => void
   const until = new Promise<void>(resolve => (release = resolve))
   const { clock, calls, run } = await start($, on, { hold: { cte: 'orders', until } })
