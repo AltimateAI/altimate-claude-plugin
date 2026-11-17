@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { buildGraph, subgraph } from './lineage-graph'
 import { MANIFEST } from './lineage-graph.test'
+import { nothingToReport } from './inert-features'
 
 const ROOT = '/repo'
 const MANIFEST_PATH = `${ROOT}/target/manifest.json`
@@ -189,6 +190,8 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { content: [], isError: true } }
   })
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
+    const inert = nothingToReport(e.argv)
+    if (inert) return { value: inert }
     const [, command, , tool] = e.argv
     // A slow CLI dbt_lineage: it answers once the test lets it.
     if (command === 'tool' && tool === 'dbt_lineage' && options.holdCliLineage) await options.holdCliLineage

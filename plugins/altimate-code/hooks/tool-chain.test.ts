@@ -1,9 +1,10 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 import { FEATURE_IDS } from './features'
 import { register } from './integrations'
 import { STATUS_ORDER, statusLineOf } from './status-line'
 import { within } from './altimate-cli'
+import { nothingToReport } from './inert-features'
 import { afterCall, beforeCall, PHASES, type ChainSteps } from './tool-chain'
 
 /** Steps that record each phase they run, in order. */
@@ -86,15 +87,26 @@ test('the features are listed in the stated order, and the status line joins its
   expect(statusLineOf({ integrations: '', runs: '' })).toBeUndefined()
 })
 
-test('through the plugin, a Bash call passes unchanged while every feature is a stub', async ($, on) => {
+test('through the plugin, a Bash call reaches the tool unchanged and its result comes back with no added context', async ($, on) => {
+  // The session beneath has nothing to report, so no feature that is built holds a call or adds to one it has no reason to.
+  mock.clock(on)
+  on('ui.status', () => ({ value: undefined }))
+  on('session.root', () => ({ value: '/repo' }))
+  on('fs.exists', () => ({ value: false }))
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => ({ value: nothingToReport(e.argv) ?? { exitCode: 1, stdout: '', stderr: 'no CLI here' } }))
   const calls: any[] = []
   on('tool.call', (_: unknown, e: any) => {
     calls.push(e)
     return { result: { ok: true } }
   })
-  const bash: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
-  expect(calls.map(one => one.command ?? one.tool)).toEqual(['dbt run -s orders'])
-  expect(bash.context ?? []).toEqual([])
+  // A dbt command may get a note from a feature that watches dbt (what a run would scan); a call no feature
+  // watches gets nothing. Neither is held or changed.
+  const dbt: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
+  const plain: any = await $.tool.call({ tool: 'Bash', command: 'ls models' })
+  expect(calls.map(one => one.command ?? one.tool)).toEqual(['dbt run -s orders', 'ls models'])
+  expect(dbt.deny).toBeUndefined()
+  expect(plain.deny).toBeUndefined()
+  expect(plain.context ?? []).toEqual([])
 })
 
 test('the plugin registers the chain: one tool.call hook for Bash and the file tools, which runs the call it is given', async () => {

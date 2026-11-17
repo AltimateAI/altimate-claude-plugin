@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { MIN_ALTIMATE_CODE } from './altimate-cli'
 import { DOWN, UP, embedded } from './impact-report.test'
+import { nothingToReport } from './inert-features'
 
 const ROOT = '/repo'
 const MANIFEST = `${ROOT}/target/manifest.json`
@@ -144,6 +145,8 @@ async function start($: any, on: any, options: Options = {}) {
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '' } })
     const [bin] = argv
     if (bin === 'altimate' && argv[2] === 'report-event') return ok()
+    const inert = nothingToReport(argv)
+    if (inert) return { value: inert }
     if (bin === 'altimate') {
       const args = JSON.parse(String(argv[argv.indexOf('--args') + 1] ?? '{}'))
       if (options.cliFails) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'no', metadata: {} }), stderr: '' } }

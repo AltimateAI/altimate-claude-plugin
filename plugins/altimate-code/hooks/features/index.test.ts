@@ -1,5 +1,6 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
+import { nothingToReport } from '../inert-features'
 import {
   attempt,
   featureBandLines,
@@ -40,8 +41,17 @@ test('attempt logs a feature function that throws at once, one that rejects, and
   expect(logs).toEqual(['runs · sessionStart failed: Error: at once', 'defer · bandLine failed: Error: later'])
 })
 
-test('with every feature a stub, each phase runs through the features and logs nothing', async () => {
-  const { $, logs } = engine()
+test('each phase runs through the features, which find nothing to report and log nothing', async ($, on) => {
+  // Under the plugin sits a session with nothing to report, so a feature that is built (it keeps state,
+  // registers commands, asks the CLI) has nothing to say whichever features are built.
+  const logs: string[] = []
+  mock.clock(on)
+  on('ui.log', (_: unknown, e: { text: string }) => (logs.push(e.text), { value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
+  on('session.root', () => ({ value: '/repo' }))
+  on('fs.exists', () => ({ value: false }))
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => ({ value: nothingToReport(e.argv) ?? { exitCode: 1, stdout: '', stderr: 'no CLI here' } }))
   const bash = { tool: 'Bash', command: 'dbt run -s a' } as any
   const file = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
   await featuresSessionStart($, {} as any)
