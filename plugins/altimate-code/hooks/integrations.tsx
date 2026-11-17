@@ -5,11 +5,8 @@ import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, Wo
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
 import { registerLineage, startLineage } from './lineage'
-<<<<<<< HEAD
 import { clearStatusParts, setStatusPart } from './status-line'
-=======
 import { startReviewNotices } from './review-notices'
->>>>>>> origin/main
 import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 import { installToolChain } from './tool-chain'
 
