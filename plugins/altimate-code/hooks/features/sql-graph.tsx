@@ -48,13 +48,19 @@ async function insideInstalledPackages($: EngineInterface, root: string): Promis
     // The configured folder as a path from this project: an absolute one counts only when it is inside the project.
     const given = (custom ?? '').replace(/\\/g, '/')
     const from = `${dir.replace(/\/+$/, '')}/`
-    const relative = given.startsWith('/') ? (given.startsWith(from) ? given.slice(from.length) : null) : given
+    // A drive or UNC prefix is absolute too, and never inside a POSIX project path.
+    const absolute = given.startsWith('/') || /^[A-Za-z]:/.test(given)
+    const relative = absolute ? (given.startsWith(from) ? given.slice(from.length) : null) : given
     const kept: string[] = []
+    let outside = relative === null
     for (const part of relative === null ? [] : relative.split('/')) {
-      if (part === '..') kept.pop()
-      else if (part && part !== '.') kept.push(part)
+      if (part === '..') {
+        // A path that climbs above the project root is outside it.
+        if (kept.length === 0) outside = true
+        else kept.pop()
+      } else if (part && part !== '.') kept.push(part)
     }
-    const own = kept.join('/')
+    const own = outside ? '' : kept.join('/')
     const here = inside.join('/')
     // An enclosing project that does not hold this one among its packages leaves the outer ones to be asked.
     if (own && (here === own || here.startsWith(`${own}/`))) return true
@@ -94,7 +100,7 @@ export async function modelOf($: EngineInterface, file: string): Promise<string 
 /** How many CTEs a model's SQL defines: `with a as (…), b (c) as (…)`; comments and strings are not read. */
 export function cteCount(sql: string): number {
   // One pass, so a `--` inside a string and a quote inside a comment each stay where they are.
-  const bare = sql.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}/g, ' ')
+  const bare = sql.replace(/"(?:[^"]|"")*"|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}/g, m => (m[0] === '"' ? '"x"' : ' '))
   return [
     ...bare.matchAll(
       /(?:\bwith\s+(?:recursive\s+)?|,\s*)(?:"[^"]+"|`[^`]+`|\w+)\s*(?:\([^)]*\)\s*)?as\s*(?:not\s+materialized\s+|materialized\s+)?\(/gi,
@@ -170,9 +176,16 @@ async function load($: EngineInterface, model: string): Promise<'shown' | 'faile
     const result = await runTool($, 'dbt_sql_graph', { model }, { write: true, until })
     const meta = result.metadata as { success?: boolean; error?: string; nodes?: SqlGraphView['nodes']; edges?: SqlGraphView['edges'] } | null
     if (!result.ok || !meta?.success || !Array.isArray(meta.nodes) || !Array.isArray(meta.edges)) {
-      await showing($, request, { loading: false, message: plain(result.text || String((meta as { error?: unknown } | null)?.error ?? '') || `No SQL graph for ${model}.`) })
+      // The tool's own reason comes before the CLI's generic output.
+      const reason = typeof meta?.error === 'string' ? meta.error : ''
+      await showing($, request, { loading: false, message: plain(reason || result.text || `No SQL graph for ${model}.`) })
     } else {
-      await showing($, request, { loading: false, graph: { nodes: meta.nodes, edges: meta.edges } })
+      // A node the render reads must be well formed: others are dropped, not thrown on.
+      const nodes = meta.nodes.filter(
+        n => n && typeof n === 'object' && typeof n.id === 'string' && typeof n.name === 'string' && typeof n.type === 'string',
+      ).map(n => ({ ...n, columns: Array.isArray(n.columns) ? n.columns : [] }))
+      const edges = meta.edges.filter(e => Array.isArray(e) && e.length === 2 && e.every(x => typeof x === 'string'))
+      await showing($, request, { loading: false, graph: { nodes, edges } })
       outcome = 'shown'
     }
   } catch (error) {

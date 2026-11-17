@@ -25,7 +25,7 @@ const GRAPH = {
   ],
 }
 
-type Options = { answer?: Record<string, unknown>; fail?: string; sql?: string; noProject?: boolean; ok?: boolean; hold?: Record<string, Promise<void>>; holdFirst?: Promise<void>; yml?: string }
+type Options = { answer?: Record<string, unknown>; fail?: string; sql?: string; noProject?: boolean; ok?: boolean; okOutput?: string; hold?: Record<string, Promise<void>>; holdFirst?: Promise<void>; yml?: string }
 
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
@@ -65,7 +65,7 @@ async function start($: any, on: any, options: Options = {}) {
       await options.holdFirst
       return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, model: asked, nodes: [{ id: 'stale', name: 'stale', type: 'cte', sql: '', columns: [] }], edges: [] } }), stderr: '' } }
     }
-    if (options.ok === false) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'Not available: this needs the dbt adapter', metadata: { success: false, reason: 'read-only', error: 'Not available: this needs the dbt adapter' } }), stderr: '' } }
+    if (options.ok === false) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: options.okOutput ?? 'Not available: this needs the dbt adapter', metadata: { success: false, reason: 'read-only', error: 'Not available: this needs the dbt adapter' } }), stderr: '' } }
     if (options.fail) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: options.fail, metadata: { success: false } }), stderr: '' } }
     const metadata = { success: true, model: asked, ...(options.answer ?? GRAPH) }
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'SQL graph for fct_orders', metadata }), stderr: '' } }
@@ -124,7 +124,7 @@ test('a package installed deeper in the default folder, or under the project\'s 
 })
 
 // A configured folder that is not the project's own vendor folder leaves the models in it alone.
-for (const path of ['/vendor', 'vendor/repo/', '/vendor/repo/', `cache${ROOT}/vendor`, `/opt${ROOT}/vendor`])
+for (const path of ['C:\\repo\\vendor', '../vendor', '/vendor', 'vendor/repo/', '/vendor/repo/', `cache${ROOT}/vendor`, `/opt${ROOT}/vendor`])
   test(`a packages-install-path of ${path} hides none of the project's own models`, async ($, on) => {
     const { clock } = await start($, on, { yml: `name: 'shop'\npackages-install-path: ${path}\n` })
     await $.tool.call({ tool: 'Read', file_path: `${ROOT}/vendor/pkg/models/v.sql` })
@@ -158,6 +158,8 @@ test('cteCount counts the CTEs a model defines, not words in comments or strings
   expect(cteCount('select cast(a as int), b as c from t')).toBe(0)
   expect(cteCount("with a as (select '--' as marker), b as (select 1) select * from b")).toBe(2)
   expect(cteCount('{# with fake as (select 1) #}\nselect 1')).toBe(0)
+  expect(cteCount(`select "it's" as c; with x as (select 1) select '--' from x`)).toBe(1)
+  expect(cteCount('with "my cte" as (select 1) select 1')).toBe(1)
   expect(cteCount('with a (id) as (select 1), b(x, y) as (select 2, 3) select * from a')).toBe(2)
 })
 
@@ -311,7 +313,6 @@ test('an edit to a model with no CTEs, or to a file that is no model, adds no li
   const plain = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: '1', new_string: '2' })
   const macro = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/macros/m.sql`, old_string: '1', new_string: '2' })
   await clock.settle()
-  expect((plain as any).context ?? []).not.toContain('0 CTEs · /sql-graph')
   expect(JSON.stringify((plain as any).context ?? [])).not.toContain('/sql-graph')
   expect(JSON.stringify((macro as any).context ?? [])).not.toContain('/sql-graph')
 })
@@ -368,4 +369,24 @@ test('a tool answer of status ok with success false is the failure it says, not 
   const reply = await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
   await clock.settle()
   expect(reply.text).toBe('Not available: this needs the dbt adapter')
+})
+
+test('the tool\'s own reason is shown, not the CLI\'s generic output', async ($, on) => {
+  const { clock } = await start($, on, { ok: false, okOutput: 'Compiled 1 model in 2.1s' })
+  const reply = await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.settle()
+  expect(reply.text).toBe('Not available: this needs the dbt adapter')
+})
+
+test('a malformed node or edge from the backend is dropped, and a node without columns is drawn with none', async ($, on) => {
+  const answer = {
+    nodes: [null, { id: 'a', name: 'a', type: 'cte', sql: '' }, { id: 5 }],
+    edges: [['a'], ['a', 'a']],
+  }
+  const { clock } = await start($, on, { answer })
+  await $.command.run({ command: 'sql-graph', args: 'fct_orders', ...composer } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await ui.findAll({ type: 'Button' })).map(row => row.key)).toEqual(['node-a'])
+  await ui.unmount()
 })
