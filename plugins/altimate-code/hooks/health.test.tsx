@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { bandText, canonical, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
+import { bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
 
 const ROOT = '/repo'
 const STG = `${ROOT}/models/staging/stg_orders.sql`
@@ -416,6 +416,9 @@ test('the configured config path is passed to the tool, empty means the defaults
   expect(toolArgs('  datapilot.yml ')).toEqual({ config_path: 'datapilot.yml' })
   expect(toolArgs('')).toEqual({})
   expect(toolArgs(undefined)).toEqual({})
+  expect(configPathProblem('datapilot.yml')).toBeNull()
+  expect(configPathProblem('')).toBeNull()
+  for (const bad of ['/etc/hosts', 'C:\\x.yml', '../x.yml', 'a/../../x.yml']) expect(configPathProblem(bad)).toContain('inside the dbt project')
 })
 
 test('git push is found by its command words, not by its text', () => {
@@ -612,7 +615,7 @@ test('an edit that keeps landing while the folders resolve is never folded into 
   })
   const files = [`${ROOT}/models/staging/late1.sql`, `${ROOT}/models/staging/late2.sql`, `${ROOT}/models/staging/late3.sql`, STG]
   for (const file of files) {
-    while (held.length === 0) await new Promise(resolve => setTimeout(resolve, 5))
+    while (held.length === 0) await new Promise(resolve => (globalThis as any).setTimeout(resolve, 5))
     gate = false
     await $.tool.call(edit(file))
     gate = true

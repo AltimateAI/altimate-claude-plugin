@@ -416,6 +416,15 @@ export function toolArgs(configPath: unknown): Record<string, unknown> {
   return config ? { config_path: config } : {}
 }
 
+/** Why a `healthConfigPath` setting can't be used: it must stay inside the dbt project. Null when it can. */
+export function configPathProblem(configPath: unknown): string | null {
+  const config = typeof configPath === 'string' ? configPath.trim() : ''
+  if (!config) return null
+  if (/^([\\/]|[A-Za-z]:)/.test(config) || config.split(/[\\/]/).includes('..'))
+    return 'Project health: the "Project health check config" setting must be a path inside the dbt project (relative, without ..).'
+  return null
+}
+
 /** The dbt project folder above `dir` (up to 40 levels), cached; null when there is none. */
 async function projectAbove($: EngineInterface, dir: string): Promise<string | null> {
   const seen: string[] = []
@@ -460,6 +469,8 @@ async function isModelFile($: EngineInterface, file: string): Promise<boolean> {
 /** Asks altimate-code's dbt_health for the project's insights. */
 async function check($: EngineInterface): Promise<HealthRun> {
   const until = (await $.clock.now()) + CHECK_MS
+  const badConfig = configPathProblem(options.healthConfigPath)
+  if (badConfig) return { problem: badConfig }
   let result: Awaited<ReturnType<typeof runTool>>
   try {
     result = await runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until })
@@ -546,7 +557,8 @@ async function loop($: EngineInterface, mine: number) {
         // that had no insight before included, are not found by their files, and new issues are told from the
         // baseline, so every model counts.
         const matched = new Set(run.insights.flatMap(i => [i.file, i.properties]).filter(Boolean).map(real))
-        if (base.touched.some(f => /\.ya?ml$/i.test(f) && !matched.has(real(f)))) for (const i of run.insights) edited.add(i.uniqueId)
+        // Not when there is no baseline yet: counting every model as edited would make the baseline empty, and every existing issue new.
+        if (base.baseline !== null && base.touched.some(f => /\.ya?ml$/i.test(f) && !matched.has(real(f)))) for (const i of run.insights) edited.add(i.uniqueId)
         const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
         const issues = newIssues(run.insights, baseline, edited)
         return { ...base, baseline, issues, running: false, problem: null }
@@ -666,7 +678,7 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
 export function pushRefusal(blocks: unknown, command: string, issues: readonly HealthInsight[]): { deny: string } | null {
   if (!(blocks === true || blocks === 'true') || !isGitPush(command) || issues.length === 0) return null
   return {
-    deny: `git push is held: the models changed this session have ${issues.length} new project health issue${issues.length === 1 ? '' : 's'}.\n${reportText(issues)}\nFix them, or turn off "Project health blocks git push" in the plugin's settings.`,
+    deny: `git push is held: the models changed this session have ${issues.length} new project health issue${issues.length === 1 ? '' : 's'}.\n${reportText(issues)}\nTell the user about them and stop; only the user can turn off "Project health blocks git push" in the plugin's settings.`,
   }
 }
 
@@ -678,7 +690,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) return null
   const startedAt = await $.clock.now()
   const hold = (why: string) => ({
-    deny: `git push is held: ${why}\nRun /${COMMAND} to check again, or turn off "Project health blocks git push" in the plugin's settings.`,
+    deny: `git push is held: ${why}\nRun /${COMMAND} to check again; only the user can turn off "Project health blocks git push" in the plugin's settings.`,
   })
   // An edit in the same command would run before any check of it.
   const root = await $.session.root().catch(() => '')
