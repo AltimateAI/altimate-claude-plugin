@@ -46,6 +46,8 @@ let applying = false
 let statusShown = false
 
 const groupKey = (manifest: string, model: string, column: string) => `${manifest}|${model}.${column}`
+/** Names one offer: the column and the description written to it. */
+const offerKey = (group: DocsGroup) => `${groupKey(group.manifest, group.model, group.column)}|${group.description}`
 // The reach names columns in lower case, so what Apply asked for is looked up the same way.
 const appliedKey = (manifest: string, model: string, column: string) => groupKey(manifest, model, column).toLowerCase()
 
@@ -505,7 +507,7 @@ export function register(on: On, context: FeatureContext) {
     const { Box, Button, Text } = $.ui.resolve(e)
     const state = (await read($, docsAtom)) ?? empty()
     const groups = state.groups.filter(group => group.candidates.length > 0)
-    const drawn = new Set(groups.map(group => `${groupKey(group.manifest, group.model, group.column)}|${group.description}`))
+    const drawn = new Set(groups.map(group => offerKey(group)))
     const picked = groups.reduce((sum, group) => sum + group.candidates.filter(one => !state.skipped.includes(candidateKey(group, one))).length, 0)
     const coverage = state.coverage
     return (
@@ -551,12 +553,12 @@ export function register(on: On, context: FeatureContext) {
                   // What is ticked now, not what was drawn: a tick or a withdrawn offer may have landed since the render.
                   const state = (await read($, docsAtom)) ?? empty()
                   // An offer that arrived after the draw waits for the next Apply: it was never shown.
-                  const groups = state.groups.filter(group => group.candidates.length > 0 && drawn.has(`${groupKey(group.manifest, group.model, group.column)}|${group.description}`))
+                  const groups = state.groups.filter(group => group.candidates.length > 0 && drawn.has(offerKey(group)))
                   const prompt = applyPrompt(groups, state.skipped)
                   if (!prompt || applying) return
                   applying = true
                   const marks: string[] = []
-                  const sent = new Set(sentGroups(groups, state.skipped).map(group => `${groupKey(group.manifest, group.model, group.column)}|${group.description}`))
+                  const sent = new Set(sentGroups(groups, state.skipped).map(group => offerKey(group)))
                   try {
                     for (const group of groups) {
                       for (const one of group.candidates) {
@@ -575,7 +577,7 @@ export function register(on: On, context: FeatureContext) {
                     }
                     // Only what was sent is cleared: an offer that arrived meanwhile stays.
                     await update($, docsAtom, prev => {
-                      const left = (prev?.groups ?? []).filter(group => !sent.has(`${groupKey(group.manifest, group.model, group.column)}|${group.description}`))
+                      const left = (prev?.groups ?? []).filter(group => !sent.has(offerKey(group)))
                       return { ...(prev ?? empty()), groups: left, skipped: (prev?.skipped ?? []).filter(key => left.some(group => key.startsWith(groupPrefix(group)))) }
                     })
                     await showStatus($)
