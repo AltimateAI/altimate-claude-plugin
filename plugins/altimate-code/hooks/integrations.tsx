@@ -4,6 +4,7 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { registerLineage, startLineage } from './lineage'
+import { startReviewNotices } from './review-notices'
 import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 
 const PANE = 'altimate-integrations'
@@ -573,6 +574,8 @@ export const register: Register = on => {
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
     if (e.isInteractive) void refresh($, 'detect')
+    // Decisions on the person's skill and knowledge requests, as toasts: only someone at the terminal reads them.
+    if (e.isInteractive) startReviewNotices($, e.cwd)
 
     return started
   })
