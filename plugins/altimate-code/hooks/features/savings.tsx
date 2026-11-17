@@ -23,7 +23,8 @@ export const SAAS_CHECK_COUNT = 15
 const CHECK_COUNT = 2
 // The queries read seven days of system tables and may start the connection's SQL warehouse.
 const RUN_BUDGET_MS = 5 * 60_000
-// Set for the tool's run only: altimate-code and altimate-core both read it.
+// Set for the tool's run only: altimate-code and altimate-core both read it. The run is kept out of
+// altimate-code's tool daemon, which would keep the environment it started with.
 const NO_TELEMETRY = { ALTIMATE_TELEMETRY_DISABLED: 'true' }
 
 // An altimate-code connection name; anything else could read as a CLI flag.
@@ -35,11 +36,21 @@ const ADD_CONNECTION =
 const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-1' })
 const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, null as { label: string } | null)
 const messageAtom = atom({ plugin: 'altimate-code', key: 'savingsMessage' } as const, null as { text: string; recovery: string } | null)
+const bandAtom = atom({ plugin: 'altimate-code', key: 'savingsBand' } as const, null as { text: string } | null)
 
 // Each run takes a number; /clear, a resume or a reload moves it on, so a run still waiting on
 // Databricks when the conversation changed never writes its report into the new one.
 let generation = 0
 let lastConnection: string | null = null
+// The once-a-session offer of /savings when the session first touches Databricks config.
+let offered = false
+
+// Files that define Databricks compute: bundles, their resources, Terraform. Read only when one is edited.
+const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/[^/]+\.ya?ml|[^/]+\.tf)$/i
+// What marks such a file, or a command, as about warehouses or clusters.
+const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
+const DATABRICKS_COMMAND = /^\s*databricks\s+(warehouses|clusters|bundle|jobs)\b/
+const BAND_READ_LIMIT = 200_000
 
 export function dollars(value: number): string {
   const rounded = value >= 100 ? Math.round(value) : Math.round(value * 100) / 100
@@ -68,6 +79,32 @@ export function evidenceLines(evidence: Record<string, unknown>): string[] {
     `${percent(evidence.no_spill_query_pct)} of queries never spilled to disk, ${percent(evidence.no_queue_query_pct)} never queued`,
     `${size(evidence.recommended_size)} is enough: ${count(evidence.current_dbu_per_hour)} → ${count(evidence.recommended_dbu_per_hour)} DBU an hour, on $${Number(evidence.total_cost).toFixed(2)} spent over 7 days`,
   ]
+}
+
+/** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
+export function apiSize(value: unknown): string {
+  return String(value ?? '')
+    .split(/[_-]/)
+    .map(part => (/^\d*X$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()))
+    .join('-')
+}
+
+/** The change a finding points at, in plain words with the setting it means. */
+function changeOf(evidence: Record<string, unknown>): string {
+  return evidence.kind === 'serverless'
+    ? 'switch it to a serverless SQL warehouse (enable_serverless_compute true, warehouse_type PRO)'
+    : `resize it to ${apiSize(evidence.recommended_size)} (cluster_size "${apiSize(evidence.recommended_size)}")`
+}
+
+/** The request "Draft the fix" puts in the prompt box: everything Claude needs, and that nothing is to be applied. */
+export function fixRequest(finding: { title: string; warehouse_id: string; warehouse_name: string; monthly_min: number; monthly_max: number; evidence: Record<string, unknown> }): string {
+  return [
+    `Draft the change for this Databricks savings finding, for me to review. Do not apply or run it.`,
+    `Warehouse ${finding.warehouse_name} (id ${finding.warehouse_id}): ${finding.title}, ${range(finding.monthly_min, finding.monthly_max)} a month at list price.`,
+    ...evidenceLines(finding.evidence).map(line => `- ${line}`),
+    `The change: ${changeOf(finding.evidence)}.`,
+    `If this repository defines the warehouse (a Databricks bundle, Terraform databricks_sql_endpoint, or JSON), edit that definition. Otherwise write the JSON for \`databricks warehouses edit ${finding.warehouse_id} --json\` and say what it changes.`,
+  ].join('\n')
 }
 
 type ToolReport = {
@@ -105,10 +142,12 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
     total: { min: report.total.monthly_min, max: report.total.monthly_max, warehouses: report.total.warehouses },
     findings: report.findings.map(one => ({
       title: one.title,
+      warehouseId: one.warehouse_id,
       warehouseName: one.warehouse_name,
       monthlyMin: one.monthly_min,
       monthlyMax: one.monthly_max,
       evidence: evidenceLines(one.evidence),
+      fixRequest: fixRequest(one),
     })),
   }
 }
@@ -123,6 +162,15 @@ export function explain(error: string): { text: string; recovery: string } {
   }
   if (/is not configured\. Available warehouses/.test(error)) {
     return { text: error.replace(/ Pass one of those.*$/, ''), recovery: 'Run /savings <connection> with one of those names, or /savings to use the first Databricks connection.' }
+  }
+  if (/is not available for \S+ warehouses/.test(error)) {
+    return { text: 'That connection is not a Databricks one.', recovery: 'Run /savings <connection> with a Databricks connection, or /savings to use the first one.' }
+  }
+  if (/^No SQL warehouses were found for warehouse/.test(error)) {
+    return {
+      text: "The connection's SQL warehouse is not in system.compute.warehouses yet.",
+      recovery: 'A new warehouse appears there within a few hours; try again later, or connect through an older SQL warehouse.',
+    }
   }
   if (/does not go through a SQL warehouse/.test(error)) {
     return { text: 'The Databricks connection does not go through a SQL warehouse.', recovery: 'Set its http_path to a SQL warehouse (/sql/1.0/warehouses/<id>), then run /savings again.' }
@@ -149,10 +197,12 @@ async function runCheck($: EngineInterface, connection: string | null) {
   const mine = ++generation
   const live = () => mine === generation
   lastConnection = connection
+  offered = true
   try {
     await update($, messageAtom, () => null)
+    await update($, bandAtom, () => null)
     const until = (await $.clock.now()) + RUN_BUDGET_MS
-    const result = await runTool($, TOOL, connection ? { warehouse: connection } : {}, { cliOnly: true, until, env: NO_TELEMETRY })
+    const result = await runTool($, TOOL, connection ? { warehouse: connection } : {}, { cliOnly: true, until, env: NO_TELEMETRY, noDaemon: true })
     if (!live()) return
     const view = toView(result.metadata as ToolMetadata | null)
     if (!view) {
@@ -173,6 +223,26 @@ async function runCheck($: EngineInterface, connection: string | null) {
   } finally {
     if (live()) await update($, busyAtom, () => null)
   }
+}
+
+/** Puts the finding's fix request in the prompt box; nothing is sent until the person presses Enter. */
+async function draftFix($: EngineInterface, request: string) {
+  const filled = await $.prompt.fill({ text: request }).catch(() => null)
+  $.ui.toast(
+    filled?.isFilled
+      ? 'The fix request is in your prompt box: edit it, or press Enter to have Claude draft the change.'
+      : 'There is no prompt box to fill here; copy the request from the pane instead.',
+  )
+}
+
+/** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
+async function bandFor($: EngineInterface, text: string): Promise<{ text: string } | null> {
+  const report = await read($, reportAtom)
+  const named = report?.findings.find(one => text.includes(one.warehouseName) || text.includes(one.warehouseId))
+  if (named) return { text: `${named.warehouseName}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
+  if (report || offered || !COMPUTE_WORDS.test(text)) return null
+  offered = true
+  return { text: 'Databricks compute in play: check its SQL warehouses for savings with /savings (read-only, on your own connection).' }
 }
 
 /** Adds this feature's own hooks. */
@@ -266,6 +336,9 @@ export function register(on: On, _context: FeatureContext) {
                   {line}
                 </Text>
               ))}
+              <Box>
+                <Button key={`fix-${at}`} label="Draft the fix" onPress={() => later($, () => draftFix($, one.fixRequest))} />
+              </Box>
             </Box>
           </Box>
         ))}
@@ -301,13 +374,34 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   generation += 1
   lastConnection = null
+  offered = false
+  await update($, bandAtom, () => null)
   await update($, reportAtom, () => null)
   await update($, busyAtom, () => null)
   await update($, messageAtom, () => null)
 }
 
 export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderElement | null> {
-  return null
+  const band = await read($, bandAtom)
+  if (!band) return null
+  const { Box, Button, Text } = ui
+  return (
+    <Box gap={1}>
+      <Text>{band.text}</Text>
+      <Button
+        key="savings-run"
+        label="Run /savings"
+        onPress={() =>
+          later($, async () => {
+            await update($, busyAtom, () => ({ label: "Checking the workspace's SQL warehouses…" }))
+            await openPane($)
+            await runCheck($, lastConnection)
+          })
+        }
+      />
+      <Button key="savings-hide" label="Hide" onPress={() => later($, () => update($, bandAtom, () => null))} />
+    </Box>
+  )
 }
 
 export async function bashRewrite($: EngineInterface, e: BashCall): Promise<string | null> {
@@ -318,9 +412,18 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   return null
 }
 
-export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {}
+export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
+  if (!DATABRICKS_COMMAND.test(e.command)) return
+  const band = await bandFor($, e.command)
+  if (band) await update($, bandAtom, () => band)
+}
 
-export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {}
+export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
+  if (!DATABRICKS_CONFIG.test(file.path.replace(/\\/g, '/'))) return
+  const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
+  const band = await bandFor($, text)
+  if (band) await update($, bandAtom, () => band)
+}
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}
 

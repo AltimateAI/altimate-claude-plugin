@@ -289,7 +289,16 @@ export type SavingsView = {
   warehousesChecked: number
   /** Dollars a month at list price, each warehouse counted once at its largest saving. */
   total: { min: number; max: number; warehouses: number }
-  findings: { title: string; warehouseName: string; monthlyMin: number; monthlyMax: number; evidence: string[] }[]
+  findings: {
+    title: string
+    warehouseId: string
+    warehouseName: string
+    monthlyMin: number
+    monthlyMax: number
+    evidence: string[]
+    /** The request "Draft the fix" puts in the prompt box: the change, for Claude to draft and the person to review. */
+    fixRequest: string
+  }[]
 }
 
 declare module 'claude-code' {
@@ -357,6 +366,8 @@ declare module 'claude-code' {
       savingsBusy: { label: string } | null
       /** Why there is no answer to show: the check's refusal and the step that fixes it. */
       savingsMessage: { text: string; recovery: string } | null
+      /** The line above the prompt when the session touches Databricks config; null when there is none. */
+      savingsBand: { text: string } | null
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */

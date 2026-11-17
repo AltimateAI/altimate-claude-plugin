@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SIGNUP_URL, dollars, explain } from './savings'
+import { SIGNUP_URL, apiSize, dollars, explain } from './savings'
 
 const ROOT = '/repo'
 
@@ -95,12 +95,22 @@ type Options = {
   hold?: Promise<void>
   isPlaced?: boolean
   now?: number
+  /** File texts `$.fs.read` answers, by path. */
+  files?: Record<string, string>
+  /** Whether the prompt box takes a fill. */
+  canFill?: boolean
 }
 
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on, { now: options.now ?? Date.parse('2026-11-17T10:00:00Z') })
   const runs: { argv: string[]; env: Record<string, string> | undefined }[] = []
   const toasts: string[] = []
+  const fills: string[] = []
+  on('prompt.fill', (_: unknown, e: { text: string }) => {
+    if (options.canFill === false) return { isFilled: false, reason: 'no_composer' }
+    fills.push(e.text)
+    return { isFilled: true }
+  })
   on('command.register', () => ({ value: { command: 'savings' } }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('session.end', () => ({ sessionId: 'test' }))
@@ -119,7 +129,7 @@ async function start($: any, on: any, options: Options = {}) {
     return <Box key="engine" />
   })
   on('fs.exists', () => ({ value: false }))
-  on('fs.read', () => ({ value: '' }))
+  on('fs.read', (_: unknown, e: { path: string }) => ({ value: options.files?.[e.path] ?? '' }))
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { env?: Record<string, string> } }) => {
@@ -135,7 +145,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('tool.call', () => ({ result: { ok: true } }))
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, runs, toasts }
+  return { clock, runs, toasts, fills }
 }
 
 const composer = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 200 } }
@@ -150,7 +160,8 @@ test('/savings runs the altimate-code tool once with telemetry off and draws its
   await clock.settle()
 
   expect(runs.length).toBe(1)
-  expect(runs[0]!.argv.slice(1)).toEqual(['tool', 'run', 'finops_databricks_savings', '--args', '{}', '--json'])
+  // The run stays out of altimate-code's tool daemon, which keeps the environment it started with.
+  expect(runs[0]!.argv.slice(1)).toEqual(['tool', 'run', 'finops_databricks_savings', '--args', '{}', '--json', '--no-daemon'])
   expect(runs[0]!.env).toEqual({ ALTIMATE_TELEMETRY_DISABLED: 'true' })
   // The reply in the conversation names no figure, warehouse or workspace: the findings stay in the pane.
   expect(said.text).toContain('Nothing is sent to Altimate')
@@ -298,10 +309,112 @@ test('each refusal altimate-code gives is explained in the person\'s terms', () 
   expect(explain('Connection "dbx" does not go through a SQL warehouse. Its http_path must name one').recovery).toContain('/sql/1.0/warehouses/<id>')
   expect(explain("This altimate-code build's altimate-core has no Databricks savings rules. Update altimate-code, then try again.").text).toContain('no Databricks savings check')
   expect(explain('socket hang up').text).toBe('The savings check failed: socket hang up')
+  // The resolver's words for a connection of another type, as altimate-code writes them.
+  const other = explain('The Databricks savings check is not available for snowflake warehouses. Try one of: dbx.')
+  expect(other.text).toBe('That connection is not a Databricks one.')
+  expect(other.recovery).toContain('/savings <connection>')
+  expect(explain('No SQL warehouses were found for warehouse abc123 in system.compute.warehouses.').recovery).toContain('within a few hours')
 })
 
 test('dollars are whole from $100 and to the cent below it', () => {
   expect(dollars(106.46)).toBe('$106')
   expect(dollars(85.1699)).toBe('$85.17')
   expect(dollars(35142.9)).toBe('$35,143')
+})
+
+const BAND = { plugin: 'altimate-code', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } } as any
+
+test('Draft the fix puts a request for the change in the prompt box, and sends nothing itself', async ($, on) => {
+  const { clock, runs, toasts, fills } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  expect(fills.length).toBe(1)
+  expect(fills[0]).toContain('Draft the change for this Databricks savings finding, for me to review. Do not apply or run it.')
+  expect(fills[0]).toContain('Warehouse Classic (id wh-classic): Migrate Classic/Pro to Serverless, $85.17–$106 a month at list price.')
+  expect(fills[0]).toContain('- CLASSIC SMALL warehouse, 95% idle over 10.8 running hours (2,988 queries)')
+  expect(fills[0]).toContain('switch it to a serverless SQL warehouse (enable_serverless_compute true, warehouse_type PRO)')
+  expect(fills[0]).toContain('`databricks warehouses edit wh-classic --json`')
+  expect(toasts.at(-1)).toContain('in your prompt box')
+  // Pressing it runs nothing more against Databricks.
+  expect(runs.length).toBe(1)
+
+  await ui.press({ key: 'fix-1' })
+  await clock.settle()
+  expect(fills[1]).toContain('resize it to 2X-Small (cluster_size "2X-Small")')
+  await ui.unmount()
+})
+
+test('Draft the fix with no prompt box says so instead of claiming it filled one', async ($, on) => {
+  const { clock, toasts, fills } = await start($, on, { canFill: false })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  expect(fills).toEqual([])
+  expect(toasts.at(-1)).toContain('There is no prompt box to fill here')
+  await ui.unmount()
+})
+
+test('editing Databricks compute config offers /savings once a session, and Hide clears it', async ($, on) => {
+  const files = {
+    [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n',
+    [`${ROOT}/databricks.yml`]: 'bundle:\n  name: x\n  # clusters below\n',
+  }
+  const { clock, runs } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  let band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play: check its SQL warehouses for savings with \/savings/ })).toBeDefined()
+  await band.press({ key: 'savings-hide' })
+  await clock.settle()
+  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+  await band.unmount()
+
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/databricks.yml`, old_string: 'x', new_string: 'y' })
+  await clock.settle()
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+  await band.unmount()
+  // The offer ran nothing.
+  expect(runs).toEqual([])
+})
+
+test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
+  const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
+  const { clock } = await start($, on, { files })
+  await savings($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Classic: Migrate Classic\/Pro to Serverless, \$85\.17–\$106 a month to save\. \/savings shows why\.$/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('a databricks CLI command offers the check; other edits and commands do not', async ($, on) => {
+  const files = { [`${ROOT}/models/orders.sql`]: 'select * from warehouse_orders', [`${ROOT}/config.yml`]: 'cluster: a' }
+  const { clock } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/orders.sql`, old_string: '*', new_string: 'id' })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/config.yml`, old_string: 'a', new_string: 'b' })
+  await $.tool.call({ tool: 'Bash', command: 'ls warehouses' })
+  await clock.settle()
+  let band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+  await band.unmount()
+  await $.tool.call({ tool: 'Bash', command: 'databricks warehouses list -o json' })
+  await clock.settle()
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('sizes are written the way the Databricks API takes them', () => {
+  expect(apiSize('2X_SMALL')).toBe('2X-Small')
+  expect(apiSize('X_SMALL')).toBe('X-Small')
+  expect(apiSize('MEDIUM')).toBe('Medium')
+  expect(apiSize('4X_LARGE')).toBe('4X-Large')
 })

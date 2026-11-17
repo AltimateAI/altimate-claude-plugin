@@ -129,6 +129,11 @@ export type RunToolOptions = {
   write?: boolean
   /** Variables set for a CLI run (`cliOnly`), over the session's environment. */
   env?: Record<string, string>
+  /**
+   * Run the tool in the CLI's own process (`--no-daemon`). A reused tool daemon keeps the environment
+   * it started with, so a run that sets `env` for itself must not be served by one.
+   */
+  noDaemon?: boolean
 }
 
 /**
@@ -178,7 +183,7 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
       serverName = null
     }
   }
-  const argv = ['tool', 'run', name, '--args', JSON.stringify(args), '--json', ...(write ? ['--allow-write'] : [])]
+  const argv = ['tool', 'run', name, '--args', JSON.stringify(args), '--json', ...(write ? ['--allow-write'] : []), ...(options.noDaemon ? ['--no-daemon'] : [])]
   const result = await runAltimate($, argv, await left(), options.env)
   if ((result as { isStdoutTruncated?: boolean }).isStdoutTruncated) {
     return { metadata: null as any, text: `${name}'s answer was larger than the 4 MiB a plugin can read`, ok: false }
