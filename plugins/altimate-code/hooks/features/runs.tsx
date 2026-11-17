@@ -167,7 +167,7 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     const flagged = PROJECT_DIR_FLAG.exec(body)?.[1]?.replace(/^['"]|['"]$/g, '')
     // A folder that cannot be told, or a target folder the shell expands, is not guessed: the run is not recorded
     // rather than recorded for another project or replayed from another folder.
-    if (dir === null || /[$`~*?[{]/.test(`${one.targetPath ?? ''}${flagged ?? ''}`)) continue
+    if (dir === null || one.dynamic || /[$`~*?[{]/.test(flagged ?? '')) continue
     const projectDir = flagged ? normalize(flagged.startsWith('/') ? flagged : `${dir}/${flagged}`) : dir
     // Always the folder: the session's shell may have moved by the time Re-run is pressed.
     const where = `cd ${quote(dir)} && `
