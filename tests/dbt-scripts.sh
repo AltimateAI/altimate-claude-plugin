@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Runs the three Python scripts the dbt helpers embed (PROFILE_TYPE, MANIFEST_SLICE, RUN_FAILURES) for
+# real, with python3 and PyYAML, against fixture profiles, manifests and run_results files that hold a
+# secret in odd places. No secret may appear in what a script prints. DBT_MODS_SRC points at another copy
+# of dbt-mods.tsx to run these checks against.
+set -u
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SRC="${DBT_MODS_SRC:-$ROOT/plugins/altimate-code/hooks/dbt-mods.tsx}"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+FAILURES=0
+fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }
+
+JS="$(command -v node || command -v bun || true)"
+[ -n "$JS" ] || { echo "dbt-scripts: skipped (no node or bun to read the scripts from the TypeScript source)"; exit 0; }
+command -v python3 >/dev/null || { echo "dbt-scripts: skipped (no python3)"; exit 0; }
+
+# Each script is a template literal with no substitutions: read it the way JavaScript does.
+"$JS" -e '
+const fs = require("fs")
+const source = fs.readFileSync(process.argv[1], "utf8")
+for (const name of ["PROFILE_TYPE", "MANIFEST_SLICE", "RUN_FAILURES"]) {
+  const found = new RegExp("export const " + name + " = `([\\s\\S]*?)`\\n").exec(source)
+  if (!found) { console.error("no " + name + " in " + process.argv[1]); process.exit(1) }
+  fs.writeFileSync(process.argv[2] + "/" + name + ".py", eval("`" + found[1] + "`"))
+}' "$SRC" "$TMP" || { echo "FAIL: could not read the scripts from $SRC"; exit 1; }
+
+# The plugin runs `python -c <script> <args>`; so does this.
+script() { local name="$1"; shift; python3 -c "$(cat "$TMP/$name.py")" "$@"; }
+field() { python3 -I -c 'import json,sys; print(json.load(sys.stdin).get(sys.argv[1], ""))' "$1"; }
+SECRET="SENTINEL_SECRET_VALUE"
+
+# ─── PROFILE_TYPE ───────────────────────────────────────────────────────────────────────────────
+if python3 -c 'import yaml' 2>/dev/null; then
+  printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
+  # profile <name> <profiles.yml> <expected status> [VAR=value ...]
+  profile() {
+    local name="$1" yml="$2" want="$3" out got; shift 3
+    printf '%s' "$yml" > "$TMP/profiles.yml"
+    out="$(env "$@" python3 -c "$(cat "$TMP/PROFILE_TYPE.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1)"
+    case "$out" in *SENTINEL*) fail "profile: $name: a secret reached the output: $out" ;; esac
+    got="$(printf '%s' "$out" | field status)"
+    [ "$got" = "$want" ] || fail "profile: $name: expected status $want, got '$got' ($out)"
+  }
+  profile "plain output" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n' ok
+  profile "env_var default and DBT_TARGET" $'shop:\n  target: "{{ env_var(\'T\', \'dev\') }}"\n  outputs:\n    dev: {type: duckdb}\n    prod: {type: postgres}\n' ok X=1
+  profile "DBT_TARGET picks the output" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n    prod: {type: postgres}\n' ok DBT_TARGET=prod
+  # An output's keys under `target:` by an indentation slip: a mapping, never echoed.
+  profile "target is a mapping holding a password" $'shop:\n  target:\n    type: postgres\n    password: SENTINEL_SECRET_VALUE\n  outputs:\n    dev: {type: duckdb}\n' no_target
+  profile "target is a list holding a password" $'shop:\n  target: [SENTINEL_SECRET_VALUE]\n  outputs:\n    dev: {type: duckdb}\n' no_target
+  # A line YAML cannot read, with the secret on it.
+  profile "malformed line with a password" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n      password: SENTINEL_SECRET_VALUE: invalid\n' error
+  # Templates dbt renders: never echoed, whatever is inside.
+  profile "target template naming a secret" $'shop:\n  target: "{{ foo(\'SENTINEL_SECRET_VALUE\') }}"\n  outputs:\n    dev: {type: duckdb}\n' template
+  profile "type template naming a secret" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "{{ var(\'SENTINEL_SECRET_VALUE\') }}"}\n' template
+  profile "type is a mapping" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: {password: SENTINEL_SECRET_VALUE}\n' no_type
+  profile "type that is no name" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "SENTINEL_SECRET_VALUE pw!"}\n' no_type
+  profile "no such output" $'shop:\n  target: staging\n  outputs:\n    dev: {type: duckdb}\n' no_output
+else
+  echo "dbt-scripts: PROFILE_TYPE skipped (python3 has no PyYAML)"
+fi
+
+# ─── MANIFEST_SLICE ─────────────────────────────────────────────────────────────────────────────
+python3 - "$TMP" <<'PY'
+import json, sys
+secret = 'SENTINEL_SECRET_VALUE'
+def node(name, kind, path, **rest):
+    return dict(name=name, resource_type=kind, package_name='shop', original_file_path=path, raw_code=secret, compiled_code=secret, **rest)
+manifest = {
+    'metadata': {'project_name': 'shop', 'env': {'DBT_ENV_SECRET_PASSWORD': secret}},
+    'nodes': {
+        'model.shop.stg': node('stg', 'model', 'models/stg.sql', description=secret, columns={}, depends_on={'nodes': []}),
+        'model.shop.orders': node('orders', 'model', 'models/orders.sql', description='One row per order', relation_name='"db"."orders"', patch_path='shop://models/schema.yml', config={'materialized': 'table'}, tags=[], columns={'id': {'name': 'id', 'description': 'key'}}, depends_on={'nodes': ['model.shop.stg']}),
+        'model.shop.revenue': node('revenue', 'model', 'models/revenue.sql', description=secret, columns={'x': {'name': 'x', 'description': secret}}, depends_on={'nodes': ['model.shop.orders']}),
+        'test.shop.unique_orders_id.abc': node('unique_orders_id', 'test', 'models/schema.yml', column_name='id', test_metadata={'name': 'unique'}, depends_on={'nodes': ['model.shop.orders']}),
+        'model.shop.unrelated': node('unrelated', 'model', 'models/unrelated.sql', description=secret, columns={}, depends_on={'nodes': []}),
+    },
+    'macros': {'macro.shop.m': {'macro_sql': secret}},
+    'sources': {'source.shop.s': {'description': secret}},
+    'parent_map': {'model.shop.orders': ['model.shop.stg'], 'model.shop.revenue': ['model.shop.orders'], 'test.shop.unique_orders_id.abc': ['model.shop.orders'], 'model.shop.stg': [], 'model.shop.unrelated': []},
+    'child_map': {'model.shop.stg': ['model.shop.orders'], 'model.shop.orders': ['model.shop.revenue', 'test.shop.unique_orders_id.abc'], 'model.shop.revenue': [], 'model.shop.unrelated': []},
+}
+json.dump(manifest, open(sys.argv[1] + '/manifest.json', 'w'))
+# The same graph with no parent_map and child_map: the slice builds them from depends_on.
+bare = dict(manifest); bare.pop('parent_map'); bare.pop('child_map')
+json.dump(bare, open(sys.argv[1] + '/manifest-bare.json', 'w'))
+open(sys.argv[1] + '/manifest-broken.json', 'w').write('{"nodes": {"a": "' + secret + '" ')
+PY
+for file in manifest manifest-bare; do
+  out="$(script MANIFEST_SLICE "$TMP/$file.json" models/orders.sql shop 2>&1)"
+  case "$out" in *SENTINEL*) fail "manifest slice ($file): a secret reached the output" ;; esac
+  printf '%s' "$out" | python3 -I -c '
+import json, sys
+s = json.load(sys.stdin)
+names = sorted(n["name"] for n in s["nodes"].values())
+assert names == ["orders", "revenue", "stg", "unique_orders_id"], names
+assert "model.shop.unrelated" not in s["nodes"]
+orders = s["nodes"]["model.shop.orders"]
+assert orders["description"] == "One row per order" and orders["columns"]["id"]["name"] == "id"
+assert set(s["nodes"]["model.shop.stg"]) == {"name", "resource_type"}
+' || fail "manifest slice ($file): the slice is not the file's node, its test and its neighbours by name"
+done
+out="$(script MANIFEST_SLICE "$TMP/manifest-broken.json" models/orders.sql shop 2>&1)"; code=$?
+[ "$code" -ne 0 ] || fail "manifest slice: a broken manifest did not fail"
+case "$out" in *SENTINEL*) fail "manifest slice: the error for a broken manifest quotes it" ;; esac
+
+# ─── RUN_FAILURES ───────────────────────────────────────────────────────────────────────────────
+python3 - "$TMP" <<'PY'
+import json, sys
+secret = 'SENTINEL_SECRET_VALUE'
+results = {
+    'metadata': {'invocation_id': 'inv-1', 'generated_at': '2026-11-17T00:00:00Z', 'env': {'DBT_ENV_SECRET_PASSWORD': secret}},
+    'args': {'vars': {'password': secret}, 'target': 'dev'},
+    'results': [
+        {'unique_id': 'model.shop.ok', 'status': 'success', 'message': 'OK', 'compiled_code': secret, 'adapter_response': {'query_id': secret}},
+        {'unique_id': 'model.shop.skipped', 'status': 'skipped', 'message': 'SKIPPED'},
+        {'unique_id': 'model.shop.bad', 'status': 'error', 'message': 'Binder Error: no column named order_dte', 'compiled_code': secret, 'adapter_response': {'query_id': secret}, 'relation': secret, 'failures': None},
+        {'unique_id': 'test.shop.unique_bad.abc', 'status': 'fail', 'message': 'Got 2 results, configured to fail if != 0', 'failures': 2, 'compiled_code': secret},
+    ],
+}
+json.dump(results, open(sys.argv[1] + '/run_results.json', 'w'))
+long = dict(results); long['results'] = [dict(results['results'][2], message='x' * 5000)]
+json.dump(long, open(sys.argv[1] + '/run_results-long.json', 'w'))
+open(sys.argv[1] + '/run_results-broken.json', 'w').write('{"results": [{"message": "' + secret + '"')
+PY
+out="$(script RUN_FAILURES "$TMP/run_results.json" 2>&1)"
+case "$out" in *SENTINEL*) fail "run failures: a secret reached the output" ;; esac
+printf '%s' "$out" | python3 -I -c '
+import json, sys
+r = json.load(sys.stdin)
+assert [x["unique_id"] for x in r["results"]] == ["model.shop.bad", "test.shop.unique_bad.abc"], r
+assert set(r["results"][0]) <= {"unique_id", "status", "message", "failures"}
+assert r["metadata"] == {"invocation_id": "inv-1", "generated_at": "2026-11-17T00:00:00Z"}, r["metadata"]
+' || fail "run failures: only the failed results, with their message and the run's invocation, are given"
+out="$(script RUN_FAILURES "$TMP/run_results-long.json" 2>&1)"
+printf '%s' "$out" | python3 -I -c 'import json, sys; assert len(json.load(sys.stdin)["results"][0]["message"]) == 2000' || fail "run failures: a message is cut at 2000 characters"
+out="$(script RUN_FAILURES "$TMP/run_results-broken.json" 2>&1)"; code=$?
+[ "$code" -ne 0 ] || fail "run failures: a broken file did not fail"
+case "$out" in *SENTINEL*) fail "run failures: the error for a broken file quotes it" ;; esac
+
+[ "$FAILURES" -eq 0 ] && echo "dbt-scripts: all checks passed"
+exit "$FAILURES"

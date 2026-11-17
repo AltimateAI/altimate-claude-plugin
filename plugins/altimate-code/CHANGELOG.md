@@ -11,7 +11,13 @@ All notable changes to this plugin will be documented in this file.
   - **Query results pane.** Rows from Claude's `dbt show`, `/dbt-show <model>` and `/dbt-show select …` open as a table beside the chat, with **Re-run** (Claude's own command with the same flags and folder, unless it depended on its shell; or your query), **Bookmark**, **Clear history** and a history kept across sessions on this machine. It opens at the widest dock, and **Min / Default / Max** resize it (the lineage pane has them too); the choice is kept across sessions.
   - **Model context.** When Claude reads a model, its materialization, columns (types, descriptions, tests), parents, children and depth upstream and downstream, from `target/manifest.json`, go with the file, once a turn.
   - **Environment doctor.** At session start the plugin checks dbt, Python, the profile's adapter, installed packages and whether the manifest is older than the project's files, and offers **Run dbt parse** (or **Run dbt deps**). `/dbt-doctor` runs the checks with the warehouse connection test.
+- Compile and validate runs one `dbt show` per edit (with `dbt ls`, which runs no query, first when the manifest does not name the model). It skips a model whose path holds a space, says "dbt could not be run here" when dbt cannot be started, and asks Claude to fix the model only for errors that are the model's own.
+- Nothing from `profiles.yml` beyond the adapter type, profile and target names reaches Claude or the panes: a target that is not a name is not echoed, and dbt's error for a `profiles.yml` it cannot read is replaced by "profiles.yml could not be parsed; run `dbt debug` yourself to see the error".
+- Saved queries cut long cells and keep at most 32 KiB each; bookmarks are capped at 50.
 - The `dbt_mods` option turns the dbt helpers off.
+
+### Privacy
+- README and PRIVACY say that opening a dbt folder runs the project's `.venv` dbt `--version` and its Python at session start, and that bookmarked queries keep their rows after **Clear history** in Claude Code's plugin store.
 
 ## [1.6.0] — 2026-11-16
 

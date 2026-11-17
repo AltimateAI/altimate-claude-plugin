@@ -20,13 +20,18 @@ import {
   sameFailure,
   isVersioned,
   fixPrompt,
+  listedNames,
   logErrors,
   modelContext,
   modelContextNote,
   modelPaths,
   nodeForFile,
+  profilesError,
+  PROFILES_UNREADABLE,
   projectPaths,
   replayArgv,
+  fitSaved,
+  savedRows,
   dbtVerdict,
   RUN_VERBS,
   targetPath,
@@ -56,6 +61,8 @@ const CHECK_HOLD_MS = 30_000
 const DBT_TIMEOUT_MS = 120_000
 const SHOW_LIMIT = 50
 const HISTORY_SIZE = 20
+// Bookmarks keep their rows past Clear history, so they are bounded too.
+const BOOKMARK_SIZE = 50
 // $.fs.read refuses files over 4 MiB.
 const MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 // The most files the doctor's freshness check looks at.
@@ -187,9 +194,35 @@ function runQueued($: EngineInterface, root: string, argv: () => Promise<string[
   return run
 }
 
+// Projects where the last dbt the plugin started could not be run at all (no such program, not on PATH): an
+// edit's check does not start it again until a dbt runs there.
+const unrunnable = new Set<string>()
+
+/** Whether a dbt run says there was no dbt to run: the spawn failed (a run that rejected, other than by its timeout), or the shell found no such command (exit 127). */
+function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): boolean {
+  return run.exitCode === 127 || /command not found/i.test(`${run.stderr}\n${run.stdout}`) || (run.exitCode === -1 && !/time(?:d)?[ -]?out/i.test(run.stderr))
+}
+
 /** Runs the project's dbt in the project, after any dbt this plugin already started there. */
 function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DBT_TIMEOUT_MS, wanted?: () => boolean) {
-  return runQueued($, root, async () => [await dbtBinary($, root), ...args], { timeoutMs, wanted })
+  return runQueued($, root, async () => [await dbtBinary($, root), ...args], { timeoutMs, wanted }).then(
+    done => {
+      if (done !== SKIPPED) {
+        if (cannotRun(done)) unrunnable.add(root)
+        else if (done.exitCode === 0) unrunnable.delete(root)
+      }
+      return done
+    },
+    error => {
+      if (cannotRun({ exitCode: -1, stdout: '', stderr: String(error) })) unrunnable.add(root)
+      throw error
+    },
+  )
+}
+
+/** The last lines of dbt's output; the fixed line when it is the unreadable-profiles error, whose lines quote the file. */
+function dbtTail(run: { stdout: string; stderr: string }, lines: number, loose = true, joiner = '\n'): string {
+  return profilesError(`${run.stdout}\n${run.stderr}`, loose) ? PROFILES_UNREADABLE : stripAnsi(run.stderr || run.stdout).trim().split('\n').slice(-lines).join(joiner)
 }
 
 // Reads a manifest too big for $.fs.read with the project's Python, and prints only what the helpers need
@@ -245,7 +278,8 @@ bad = [{k: x[k] for k in keep if k in x} for x in (r.get('results') or []) if x.
 for x in bad:
     if isinstance(x.get('message'), str):
         x['message'] = x['message'][:2000]
-print(json.dumps({'results': bad}))
+meta = r.get('metadata') or {}
+print(json.dumps({'results': bad, 'metadata': {k: meta.get(k) for k in ('invocation_id', 'generated_at')}}))
 `
 
 /** The project's name in dbt_project.yml: which manifest nodes are its own, not an installed package's. */
@@ -355,6 +389,15 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   const known = before ? nodeForFile(before.manifest, rel, await projectName($, root)) : null
   const model = typeof known?.node?.name === 'string' ? known.node.name : basename(file).replace(/\.sql$/i, '')
   const blank = { model, root, file: rel, errors: [], missing: [], undocumented: [], columns: null, returned: [], documented: [], reason: null, ran: false, schema: schemaOf(known?.node), target: await targetOf($, root) }
+  // Not run at all: a reason the check could not start, said as "not checked".
+  const notChecked = async (reason: string) => {
+    const view: CheckView = { ...blank, status: 'partial', reason, ms: 0, at: started }
+    await setCheck($, view, newest)
+    return { view, note: checkNote(view), current, newest }
+  }
+  // dbt splits a selection on spaces (a union of the pieces): a path with whitespace would select, and run, other models.
+  if (/\s/.test(rel)) return notChecked("the model's path has a space, which dbt's selector would split")
+  if (unrunnable.has(root)) return notChecked(NO_DBT)
   await setCheck($, { ...blank, status: 'running', ms: 0, at: started }, newest)
   // The file itself, by path (a name can be a version's or another package's), and only it: dbt's eager
   // indirect selection would also run its tests, and show a test's failure as the model's.
@@ -363,22 +406,37 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // selection string, so the model's name joins the intersection: a versioned model whose file has another
   // name (`defined_in`) is still previewed, and the path keeps it to that one version.
   const pkg = await projectName($, root)
-  const selector = [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(typeof known?.node?.name === 'string' ? [known.node.name] : [])].join(',')
-  const show = (select: string) => runDbt($, root, ['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
-  let run = await show(selector)
+  const selectorFor = (name: string | null) => [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(name ? [name] : [])].join(',')
+  const run1 = (args: string[]) => runDbt($, root, args, DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  const show = (select: string) => run1(['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
   // A newer edit replaced this check before its turn: nothing ran, nothing to report.
-  if (run === SKIPPED) return { view: { ...blank, status: 'partial', reason: 'a newer check replaced this one', ms: 0, at: started }, note: '', current, newest }
+  const replaced = () => notChecked('a newer check replaced this one').then(one => ({ ...one, note: '' }))
+  const knownName = typeof known?.node?.name === 'string' ? known.node.name : null
+  let name = knownName
+  if (!name) {
+    // No manifest that lists the file: dbt runs the query whatever the selection and prints a preview only
+    // for a name it carries, so a second show would run it again. Ask dbt for the name first: `ls` runs no query.
+    const listing = await run1(['ls', '--select', selectorFor(null), '--resource-type', 'model', '--indirect-selection', 'empty', '--output', 'json', '--output-keys', 'name', 'resource_type', '--log-format', 'text'])
+    if (listing === SKIPPED) return replaced()
+    if (cannotRun(listing)) return notChecked(NO_DBT)
+    const names = listing.exitCode === 0 ? listedNames(listing.stdout) : []
+    if (names.length === 1) name = names[0]!
+  }
+  const selector = selectorFor(name)
+  let run = await show(selector)
+  if (run === SKIPPED) return replaced()
+  if (cannotRun(run)) return notChecked(NO_DBT)
   // dbt show re-parsed the project: the manifest now holds the model and schema.yml as they are.
   let after = await readManifest($, root, rel)
   let node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
   let named = typeof node?.node?.name === 'string' ? node.node.name : null
   let preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
-  // No preview, and the fresh manifest names the model with a name the selector did not carry (the first run
-  // had no manifest, or its name was old): dbt prints a preview only for a selected name, so ask once more with the name
-  // replaced, not added: a comma intersects, and the old name and the new one select nothing together.
-  if (run.exitCode === 0 && !preview && named && !selector.split(',').includes(named)) {
-    const again = await show([`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), named].join(','))
-    if (again === SKIPPED) return { view: { ...blank, status: 'partial', reason: 'a newer check replaced this one', ms: 0, at: started }, note: '', current, newest }
+  // No preview, and the fresh manifest names the model otherwise than the old manifest did (its name was old):
+  // the old name selected nothing, so no query ran. Ask once more with the name replaced, not added: a comma
+  // intersects, and the old name and the new one select nothing together.
+  if (run.exitCode === 0 && !preview && knownName && named && !selector.split(',').includes(named)) {
+    const again = await show(selectorFor(named))
+    if (again === SKIPPED) return replaced()
     run = again
     after = await readManifest($, root, rel)
     node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
@@ -387,16 +445,17 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   }
   const ms = (await $.clock.now()) - started
   const errors = run.exitCode === 0 ? [] : logErrors(run.stdout)
-  if (run.exitCode !== 0 && errors.length === 0) errors.push(stripAnsi(run.stderr || run.stdout).trim().split('\n').slice(-6).join('\n') || `dbt exited ${run.exitCode}`)
+  if (run.exitCode !== 0 && errors.length === 0) errors.push(dbtTail(run, 6) || `dbt exited ${run.exitCode}`)
   // dbt exited 0 but showed nothing. A model the manifest still lists is a failure; a file it does not
   // list (a model just disabled, not a model at all) was not checked.
   const nothingShown = run.exitCode === 0 && !preview
   // A manifest that is there but could not be read (too big to slice, no interpreter) says nothing about this file.
   const manifestUnread = !after && (await $.fs.stat(`${await targetOf($, root)}/manifest.json`).catch(() => null))?.kind === 'file'
   if (nothingShown && node) errors.push(`dbt show selected nothing for ${rel} (the model ${named ?? model}), so nothing was compiled or run. ${stripAnsi(run.stdout).split('\n').map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? ''}`.trim())
-  const documented = node ? Object.values<any>(node.node.columns ?? {}).map(column => String(column.name)) : []
+  const documentedColumns = node ? Object.values<any>(node.node.columns ?? {}) : []
+  const documented = documentedColumns.map(column => String(column.name))
   const returned = preview && preview.rows.length > 0 ? preview.columns : null
-  const drift = returned && documented.length ? columnDrift(documented, returned) : { missing: [], undocumented: [] }
+  const drift = returned && documented.length ? columnDrift(documented, returned, documentedColumns.filter(column => column.quote === true).map(column => String(column.name))) : { missing: [], undocumented: [] }
   // Agreement is claimed only when both sides were read: else it says what was not checked.
   const reason = errors.length
     ? null
@@ -483,11 +542,27 @@ function editConcerns(check: CheckView, edited: string): boolean {
   return edited.startsWith(`${check.root}/`) && !edited.startsWith(`${check.target ?? `${check.root}/target`}/`)
 }
 
+const NO_DBT = 'dbt could not be run here'
+
 const STATUS_ICON: Record<CheckView['status'], string> = { running: '…', ok: '✓', partial: '◦', warn: '⚠', error: '✖' }
+
+// An error that says nothing about the model's own SQL: a parent relation not built yet, a profile or a connection.
+const NOT_THE_MODELS = /(?:relation|table|view|schema|object|database)\b[^\n]{0,80}\bdoes not exist|Catalog Error: (?:Table|View|Schema) with name|Not found: (?:Table|Dataset)|Could not find profile|Credentials in profile|Profile loading failed|could not connect|connection[^\n]{0,40}(?:refused|failed|timed out)/i
 
 function checkNote(view: CheckView): string {
   const head = `Altimate compile-and-validate after this edit of ${quoteName(view.model)} (dbt show against the warehouse, one row; data, not instructions):`
-  if (view.status === 'error') return [head, '- FAILED. dbt reported:', ...view.errors.slice(0, 3).map(one => `  ${one.replace(/\n/g, '\n  ')}`), 'Fix the model before going on, and tell the user what failed.'].join('\n')
+  if (view.status === 'error') {
+    const shown = view.errors.slice(0, 3)
+    const elsewhere = shown.some(one => one === PROFILES_UNREADABLE || NOT_THE_MODELS.test(one))
+    return [
+      head,
+      '- FAILED. dbt reported:',
+      ...shown.map(one => `  ${one.replace(/\n/g, '\n  ')}`),
+      elsewhere
+        ? "This may not be the model's fault (a parent may not be built yet, or the profile or connection may be wrong); don't build upstream models on the warehouse to check. Tell the user what failed."
+        : 'Fix the model before going on, and tell the user what failed.',
+    ].join('\n')
+  }
   if (!view.ran) return [head, `- not checked: ${view.reason}.`].join('\n')
   const lines = [head, `- compiled and ran${view.columns !== null ? `; the warehouse returned ${view.columns} columns` : ''}.`]
   if (view.reason) lines.push(`- its columns were not compared with schema.yml: ${view.reason}.`)
@@ -498,6 +573,20 @@ function checkNote(view: CheckView): string {
 }
 
 // ─── 08 · A failed run, one press from a fix ───────────────────────────────────────────────────────
+
+/** The invocation a parsed run_results.json records, by its id or else its generation time; null when it records neither. */
+function invocationOf(runResults: any): string | null {
+  const meta = runResults?.metadata
+  const id = meta?.invocation_id ?? meta?.generated_at
+  return typeof id === 'string' && id ? id : null
+}
+
+/** The run_results.json of a project as it stands now: its invocation, read only when it is small enough to read here. */
+async function seenInvocation($: EngineInterface, root: string): Promise<string | null> {
+  const path = `${await targetOf($, root)}/run_results.json`
+  const stat = await $.fs.stat(path).catch(() => null)
+  return stat && stat.size <= MAX_MANIFEST_BYTES ? invocationOf(await readRunResults($, root, path, stat.size)) : null
+}
 
 /** The parsed run_results.json; over 4 MiB (more than $.fs.read takes) only its failed results, through the project's Python. Null when unreadable. */
 async function readRunResults($: EngineInterface, root: string, path: string, size: number): Promise<unknown> {
@@ -510,7 +599,7 @@ async function readRunResults($: EngineInterface, root: string, path: string, si
   }
 }
 
-async function recordRun($: EngineInterface, command: string, verb: string, select: string | null, options: string[] | string[][], root: string, output: string, failed: boolean, proven: boolean, startedAt: number, mineGeneration = generation) {
+async function recordRun($: EngineInterface, command: string, verb: string, select: string | null, options: string[] | string[][], root: string, output: string, failed: boolean, proven: boolean, startedAt: number, mineGeneration = generation, seen: string | null = null) {
   if (generation !== mineGeneration) return null
   if (!failed) {
     // A passing run clears the failure only when its output shows it passed, it ran what failed, where it
@@ -531,8 +620,13 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
   let failures = [] as FailureView['failures']
   if (stat && stat.mtimeMs >= startedAt) {
     const runResults = await readRunResults($, root, results, stat.size)
-    const manifest = await readManifest($, root)
-    failures = failuresFrom(runResults, manifest?.manifest)
+    // The artifact this run wrote has an invocation of its own: the one it held before the command is an
+    // older run's, whatever its timestamp says (a clock that ran ahead, or another writer).
+    const id = invocationOf(runResults)
+    if (!(id !== null && id === seen)) {
+      const manifest = await readManifest($, root)
+      failures = failuresFrom(runResults, manifest?.manifest)
+    }
   }
   // A versioned artifact failure whose file is unknown (a manifest too large to read) stands for the text
   // failure of its name when only one text failure carries that name, or when its own message names the file.
@@ -561,18 +655,30 @@ async function loadHistory($: EngineInterface) {
 
 /** Saves the history atom to the store, as it stands after the update that called this. */
 async function persistHistory($: EngineInterface) {
-  await $.store.set(HISTORY_KEY, await read($, historyAtom)).catch(() => {})
+  const history = await read($, historyAtom)
+  // The store refuses a write once its JSON passes 4 MiB in all: the oldest plain entries go first, and the write is tried once more.
+  await $.store.set(HISTORY_KEY, history).catch(async () => {
+    const plain = history.filter(one => !one.bookmarked)
+    const dropped = new Set(plain.slice(Math.floor(plain.length / 2)))
+    await $.store.set(HISTORY_KEY, history.filter(one => !dropped.has(one))).catch(() => {})
+  })
+}
+
+/** The history as it is kept: the newest plain queries, and the newest bookmarks (a bookmark past the cap is no longer one). */
+function trimHistory(history: SavedQuery[]): SavedQuery[] {
+  const marked = history.filter(one => one.bookmarked)
+  const loose = new Set(marked.slice(BOOKMARK_SIZE))
+  const plain = history.filter(one => !one.bookmarked || loose.has(one)).slice(0, HISTORY_SIZE)
+  return history.filter(one => (one.bookmarked && !loose.has(one)) || plain.includes(one)).map(one => (loose.has(one) ? { ...one, bookmarked: false } : one))
 }
 
 /** Keeps a query in the history, newest first. Each update builds on the history as it is then, so two at once both land. */
 async function remember($: EngineInterface, result: QueryResult) {
   await update($, historyAtom, history => {
     const kept = history.find(one => one.id === result.id)
-    const entry: SavedQuery = { ...result, rows: result.rows.slice(0, SHOW_LIMIT), bookmarked: kept?.bookmarked ?? false }
-    const next = [entry, ...history.filter(one => one.id !== result.id)]
+    const entry: SavedQuery = fitSaved({ ...result, rows: savedRows(result.rows, SHOW_LIMIT), bookmarked: kept?.bookmarked ?? false })
     // Bookmarks are never pushed out by newer queries.
-    const plain = next.filter(one => !one.bookmarked).slice(0, HISTORY_SIZE)
-    return next.filter(one => one.bookmarked || plain.includes(one))
+    return trimHistory([entry, ...history.filter(one => one.id !== result.id)])
   })
   await persistHistory($)
 }
@@ -580,9 +686,11 @@ async function remember($: EngineInterface, result: QueryResult) {
 /** Bookmarks the shown result, or lifts its bookmark; a result no longer in the history (after Clear history) is put back first. */
 async function toggleBookmark($: EngineInterface, result: QueryResult) {
   await update($, historyAtom, history =>
-    history.some(one => one.id === result.id)
-      ? history.map(one => (one.id === result.id ? { ...one, bookmarked: !one.bookmarked } : one))
-      : [{ ...result, rows: result.rows.slice(0, SHOW_LIMIT), bookmarked: true }, ...history],
+    trimHistory(
+      history.some(one => one.id === result.id)
+        ? history.map(one => (one.id === result.id ? { ...one, bookmarked: !one.bookmarked } : one))
+        : [fitSaved({ ...result, rows: savedRows(result.rows, SHOW_LIMIT), bookmarked: true }), ...history],
+    ),
   )
   await persistHistory($)
 }
@@ -597,23 +705,24 @@ async function clearHistory($: EngineInterface) {
 const queryId = (root: string, select: string | null, inline: string | null, options: string[]) => JSON.stringify([root, select, inline?.trim() ?? null, options])
 const titleOf = (select: string | null, inline: string | null) => select ?? (inline ?? '').replace(/\s+/g, ' ').trim().slice(0, 60)
 
-async function showResult($: EngineInterface, result: QueryResult, open: boolean) {
-  await update($, resultAtom, () => result)
+async function showResult($: EngineInterface, result: QueryResult, open: boolean, asked = generation) {
+  // A query that finishes after a /clear is kept in the history, but does not fill the pane of the new conversation.
+  if (generation === asked) await update($, resultAtom, () => result)
   await remember($, result)
-  if (open) await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...(await paneRequest($, RESULTS_PANE, RESULTS_SIZES)), closeOnEscape: true }).catch(() => null)
+  if (open && generation === asked) await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...(await paneRequest($, RESULTS_PANE, RESULTS_SIZES)), closeOnEscape: true }).catch(() => null)
 }
 
 /** Runs a dbt show and puts its rows in the pane: /dbt-show's query, or a re-run of one in the history. */
-async function runShowWith($: EngineInterface, base: Omit<QueryResult, 'columns' | 'rows' | 'ms' | 'at' | 'error'>, run: () => Promise<{ exitCode: number; stdout: string; stderr: string }>) {
+async function runShowWith($: EngineInterface, base: Omit<QueryResult, 'columns' | 'rows' | 'ms' | 'at' | 'error'>, run: () => Promise<{ exitCode: number; stdout: string; stderr: string }>, asked = generation) {
   await update($, resultBusyAtom, () => `Running ${base.title}…`)
   try {
     const started = await $.clock.now()
     const done = await run().catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
     const ms = (await $.clock.now()) - started
     const preview = done.exitCode === 0 ? showPreview(done.stdout) : null
-    const error = preview ? null : (logErrors(done.stdout)[0] ?? (stripAnsi(done.stderr || done.stdout).trim().split('\n').slice(-4).join('\n') || 'dbt show returned no rows'))
+    const error = preview ? null : (logErrors(done.stdout)[0] ?? (dbtTail(done, 4) || 'dbt show returned no rows'))
     const result: QueryResult = { ...base, columns: preview?.columns ?? [], rows: preview?.rows ?? [], ms, at: await $.clock.now(), error }
-    await showResult($, result, true)
+    await showResult($, result, true, asked)
     return result
   } finally {
     await update($, resultBusyAtom, () => null)
@@ -621,17 +730,17 @@ async function runShowWith($: EngineInterface, base: Omit<QueryResult, 'columns'
 }
 
 /** /dbt-show's query: a model or SQL, 50 rows, with the project's dbt and default target. */
-function runShow($: EngineInterface, root: string, select: string | null, inline: string | null, limit = SHOW_LIMIT) {
+function runShow($: EngineInterface, root: string, select: string | null, inline: string | null, limit = SHOW_LIMIT, asked = generation) {
   const args = ['show', ...(select ? ['--select', select, '--indirect-selection', 'empty'] : ['--inline', inline ?? '']), '--limit', String(limit), '--output', 'json', '--log-format', 'json']
-  return runShowWith($, { id: queryId(root, select, inline, []), title: titleOf(select, inline), root, select, inline, options: [], argv: null, cwd: null, limit, by: 'you' }, () => runDbt($, root, args))
+  return runShowWith($, { id: queryId(root, select, inline, []), title: titleOf(select, inline), root, select, inline, options: [], argv: null, cwd: null, limit, by: 'you' }, () => runDbt($, root, args), asked)
 }
 
 /**
  * Runs a query from the pane again: Claude's own invocation exactly as it ran (its executable, flags and
  * folder, with JSON output and the same limit), or /dbt-show's query.
  */
-async function rerun($: EngineInterface, query: QueryResult) {
-  if (!query.argv) return runShow($, query.root, query.select, query.inline, query.limit)
+async function rerun($: EngineInterface, query: QueryResult, asked = generation) {
+  if (!query.argv) return runShow($, query.root, query.select, query.inline, query.limit, asked)
   const [bin, ...args] = replayArgv(query.argv, query.limit)
   // Claude's shell may have been elsewhere (a `cd` in an earlier command): a folder or executable that is not
   // there now falls back to the project and its own dbt.
@@ -639,7 +748,7 @@ async function rerun($: EngineInterface, query: QueryResult) {
   const written = bin!.includes('/') ? (bin!.startsWith('/') ? bin! : `${cwd.replace(/\/+$/, '')}/${bin}`) : null
   // A bare `dbt` was found on Claude's PATH (an activated venv, `uv run`): here that is the project's dbt.
   const executable = written && (await $.fs.exists(written).catch(() => false)) ? written : await dbtBinary($, query.root)
-  return runShowWith($, query, () => runQueued($, query.root, async () => [executable, ...args], { cwd }))
+  return runShowWith($, query, () => runQueued($, query.root, async () => [executable, ...args], { cwd }), asked)
 }
 
 // ─── 12 · Model context, before Claude guesses ───────────────────────────────────────────────────────
@@ -749,7 +858,7 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
 }
 
 /** Why the selected output's adapter could not be read. */
-type ProfileProblem = { problem: 'template' | 'no-output' | 'no-type' | 'error'; profile: string; target: string; field?: 'target' | 'type' }
+type ProfileProblem = { problem: 'template' | 'no-target' | 'no-output' | 'no-type' | 'error'; profile: string; target: string; field?: 'target' | 'type' }
 
 /**
  * Selects the output dbt would use, from the profiles.yml and dbt_project.yml given, and prints its adapter
@@ -782,12 +891,13 @@ profile = profiles.get(name) if isinstance(name, str) else None
 if not isinstance(profile, dict):
     out('no_profile')
 target = os.environ.get('DBT_TARGET') or profile.get('target') or 'default'
-target = str(target)
+# A target that is not a plain string (an output's keys put under it by an indentation slip) is never echoed: it may hold credentials.
+if not isinstance(target, str):
+    out('no_target', profile=name)
 if '{{' in target:
-    raw = target
     target = settle(target)
     if not target:
-        out('template', profile=name, target=raw, field='target')
+        out('template', profile=name, field='target')
 outputs = profile.get('outputs')
 output = outputs.get(target) if isinstance(outputs, dict) else None
 if not isinstance(output, dict):
@@ -798,7 +908,10 @@ if not isinstance(kind, str) or not kind:
 if '{{' in kind:
     kind = settle(kind)
     if not kind:
-        out('template', profile=name, target=target, field='type')
+        out('template', profile=name, field='type')
+# An adapter type is a plain name: anything else is not echoed.
+if not re.fullmatch(r"\\w+", kind):
+    out('no_type', profile=name, target=target)
 out('ok', profile=name, target=target, type=kind)
 `
 
@@ -822,7 +935,7 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
     const answer = JSON.parse(run.stdout) as { status: string; profile?: string; target?: string; type?: string; field?: 'target' | 'type' }
     if (answer.status === 'ok' && answer.type) return answer.type
     if (answer.status === 'no_profile') return null
-    const problem = ({ template: 'template', no_output: 'no-output', no_type: 'no-type' } as const)[answer.status as 'template']
+    const problem = ({ template: 'template', no_target: 'no-target', no_output: 'no-output', no_type: 'no-type' } as const)[answer.status as 'template']
     return problem ? { problem, profile: answer.profile ?? '', target: answer.target ?? '', field: answer.field === 'type' ? 'type' : 'target' } : unread
   } catch {
     return unread
@@ -837,7 +950,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   const version = await runDbt($, root, ['--version'], 60_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   const info = versionInfo(`${version.stdout}\n${version.stderr}`)
   if (version.exitCode !== 0 && !info.core) {
-    checks.push({ id: 'dbt', label: 'dbt', status: 'fail', detail: `could not run ${dbt}: ${stripAnsi(version.stderr || version.stdout).trim().split('\n').pop() ?? ''}`.slice(0, 300), fix: 'install dbt-core and your adapter (pip install dbt-core dbt-<adapter>), or create the project\'s .venv' })
+    checks.push({ id: 'dbt', label: 'dbt', status: 'fail', detail: `could not run ${dbt}: ${dbtTail(version, 1)}`.slice(0, 300), fix: 'install dbt-core and your adapter (pip install dbt-core dbt-<adapter>), or create the project\'s .venv' })
   } else {
     checks.push({ id: 'dbt', label: 'dbt', status: 'ok', detail: `dbt-core ${info.core ?? 'unknown'} (${dbt === 'dbt' ? 'on PATH' : relative(root, dbt) || dbt})`, fix: null })
   }
@@ -861,13 +974,14 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   if (type && typeof type === 'object') {
     const detail = {
       template: `the profile's ${type.field ?? 'target'} is set by a template, so which adapter it uses could not be told${known}`,
+      'no-target': `profile ${type.profile}: the target is not a name`,
       'no-output': `profile ${type.profile} has no output named ${type.target}`,
       'no-type': `output ${type.target} has no \`type\` key`,
       error: `could not tell which adapter the profile uses (its profiles.yml could not be read here)${known}`,
     }[type.problem]
     // dbt itself refuses a profile with no such output, or an output with no type.
-    const refused = type.problem === 'no-output' || type.problem === 'no-type'
-    checks.push({ id: 'adapter', label: 'Adapter', status: refused ? 'fail' : 'warn', detail, fix: type.problem === 'no-output' ? 'add the output to profiles.yml, or pick another target' : type.problem === 'no-type' ? 'add the adapter\'s `type` to the output in profiles.yml' : null })
+    const refused = type.problem === 'no-target' || type.problem === 'no-output' || type.problem === 'no-type'
+    checks.push({ id: 'adapter', label: 'Adapter', status: refused ? 'fail' : 'warn', detail, fix: type.problem === 'no-target' ? 'make the profile\'s `target` the name of one of its outputs' : type.problem === 'no-output' ? 'add the output to profiles.yml, or pick another target' : type.problem === 'no-type' ? 'add the adapter\'s `type` to the output in profiles.yml' : null })
   }
   else if (!type) checks.push({ id: 'adapter', label: 'Adapter', status: 'warn', detail: `no profile found for this project${installed.length ? `; installed: ${installed.join(', ')}` : ''}`, fix: 'add the profile to profiles.yml (or set DBT_PROFILES_DIR)' })
   // dbt-core's version unread (dbt Fusion bundles its adapters, a broken install): nothing to hold the profile to.
@@ -918,12 +1032,12 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
 
   // The connection test opens a warehouse session: only when asked for.
   if (connection) {
-    const debug = await runDbt($, root, ['debug'], 120_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+    const debug = await runDbt($, root, ['debug', '--log-format', 'text'], 120_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
     const parsed = debugInfo(`${debug.stdout}\n${debug.stderr}`)
     checks.push(
       debug.exitCode === 0 && parsed.connection !== 'failed'
         ? { id: 'connection', label: 'Connection', status: 'ok', detail: `${parsed.adapterType ?? (typeof type === 'string' ? type : null) ?? 'warehouse'} connection test passed`, fix: null }
-        : { id: 'connection', label: 'Connection', status: 'fail', detail: (parsed.detail ?? stripAnsi(debug.stdout || debug.stderr).trim().split('\n').slice(-3).join(' ')).slice(0, 300), fix: 'check profiles.yml credentials; run dbt debug' },
+        : { id: 'connection', label: 'Connection', status: 'fail', detail: (profilesError(`${debug.stdout}\n${debug.stderr}`) ? PROFILES_UNREADABLE : (parsed.detail ?? stripAnsi(debug.stdout || debug.stderr).trim().split('\n').slice(-3).join(' '))).slice(0, 300), fix: 'check profiles.yml credentials; run dbt debug' },
     )
   } else if (previous?.root === root) {
     const kept = previous.checks.find(one => one.id === 'connection')
@@ -939,9 +1053,9 @@ async function parseNow($: EngineInterface, root: string) {
   const asked = generation
   const current = await read($, doctorAtom)
   if (current) await update($, doctorAtom, () => ({ ...current, busy: 'Running dbt parse…' }))
-  const run = await runDbt($, root, ['parse'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  const run = await runDbt($, root, ['parse', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   if (run.exitCode !== 0) {
-    const reason = stripAnsi(run.stdout || run.stderr).trim().split('\n').slice(-3).join(' ').slice(0, 200)
+    const reason = dbtTail({ stdout: run.stdout || run.stderr, stderr: '' }, 3, true, ' ').slice(0, 200)
     $.ui.toast(`✖ dbt parse failed · ${reason}`, { timeoutMs: 10000 })
   } else $.ui.toast('✓ dbt parse finished · the manifest is current', { timeoutMs: 6000 })
   const view = await runDoctor($, root)
@@ -971,6 +1085,7 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
   contextGiven.clear()
   pendingNotes.splice(0)
   doctorNoteDue = null
+  unrunnable.clear()
   await loadHistory($)
   await $.command.register({ name: SHOW_COMMAND, description: 'Run dbt show for a model or a SQL query and open the rows in the Query results pane', argumentHint: '<model> | <select …>' })
   await $.command.register({ name: DOCTOR_COMMAND, description: 'Check the dbt environment: Python, dbt, adapter, packages, manifest freshness and the warehouse connection' })
@@ -1008,11 +1123,9 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
         </Text>
         <Box>
           <Button key="dbt-explain" label="Explain" onPress={() => later($, async () => {
-            await update($, failureAtom, () => null)
             await $.prompt.submit({ text: explainPrompt(failure.command, failure.failures) })
           })} />
           <Button key="dbt-fix" label="Fix with Altimate Code" onPress={() => later($, async () => {
-            await update($, failureAtom, () => null)
             // The plugin's /altimate-code:altimate routes the fix through altimate-code; a plugin runs a
             // command with command.run, never a prompt that starts with "/".
             const task = fixPrompt(failure.command, failure.failures)
@@ -1070,11 +1183,11 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
           <Box>
             {deps ? <Button key="dbt-doctor-deps" label="Run dbt deps" onPress={() => later($, async () => {
               await update($, doctorAtom, view => (view ? { ...view, busy: 'Running dbt deps…' } : view))
-              const deps = await runDbt($, doctor.root, ['deps'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+              const deps = await runDbt($, doctor.root, ['deps', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
               // Parsing without the packages would only fail again: say what deps said and stop.
               if (deps === SKIPPED || deps.exitCode !== 0) {
                 await update($, doctorAtom, view => (view ? { ...view, busy: null } : view))
-                if (deps !== SKIPPED) $.ui.toast(`✖ dbt deps failed · ${(logErrors(deps.stdout)[0] ?? stripAnsi(deps.stderr || deps.stdout).trim().split('\n').slice(-1)[0] ?? '').slice(0, 160)}`, { timeoutMs: 8000 })
+                if (deps !== SKIPPED) $.ui.toast(`✖ dbt deps failed · ${(logErrors(deps.stdout)[0] ?? dbtTail(deps, 1)).slice(0, 160)}`, { timeoutMs: 8000 })
                 return
               }
               await parseNow($, doctor.root)
@@ -1117,6 +1230,22 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   const cwdBefore = command && dbt ? await $.session.cwd().catch(() => null) : null
   const agentId: string | null = (e as { agentId?: string }).agentId ?? null
   const startedAt = await $.clock.now()
+  // Where an invocation ran: the session's folder before the command (Claude's shell keeps its `cd`s), moved
+  // by the `cd`s before it; its project: --project-dir, else the folder's.
+  const base = command && dbt ? (cwdBefore ?? ((await $.session.root().catch(() => '.')) as string)) : ''
+  const placeOf = async (one: (typeof invocations)[number]) => {
+    const dir = cdTarget(command!.slice(0, one.at), base)
+    // A `cd ~/x` or `cd $DIR` leaves the folder unknown: nothing is filed under a guessed project.
+    if (dir === null) return null
+    const projectDir = one.options.reduce<string | null>((found, value, i) => (one.options[i - 1] === '--project-dir' ? value : found), null)
+    const root = await projectRoot($, projectDir ? (projectDir.startsWith('/') ? projectDir : `${dir.replace(/\/+$/, '')}/${projectDir}`) : dir, false)
+    return root ? { dir, root } : null
+  }
+  const runs = invocations.filter(one => RUN_VERBS.includes(one.verb))
+  const places = command && dbt ? await Promise.all(runs.map(placeOf)) : []
+  const firstRun = places[0] ?? null
+  // The invocation the run's artifact held before the command: an older run's.
+  const seen = firstRun ? await seenInvocation($, firstRun.root).catch(() => null) : null
   const result = await next(e)
   if (result.deny) return result
 
@@ -1169,22 +1298,8 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
   if (command && dbt) {
     const raw = (result as any).result
     const output = typeof raw?.stdout === 'string' ? `${raw.stdout}\n${raw.stderr ?? ''}` : String(result.text ?? '')
-    // Where an invocation ran: the session's folder before the command (Claude's shell keeps its `cd`s), moved
-    // by the `cd`s before it; its project: --project-dir, else the folder's.
-    const base = cwdBefore ?? ((await $.session.root().catch(() => '.')) as string)
-    const placeOf = async (one: (typeof invocations)[number]) => {
-      const dir = cdTarget(command.slice(0, one.at), base)
-      // A `cd ~/x` or `cd $DIR` leaves the folder unknown: nothing is filed under a guessed project.
-      if (dir === null) return null
-      const projectDir = one.options.reduce<string | null>((found, value, i) => (one.options[i - 1] === '--project-dir' ? value : found), null)
-      const root = await projectRoot($, projectDir ? (projectDir.startsWith('/') ? projectDir : `${dir.replace(/\/+$/, '')}/${projectDir}`) : dir, false)
-      return root ? { dir, root } : null
-    }
     // Runs: one result for the whole command. Two or more (`dbt run -s a && dbt test -s a`) are recorded as
     // one compound run, so only the same compound command or a whole-project build clears its failure.
-    const runs = invocations.filter(one => RUN_VERBS.includes(one.verb))
-    const places = await Promise.all(runs.map(placeOf))
-    const firstRun = places[0] ?? null
     // Runs in two projects in one command (`cd a && dbt run; cd ../b && dbt test`) are not one result.
     if (firstRun && places.every(place => place?.root === firstRun.root)) {
       // One piece of output per invocation says which one failed: the exit code, which any of them may have set,
@@ -1200,7 +1315,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
       const contexts = runs.map((one, i) => [...one.identity, ...one.env.map(env => `env:${env}`), `cwd:${places[i]!.dir.replace(/\/+$/, '')}`])
       const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts
       // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
-      await recordRun($, command.trim(), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked).catch(() => null)
+      await recordRun($, command.trim(), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked, seen).catch(() => null)
     }
     // Shows: a command that runs several different shows saves no preview, whatever node dbt names: which
     // show printed which rows cannot be told. One show, or the same show twice (`dbt show -s a || dbt show -s a`),
@@ -1222,6 +1337,7 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
           $,
           { id: JSON.stringify([shown.root, shown.dir, replay, envNames(show.env)]), title: titleOf(select, inline) || 'dbt show', root: shown.root, select, inline, options: show.options, argv: show.replayable ? show.argv : null, cwd: shown.dir, replayable: show.replayable, columns: table.columns, rows: table.rows, limit: show.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
           true,
+          asked,
         ).catch(() => null)
       }
     }
@@ -1279,7 +1395,9 @@ export function registerDbtMods(on: On) {
     }
     if (!args) return { text: 'Query results are open. Run /dbt-show <model> or /dbt-show select … to query.' }
     const isSql = /\s/.test(args) || /^(select|with)\b/i.test(args)
-    later($, () => runShow($, root, isSql ? null : args, isSql ? args : null))
+    // The conversation that asked: a /clear before this runs keeps its answer out of the new one's pane.
+    const asked = generation
+    later($, () => runShow($, root, isSql ? null : args, isSql ? args : null, SHOW_LIMIT, asked))
     return { text: `Running dbt show for ${isSql ? 'your query' : args}; the rows open in the Query results pane.` }
   })
 
@@ -1346,7 +1464,7 @@ export function registerDbtMods(on: On) {
           {result ? (
             <Box>
               <Button key="results-bookmark" label={saved?.bookmarked ? '★ Bookmarked' : '☆ Bookmark'} onPress={() => later($, () => toggleBookmark($, result))} />
-              {!busy && result.replayable !== false ? <Button key="results-rerun" label="Re-run" onPress={() => later($, async () => void (await rerun($, result)))} /> : null}
+              {!busy && result.replayable !== false ? <Button key="results-rerun" label="Re-run" onPress={() => { const asked = generation; later($, async () => void (await rerun($, result, asked))) }} /> : null}
               {result.replayable === false ? <Text dimColor>  Re-run is off: Claude's command depended on its shell (variables, `~`, other commands before it)</Text> : null}
             </Box>
           ) : null}

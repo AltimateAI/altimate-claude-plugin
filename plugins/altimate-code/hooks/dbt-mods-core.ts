@@ -60,17 +60,52 @@ export function showPreview(stdout: string, uniqueId?: string): { columns: strin
   return null
 }
 
+/** What stands in for dbt's error about a profiles.yml it could not read: that error quotes the lines around the fault, a password line among them. */
+export const PROFILES_UNREADABLE = 'profiles.yml could not be parsed; run `dbt debug` yourself to see the error'
+
+/**
+ * Whether dbt's text is its error for a profiles.yml it could not read: its own heading, or a YAML syntax error
+ * that names profiles.yml. dbt prints the same error with no heading and no file name in `dbt debug` (`loose`):
+ * a syntax error that quotes numbered lines and names no other YAML file.
+ */
+export function profilesError(text: string, loose = true): boolean {
+  // JSON log lines are read as the text they carry: their line breaks are escaped in the raw output.
+  const plain = stripAnsi(logText(text))
+  if (/error while trying to read your profiles\.yml/i.test(plain)) return true
+  if (/profiles\.yml[\s\S]{0,400}\b(?:yaml|syntax error|ScannerError|ParserError)\b|\b(?:yaml|syntax error|ScannerError|ParserError)\b[\s\S]{0,400}profiles\.yml/i.test(plain)) return true
+  // Without the heading or the file's name: a syntax error that quotes numbered lines and names no other YAML file.
+  return loose && /Syntax error near line \d+/.test(plain) && /^\s*\d+\s+\|/m.test(plain) && !/[\w./-]+\.ya?ml\b/i.test(plain.replace(/profiles\.yml/gi, ''))
+}
+
+/** dbt's text as it may be shown and sent on: the fixed line in place of an unreadable-profiles error. */
+export const scrubDbt = (text: string, loose = true): string => (profilesError(text, loose) ? PROFILES_UNREADABLE : text)
+
 /** The errors a dbt command logged as JSON lines: level error, the message without colour. */
 export function logErrors(stdout: string): string[] {
   const errors: string[] = []
   for (const line of stdout.split('\n')) {
     const one = logLine(line)
     if (one?.level !== 'error' || !one.msg) continue
-    const msg = stripAnsi(one.msg).trim()
+    const msg = scrubDbt(stripAnsi(one.msg).trim())
     // dbt repeats the summary ("Encountered an error:") ahead of the error itself.
     if (msg && !errors.includes(msg)) errors.push(msg)
   }
   return errors
+}
+
+/** The node names `dbt ls --output json --output-keys name` printed: one JSON object per line, among dbt's own log lines. */
+export function listedNames(stdout: string): string[] {
+  const names: string[] = []
+  for (const line of stripAnsi(stdout).split('\n')) {
+    const text = line.trim()
+    if (!text.startsWith('{')) continue
+    try {
+      const one = JSON.parse(text)
+      // Only a model: a test selected with it by dbt's indirect selection is not the file's node.
+      if (typeof one?.name === 'string' && one.name && (one.resource_type === undefined || one.resource_type === 'model')) names.push(one.name)
+    } catch {}
+  }
+  return names
 }
 
 /**
@@ -492,7 +527,7 @@ export function failuresFrom(runResults: unknown, manifest?: { nodes?: Record<st
       name: typeof node?.name === 'string' ? node.name : (id.startsWith('test.') ? id.split('.')[2] : versionedName(id)) ?? id,
       kind: id.split('.')[0] ?? 'node',
       status: status === 'fail' ? 'fail' : 'error',
-      message: stripAnsi(String(one?.message ?? '')).trim().slice(0, 2000),
+      message: scrubDbt(stripAnsi(String(one?.message ?? '')).trim()).slice(0, 2000),
       path: typeof node?.original_file_path === 'string' ? node.original_file_path : null,
       failures: typeof one?.failures === 'number' ? one.failures : null,
     })
@@ -539,6 +574,7 @@ export const isVersioned = (failure: DbtFailure): boolean => failure.kind === 'm
 export function failuresFromText(output: string): DbtFailure[] {
   const text = stripAnsi(logText(output))
   const out: DbtFailure[] = []
+  const unreadable = profilesError(text)
   const block = /^\s*(?:\d\d:\d\d:\d\d\s+)?(Compilation|Database|Runtime|Parsing) Error(?: in (\w+) (\w+) \(([^)]+)\))?\s*$/gm
   for (let match = block.exec(text); match; match = block.exec(text)) {
     const kind = match[2] ?? 'project'
@@ -548,7 +584,8 @@ export function failuresFromText(output: string): DbtFailure[] {
       .map(line => line.replace(/^\s*\d\d:\d\d:\d\d\s+/, '').trim())
       .filter(Boolean)
       .join('\n')
-    const failure: DbtFailure = { id: `${kind}.${name}${match[4] ? `@${match[4]}` : ''}`, name, kind, status: 'error', message: `${match[1]} Error\n${message}`.slice(0, 2000), path: match[4] ?? null, failures: null }
+    // dbt's error for a profiles.yml it could not read is a project error; its lines quote the file.
+    const failure: DbtFailure = { id: `${kind}.${name}${match[4] ? `@${match[4]}` : ''}`, name, kind, status: 'error', message: `${match[1]} Error\n${unreadable && kind === 'project' ? PROFILES_UNREADABLE : message}`.slice(0, 2000), path: match[4] ?? null, failures: null }
     if (!out.some(one => sameFailure(one, failure))) out.push(failure)
   }
   const failedTest = /^\s*(?:\d\d:\d\d:\d\d\s+)?Failure in test (\S+) \(([^)]+)\)/gm
@@ -754,14 +791,49 @@ export function doctorNote(root: string, checks: DoctorCheck[]): string {
   return lines.join('\n')
 }
 
-/** Columns the warehouse returned against those schema.yml documents. */
-export function columnDrift(documented: string[], returned: string[]): { missing: string[]; undocumented: string[] } {
+/**
+ * Columns the warehouse returned against those schema.yml documents. Names compare without case, except a
+ * column documented with `quote: true` (`quoted`), which the warehouse keeps exactly as written.
+ */
+export function columnDrift(documented: string[], returned: string[], quoted: string[] = []): { missing: string[]; undocumented: string[] } {
   const has = new Set(returned.map(one => one.toLowerCase()))
-  const doc = new Set(documented.map(one => one.toLowerCase()))
+  const exact = new Set(quoted)
+  const loose = new Set(documented.filter(one => !exact.has(one)).map(one => one.toLowerCase()))
   return {
-    missing: documented.filter(one => !has.has(one.toLowerCase())),
-    undocumented: returned.filter(one => !doc.has(one.toLowerCase())),
+    missing: documented.filter(one => (exact.has(one) ? !returned.includes(one) : !has.has(one.toLowerCase()))),
+    undocumented: returned.filter(one => !loose.has(one.toLowerCase()) && !exact.has(one)),
   }
+}
+
+// What a saved query may keep: the plugin store takes 4 MiB of JSON in all, the history and bookmarks among
+// other keys, so a cell and a query are bounded.
+const SAVED_CELL = 200
+const SAVED_QUERY_BYTES = 32 * 1024
+
+/** Rows as the history keeps them: a long cell cut as the table cuts it (marked with …), and no more rows than fit the query's byte budget. */
+export function savedRows(rows: unknown[][], limit: number): unknown[][] {
+  const cut = (value: unknown) => {
+    const text = value === null || value === undefined ? null : typeof value === 'object' ? JSON.stringify(value) : typeof value === 'string' ? value : null
+    return text !== null && text.length > SAVED_CELL ? `${text.slice(0, SAVED_CELL - 1)}…` : value
+  }
+  const kept: unknown[][] = []
+  let bytes = 0
+  for (const row of rows.slice(0, limit)) {
+    const next = row.map(cut)
+    bytes += JSON.stringify(next).length
+    if (bytes > SAVED_QUERY_BYTES) break
+    kept.push(next)
+  }
+  return kept
+}
+
+const SAVED_ENTRY_BYTES = 64 * 1024
+
+/** A saved query as a whole, by its serialized size: its error cut, then rows dropped from the end until it fits. */
+export function fitSaved<T extends { rows: unknown[][]; error: string | null }>(entry: T): T {
+  const next = { ...entry, error: entry.error ? entry.error.slice(0, 2000) : entry.error, rows: [...entry.rows] }
+  while (next.rows.length > 0 && JSON.stringify(next).length > SAVED_ENTRY_BYTES) next.rows.pop()
+  return next
 }
 
 /** A cell as the results table shows it: one line, cut to `width`. */
