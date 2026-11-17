@@ -16,7 +16,7 @@ import {
 
 const engine = () => {
   const logs: string[] = []
-  return { logs, $: { ui: { log: (text: string) => void logs.push(text) } } as any }
+  return { logs, $: { ui: { log: (text: string) => void logs.push(text), status: async () => {} }, command: { register: async () => {} }, state: { get: async (atom: { key?: string }) => ({ value: atom?.key === 'statusParts' ? {} : null }), set: async () => ({ isSet: true }) } } as any }
 }
 
 test('attempt logs a feature function that throws at once, one that rejects, and passes a value on', async () => {
