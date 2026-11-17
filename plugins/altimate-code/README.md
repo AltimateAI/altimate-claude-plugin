@@ -146,6 +146,8 @@ The plugin has five settings, shown when you enable it (`userConfig` in `.claude
 | `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). |
 | `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. |
 
+Project health follows edits Claude makes with Edit/Write and the files a Bash command names. It reads shell commands heuristically, and a Bash call carries no working folder of its own: a relative path written after an earlier call changed folder (`cd models` in one call, `sed -i x.sql` in the next) is read from the session's folder and can miss the model. It also covers only the dbt project the session's folder is in, and a result too large for the engine to return whole counts as a failed check.
+
 ## Example prompts
 
 Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):
