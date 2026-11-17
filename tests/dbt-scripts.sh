@@ -35,13 +35,13 @@ field() { python3 -I -c 'import json,sys; print(json.load(sys.stdin).get(sys.arg
 SECRET="SENTINEL_SECRET_VALUE"
 
 # ─── PROFILE_TYPE ───────────────────────────────────────────────────────────────────────────────
-# dbt always ships PyYAML; a bare python3 may not, so one with it is made in a throwaway venv when needed.
 YPY=python3
-if ! python3 -c 'import yaml' 2>/dev/null && python3 -m venv "$TMP/yaml-venv" >/dev/null 2>&1 \
-  && "$TMP/yaml-venv/bin/python" -m pip install -q pyyaml >/dev/null 2>&1; then
+# dbt's own Python always has PyYAML and jinja2; a bare python3 may lack them, so a throwaway venv gets both.
+if ! python3 -c 'import yaml, jinja2' 2>/dev/null && python3 -m venv "$TMP/yaml-venv" >/dev/null 2>&1 \
+  && "$TMP/yaml-venv/bin/python" -m pip install -q pyyaml jinja2 >/dev/null 2>&1; then
   YPY="$TMP/yaml-venv/bin/python"
 fi
-if "$YPY" -c 'import yaml' 2>/dev/null; then
+if "$YPY" -c 'import yaml, jinja2' 2>/dev/null; then
   printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
   # profile <name> <profiles.yml> <expected status> <expected target> <expected type> [VAR=value ...]; an empty target or type is one the script does not print
   profile() {
@@ -80,20 +80,20 @@ if "$YPY" -c 'import yaml' 2>/dev/null; then
   profile "a default holding the opposite quote" $'shop:\n  target: "{{ env_var(\'T\', \\"d\'ev\\") }}"\n  outputs:\n    "d\'ev": {type: duckdb}\n' ok "d'ev" duckdb
   profile "no such output" $'shop:\n  target: staging\n  outputs:\n    dev: {type: duckdb}\n' no_output staging ''
 else
-  missing "no python3 with PyYAML (and none could be installed into a venv), so the PROFILE_TYPE checks cannot run"
+  missing "no python3 with PyYAML and jinja2 (and none could be installed into a venv), so the PROFILE_TYPE checks cannot run"
 fi
 
 # ─── PROFILE_REDACT ─────────────────────────────────────────────────────────────────────────────
 # The strings dbt's errors may echo back: every string under the profile's outputs (aliases resolved) and the env vars
 # profiles.yml names. The script prints them to the plugin only.
-if python3 -c 'import yaml' 2>/dev/null; then
+if "$YPY" -c 'import yaml, jinja2' 2>/dev/null; then
   printf "name: 'shop'\nprofile: 'shop'\n" > "$TMP/dbt_project.yml"
   # redact <name> <profiles.yml> <value that must be listed> [VAR=value ...]; a value of "-" means none must be listed
   redact() {
     local name="$1" yml="$2" want="$3" out; shift 3
     printf '%s' "$yml" > "$TMP/profiles.yml"
     # The assignments set for the command arrive on stdin (REDACT_STDIN), as the plugin sends them.
-    out="$(env "$@" python3 -c "$(cat "$TMP/PROFILE_REDACT.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1 <<<"${REDACT_STDIN:-{\}}")"
+    out="$(env "$@" "$YPY" -c "$(cat "$TMP/PROFILE_REDACT.py")" "$TMP/dbt_project.yml" "$TMP/profiles.yml" 2>&1 <<<"${REDACT_STDIN:-{\}}")"
     printf '%s' "$out" | python3 -I -c '
 import json, sys
 want = sys.argv[1]
@@ -132,7 +132,7 @@ assert (want == "-" and not found) or want in found, found
   REDACT_STDIN='{"env": {"DB_PASSWORD": "SENTINEL_COMMAND_ENV"}}' redact "an env var set for the command" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      sslmode: "{{ env_var(\'DB_PASSWORD\') }}"\n' SENTINEL_COMMAND_ENV
   redact "nothing but short values, types and ports" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, method: password, port: 5432, threads: 1234567, user: me}\n' -
 else
-  missing "python3 has no PyYAML, so the PROFILE_REDACT checks cannot run"
+  missing "no python3 with PyYAML and jinja2 (and none could be installed into a venv), so the PROFILE_REDACT checks cannot run"
 fi
 
 # ─── MANIFEST_SLICE ─────────────────────────────────────────────────────────────────────────────
