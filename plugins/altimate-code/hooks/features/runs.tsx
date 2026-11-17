@@ -139,7 +139,7 @@ const SECRET_ASSIGNMENT = /(^|\s)((?=[A-Za-z_])[A-Za-z0-9_]*(?:SECRET|TOKEN|PASS
 /** A `--vars` value that names a secret: the command is not recorded, since a replay would store and show it. */
 const VARS_VALUE = /(?:^|\s)--vars(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g
 const SECRET_NAME = /(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)/i
-const varsHoldSecret = (body: string) => [...body.matchAll(VARS_VALUE)].some(match => SECRET_NAME.test(match[1]!))
+const varsHoldSecret = (body: string) => [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => SECRET_NAME.test(match[1]!))
 const redact = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 
 /** The flags `dbt retry` does not take from the run it retries. */
@@ -298,7 +298,7 @@ async function load($: EngineInterface, root: string, open: string | null = null
 }
 
 /** The Bash calls in flight that run dbt, whatever folder they work in: when each started, by tool-use id. */
-const started = new Map<string, { at: number; cwd: string; writes: boolean }>()
+const started = new Map<string, { at: number; cwd: string; writes: boolean; operation: boolean }>()
 /** The dbt calls that just ended: a run is recorded only when no other dbt call overlapped it. */
 const finished: Array<{ at: number; ended: number }> = []
 /** A call in flight longer than this is taken as one that never ended (refused or cancelled), so it stops holding back later calls. */
@@ -308,6 +308,8 @@ export const OVERLAP_LINE = 'run not recorded: overlapping dbt commands'
 /** Whether the command runs dbt at all, with any subcommand. */
 export const runsDbt = (command: string) => parseDbtCommand(command).length > 0
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
+/** `dbt run-operation` replaces run_results.json too, but is no run to record. */
+export const runsOperation = (command: string) => parseDbtCommand(command).some(one => one.subcommand === 'run-operation')
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
 const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(^|[^&])&\s*$/.test(e.command.trim())
@@ -345,11 +347,14 @@ async function readRun(
   // The CLI's answer carries the rows: the plugin's MCP server offers only a fixed set of tools.
   const result = await runTool($, 'dbt_run_results', args, { until: ended + READ_MS, cliOnly: true })
   const view = result.ok ? readable(result.metadata) : null
-  if (!view || view.found === false || !view.completedAt) return null
+  // An answer that cannot be read does not say whether this call replaced the file: that is unknown, not "nothing written".
+  if (!view) throw new Error('the artifact could not be read')
+  if (view.found === false || !view.completedAt) return null
   // A file older than the call is one this call did not write (dbt stopped before it ran anything);
   // one newer than the call is another command's, which would be recorded with this call's command line.
   const wrote = Date.parse(view.completedAt)
-  if (wrote < began - CLOCK_SLACK_MS || wrote > ended + CLOCK_SLACK_MS) return null
+  if (wrote > ended + CLOCK_SLACK_MS) throw new Error('the artifact is newer than this call')
+  if (wrote < began - CLOCK_SLACK_MS) return null
   const written = writer(invocations, view.command)
   const run = written ? toRecord(view, written) : null
   return run && written ? { run, order: all.lastIndexOf(written) } : null
@@ -398,6 +403,7 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   // Kept back to the oldest call still running, never past the limit.
   const cutoff = Math.max(ended - IN_FLIGHT_MS, Math.min(ended, ...live.map(other => other.at)))
   while (finished.length > 500 || (finished[0] && finished[0].ended < cutoff)) finished.shift()
+  if (began.operation) await clearRetries($)
   if (!began.writes) return null
   if (overlapped) {
     await clearRetries($)
@@ -550,7 +556,7 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   // Every dbt call counts for the overlap rule, one that writes no results too: it is told apart only by `writes`.
   if (!runsDbt(e.command)) return null
   const cwd = await $.session.cwd()
-  started.set(startKey(e), { at: await $.clock.now(), cwd, writes: writesResults(e.command) })
+  started.set(startKey(e), { at: await $.clock.now(), cwd, writes: writesResults(e.command), operation: runsOperation(e.command) })
   // A call refused by a gate is dropped by bashDropped; one cancelled otherwise leaves its entry: only the newest are kept.
   while (started.size > 50) started.delete(started.keys().next().value as string)
   return null

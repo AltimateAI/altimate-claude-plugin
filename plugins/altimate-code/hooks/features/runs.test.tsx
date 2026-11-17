@@ -369,6 +369,24 @@ test('a single build whose artifact cannot be read clears the stored retry: it m
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
+test('dbt run-operation clears the stored retry: it replaces the artifact but is no run to record', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  expect(kept(stored)[0]!.retryLine).toBe('cd /repo && dbt retry')
+  await $.tool.call({ tool: 'Bash', command: 'dbt run-operation clean', tool_use_id: 'operation' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+})
+
+test('an artifact answer that cannot be read clears the stored retry: whether the file was replaced is unknown', async ($, on) => {
+  let bad = false
+  const { stored } = await start($, on, () => (bad ? 'not a run' : view('inv-a', [['model.shop.m', 'error', null]])))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  expect(kept(stored)[0]!.retryLine).toBe('cd /repo && dbt retry')
+  bad = true
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s b', tool_use_id: 'second' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+})
+
 test('a secret is redacted whole, quotes and escapes in its value included; a --vars value that names one is not recorded; a quoted subcommand is not guessed', () => {
   for (const value of ['"one\\"two"', "'one'\\''two'", '"a b"\'c\'d', 'plain']) {
     const found = resultsInvocations(`SNOWFLAKE_PASSWORD=${value} dbt build`, ROOT)[0]!
@@ -377,6 +395,7 @@ test('a secret is redacted whole, quotes and escapes in its value included; a --
   }
   expect(resultsInvocations(`dbt build --vars '{"api_token":"s3cret"}'`, ROOT)).toEqual([])
   expect(resultsInvocations('dbt build --vars "{db_password: s3cret}"', ROOT)).toEqual([])
+  expect(resultsInvocations('dbt build --vars \\\n  \'{"api_token":"s3cret"}\'', ROOT)).toEqual([])
   expect(resultsInvocations('dbt build --vars=\'{"limit": 3}\' -s a', ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt 'build' -s orders`, ROOT)).toEqual([])
   expect(resultsInvocations('dbt "build" -s orders', ROOT)).toEqual([])
