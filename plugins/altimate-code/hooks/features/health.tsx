@@ -542,9 +542,10 @@ async function loop($: EngineInterface, mine: number) {
         // A baseline that lands after edits (the first run failed, or the project was opened above the dbt
         // project) cannot tell the touched models' old issues from the new: all of theirs count as new.
         const edited = modelsOfFiles(base.touched, seen, real)
-        // A deleted schema file names no model any more, and a model that had no insight before has no record
-        // of it: its new issues are told from the baseline, so every model counts.
-        const matched = new Set(seen.flatMap(i => [i.file, i.properties]).filter(Boolean).map(real))
+        // A schema file the latest answer no longer names was deleted (or never mattered): its models, the ones
+        // that had no insight before included, are not found by their files, and new issues are told from the
+        // baseline, so every model counts.
+        const matched = new Set(run.insights.flatMap(i => [i.file, i.properties]).filter(Boolean).map(real))
         if (base.touched.some(f => /\.ya?ml$/i.test(f) && !matched.has(real(f)))) for (const i of run.insights) edited.add(i.uniqueId)
         const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
         const issues = newIssues(run.insights, baseline, edited)
