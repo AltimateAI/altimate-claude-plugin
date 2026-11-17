@@ -1,7 +1,7 @@
 # Privacy Policy — Altimate Code plugin for Claude Code
 
 **Effective date:** November 2, 2026
-**Last revised:** November 10, 2026
+**Last revised:** November 17, 2026
 **Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) MCP server and CLI.
 
 This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai/privacy) and [Terms](https://www.altimate.ai/terms), which govern Altimate services generally. Where this document is silent, the master policy applies. Questions: **info@altimate.ai**.
@@ -82,6 +82,18 @@ Turn off recording and drafting with `altimate learn disable` in the project, or
 
 The delegation path below runs only when the delegation skill or the `/altimate-code:altimate` command fires and invokes the locally installed altimate-code CLI.
 
+## The lineage report
+
+The column impact report is one HTML file that the plugin writes to the project's `target/.altimate-lineage/` and opens in your browser. The page loads nothing from the network: its content-security policy allows only its own inline script and style.
+
+To learn whether the report gets used, the plugin asks the local altimate-code CLI (`altimate-code tool report-event`) to send one usage event, `lineage_report`, at each of these steps:
+- the summary was shown;
+- **Open report** was pressed;
+- `/lineage-report` was run;
+- the report was built, failed to build, or found no browser.
+
+Each event carries the step and the Claude Code session id (`claude:<id>`) only: no model, column, file or project names. It goes through Altimate's usage telemetry, described in [Usage telemetry](#usage-telemetry), and that section's opt-out turns it off. With an altimate-code that predates the command, nothing is sent.
+
 ## Data flows when a task is delegated
 
 | Data | Where it goes | Retention |
@@ -131,6 +143,10 @@ The plugin and the altimate-code CLI are professional developer tools, not direc
 ## Changes to this policy
 
 We will update this document in this repository and revise the effective date when our practices change. Material changes to Altimate-wide practices are governed by the master [Privacy Policy](https://www.altimate.ai/privacy).
+
+**November 17, 2026:** added [dbt helpers](#dbt-helpers) (plugin 1.7.0): the dbt commands the plugin runs in a dbt project, and what it keeps of their results.
+
+**November 16, 2026:** added [The lineage report](#the-lineage-report) (plugin 1.6.0): the offline report page, and the usage events the altimate-code CLI sends for it.
 
 **November 10, 2026:** added [Workspace rules](#workspace-rules) (the workspace-rules hooks and `/altimate-code:rules` in plugin 1.5.0), and the rules telemetry the altimate-code CLI sends.
 

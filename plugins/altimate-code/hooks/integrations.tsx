@@ -4,7 +4,8 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { dbtModsBand, registerDbtMods, startDbtMods } from './dbt-mods'
-import { lineageBand, registerLineage, startLineage } from './lineage'
+import { registerLineage, startLineage } from './lineage'
+import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -564,6 +565,7 @@ export const register: Register = (on, options) => {
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
     if (dbtMods) await startDbtMods($, !!e.isInteractive).catch(error => $.ui.log(`dbt-mods · could not start: ${String(error)}`))
+    await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
@@ -584,9 +586,9 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    // One band per plugin: the lineage impact line rides under the integrations one, or alone.
+    // One band per plugin: the end-of-task lineage summary rides under the integrations one, or alone.
     if (e.props.hasSurvey) return next(e)
-    const ownLineage = await lineageBand($, $.ui.resolve(e))
+    const ownLineage = await taskBand($, $.ui.resolve(e))
     const dbt = dbtMods ? await dbtModsBand($, $.ui.resolve(e)) : null
     const { Box: Rows } = $.ui.resolve(e)
     // The impact line and the dbt lines ride together under the integrations one, or alone.
@@ -811,6 +813,7 @@ export const register: Register = (on, options) => {
 
   registerLineage(on)
   if (dbtMods) registerDbtMods(on)
+  registerTaskImpact(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added
