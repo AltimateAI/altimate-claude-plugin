@@ -4,9 +4,10 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
-import { lineageBand, registerLineage, startLineage } from './lineage'
+import { registerLineage, startLineage } from './lineage'
 import { setStatusPart } from './status-line'
 import { installToolChain } from './tool-chain'
+import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -564,6 +565,7 @@ export const register: Register = (on, options) => {
     })
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
+    await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
     // Each feature's own start (its commands); one failing is logged and the rest go on.
     await featuresSessionStart($, e)
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
@@ -586,11 +588,11 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    // One band per plugin: the lineage impact line rides under the integrations one, or alone; each
+    // One band per plugin: the end-of-task lineage summary rides under the integrations one, or alone; each
     // feature's line rides under the lineage one.
     if (e.props.hasSurvey) return next(e)
     const ui = $.ui.resolve(e)
-    const lineage = await lineageBand($, ui)
+    const lineage = await taskBand($, ui)
     const extra = await featureBandLines($, ui)
     const tail =
       extra.length === 0 ? (
@@ -821,6 +823,7 @@ export const register: Register = (on, options) => {
   // tool.call hook (tool-chain.ts).
   registerFeatures(on, { options })
   installToolChain(on)
+  registerTaskImpact(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added
