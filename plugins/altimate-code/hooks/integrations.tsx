@@ -3,8 +3,9 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
-import { lineageBand, registerLineage, startLineage } from './lineage'
+import { registerLineage, startLineage } from './lineage'
 import { startReviewNotices } from './review-notices'
+import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -79,17 +80,19 @@ const ANSI = /\u001b\[[0-9;]*m/g
 async function runJson<T extends { message?: string | null }>($: EngineInterface, args: string[], timeoutMs?: number) {
   const result = await runCli($, args, timeoutMs)
   const data = parseJson<T>(result.stdout)
-  const failure = result.exitCode === 0 ? null : (data?.message ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed')
-  return { data, failure }
+  return { data, failure: result.exitCode === 0 ? null : failureText(result) }
 }
 
+/** A CLI reason worth showing: a non-empty string, else null. */
+const reasonOf = (value: unknown): string | null => (typeof value === 'string' && value.trim() ? value : null)
+
 /**
- * Why a failed CLI call failed: a `sync` report's own lines, else the `message` or `error` of the JSON the
- * CLI prints to stdout, else the first line of stderr.
+ * Why a failed CLI call failed: a `sync` report's own lines, else the first non-empty `message` or `error`
+ * string of the JSON the CLI prints to stdout, else the first line of stderr.
  */
 function failureText(result: { stdout: string; stderr: string }, command?: string): string {
-  const data = parseJson<{ message?: string; error?: string }>(result.stdout)
-  return (command === 'sync' ? syncText(result.stdout) : null) ?? data?.message ?? data?.error ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
+  const data = parseJson<{ message?: unknown; error?: unknown }>(result.stdout)
+  return (command === 'sync' ? syncText(result.stdout) : null) ?? reasonOf(data?.message) ?? reasonOf(data?.error) ?? firstLine(result.stderr.replace(ANSI, '')) ?? 'failed'
 }
 
 // A status read that finishes after a newer one started is dropped, so an older answer never overwrites a newer one.
@@ -229,7 +232,8 @@ async function listWorkspaces($: EngineInterface) {
     const result = await runAltimate($, ['workspace', 'list', '--json'])
     const data = parseJson<{ ok?: boolean; workspaces?: WorkspaceChoice[] }>(result.stdout)
     if (result.exitCode !== 0 || !Array.isArray(data?.workspaces)) {
-      await update($, message, () => failureText(result) === 'failed' ? 'Could not list workspaces.' : failureText(result))
+      const reason = failureText(result)
+      await update($, message, () => (reason === 'failed' ? 'Could not list workspaces.' : reason))
     } else if (data.workspaces.length === 0) {
       await update($, message, () => 'No workspaces found for this account.')
     } else {
@@ -250,7 +254,8 @@ async function linkWorkspace($: EngineInterface, choice: WorkspaceChoice) {
   try {
     const link = await runAltimate($, ['link', '--workspace', String(choice.id), '-y'], WORKSPACE_TIMEOUT_MS)
     if (link.exitCode !== 0) {
-      await update($, message, () => (failureText(link) === 'failed' ? 'Could not link the workspace.' : failureText(link)))
+      const reason = failureText(link)
+      await update($, message, () => (reason === 'failed' ? 'Could not link the workspace.' : reason))
       return
     }
     await update($, workspaces, () => null)
@@ -275,28 +280,30 @@ type Outcome = { status?: string; sync?: string; account?: string | null; messag
 async function loadForm($: EngineInterface, open: Expanded) {
   try {
     const { data, failure } = await runJson<Form & { message?: string }>($, ['fields', open.provider, ...(open.variant ? ['--variant', open.variant] : []), '--json'])
-    if (data && Array.isArray(data.fields)) await update($, form, () => data)
-    else await update($, formMessage, () => failure ?? 'Could not read the credential fields.')
+    if (data && Array.isArray(data.fields)) await update($, form, () => ({ ...data, variants: Array.isArray(data.variants) ? data.variants : [] }))
+    else await update($, formMessage, current => joinNotes(current, failure ?? 'Could not read the credential fields.'))
   } catch (error) {
-    await update($, formMessage, () => `Could not run altimate: ${String(error)}`)
+    await update($, formMessage, current => joinNotes(current, `Could not run altimate: ${String(error)}`))
   }
 }
 
-/** Forgets what was typed or pasted for a provider, so an abandoned form cannot leak into the next connect. */
-async function discardEntries($: EngineInterface, provider: ProviderId) {
+/** Keeps an earlier note on the form (a failed discard, a refused connect) next to a new one. */
+function joinNotes(...notes: (string | null | undefined)[]): string | null {
+  return notes.filter(Boolean).join(' · ') || null
+}
+
+/** Forgets what was typed or pasted for a provider, so an abandoned form cannot leak into the next connect. Returns why it failed, or null. */
+async function discardEntries($: EngineInterface, provider: ProviderId): Promise<string | null> {
   try {
-    await runJson($, ['discard', provider, '--json'])
-  } catch {}
+    return (await runJson($, ['discard', provider, '--json'])).failure
+  } catch (error) {
+    return String(error)
+  }
 }
 
 /** Discards what was entered for a provider ahead of an action that ignores the form; an open form for it is closed with it. Returns why it failed, or null. */
 async function discardForAction($: EngineInterface, provider: ProviderId): Promise<string | null> {
-  let failure: string | null
-  try {
-    failure = (await runJson($, ['discard', provider, '--json'])).failure
-  } catch (error) {
-    failure = String(error)
-  }
+  const failure = await discardEntries($, provider)
   if (failure) return failure
   if ((await read($, expanded))?.provider === provider) await closeForm($)
   return null
@@ -304,11 +311,11 @@ async function discardForAction($: EngineInterface, provider: ProviderId): Promi
 
 async function openForm($: EngineInterface, provider: ProviderId, mode: Expanded['mode'], note: string | null = null) {
   const open: Expanded = { provider, mode, variant: null }
-  await discardEntries($, provider)
+  const failure = await discardEntries($, provider)
   await update($, expanded, () => open)
   await update($, form, () => null)
   await update($, typed, () => ({}))
-  await update($, formMessage, () => note)
+  await update($, formMessage, () => joinNotes(failure && `Could not clear earlier input: ${failure}`, note))
   await update($, message, () => null)
   await loadForm($, open)
 }
@@ -321,8 +328,9 @@ async function closeForm($: EngineInterface) {
 }
 
 async function cancelForm($: EngineInterface, provider: ProviderId) {
-  await discardEntries($, provider)
+  const failure = await discardEntries($, provider)
   await closeForm($)
+  if (failure) await update($, message, () => `${nameOf(provider)}: could not clear what was entered: ${failure}`)
 }
 
 async function openPane($: EngineInterface) {
@@ -428,7 +436,7 @@ function submitForm($: EngineInterface, localOnly: boolean) {
       const verb = open.mode === 'update' && !localOnly ? 'update' : 'connect'
       const variant = open.variant ? ['--variant', open.variant] : []
       const run = await runJson<Outcome>($, [verb, open.provider, ...(localOnly ? ['--local-only'] : []), ...variant, '--json'], WORKSPACE_TIMEOUT_MS)
-      outcome = run.data ?? { status: 'failed', message: run.failure }
+      outcome = { status: 'failed', ...run.data, message: run.failure ? (run.failure === 'failed' ? null : run.failure) : reasonOf(run.data?.message) }
     })
     const result = outcome as Outcome | null
     if (!result) return
@@ -561,6 +569,7 @@ export const register: Register = on => {
     })
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
+    await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
@@ -583,9 +592,9 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    // One band per plugin: the lineage impact line rides under the integrations one, or alone.
+    // One band per plugin: the end-of-task lineage summary rides under the integrations one, or alone.
     if (e.props.hasSurvey) return next(e)
-    const lineage = await lineageBand($, $.ui.resolve(e))
+    const lineage = await taskBand($, $.ui.resolve(e))
     const pass = async () => lineage ?? next(e)
     const current = await read($, status)
     if (!current || (await read($, isBandHidden))) return pass()
@@ -690,12 +699,10 @@ export const register: Register = on => {
           {choices && !running && (
             <Box flexDirection="column">
               <Text dimColor>Link this folder to:</Text>
-              <Box flexDirection="column">
-                {choices.map(one => (
-                  <Button key={`link-${one.id}`} label={one.name} onPress={() => later($, () => linkWorkspace($, one))} />
-                ))}
-                <Button key="link-cancel" label="Cancel" onPress={() => later($, () => update($, workspaces, () => null))} />
-              </Box>
+              {choices.map(one => (
+                <Button key={`link-${one.id}`} label={one.name} onPress={() => later($, () => linkWorkspace($, one))} />
+              ))}
+              <Button key="link-cancel" label="Cancel" onPress={() => later($, () => update($, workspaces, () => null))} />
             </Box>
           )}
         </Box>
@@ -799,6 +806,7 @@ export const register: Register = on => {
   })
 
   registerLineage(on)
+  registerTaskImpact(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added
