@@ -336,7 +336,13 @@ async function attach($: EngineInterface, dir: string) {
     return switched ? { ...INITIAL, drafts: current.drafts, ...found } : { ...current, ...found }
   })
   if (mine !== generation) return
-  if (switched) writes++
+  if (switched) {
+    writes++
+    // The project in view is a different one: an unchecked post of the first is no longer in view either, and
+    // its lock would never be freed by a list of this one. Going back lists the first project again.
+    uncertain = null
+    posting = false
+  }
   // The first load of a project: a read that is waiting on it has already joined it, so this one is not asked twice.
   pendingFor = found.root
   later($, async () => {

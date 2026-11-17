@@ -28,7 +28,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void> } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[] } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -61,7 +61,7 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
     if (args.action === 'list') {
       const call = cli.filter(c => c.args.action === 'list').length - 1
       const threads = options.listThreads?.(call) ?? options.threads ?? [RAW]
-      if (options.failListFrom !== undefined && call >= options.failListFrom) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'service unavailable', metadata: {} }), stderr: '' } }
+      if ((options.failListFrom !== undefined && call >= options.failListFrom) || options.failListCalls?.includes(call)) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'service unavailable', metadata: {} }), stderr: '' } }
       const heldList = options.holdLists?.[call]
       if (heldList) return heldList.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }))
       if (options.holdListCall && options.holdListCall.n === call) {
@@ -487,4 +487,20 @@ test('a read in a second project while the first project’s list is still loadi
   release()
   for (let i = 0; i < 4; i++) await clock.advance(FIRST_READ_WAIT_MS)
   expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toContain('other_shop')
+})
+
+test('an unchecked post does not lock posting for good when a read moves the pane to another project', async ($, on) => {
+  const other = '/other'
+  const { clock, cli } = await start($, on, { otherProject: other, timeoutPost: true, listThreads: () => [RAW], files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL }, failListCalls: [1] })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
+  for (let i = 0; i < 4; i++) await clock.advance(FIRST_READ_WAIT_MS)
+  // The other project's lists fail here too, but its thread is not the locked one: its Resolve goes out.
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve').length).toBeGreaterThanOrEqual(2)
+  await ui.unmount()
 })
