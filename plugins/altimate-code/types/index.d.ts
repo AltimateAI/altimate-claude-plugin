@@ -278,6 +278,20 @@ export interface DocsState {}
 // ---------------------------------------------------------------------------------------------------
 export interface CteProfileState {}
 
+/** One /savings run's answer, as the pane draws it. */
+export type SavingsView = {
+  /** The altimate-code connection that ran the check. */
+  connection: string | null
+  /** The SQL warehouse its queries ran on. */
+  ranOn: string | null
+  /** The days the check read, `start` inclusive and `end` at 06:00 UTC (YYYY-MM-DD). */
+  window: { start: string; end: string }
+  warehousesChecked: number
+  /** Dollars a month at list price, each warehouse counted once at its largest saving. */
+  total: { min: number; max: number; warehouses: number }
+  findings: { title: string; warehouseName: string; monthlyMin: number; monthlyMax: number; evidence: string[] }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -337,6 +351,12 @@ declare module 'claude-code' {
       health: HealthState | null
       /** hooks/features/: SqlGraphState. */
       sqlGraph: Shaped<SqlGraphState | null>
+      /** The last /savings answer; null before one, or after /clear. */
+      savingsReport: Shaped<SavingsView | null>
+      /** What /savings is doing now; null when it is idle. */
+      savingsBusy: { label: string } | null
+      /** Why there is no answer to show: the check's refusal and the step that fixes it. */
+      savingsMessage: { text: string; recovery: string } | null
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */

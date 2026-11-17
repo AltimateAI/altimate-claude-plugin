@@ -134,6 +134,14 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 - **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds). All of them run only in a linked folder (or below it), as recorded in altimate-code's link cache in your own state directory: nothing in the repository turns them on.
 - **`ALTIMATE_LEARN=0`** turns all of it off: the hooks start nothing.
 
+## Databricks savings check
+
+`/savings [connection]` checks a Databricks workspace's SQL warehouses for savings with two of Altimate's Databricks checks: Classic or Pro warehouses that would cost less as serverless, and warehouses larger than their queries need. A pane beside the chat shows each finding with what it rests on (idle share, cores used, spill and queueing, DBUs and cost) and a monthly range at list price, each warehouse counted once at its largest saving.
+
+- **What runs.** altimate-code's `finops_databricks_savings` tool, with your own altimate-code Databricks connection (the first one, or the one named). It reads seven days of Databricks system tables (`system.billing`, `system.compute`, `system.query`) on the connection's SQL warehouse, which Databricks starts if it is stopped. Nothing is written.
+- **What it needs.** An altimate-code with that tool, and a Databricks connection whose `http_path` is a SQL warehouse (`/sql/1.0/warehouses/<id>`) with an access token that can read those system tables.
+- **What leaves your machine.** The plugin runs the tool with `ALTIMATE_TELEMETRY_DISABLED=true`, so neither altimate-code nor altimate-core sends usage telemetry for it. The findings stay in the pane: they do not enter the conversation. Claude can also run the same tool itself (it is listed for it); its answer then reaches your model provider like any other tool result.
+
 ## Settings
 
 The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). None is used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each will control.

@@ -112,6 +112,10 @@ Each event carries the step and the Claude Code session id (`claude:<id>`) only:
 
 **Bring Your Own Key (BYOK):** if you configure your own provider (Anthropic, OpenAI, Bedrock, Azure OpenAI, Ollama, and others), your prompts go directly from your machine to that provider. Altimate is not in that delegation path; workspace service requests still go to Altimate.
 
+## The Databricks savings check
+
+`/savings` runs altimate-code's `finops_databricks_savings` tool on your machine, with your own Databricks connection. It reads usage from your workspace's system tables and decides the savings locally. The plugin runs it with telemetry turned off, so no usage event about the run is sent to Altimate, and the findings are shown in a pane, not added to the conversation. When Claude runs the same tool itself, its answer is a tool result like any other and reaches your model provider.
+
 ## Usage telemetry
 
 The altimate-code CLI emits anonymous product usage telemetry: event names, tool categories, token counts, timing, and error types. Telemetry never includes your code, queries, credentials, file paths, or prompt content, and error messages pass through a redaction layer (API keys, emails, and internal hostnames are masked). Events are keyed to an anonymous machine ID — a random UUID generated on first run and stored at `~/.altimate/machine-id`, not tied to your hardware or identity. For logged-in users, the email identifier is SHA-256 hashed before sending. The full event list is published in the [Telemetry reference](https://docs.altimate.sh/reference/telemetry/).

@@ -15,12 +15,15 @@ const CLI_NAMES = ['altimate', 'altimate-code'] as const
 // reruns a command that may have taken effect.
 export const MISSING_BINARY = /ENOENT|not found|no such file|(cannot|could not|failed to) (start|spawn|run)/i
 
-/** Runs the altimate CLI under the first name that is installed; 90 s unless the caller says otherwise. */
-export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 90_000) {
+/**
+ * Runs the altimate CLI under the first name that is installed; 90 s unless the caller says otherwise.
+ * `env` is set over the session's environment for this run only.
+ */
+export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 90_000, env?: Record<string, string>) {
   let lastError: unknown = null
   for (const bin of CLI_NAMES) {
     try {
-      return await $.process.run([bin, ...args], { timeoutMs })
+      return await $.process.run([bin, ...args], env ? { timeoutMs, env } : { timeoutMs })
     } catch (error) {
       if (!MISSING_BINARY.test(String(error))) throw error
       lastError = error
@@ -124,6 +127,8 @@ export type RunToolOptions = {
    * item 4), as the skill does before it adds `--allow-write`.
    */
   write?: boolean
+  /** Variables set for a CLI run (`cliOnly`), over the session's environment. */
+  env?: Record<string, string>
 }
 
 /**
@@ -174,7 +179,7 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
     }
   }
   const argv = ['tool', 'run', name, '--args', JSON.stringify(args), '--json', ...(write ? ['--allow-write'] : [])]
-  const result = await runAltimate($, argv, await left())
+  const result = await runAltimate($, argv, await left(), options.env)
   if ((result as { isStdoutTruncated?: boolean }).isStdoutTruncated) {
     return { metadata: null as any, text: `${name}'s answer was larger than the 4 MiB a plugin can read`, ok: false }
   }

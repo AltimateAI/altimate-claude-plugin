@@ -2,6 +2,12 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.8.0] — 2026-11-17
+
+### Added
+- `/savings [connection]`: a Databricks SQL warehouse savings check beside the chat. It runs altimate-code's `finops_databricks_savings` tool (Migrate Classic/Pro to Serverless and Over-Sized Warehouse) with your own Databricks connection and telemetry off, and shows each finding with its evidence and a monthly range at list price, each warehouse counted once. Needs an altimate-code release with that tool; with an older one the pane says to update. It is a feature under `hooks/features/` like the others.
+- `runTool` and `runAltimate` take an optional environment for one CLI run.
+
 ## [1.7.0] — 2026-11-17
 
 ### Added
