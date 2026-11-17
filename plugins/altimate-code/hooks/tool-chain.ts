@@ -39,6 +39,10 @@ export const PHASES: readonly Phase[] = ['bashRewrite', 'bashGate', 'bashAfter',
 /**
  * How long one phase may take, in milliseconds. A phase that runs longer is given up on: the call is
  * passed through unchanged (no refusal, no rewrite, no added context) and the timeout is logged.
+ *
+ * The deadline covers all the features' work in a phase together, not each feature: a gate still running at it
+ * is given up on and the call runs. A gate that must hold the call therefore bounds its own check well inside
+ * this and returns `{ deny }` when the check runs out of time.
  */
 export const PHASE_TIMEOUT_MS = 5_000
 

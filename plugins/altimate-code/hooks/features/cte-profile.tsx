@@ -36,9 +36,7 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
 
 /**
  * `{ deny }` refuses the Bash call; null lets it run. A gate that throws is logged and the call runs:
- * a gate that must hold the call when its own check fails catches that failure and returns `{ deny }`. The
- * phase has one deadline (PHASE_TIMEOUT_MS) for all the gates together: a gate still running at it is given
- * up on and the call runs, so a gate that must hold bounds its own check well inside that and denies.
+ * a gate that must hold the call when its own check fails catches that failure and returns `{ deny }`.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   return null
