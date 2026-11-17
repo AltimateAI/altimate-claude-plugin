@@ -567,7 +567,7 @@ export const register: Register = (on, options) => {
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
     await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
     // An earlier session's status parts are not this one's.
-    await clearStatusParts($)
+    await clearStatusParts($).catch(error => $.ui.log(`status line · could not clear: ${String(error)}`))
     // Each feature's own start (its commands); one failing is logged and the rest go on.
     await featuresSessionStart($, e)
     // A press that was running when an earlier session ended can never finish, so it must not block this one.

@@ -3,6 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import { FEATURE_IDS } from './features'
 import { register } from './integrations'
 import { STATUS_ORDER, statusLineOf } from './status-line'
+import { within } from './altimate-cli'
 import { afterCall, beforeCall, PHASES, type ChainSteps } from './tool-chain'
 
 /** Steps that record each phase they run, in order. */
@@ -16,6 +17,8 @@ function recording(overrides: Partial<ChainSteps> = {}) {
     readOrEditAfter: async e => (seen.push(`readOrEditAfter:${e.tool}`), []),
     readBefore: async path => (seen.push(`readBefore:${path}`), 'select 1'),
     readsBefore: false,
+    limit: async work => work.catch(() => null),
+    log: text => void seen.push(`log:${text}`),
     ...overrides,
   }
   return { seen, steps }
@@ -107,7 +110,50 @@ test('the plugin registers the chain: one tool.call hook for Bash and the file t
   expect(tool.test('Grep')).toBe(false)
   // With every feature a stub, the chain hands the call on unchanged and passes its result back.
   const seen: any[] = []
-  const result = await chains[0]!.handler({ fs: { read: async () => null } }, { tool: 'Bash', command: 'dbt run -s orders' }, async (e: any) => (seen.push(e), ok))
+  const result = await chains[0]!.handler({ fs: { read: async () => null }, clock: quick.clock, ui: { log: () => {} } }, { tool: 'Bash', command: 'dbt run -s orders' }, async (e: any) => (seen.push(e), ok))
   expect(seen).toEqual([{ tool: 'Bash', command: 'dbt run -s orders' }])
   expect(result).toBe(ok)
+})
+
+/** Phases bounded by a real `within` on a clock whose deadline passes at once, so the test is fast. */
+const quick = { clock: { after: (_ms: number, run: () => void) => void Promise.resolve().then(run) } } as any
+const never = () => new Promise<never>(() => {})
+
+test('a phase that never settles is given up on: the call passes through unchanged and the timeout is logged', async () => {
+  const { seen, steps } = recording({
+    bashRewrite: never,
+    bashGate: never,
+    bashAfter: never,
+    editAfter: never,
+    readOrEditAfter: never,
+    readBefore: never,
+    readsBefore: true,
+    limit: work => within(quick, 20, work),
+  })
+  const bash = { tool: 'Bash', command: 'dbt run -s a' } as any
+  const pre = await beforeCall(bash, steps)
+  expect(pre.e).toBe(bash)
+  expect(pre.deny).toBeNull()
+  const result = await afterCall(pre.e, ok, pre.before, steps)
+  expect(result).toBe(ok)
+
+  const edit = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
+  const editPre = await beforeCall(edit, steps)
+  expect(editPre.before).toBeNull()
+  expect(await afterCall(edit, ok, null, steps)).toBe(ok)
+  expect(seen).toEqual(
+    ['bashRewrite', 'bashGate', 'bashAfter', 'readBefore', 'editAfter', 'readOrEditAfter'].map(
+      phase => `log:tool chain · ${phase} did not finish within 5000 ms or failed: the call goes on unchanged`,
+    ),
+  )
+})
+
+test('a phase that throws at once is treated like one that timed out', async () => {
+  const { steps } = recording({
+    bashRewrite: (() => {
+      throw new Error('at once')
+    }) as any,
+  })
+  const pre = await beforeCall({ tool: 'Bash', command: 'dbt run' } as any, steps)
+  expect((pre.e as any).command).toBe('dbt run')
 })

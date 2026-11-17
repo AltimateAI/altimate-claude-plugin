@@ -132,6 +132,18 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 - **The per-turn hooks never block**: they hand off to altimate-code in the background. Session start makes one bounded synchronous call (at most 15 seconds). All of them run only in a linked folder (or below it), as recorded in altimate-code's link cache in your own state directory: nothing in the repository turns them on.
 - **`ALTIMATE_LEARN=0`** turns all of it off: the hooks start nothing.
 
+## Settings
+
+The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). None of them does anything yet: the features they belong to are not built, so changing one has no effect today.
+
+| Setting | Default | What it will control | Active |
+| --- | --- | --- | --- |
+| `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it is held for `/allow-scan` (0 never holds one; at least 0). | Not yet |
+| `healthBlocksPush` | off | Refusing `git push` while the project health check finds new issues in the models you changed. | Not yet |
+| `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. | Not yet |
+| `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). | Not yet |
+| `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. | Not yet |
+
 ## Example prompts
 
 Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):

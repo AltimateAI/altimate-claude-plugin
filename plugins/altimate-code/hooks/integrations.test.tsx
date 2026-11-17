@@ -579,3 +579,18 @@ test("a new session's start clears the status line an earlier session drew befor
   expect(drawn[0]).toBeUndefined()
   expect(drawn.at(-1)).toBe(first.at(-1))
 })
+
+test("a status line that cannot be drawn does not stop the rest of the session's start", async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const calls = fakeCli(on, { connect: { exitCode: 0, body: {} } })
+  on('ui.status', () => {
+    throw new Error('no status line')
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  // The scan after the clearing still ran.
+  expect(calls.length).toBeGreaterThan(0)
+})

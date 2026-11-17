@@ -6,9 +6,11 @@
 // Within a phase the features run in the order features/index.ts calls them. A feature that throws is
 // logged and skipped: its failure never stops or alters the call on its own. After-phases are awaited,
 // so they stay quick and leave slow work to `later`. Context lines they return are appended to the
-// call's result, after any the call already carries.
+// call's result, after any the call already carries. Each phase has a deadline (PHASE_TIMEOUT_MS): one
+// that does not answer in time is logged and the call goes on as if no feature had spoken in it.
 import type { On, ToolCallInput, ToolCallResult } from 'claude-code'
 
+import { within } from './altimate-cli'
 import {
   EDIT_READS_BEFORE,
   featuresBashAfter,
@@ -33,6 +35,12 @@ export type Phase = 'bashRewrite' | 'bashGate' | 'bashAfter' | 'editAfter' | 're
 
 /** The phases in the order a call goes through them; `next(e)` runs between bashGate and bashAfter. */
 export const PHASES: readonly Phase[] = ['bashRewrite', 'bashGate', 'bashAfter', 'editAfter', 'readOrEditAfter']
+
+/**
+ * How long one phase may take, in milliseconds. A phase that runs longer is given up on: the call is
+ * passed through unchanged (no refusal, no rewrite, no added context) and the timeout is logged.
+ */
+export const PHASE_TIMEOUT_MS = 5_000
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
 
@@ -63,6 +71,19 @@ export type ChainSteps = {
   /** The file's text before an edit; called only when `readsBefore` is set. */
   readBefore: (path: string) => Promise<string | null>
   readsBefore: boolean
+  /** Runs one phase's work under its deadline: null when the work did not finish in time or failed. */
+  limit: <T>(work: Promise<T>) => Promise<T | null>
+  /** Where a phase that timed out is logged. */
+  log: (text: string) => void
+}
+
+/** The phase's value, or `fallback` (logged) when it ran out of time, failed or threw. */
+async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore', fallback: T, run: () => Promise<T>): Promise<T> {
+  // Wrapped, so a legitimate null value is told apart from the deadline's null.
+  const done = await steps.limit(Promise.resolve().then(run).then(value => ({ value })))
+  if (done) return done.value
+  steps.log(`tool chain · ${phase} did not finish within ${PHASE_TIMEOUT_MS} ms or failed: the call goes on unchanged`)
+  return fallback
 }
 
 /** The phases before the call: rewrites, then the gate. `deny` set means the call must not run. */
@@ -70,13 +91,13 @@ export async function beforeCall(input: ToolCallInput, steps: ChainSteps): Promi
   let e = input
   const bash = bashCallOf(e)
   if (bash) {
-    const command = await steps.bashRewrite(bash)
+    const command = await bounded(steps, 'bashRewrite', bash.command, () => steps.bashRewrite(bash))
     if (command !== bash.command) e = { ...e, command } as ToolCallInput
-    const deny = await steps.bashGate({ ...bash, command })
+    const deny = await bounded(steps, 'bashGate', null, () => steps.bashGate({ ...bash, command }))
     if (deny) return { e, deny, before: null }
   }
   const path = filePathOf(e)
-  const before = path && EDIT_TOOLS.has(e.tool) && steps.readsBefore ? await steps.readBefore(path).catch(() => null) : null
+  const before = path && EDIT_TOOLS.has(e.tool) && steps.readsBefore ? await bounded(steps, 'readBefore', null, () => steps.readBefore(path)) : null
   return { e, deny: null, before }
 }
 
@@ -85,11 +106,11 @@ export async function afterCall(e: ToolCallInput, result: ToolCallResult, before
   if (result.deny !== undefined) return result
   const lines: string[] = []
   const bash = bashCallOf(e)
-  if (bash) lines.push(...(await steps.bashAfter(bash, result)))
+  if (bash) lines.push(...(await bounded<string[]>(steps, 'bashAfter', [], () => steps.bashAfter(bash, result))))
   const path = filePathOf(e)
   if (path && !result.isError) {
-    if (EDIT_TOOLS.has(e.tool)) lines.push(...(await steps.editAfter(e as FileCall, result, { path, before })))
-    lines.push(...(await steps.readOrEditAfter(e as FileCall, result, { path })))
+    if (EDIT_TOOLS.has(e.tool)) lines.push(...(await bounded<string[]>(steps, 'editAfter', [], () => steps.editAfter(e as FileCall, result, { path, before }))))
+    lines.push(...(await bounded<string[]>(steps, 'readOrEditAfter', [], () => steps.readOrEditAfter(e as FileCall, result, { path }))))
   }
   return withContext(result, lines)
 }
@@ -108,6 +129,8 @@ export function installToolChain(on: On) {
       readOrEditAfter: (e, result, file) => featuresReadOrEditAfter($, e, result, file),
       readBefore: path => $.fs.read(path),
       readsBefore: EDIT_READS_BEFORE,
+      limit: work => within($, PHASE_TIMEOUT_MS, work),
+      log: text => $.ui.log(text, { to: 'debug' }),
     }
     // The chain failing never stops the call: it then runs as it came, and its result goes back as is.
     const pre = await beforeCall(input, steps).catch(() => ({ e: input, deny: null, before: null }))

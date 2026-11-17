@@ -1,20 +1,50 @@
 // The dbt invocations in a shell command line, as Claude's Bash calls write them: `dbt build -s x`,
 // `cd a && dbt run`, `uv run dbt test | tee log`, `DBT_PROFILES_DIR=. dbt run`. Each comes with its
-// place in the line, so a caller can rewrite one without touching the rest. A line that can't be read
-// (an unclosed quote, substitution or parenthesis, an operator or redirection with nothing after it, a
-// heredoc outside a `$(…)` substitution) yields no invocation.
+// place in the line, so a caller can rewrite one without touching the rest.
+//
+// Supported-input contract: parseDbtCommand reports an invocation only when the static text shows dbt
+// will start; when in doubt it returns no invocation, and values it cannot read statically are never
+// reported as literal values. In particular, these give no invocation:
+//   - a line that can't be read (an unclosed quote, substitution or parenthesis, an operator or
+//     redirection with nothing after it, a heredoc outside a `$(…)` substitution);
+//   - `command -v dbt …` / `command -V dbt …` (a lookup), and `env` followed by any option word
+//     (`env -u X`, `env -i`, `env -S`); `env` with only NAME=value words is read;
+//   - a NAME=value word right after `nohup`, `command`, `exec` (it is the command's name, not an
+//     assignment), and a quoted NAME=value or quoted shell keyword (`"DBT_TARGET=prod" dbt run`,
+//     `"if" dbt run`), which is a command's name too;
+//   - a binary or subcommand word that holds an expansion (`dbt $CMD`, `$(which dbt) run`);
+//   - a redirection among the arguments with another argument after it (`dbt run > log -s a`): an
+//     unsupported form, since cutting the invocation out would cut the redirection too. A trailing
+//     redirection (`dbt run -s a > log`) is fine and is left out of the invocation's range.
+// An expansion is `$(…)`, `${…}`, `$NAME`, `$1`, a backtick command, or a `<(…)` / `>(…)` substitution,
+// outside single quotes; a word holding one is a single word, whatever it holds.
 
 export type DbtInvocation = {
   /** How dbt is launched, as written: `dbt`, `.venv/bin/dbt`, `uv run dbt`, `poetry run dbt`. */
   binary: string
   /** The first word after the launcher's options: `build`, `run`, `test`…; null when there is none. */
   subcommand: string | null
-  /** Every value given to -s, --select, -m, --models or --model, in order. */
+  /**
+   * Every value given to -s, --select, -m, --models or --model, in order. A value that holds an expansion
+   * is left out, so when `dynamic` is true this list is unknown, not complete.
+   */
   select: string[]
-  /** The value of -t or --target, else of DBT_TARGET set in front of the command; null when neither. */
+  /**
+   * The value of -t or --target, else of DBT_TARGET set in front of the command; null when neither, and
+   * null when the value holds an expansion. When `dynamic` is true it is unknown, not "none".
+   */
   target: string | null
-  /** The value of --target-path, else of DBT_TARGET_PATH set in front of the command; null when neither. */
+  /**
+   * The value of --target-path, else of DBT_TARGET_PATH set in front of the command; null when neither,
+   * and null when the value holds an expansion. When `dynamic` is true it is unknown, not "none".
+   */
   targetPath: string | null
+  /**
+   * Some word of the invocation (its leading assignments, launcher, flags or flag values) holds an
+   * expansion, so what the shell passes to dbt is not what the text says. A consumer treats `select`,
+   * `target` and `targetPath` of such an invocation as unknown, and does not rewrite it on their strength.
+   */
+  dynamic: boolean
   /** --defer or --no-defer is given, or DBT_DEFER is set in front of the command. */
   hasDefer: boolean
   /** --state or --defer-state is given, or DBT_STATE / DBT_DEFER_STATE is set in front of the command. */
@@ -31,7 +61,20 @@ export type DbtInvocation = {
   subcommandEnd: number
 }
 
-type Token = { kind: 'word'; text: string; start: number; end: number } | { kind: 'op'; text: string; start: number; end: number }
+type Word = {
+  kind: 'word'
+  text: string
+  start: number
+  end: number
+  /**
+   * Where in `text` the first quoted part (single, double, `$'…'` or a backslash escape) begins; -1 when
+   * no part is quoted. A NAME=value word is an assignment only when its `=` comes before it.
+   */
+  quotedAt: number
+  /** An expansion outside single quotes: `$(…)`, `${…}`, `$NAME`, `$1`, a backtick command, `<(…)`. */
+  dynamic: boolean
+}
+type Token = Word | { kind: 'op'; text: string; start: number; end: number }
 
 const OPERATORS = ['&&', '||', ';;', '|&', '|', '&', ';', '(', ')', '\n']
 const ARRAY_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?\+?=$/
@@ -101,16 +144,56 @@ function substitutionEnd(line: string, at: number): number {
   return -1
 }
 
+/** Offset just past the `${…}` whose `{` is at `at`; -1 when it is not closed. */
+function braceEnd(line: string, at: number): number {
+  let depth = 0
+  for (let j = at; j < line.length; j++) {
+    const c = line[j]
+    if (c === '\\') j++
+    else if (c === "'") {
+      j = line.indexOf("'", j + 1)
+      if (j < 0) return -1
+    } else if (c === '"') {
+      for (j++; j < line.length && line[j] !== '"'; j++) {
+        if (line[j] === '\\') j++
+        else if (line[j] === '$' && line[j + 1] === '(') {
+          const end = substitutionEnd(line, j + 1)
+          if (end < 0) return -1
+          j = end - 1
+        }
+      }
+      if (j >= line.length) return -1
+    } else if (c === '$' && line[j + 1] === '(') {
+      const end = substitutionEnd(line, j + 1)
+      if (end < 0) return -1
+      j = end - 1
+    } else if (c === '{') depth++
+    else if (c === '}' && --depth === 0) return j + 1
+  }
+  return -1
+}
+
+/** A `$` that opens a variable: a name, a digit or one of the special parameters. */
+const startsVariable = (next: string | undefined) => next !== undefined && /[A-Za-z0-9_@*#?!$]/.test(next)
+
 /** The words and operators of a command line, with their offsets; null when a quote or substitution is not closed. */
 function lex(line: string): Token[] | null {
   const tokens: Token[] = []
   let i = 0
   let text = ''
   let start = -1
+  let quotedAt = -1
+  let dynamic = false
   const flush = (end: number) => {
-    if (start >= 0) tokens.push({ kind: 'word', text, start, end })
+    if (start >= 0) tokens.push({ kind: 'word', text, start, end, quotedAt, dynamic })
     text = ''
     start = -1
+    quotedAt = -1
+    dynamic = false
+  }
+  // A quoted part is about to add to `text`.
+  const quote = () => {
+    if (quotedAt < 0) quotedAt = text.length
   }
   while (i < line.length) {
     const c = line[i]!
@@ -132,13 +215,15 @@ function lex(line: string): Token[] | null {
     const paren =
       (c === '<' || c === '>') && line[i + 1] === '(' && start < 0
         ? i + 1
-        : c === '(' && (start < 0 ? line[i + 1] === '(' : ARRAY_ASSIGNMENT.test(text))
+        : c === '(' && (start < 0 ? line[i + 1] === '(' : quotedAt < 0 && ARRAY_ASSIGNMENT.test(text))
           ? i
           : -1
     if (paren >= 0) {
       const end = substitutionEnd(line, paren)
       if (end < 0) return null
       if (start < 0) start = i
+      // A process substitution's value is a path the shell makes up.
+      if (c === '<' || c === '>') dynamic = true
       text += line.slice(i, end)
       i = end
       continue
@@ -159,14 +244,25 @@ function lex(line: string): Token[] | null {
     }
     if (start < 0) start = i
     if (c === '\\') {
+      quote()
       text += line[i + 1] ?? ''
       i += 2
     } else if (c === "'") {
       const close = line.indexOf("'", i + 1)
       if (close < 0) return null
+      quote()
       text += line.slice(i + 1, close)
       i = close + 1
+    } else if (c === '$' && line[i + 1] === "'") {
+      // `$'…'`: a quoted string in which a backslash escapes the next character.
+      let j = i + 2
+      while (j < line.length && line[j] !== "'") j += line[j] === '\\' ? 2 : 1
+      if (j >= line.length) return null
+      quote()
+      text += line.slice(i + 2, j)
+      i = j + 1
     } else if (c === '"') {
+      quote()
       let j = i + 1
       while (j < line.length && line[j] !== '"') {
         if (line[j] === '\\' && j + 1 < line.length) {
@@ -175,18 +271,36 @@ function lex(line: string): Token[] | null {
         } else if ((line[j] === '$' && line[j + 1] === '(') || line[j] === '`') {
           const end = substitutionEnd(line, line[j] === '$' ? j + 1 : j)
           if (end < 0) return null
+          dynamic = true
           text += line.slice(j, end)
           j = end
-        } else text += line[j++]
+        } else if (line[j] === '$' && line[j + 1] === '{') {
+          const end = braceEnd(line, j + 1)
+          if (end < 0) return null
+          dynamic = true
+          text += line.slice(j, end)
+          j = end
+        } else {
+          if (line[j] === '$' && startsVariable(line[j + 1])) dynamic = true
+          text += line[j++]
+        }
       }
       if (j >= line.length) return null
       i = j + 1
     } else if ((c === '$' && line[i + 1] === '(') || c === '`') {
       const end = substitutionEnd(line, c === '$' ? i + 1 : i)
       if (end < 0) return null
+      dynamic = true
+      text += line.slice(i, end)
+      i = end
+    } else if (c === '$' && line[i + 1] === '{') {
+      const end = braceEnd(line, i + 1)
+      if (end < 0) return null
+      dynamic = true
       text += line.slice(i, end)
       i = end
     } else {
+      if (c === '$' && startsVariable(line[i + 1])) dynamic = true
       text += c
       i++
     }
@@ -196,10 +310,12 @@ function lex(line: string): Token[] | null {
 }
 
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
-// Words that may stand in front of a command without being it.
-const PREFIX_WORDS = new Set(['!', '{', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time', 'command', 'exec', 'nohup', 'env'])
-// Options of those prefix words that take a value, so the value is not read as the command.
-const PREFIX_VALUE_FLAGS = new Set(['-u', '--unset', '-C', '--chdir', '-f', '--format', '-o', '--output', '-a'])
+// Shell keywords after which a command still starts: assignments may follow them.
+const KEYWORDS = new Set(['!', '{', 'then', 'do', 'else', 'elif', 'if', 'while', 'until', 'time'])
+// Commands that run their first argument that is no option: a NAME=value there is the command's name.
+const WRAPPERS = new Set(['command', 'exec', 'nohup', 'env'])
+// Options of those words and of `time` that take a value, so the value is not read as the command.
+const PREFIX_VALUE_FLAGS = new Set(['-C', '--chdir', '-f', '--format', '-o', '--output', '-a'])
 // Launchers whose `run` subcommand runs the command after their own options.
 const RUNNERS = new Set(['uv', 'poetry', 'pipenv', 'pdm', 'hatch', 'rye', 'uvx'])
 // Launcher options that take a value, so the value is not read as the command.
@@ -263,12 +379,40 @@ const DBT_VALUE_FLAGS = new Set([
   '--log-file-max-bytes',
   '--add-package',
   '--source',
+  '--partial-parse-file-path',
+  '--packages-install-path',
 ])
 // Short dbt options that take a value, which may also be written joined to it: `-tprod`, `-sorders`.
 const SHORT_VALUE_FLAGS = new Set(['-s', '-m', '-t', '-o', '-r'])
 const SELECT_FLAGS = new Set(['-s', '--select', '-m', '--models', '--model'])
 
+// dbt's subcommands: the first of these in the line is the one dbt runs.
+const DBT_SUBCOMMANDS = new Set([
+  'build',
+  'clean',
+  'clone',
+  'compile',
+  'debug',
+  'deps',
+  'docs',
+  'init',
+  'list',
+  'ls',
+  'parse',
+  'retry',
+  'run',
+  'run-operation',
+  'seed',
+  'show',
+  'snapshot',
+  'source',
+  'test',
+])
+
 const isDbt = (word: string) => word.split('/').pop() === 'dbt'
+
+/** Whether `word` is a NAME=value assignment: a quoted part may only come after the `=`. */
+const isAssignment = (word: Word) => ASSIGNMENT.test(word.text) && (word.quotedAt < 0 || word.text.indexOf('=') < word.quotedAt)
 
 /** The dbt invocations in a shell command line, in the order written; [] when there are none or the line can't be read. */
 export function parseDbtCommand(line: string): DbtInvocation[] {
@@ -329,12 +473,14 @@ function readable(tokens: Token[]): Set<number> | null {
     const token = tokens[k]!
     if (token.kind === 'word') {
       waiting = false
+      // A quoted word is never a keyword.
+      const word = token.quotedAt >= 0 ? `\u0000${token.text}` : token.text
       if (caseHead === 'case') caseHead = 'word'
       else if (caseHead === 'word') {
-        if (token.text !== 'in') return null
+        if (word !== 'in') return null
         caseHead = 'none'
         pattern = true
-      } else if (!words.length && token.text === 'esac' && open.at(-1) === 'case') {
+      } else if (!words.length && word === 'esac' && open.at(-1) === 'case') {
         open.pop()
         pattern = false
         words = [token.text]
@@ -342,10 +488,10 @@ function readable(tokens: Token[]): Set<number> | null {
         words.push(token.text)
         notCommand.add(k)
       }
-      else if (!words.length && token.text === 'case') {
+      else if (!words.length && word === 'case') {
         open.push('case')
         caseHead = 'case'
-      } else if (words.length || !COMMAND_KEYWORDS.has(token.text)) words.push(token.text)
+      } else if (words.length || !COMMAND_KEYWORDS.has(word)) words.push(token.text)
       continue
     }
     if (isRedirect(token)) {
@@ -420,7 +566,7 @@ function readable(tokens: Token[]): Set<number> | null {
 
 function readSimple(tokens: Token[]): DbtInvocation | null {
   // Drop redirections and their targets: what is left is the command's words.
-  const words: Extract<Token, { kind: 'word' }>[] = []
+  const words: Word[] = []
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!
     if (token.kind === 'op') {
@@ -438,28 +584,42 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
   let hasState = false
   let envTarget: string | null = null
   let envTargetPath: string | null = null
-  // The prefix word whose options are being read (`env -u X`, `time -p`).
+  // The prefix word whose options are being read (`env -u X`, `time -p`); whether it is a wrapper, after
+  // which the next word that is no option is the command itself.
   let prefix: string | null = null
+  let wrapped = false
+  // Whether the prefix word's options may still come: not after an assignment.
+  let optionsOpen = false
   for (; i < words.length; i++) {
-    const word = words[i]!.text
-    if (ASSIGNMENT.test(word)) {
-      const name = word.slice(0, word.indexOf('='))
-      const assigned = word.slice(word.indexOf('=') + 1)
+    const word = words[i]!
+    if (isAssignment(word)) {
+      // After `nohup`, `command` or `exec` this is the name of the command to run, not an assignment.
+      if (wrapped && prefix !== 'env') return null
+      const name = word.text.slice(0, word.text.indexOf('='))
+      const assigned = word.dynamic ? null : word.text.slice(word.text.indexOf('=') + 1)
       if (name === 'DBT_DEFER') hasDefer = true
       if (name === 'DBT_STATE' || name === 'DBT_DEFER_STATE') hasState = true
       if (name === 'DBT_TARGET') envTarget = assigned
       if (name === 'DBT_TARGET_PATH') envTargetPath = assigned
-      prefix = null
       firstAssignment ??= i
+      optionsOpen = false
       continue
     }
-    if (PREFIX_WORDS.has(word)) {
-      prefix = word
+    // A quoted word is a command's name, never a keyword or a prefix command.
+    const unquoted = word.quotedAt < 0
+    if (unquoted && (KEYWORDS.has(word.text) || WRAPPERS.has(word.text))) {
+      prefix = word.text
+      wrapped = WRAPPERS.has(word.text)
+      optionsOpen = true
       firstAssignment = null
       continue
     }
-    if (word.startsWith('-') && prefix !== null) {
-      if (PREFIX_VALUE_FLAGS.has(word)) i++
+    if (unquoted && word.text.startsWith('-') && prefix !== null && optionsOpen) {
+      // `env` with an option (`-u X`, `-i`, `-S …`) may clear or change what dbt sees: not read.
+      if (prefix === 'env') return null
+      // `command -v dbt` and `command -V dbt` look the command up; they do not run it.
+      if (prefix === 'command' && /^-[A-Za-z]*[vV]/.test(word.text)) return null
+      if (PREFIX_VALUE_FLAGS.has(word.text)) i++
       firstAssignment = null
       continue
     }
@@ -487,6 +647,11 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
     if (i >= words.length || !isDbt(words[i]!.text)) return null
     binaryEnd = i
   } else return null
+  // A binary that holds an expansion is not known to be dbt.
+  if (words[binaryEnd]!.dynamic) return null
+  const end = words[words.length - 1]!.end
+  // A redirection among the arguments, with an argument after it, would be cut out with the invocation.
+  if (tokens.some(token => token.kind === 'op' && token.start > start && token.start < end)) return null
 
   const binary = words
     .slice(launcherStart, binaryEnd + 1)
@@ -494,29 +659,42 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
     .join(' ')
   let subcommand: string | null = null
   let subcommandEnd = words[binaryEnd]!.end
+  // The first word that is no option, used when none is a known subcommand.
+  let firstOther: Word | null = null
   const select: string[] = []
   let target: string | null = null
   let targetPath: string | null = null
+  // A target or target path given by a value that holds an expansion: unknown, so null whatever else says.
+  let targetDynamic = false
+  let targetPathDynamic = false
   let selecting = false
   for (let j = binaryEnd + 1; j < words.length; j++) {
-    const word = words[j]!.text
+    const current = words[j]!
+    const word = current.text
     if (word.startsWith('-')) {
       selecting = false
       const eq = word.indexOf('=')
       const joined = !word.startsWith('--') && word.length > 2 && SHORT_VALUE_FLAGS.has(word.slice(0, 2))
       const flag = joined ? word.slice(0, 2) : eq > 0 ? word.slice(0, eq) : word
       const inline = joined ? word.slice(2) : eq > 0 ? word.slice(eq + 1) : null
-      const value = () => {
-        if (inline !== null) return inline
+      // The flag's value and whether it holds an expansion (null value: none given).
+      const value = (): { text: string | null; dynamic: boolean } => {
+        if (inline !== null) return { text: inline, dynamic: current.dynamic }
         j++
-        return words[j]?.text ?? null
+        return { text: words[j]?.text ?? null, dynamic: words[j]?.dynamic ?? false }
       }
       if (SELECT_FLAGS.has(flag)) {
-        if (inline !== null) select.push(...inline.split(/\s+/).filter(Boolean))
+        if (inline !== null && !current.dynamic) select.push(...inline.split(/\s+/).filter(Boolean))
         selecting = true
-      } else if (flag === '-t' || flag === '--target') target = value()
-      else if (flag === '--target-path') targetPath = value()
-      else if (flag === '--defer' || flag === '--no-defer') hasDefer = true
+      } else if (flag === '-t' || flag === '--target') {
+        const given = value()
+        target = given.dynamic ? null : given.text
+        targetDynamic = given.dynamic
+      } else if (flag === '--target-path') {
+        const given = value()
+        targetPath = given.dynamic ? null : given.text
+        targetPathDynamic = given.dynamic
+      } else if (flag === '--defer' || flag === '--no-defer') hasDefer = true
       else if (flag === '--state' || flag === '--defer-state') {
         hasState = true
         value()
@@ -524,24 +702,33 @@ function readSimple(tokens: Token[]): DbtInvocation | null {
       continue
     }
     if (selecting) {
-      select.push(...word.split(/\s+/).filter(Boolean))
+      if (!current.dynamic) select.push(...word.split(/\s+/).filter(Boolean))
       continue
     }
     if (subcommand === null) {
-      subcommand = word
-      subcommandEnd = words[j]!.end
+      // Which word dbt takes as the subcommand is not known when an expansion may be it.
+      if (current.dynamic) return null
+      if (DBT_SUBCOMMANDS.has(word)) {
+        subcommand = word
+        subcommandEnd = current.end
+      } else firstOther ??= current
     }
+  }
+  if (subcommand === null && firstOther) {
+    subcommand = firstOther.text
+    subcommandEnd = firstOther.end
   }
   return {
     binary,
     subcommand,
     select,
-    target: target ?? envTarget,
-    targetPath: targetPath ?? envTargetPath,
+    target: targetDynamic ? null : (target ?? envTarget),
+    targetPath: targetPathDynamic ? null : (targetPath ?? envTargetPath),
+    dynamic: words.slice(firstAssignment ?? launcherStart).some(one => one.dynamic),
     hasDefer,
     hasState,
     start,
-    end: words[words.length - 1]!.end,
+    end,
     subcommandEnd,
   }
 }
