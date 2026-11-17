@@ -181,7 +181,16 @@ test('a cd with a redirection before a pipe or &, a cd inside quotes and a short
   expect(run('cd ../b; cd ../a 2>/dev/null & wait; dbt run')).toBe(false)
   expect(run("cd ../b; echo 'example; cd ../a '; dbt run")).toBe(false)
   expect(run('poetry run -C ../b dbt run')).toBe(false)
-  expect(run('cd models 2>&1 && dbt run | tee out')).toBe(true)
+  expect(run('cd models && dbt run | tee out')).toBe(true)
+})
+
+test('a cd is trusted only as the leading `cd a && cd b &&` chain, and option text inside quotes is no option', () => {
+  const run = (command: string) => runsInProject(command, '/repo/a', '/repo/a')
+  expect(run('cd ../b; false &&\ncd ../a; dbt run')).toBe(false)
+  expect(run('cd ../b; # example; cd ../a\ndbt run')).toBe(false)
+  expect(run('cd nonexistent; cd ..; dbt run')).toBe(false)
+  expect(run('cd ../b && dbt run --vars \'{"example": "--project-dir /repo/a "}\'')).toBe(false)
+  expect(run('cd models && cd .. && dbt run')).toBe(true)
 })
 
 test('the override decides, and the status text shows target and defer', () => {

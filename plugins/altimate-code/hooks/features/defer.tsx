@@ -162,6 +162,12 @@ export function runsInProject(command: string, root: string, projectDir: string,
   const cdWords = plain.match(/(?:^|[\s;&|(){}!`])(?:cd|pushd)(?=[\s;&|)]|$)/g)?.length ?? 0
   if (cdWords !== [...command.matchAll(CD)].length) return false
   if (cdWords > 0 && control) return false
+  // A folder change is trusted only as the leading `cd a && cd b && dbt ...` chain: after it, only a command that runs because every `cd` worked.
+  // A `cd` after a `;`, a newline, a comment, `||`, a pipe or anywhere later may be skipped, fail or run elsewhere.
+  if (cdWords > 0) {
+    const rest = command.replace(/^\s*(?:(?:cd|pushd)[ \t]+(?:"[^"]*"|'[^']*'|[^\s;&|()<>`$\\*?[\]{}'"]+)[ \t]*&&[ \t]*)*/, '')
+    if (/(?:^|[\s;&|(){}!`])(?:cd|pushd|popd|chdir)(?=[\s;&|)]|$)/.test(rest.replace(/["'\\]/g, ''))) return false
+  }
   // A folder change inside a subshell or command substitution leaves the parent's folder unchanged or unknown.
   if (cdWords > 0 && /[(`]/.test(plain)) return false
   const invocations = parseDbtCommand(command)
@@ -203,7 +209,7 @@ export function runsInProject(command: string, root: string, projectDir: string,
     else if (!inside(dir)) return false
   }
   // A project named outright is the one to judge; otherwise the folder the command runs from.
-  const named = [...command.matchAll(PROJECT_DIR)]
+  const named = [...command.matchAll(PROJECT_DIR)].filter(match => !quoted(command, match.index))
   // A project option written with quotes (`"--project-dir" ../b`) is only seen in the plain copy: unknown.
   if (named.length !== (plain.match(/--project-dir[\s=]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
   // A path word that goes on after its quotes (`--project-dir "."/../b`) is not one this can work out.
@@ -328,7 +334,7 @@ export function register(on: On, context: FeatureContext) {
     let state = await ensure($)
     if (word === 'on' || word === 'off') {
       if (word === 'on' && !state.stateDir) {
-        await publish($, state)
+        if (started === generation) await publish($, state)
         return { text: `Defer cannot be turned on: ${state.reason ?? 'no state directory is configured for this project (dbt.deferConfigPerProject).'}` }
       }
       state = { ...state, override: word === 'on' }
@@ -337,10 +343,9 @@ export function register(on: On, context: FeatureContext) {
       return { text: `Defer ${word} for this session.\n${describe(state)}` }
     }
     if (word === 'reset') {
-      const mine = generation
       state = await load($, null)
-      // A session that started while this read ran has its own state.
-      if (mine === generation) await publish($, state)
+      // A session that started before this command's reads finished has its own state.
+      if (started === generation) await publish($, state)
       return { text: `Defer and target back to the project's settings.\n${describe(state)}` }
     }
     if (word === '' || word === 'status') {
