@@ -101,7 +101,8 @@ export async function nestedProjects($: EngineInterface, projectDir: string): Pr
     const next: string[] = []
     for (const dir of level) {
       for (const entry of await $.fs.list(dir).catch(() => [])) {
-        if (entry.kind !== 'dir' || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'target') continue
+        // A link may lead to a dbt project of its own: the engine lists it as another kind than 'dir'.
+        if ((entry.kind !== 'dir' && !entry.isLink) || entry.name.startsWith('.') || entry.name === 'node_modules' || entry.name === 'target') continue
         const child = `${dir}/${entry.name}`
         if (await $.fs.exists(`${child}/dbt_project.yml`).catch(() => false)) found.add(resolvePath(child, '.') ?? child)
         else next.push(child)

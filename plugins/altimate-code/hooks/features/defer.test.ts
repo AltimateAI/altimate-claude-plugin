@@ -320,3 +320,15 @@ test('a Windows --project-dir with backslashes names the project; an escaped spa
   expect(runsInProject('dbt run --project-dir "C:\\other"', 'C:/repo', 'C:/repo')).toBe(false)
   expect(runsInProject('dbt run --project-dir ./a\\ b', '/repo', '/repo/a')).toBe(false)
 })
+
+test('a symbolic link to another dbt project counts as a nested project', async () => {
+  const $: any = {
+    fs: {
+      list: async (dir: string) => (dir === '/repo/a' ? [{ name: 'linked', kind: 'other', isLink: true }, { name: 'notes.txt', kind: 'file', isLink: false }] : []),
+      exists: async (file: string) => file === '/repo/a/linked/dbt_project.yml',
+    },
+  }
+  const nested = await nestedProjects($, '/repo/a')
+  expect([...nested]).toEqual(['/repo/a/linked'])
+  expect(runsInProject('cd linked && dbt build', '/repo/a', '/repo/a', dir => nested.has(dir))).toBe(false)
+})
