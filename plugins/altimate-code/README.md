@@ -140,7 +140,7 @@ The plugin has five settings, shown when you enable it (`userConfig` in `.claude
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
-| `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it waits for your approval (0 never waits; at least 0). Other warehouses are never held. The size is that of the model's query: the extra scan of an incremental merge on a large existing table is not counted. |
+| `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it waits for your approval (0 never waits; at least 0). Other warehouses are never held. The size is that of the model's query: the extra scan of an incremental merge on a large existing table is not counted. A line that rewrites a model and runs it in one command is estimated on the model as it was before the line. |
 | `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. |
 | `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. Empty uses the default checks. |
 | `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). |

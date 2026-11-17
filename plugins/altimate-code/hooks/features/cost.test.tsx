@@ -14,6 +14,8 @@ type Options = {
   hold?: Promise<void>
   /** With `hold`: only the estimate of this model or SQL waits. */
   holdFor?: string
+  /** The Bash tool runs this command only once this resolves. */
+  holdBash?: { command: string; until: Promise<void> }
 }
 
 /** The session beneath the plugin, a CLI whose dbt_cost_estimate is scripted, and a Bash tool that records what ran. */
@@ -55,7 +57,8 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: answer ?? { success: false, error: 'no answer scripted' } }), stderr: '' } }
   })
   // The Bash tool itself, beneath the plugin.
-  on('tool.call', (_: unknown, e: { tool: string; command?: string }) => {
+  on('tool.call', async (_: unknown, e: { tool: string; command?: string }) => {
+    if (e.tool === 'Bash' && options.holdBash?.command === e.command) await options.holdBash.until
     if (e.tool === 'Bash') ran.push(String(e.command))
     return { result: { text: 'ok', isError: false } }
   })
@@ -556,7 +559,7 @@ test('an edit made while an estimate is running makes its answer void: the comma
   options.answers = { orders: OVER }
   release()
   await clock.settle()
-  expect(((await first) as any).deny).toContain('still being estimated')
+  expect(((await first) as any).deny).toContain('The project changed while the scan was being estimated')
   expect(ran).toEqual([])
 
   options.hold = undefined
@@ -633,6 +636,54 @@ test('a warehouse found to have no dry run is asked about again after an edit, a
   await clock.advance(10 * 60_000 + 1)
   expect((await run()).deny).toContain('20.0 GiB')
   expect(ran.length).toBeGreaterThan(0)
+})
+
+test('a shell line that rewrites the model and also runs dbt voids the estimates made before it', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER, cheap: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'orders'
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+
+  await $.tool.call(bash('git restore models/orders.sql && dbt run -s cheap'))
+  await clock.settle()
+  options.hold = undefined
+  options.answers = { orders: OVER, cheap: UNDER }
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(estimates.filter(key => key === 'orders')).toEqual(['orders', 'orders'])
+})
+
+test('a command that is rewriting the model voids the estimates before it ends, not only after', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+
+  // The rewrite is still running (its after-hook has not come) when the retry asks.
+  let finish!: () => void
+  options.holdBash = { command: 'sed -i s/a/b/ models/orders.sql; sleep 10', until: new Promise<void>(resolve => (finish = resolve)) }
+  const rewrite = $.tool.call(bash('sed -i s/a/b/ models/orders.sql; sleep 10'))
+  await clock.advance(1_000)
+  options.hold = undefined
+  options.answers = { orders: OVER }
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(estimates).toEqual(['orders', 'orders'])
+  finish()
+  await rewrite
 })
 
 test('an edit drops the estimates made before it', async ($, on) => {

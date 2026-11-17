@@ -51,7 +51,19 @@ let generation = 0
 let unsupportedSince: number | null = null
 const UNSUPPORTED_KEEP_MS = 10 * 60_000
 /** Commands that can rewrite a model, the project or its profile from the shell: an estimate made before one is not reused. */
-const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|dbt|make|sh|bash|dd|ed|ex)(\s|$)|>/
+const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
+/** The dbt subcommands that change nothing in the project. */
+const READS_ONLY = new Set(['run', 'build', 'show', 'compile', 'ls', 'list', 'debug', 'parse'])
+
+/** Whether the command can rewrite a model or the profile: any part of the line, with the dbt calls that only read set aside. */
+function mutates(command: string): boolean {
+  const all = parseDbtCommand(command)
+  if (all.some(i => i.subcommand !== null && !READS_ONLY.has(i.subcommand))) return true
+  let rest = command
+  for (const i of [...all].sort((a, b) => b.start - a.start)) rest = rest.slice(0, i.start) + ' ' + rest.slice(i.end)
+  return MAY_CHANGE_PROJECT.test(rest)
+}
+
 /** Files and variables that decide which warehouse a dbt command runs on. */
 const MOVES_TARGET = /profiles\.yml|dbt_project\.yml|dbt\.json|DBT_|--target|-t\s|\.env/
 /** An answer nobody took within this long is dropped: the model may have changed since. */
@@ -130,9 +142,16 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
+  // Before it runs, not only after: another call can ask while a long command is rewriting the project.
+  if (mutates(e.command)) {
+    invalidate()
+    if (MOVES_TARGET.test(e.command)) await forgetUnsupported($)
+  }
   const all = parseDbtCommand(e.command)
   const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
   if (invocations.length === 0) return null
+  // An edit or a command that changed the project while the answers were coming in makes them void.
+  const startedAt = generation
   const state = (await read($, costAtom)) ?? FRESH
   // A warehouse with no dry run was found out already: the command is never held, and nothing is asked again,
   // until an edit or a command that can move the target, or time, says it may have changed.
@@ -182,6 +201,12 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     await rememberEstimate($, label, answer.bytes, answer.display)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}`)
     else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
+  }
+
+  if (generation !== startedAt) {
+    inflight.clear()
+    notes.delete(e.command)
+    return { deny: 'The project changed while the scan was being estimated. Run the same command again.' }
   }
 
   // A finished command's answers are taken: a later one asks again. A pending one keeps them for its retry.
@@ -263,7 +288,7 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
   const lines = notes.get(e.command)
   notes.delete(e.command)
   // A shell command can rewrite a model or the profile (a git restore, a sed): no earlier estimate is reused after one.
-  if (MAY_CHANGE_PROJECT.test(e.command) && !parseDbtCommand(e.command).some(i => i.subcommand !== null && SCANNING.has(i.subcommand))) {
+  if (mutates(e.command)) {
     invalidate()
     if (MOVES_TARGET.test(e.command)) await forgetUnsupported($)
   }
