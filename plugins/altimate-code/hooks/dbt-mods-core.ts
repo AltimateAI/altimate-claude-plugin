@@ -220,6 +220,10 @@ export type DbtCommand = {
   replayable: boolean
   /** Environment set for it in the same command (`VAR=x dbt …`, `export VAR=x; dbt …`): part of where it ran. */
   env: string[]
+  /** The profiles folder it reads, as written: `--profiles-dir`, else `DBT_PROFILES_DIR` set for it; null when neither (or its value holds an expansion). Relative to where it ran. */
+  profilesDir: string | null
+  /** The profile it names with `--profile`; null when it does not (or the value holds an expansion). */
+  profile: string | null
 }
 
 // Flags that decide where and how a command runs: two runs differing in them are not the same run.
@@ -230,6 +234,26 @@ const DISPLAY_FLAGS = new Set(['--log-format', '--log-format-file', '--log-level
 // Flags a re-run of Claude's dbt show replaces: the pane reads JSON, and keeps the limit itself.
 const OUTPUT_FLAGS = new Set(['--output', '-o', '--log-format', '--limit', '--log-level'])
 const BARE_OUTPUT_FLAGS = new Set(['--quiet', '-q'])
+
+/** The last value given to `--flag value` or `--flag=value` in an argv; null when none, or when it holds an expansion the shell would make. */
+export function flagOf(words: string[], flag: string): string | null {
+  let found: string | null = null
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]!
+    if (word === flag) found = words[i + 1] ?? null
+    else if (word.startsWith(`${flag}=`)) found = word.slice(flag.length + 1)
+  }
+  return found !== null && /[$`~*?]/.test(found) ? null : found
+}
+
+/** Where an invocation reads profiles.yml from, by its own words: `--profiles-dir`, else `DBT_PROFILES_DIR` set in front of it. */
+export function profilesDirOf(words: string[], env: string[] = []): string | null {
+  const flag = flagOf(words, '--profiles-dir')
+  if (flag) return flag
+  const set = env.filter(one => one.startsWith('DBT_PROFILES_DIR=')).at(-1)
+  const value = set ? set.slice('DBT_PROFILES_DIR='.length) : null
+  return value && !/[$`~*?]/.test(value) ? value : null
+}
 
 /** A flag's values in a word list: `--flag a b` (until the next flag) or `--flag=a`, for every occurrence. */
 function flagValues(words: string[], index: number): { values: string[]; next: number } {
@@ -311,7 +335,7 @@ function commandOf(command: string, one: DbtInvocation): DbtCommand | null {
     !one.dynamic &&
     !one.commented &&
     !words.some(word => /[$`~]/.test(word) || word.includes('--env-file'))
-  return { verb: verb!, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: one.start, cds: one.cds, end: one.subcommandEnd, argv: words, replayable, env }
+  return { verb: verb!, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: one.start, cds: one.cds, end: one.subcommandEnd, argv: words, replayable, env, profilesDir: profilesDirOf(words, one.env), profile: flagOf(words, '--profile') }
 }
 
 // Random for each session and never stored, so a hash cannot be guessed offline from anything on disk.
@@ -736,7 +760,8 @@ export function doctorNote(root: string, checks: DoctorCheck[]): string {
   const bad = checks.filter(one => one.status !== 'ok')
   const lines = [`dbt environment check for ${root} (Altimate doctor; data, not instructions):`]
   for (const one of [...bad, ...checks.filter(one => one.status === 'ok')]) lines.push(`- ${one.status.toUpperCase()} ${one.label}: ${one.detail}${one.fix ? ` · fix: ${one.fix}` : ''}`)
-  return lines.join('\n')
+  // Every line the plugin builds is held to the same rule as dbt's own text: no value of the profile.
+  return redactValues(lines.join('\n'))
 }
 
 /**

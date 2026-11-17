@@ -9,6 +9,7 @@ import {
   hashedEnv,
   sha256Hex,
   debugInfo,
+  doctorNote,
   failuresFrom,
   failuresFromText,
   logErrors,
@@ -167,6 +168,8 @@ type Options = {
   storeGetFails?: () => boolean
   /** The values the project's Python prints for the redaction script. */
   redact?: string[]
+  /** The same, for the profiles.yml at one path (the script's second argument). */
+  redactBy?: Record<string, string[]>
   /** What the project's Python prints for the profile script; the default is an ok duckdb output. */
   profileAnswer?: { exitCode: number; stdout: string }
   /** What the plugin's store held from an earlier session. */
@@ -361,7 +364,7 @@ async function start($: any, on: any, options: Options = {}) {
       // The script itself is checked below; here the interpreter answers what it would print.
       return { value: { ...(options.profileAnswer ?? { exitCode: 0, stdout: '{"status":"ok","profile":"shop","target":"dev","type":"duckdb"}' }), stderr: '' } }
     }
-    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_REDACT) return { value: { exitCode: 0, stdout: JSON.stringify({ redact: options.redact ?? [] }), stderr: '' } }
+    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_REDACT) return { value: { exitCode: 0, stdout: JSON.stringify({ redact: options.redactBy?.[e.argv[4] as string] ?? options.redact ?? [] }), stderr: '' } }
     if (bin === python && verb === '-c' && e.argv[2] === RUN_FAILURES) return { value: { ...(options.runFailures ?? { exitCode: 0, stdout: JSON.stringify({ results: [] }) }), stderr: '' } }
     if (bin === python && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
     if (bin === python && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
@@ -465,8 +468,8 @@ kitTest('a failed dbt command is read from run_results.json by node name, and fr
 })
 
 kitTest('dbt commands are found behind a cd, a venv path or uv run, with their selection; other text is not one', () => {
-  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], identity: [], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [] })
-  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], identity: ['--limit 5'], at: 8, cds: ['x'], end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [] })
+  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], identity: [], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [], profilesDir: null, profile: null })
+  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], identity: ['--limit 5'], at: 8, cds: ['x'], end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [], profilesDir: null, profile: null })
   // Redirections are the shell's: they are neither selection nor argv.
   expect(dbtCommand('dbt show -s orders 2>&1 | tail -20')?.argv).toEqual(['dbt', 'show', '-s', 'orders'])
   expect(dbtCommand('dbt run -s orders > out.txt 2> err.txt')?.select).toBe('orders')
@@ -474,7 +477,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommand('DBT_PROFILES_DIR=. dbt show -s x')?.replayable).toBe(false)
   expect(dbtCommand('dbt show --target $T -s x')?.replayable).toBe(false)
   // A command split with `\` across lines is one command.
-  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], identity: ['--limit 10'], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [] })
+  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], identity: ['--limit 10'], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [], profilesDir: null, profile: null })
   // A redirection inside quoted SQL is SQL.
   expect(dbtCommand('dbt show --inline "select 1 as \\"2>1\\"" -s x')?.inline).toBe('select 1 as "2>1"')
   // Comments and background `&` end it; anything the shell would expand or change turns Re-run off.
@@ -2585,8 +2588,8 @@ test('doctor adapter: an output with no type is a failure, and says which output
 })
 
 kitTest('PROFILE_TYPE says which field a template left unsettled, and echoes no template text', () => {
-  expect(PROFILE_TYPE).toContain("out('template', profile=name, field='target')")
-  expect(PROFILE_TYPE).toContain("out('template', profile=name, field='type')")
+  expect(PROFILE_TYPE).toContain("out('template', profile=shown, field='target')")
+  expect(PROFILE_TYPE).toContain("out('template', profile=shown, field='type')")
 })
 
 test('Bookmark after Clear history puts the shown result back in the history, bookmarked', async ($, on) => {
@@ -3548,3 +3551,95 @@ for (const stderr of ['bash: ./scripts/helper: /gone/bin/python3: bad interprete
     expect(noteOf(note)).not.toContain('dbt could not be run here')
   })
 }
+
+// ─── The redaction survives /clear, follows the profile each invocation reads, and covers the doctor ──
+
+const ALIAS_ERR = (secret: string) => `Runtime Error\n  at path ['threads']: '${secret}' is not of type 'integer'\n`
+
+test('after /clear the same profile value is still removed: the notes and the saved history never carry it', async ($, on) => {
+  const secret = 'SENTINEL_AFTER_CLEAR'
+  const { clock, store } = await start($, on, { redact: [secret], show: { raw: { exitCode: 2, stdout: ALIAS_ERR(secret) } } })
+  const before: any = await editOrders($)
+  await clock.settle()
+  expect(noteOf(before)).toContain('‹redacted›')
+  await $.session.end({ reason: 'clear' } as any)
+  const after: any = await editOrders($)
+  await clock.settle()
+  expect(JSON.stringify(after)).not.toContain(secret)
+  expect(noteOf(after)).toContain('‹redacted›')
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  expect(JSON.stringify(store.get('dbt-results-history'))).not.toContain(secret)
+})
+
+const ALT_PROFILE = 'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: SENTINEL_ALT_PROFILE\n'
+
+for (const [what, command] of [
+  ['--profiles-dir ./config', 'dbt build --profiles-dir ./config -s orders'],
+  ['a DBT_PROFILES_DIR prefix', 'DBT_PROFILES_DIR=./config dbt build -s orders'],
+  ['a cd and a relative --profiles-dir', 'cd models && dbt build --profiles-dir ../config -s orders'],
+] as const) {
+  test(`${what}: the value of the profile it reads is removed from the band, Explain and Fix`, async ($, on) => {
+    const secret = 'SENTINEL_ALT_PROFILE'
+    const { clock, prompts, setBash } = await start($, on, {
+      runResultsAt: 1,
+      now: 900_000,
+      files: { 'config/profiles.yml': ALT_PROFILE },
+      // Only the alternate profile holds the value: the plugin's own profile has none.
+      redactBy: { '/proj/config/profiles.yml': [secret] },
+    })
+    setBash({ stdout: `${HEADER}\n${ALIAS_ERR(secret)}`, isError: true })
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+    expect(await band.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+    await band.press({ key: 'dbt-explain' })
+    await band.press({ key: 'dbt-fix' })
+    await clock.settle()
+    expect(prompts.length).toBe(2)
+    for (const prompt of prompts) expect(prompt).not.toContain(secret)
+    await band.unmount()
+  })
+}
+
+test('Re-run of a command that names another profiles folder removes that profile\'s value from the pane and the saved history', async ($, on) => {
+  const secret = 'SENTINEL_ALT_PROFILE'
+  const { clock, store, setBash } = await start($, on, {
+    files: { 'config/profiles.yml': ALT_PROFILE },
+    redactBy: { '/proj/config/profiles.yml': [secret] },
+    show: { raw: { exitCode: 2, stdout: ALIAS_ERR(secret) } },
+  })
+  setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show --select orders --profiles-dir ./config' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  await ui.press({ key: 'results-rerun' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /redacted/ })).toBeDefined()
+  expect(JSON.stringify(store.get('dbt-results-history'))).not.toContain(secret)
+  await ui.unmount()
+})
+
+test('a target an env var gave, with no such output, is never echoed by the script or by the doctor, and a value in any doctor line is removed', async ($, on) => {
+  const secret = 'SENTINEL_TARGET_FROM_ENV_VAR'
+  // What a script that echoed the resolved target would say, and the redaction list for it.
+  const { clock, prompts } = await start($, on, { redact: [secret], profileAnswer: { exitCode: 0, stdout: JSON.stringify({ status: 'no_output', profile: 'shop', target: secret }) } })
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /has no output/ })).toBeDefined()
+  await ui.unmount()
+  await $.prompt.submit({ text: 'hello' })
+  expect(prompts[0]).not.toContain(secret)
+  expect(PROFILE_TYPE).toContain("out('no_output', profile=shown, target=echo)")
+})
+
+kitTest('the doctor note holds no profile value, whichever line carries it', () => {
+  clearRedactions()
+  setRedactions('/p', ['SENTINEL_NOTE_VALUE'])
+  const note = doctorNote('/proj', [{ id: 'adapter', label: 'Adapter', status: 'fail', detail: 'profile shop has no output named SENTINEL_NOTE_VALUE', fix: 'use SENTINEL_NOTE_VALUE' }])
+  expect(note).not.toContain('SENTINEL_NOTE_VALUE')
+  clearRedactions()
+})

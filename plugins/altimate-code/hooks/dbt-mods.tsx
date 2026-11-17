@@ -30,7 +30,10 @@ import {
   profilesError,
   PROFILES_UNREADABLE,
   scrubDbt,
+  redactValues,
   setRedactions,
+  flagOf,
+  profilesDirOf,
   withoutDropped,
   clearRedactions,
   projectPaths,
@@ -796,6 +799,8 @@ async function rerun($: EngineInterface, query: QueryResult, asked = generation)
   const written = bin!.includes('/') ? (bin!.startsWith('/') ? bin! : `${cwd.replace(/\/+$/, '')}/${bin}`) : null
   // A bare `dbt` was found on Claude's PATH (an activated venv, `uv run`): here that is the project's dbt.
   const executable = written && (await $.fs.exists(written).catch(() => false)) ? written : await dbtBinary($, query.root)
+  // The profile the replayed command reads is the one its own flags name, from the folder it runs in.
+  await ensureRedactions($, query.root, { dir: cwd, profilesDir: profilesDirOf(query.argv), profile: flagOf(query.argv, '--profile') })
   return runShowWith($, query, () => runQueued($, query.root, async () => [executable, ...args], { cwd }), asked)
 }
 
@@ -935,31 +940,36 @@ if profiles is None:
     out('error')
 project = load(sys.argv[1]) or {}
 name = os.environ.get('DBT_PROFILE') or project.get('profile')
+# A name is echoed only when it is written in the file as a plain literal: one an env var or a template gave may be a secret.
+named = isinstance(name, str) and not os.environ.get('DBT_PROFILE') and '{{' not in name
+shown = name if named else ''
 profile = profiles.get(name) if isinstance(name, str) else None
 if not isinstance(profile, dict):
-    out('no_profile')
+    out('no_profile', profile=shown)
 target = os.environ.get('DBT_TARGET') or profile.get('target') or 'default'
+written = isinstance(target, str) and not os.environ.get('DBT_TARGET') and '{{' not in target
+echo = target if written else ''
 # A target that is not a plain string (an output's keys put under it by an indentation slip) is never echoed: it may hold credentials.
 if not isinstance(target, str):
-    out('no_target', profile=name)
+    out('no_target', profile=shown)
 if '{{' in target:
     target = settle(target)
     if not target:
-        out('template', profile=name, field='target')
+        out('template', profile=shown, field='target')
 outputs = profile.get('outputs')
 output = outputs.get(target) if isinstance(outputs, dict) else None
 if not isinstance(output, dict):
-    out('no_output', profile=name, target=target)
+    out('no_output', profile=shown, target=echo)
 kind = output.get('type')
 if not isinstance(kind, str) or not kind:
-    out('no_type', profile=name, target=target)
+    out('no_type', profile=shown, target=echo)
 if '{{' in kind:
     kind = settle(kind)
     if not kind:
-        out('template', profile=name, field='type')
+        out('template', profile=shown, field='type')
 # An adapter type is a plain name: anything else is not echoed.
 if not re.fullmatch(r"\\w+", kind):
-    out('no_type', profile=name, target=target)
+    out('no_type', profile=shown, target=echo)
 out('ok', profile=name, target=target, type=kind)
 `
 
@@ -1005,7 +1015,7 @@ for call in re.finditer(r"env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:
 try:
     profiles = yaml.safe_load(text) if yaml else None
     project = (yaml.safe_load(load(sys.argv[1])) if yaml else None) or {}
-    name = os.environ.get('DBT_PROFILE') or project.get('profile')
+    name = (sys.argv[3] if len(sys.argv) > 3 else None) or os.environ.get('DBT_PROFILE') or project.get('profile')
     profile = profiles.get(name) if isinstance(profiles, dict) and isinstance(name, str) else None
     if isinstance(profile, dict):
         walk(profile.get('outputs'))
@@ -1014,41 +1024,63 @@ except Exception:
 print(json.dumps(dict(redact=found)))
 `
 
-/** The profiles.yml dbt itself would read: DBT_PROFILES_DIR's, else the project folder's when it has one, else ~/.dbt's; null when there is none. */
-async function profilesPath($: EngineInterface, root: string): Promise<string | null> {
+/** Where an invocation reads its profiles.yml from, by its own words: the folder it ran in, and the folder it names. */
+type ProfilesFrom = { dir: string; profilesDir: string | null; profile?: string | null }
+
+/**
+ * The profiles.yml dbt reads: the invocation's own `--profiles-dir` (or `DBT_PROFILES_DIR` set for it), relative to the
+ * folder it ran in; else the plugin's DBT_PROFILES_DIR (relative to the project), else the project folder's when it has
+ * one, else ~/.dbt's. Null when there is none.
+ */
+async function profilesPath($: EngineInterface, root: string, from?: ProfilesFrom): Promise<string | null> {
   const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
   const home = await env('HOME')
   // A relative DBT_PROFILES_DIR is the project's (dbt runs there); `~` is the home folder.
-  const rawDir = await env('DBT_PROFILES_DIR')
+  const rawDir = from?.profilesDir ?? (await env('DBT_PROFILES_DIR'))
   const expanded = rawDir.startsWith('~') && home ? `${home}${rawDir.slice(1)}` : rawDir
-  const profilesDir = expanded && !expanded.startsWith('/') ? normalize(`${root}/${expanded}`) : expanded
+  const profilesDir = expanded && !expanded.startsWith('/') ? normalize(`${from?.profilesDir ? from.dir : root}/${expanded}`) : expanded
   const local = `${root}/profiles.yml`
   const path = profilesDir ? `${profilesDir}/profiles.yml` : (await $.fs.exists(local).catch(() => false)) ? local : home ? `${home}/.dbt/profiles.yml` : null
   return path && (await $.fs.exists(path).catch(() => false)) ? path : null
 }
 
-// What was loaded for a project's profile: when, and the file's time then.
+// What was loaded for a profiles.yml (and the profile asked for): when, and the file's time then.
 const redactionLoaded = new Map<string, { mtimeMs: number; at: number }>()
 const REDACTION_REFRESH_MS = 30_000
 
+/** Forgets every value and that it was loaded: the next dbt output loads them again. */
+function forgetRedactions() {
+  clearRedactions()
+  redactionLoaded.clear()
+}
+
 /**
- * Loads, per project, the values of its profiles.yml (and of the env vars it names) that dbt's errors may echo, before any
- * dbt output of the project is read. Again when the file changed, or after 30 seconds (an env var may have). Whatever
- * stops the script leaves what was loaded, or nothing: the fixed-message scrub still applies.
+ * Loads the values of the profiles.yml an invocation reads (and of the env vars it names) that dbt's errors may echo,
+ * before any dbt output of the invocation is read: the plugin's own profile, and the one the invocation names with
+ * `--profiles-dir` or `DBT_PROFILES_DIR`. Again when a file changed, or after 30 seconds (an env var may have).
+ * Whatever stops the script leaves what was loaded, or nothing: the fixed-message scrub still applies.
  */
-async function ensureRedactions($: EngineInterface, root: string): Promise<void> {
+async function ensureRedactions($: EngineInterface, root: string, from?: ProfilesFrom): Promise<void> {
   try {
-    const path = await profilesPath($, root)
-    if (!path) return
-    const stat = await $.fs.stat(path).catch(() => null)
-    const now = await $.clock.now()
-    const seen = redactionLoaded.get(root)
-    if (seen && stat && seen.mtimeMs === stat.mtimeMs && now - seen.at < REDACTION_REFRESH_MS) return
-    redactionLoaded.set(root, { mtimeMs: stat?.mtimeMs ?? 0, at: now })
-    const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path], { cwd: root, timeoutMs: 30_000 })
-    if (run.exitCode !== 0) return
-    const answer = JSON.parse(run.stdout) as { redact?: unknown }
-    if (Array.isArray(answer.redact)) setRedactions(root, answer.redact.filter((one): one is string => typeof one === 'string'))
+    const paths = new Set<string>()
+    const own = await profilesPath($, root)
+    if (own) paths.add(own)
+    if (from?.profilesDir) {
+      const named = await profilesPath($, root, from)
+      if (named) paths.add(named)
+    }
+    for (const path of paths) {
+      const key = `${path}|${from?.profile ?? ''}`
+      const stat = await $.fs.stat(path).catch(() => null)
+      const now = await $.clock.now()
+      const seen = redactionLoaded.get(key)
+      if (seen && stat && seen.mtimeMs === stat.mtimeMs && now - seen.at < REDACTION_REFRESH_MS) continue
+      redactionLoaded.set(key, { mtimeMs: stat?.mtimeMs ?? 0, at: now })
+      const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path, ...(from?.profile ? [from.profile] : [])], { cwd: root, timeoutMs: 30_000 })
+      if (run.exitCode !== 0) continue
+      const answer = JSON.parse(run.stdout) as { redact?: unknown }
+      if (Array.isArray(answer.redact)) setRedactions(key, answer.redact.filter((one): one is string => typeof one === 'string'))
+    }
   } catch {}
 }
 
@@ -1101,11 +1133,13 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   const installed = info.adapters.map(one => one.name)
   const known = installed.length ? `; installed: ${installed.join(', ')}` : ''
   if (type && typeof type === 'object') {
+    // A name is shown only when the file writes it plainly: one an env var or a template gave may be a secret.
+    const named = type.profile ? `profile ${type.profile}` : 'the profile'
     const detail = {
       template: `the profile's ${type.field ?? 'target'} is set by a template, so which adapter it uses could not be told${known}`,
-      'no-target': `profile ${type.profile}: the target is not a name`,
-      'no-output': `profile ${type.profile} has no output named ${type.target}`,
-      'no-type': `output ${type.target} has no \`type\` key`,
+      'no-target': `${named}: the target is not a name`,
+      'no-output': type.target ? `${named} has no output named ${type.target}` : `${named} has no output for the target its template or env var gives`,
+      'no-type': `${type.target ? `output ${type.target}` : 'the output'} has no \`type\` key`,
       error: `could not tell which adapter the profile uses (its profiles.yml could not be read here)${known}`,
     }[type.problem]
     // dbt itself refuses a profile with no such output, or an output with no type.
@@ -1173,6 +1207,11 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     if (kept) checks.push(kept)
   }
 
+  // Every line the doctor shows or sends, the plugin's own wording included, is held to the same rule as dbt's text: no value of the profile.
+  for (const check of checks) {
+    check.detail = redactValues(check.detail)
+    if (check.fix) check.fix = redactValues(check.fix)
+  }
   const view: DoctorView = { root, checks, at: await $.clock.now(), staleFiles, busy: null }
   await update($, doctorAtom, () => view)
   return view
@@ -1216,7 +1255,7 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
   doctorNoteDue = null
   unrunnable.clear()
   ownInvocation.clear()
-  clearRedactions()
+  forgetRedactions()
   await loadHistory($)
   await $.command.register({ name: SHOW_COMMAND, description: 'Run dbt show for a model or a SQL query and open the rows in the Query results pane', argumentHint: '<model> | <select …>' })
   await $.command.register({ name: DOCTOR_COMMAND, description: 'Check the dbt environment: Python, dbt, adapter, packages, manifest freshness and the warehouse connection' })
@@ -1396,6 +1435,14 @@ async function placeOf($: EngineInterface, base: string, one: DbtCommand): Promi
   return root ? { dir, root } : null
 }
 
+/** Loads the profile values of every run in a command, each from the profiles.yml its own words name. */
+async function ensureForRuns($: EngineInterface, base: string, runs: DbtCommand[]): Promise<void> {
+  for (const one of runs) {
+    const place = await placeOf($, base, one)
+    if (place) await ensureRedactions($, place.root, { dir: place.dir, profilesDir: one.profilesDir, profile: one.profile })
+  }
+}
+
 /** Before a call runs: the conversation it is in; for a dbt command also the folder, the time and the run artifact as they are now. */
 export async function dbtModsCallStart($: EngineInterface, e: { tool: string; agentId?: string }): Promise<void> {
   if (!enabled) return
@@ -1416,7 +1463,7 @@ export async function dbtModsCallStart($: EngineInterface, e: { tool: string; ag
     const first = runs[0] ? await placeOf($, base, runs[0]) : null
     if (!first) return null
     const seen = await seenInvocation($, first.root).catch(() => null)
-    await ensureRedactions($, first.root)
+    await ensureForRuns($, base, runs)
     return seen
   })()
   // Nobody awaits it if the call never reaches its after phase.
@@ -1443,7 +1490,7 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
   const places = await Promise.all(runs.map(one => placeOf($, base, one)))
   const firstRun = places[0] ?? null
   // The profile's values are loaded before the command's output is read.
-  if (firstRun && !start) await ensureRedactions($, firstRun.root)
+  if (!start) await ensureForRuns($, base, runs)
   const raw = (result as any).result
   const output = typeof raw?.stdout === 'string' ? `${raw.stdout}\n${raw.stderr ?? ''}` : String((result as any).text ?? '')
   // Runs: one result for the whole command. Two or more (`dbt run -s a && dbt test -s a`) are recorded as
@@ -1557,7 +1604,7 @@ export async function dbtModsReadOrEditAfter($: EngineInterface, e: { tool: stri
  */
 export async function endDbtMods($: EngineInterface) {
   generation++
-  clearRedactions()
+  forgetRedactions()
   slices.clear()
   parsed = null
   forcedWhileBusy = null

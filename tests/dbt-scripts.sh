@@ -69,6 +69,10 @@ if "$YPY" -c 'import yaml' 2>/dev/null; then
   profile "type template naming a secret" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "{{ var(\'SENTINEL_SECRET_VALUE\') }}"}\n' template '' ''
   profile "type is a mapping" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: {password: SENTINEL_SECRET_VALUE}\n' no_type dev ''
   profile "type that is no name" $'shop:\n  target: dev\n  outputs:\n    dev: {type: "SENTINEL_SECRET_VALUE pw!"}\n' no_type dev ''
+  # A target an env var (or DBT_TARGET) gave is never echoed back, even when it names no output.
+  profile "env_var target with no such output" $'shop:\n  target: "{{ env_var(\'T\') }}"\n  outputs:\n    dev: {type: duckdb}\n' no_output '' '' T=SENTINEL_TARGET_FROM_ENV
+  profile "DBT_TARGET with no such output" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n' no_output '' '' DBT_TARGET=SENTINEL_TARGET_FROM_ENV
+  profile "profile named by DBT_PROFILE with no such profile" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n' no_profile '' '' DBT_PROFILE=SENTINEL_PROFILE_FROM_ENV
   profile "no such output" $'shop:\n  target: staging\n  outputs:\n    dev: {type: duckdb}\n' no_output staging ''
 else
   missing "no python3 with PyYAML (and none could be installed into a venv), so the PROFILE_TYPE checks cannot run"
