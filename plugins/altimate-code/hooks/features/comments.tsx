@@ -67,6 +67,8 @@ let writes = 0
 let firstWaitSpent = false
 // The project whose first load is scheduled but not started.
 let pendingFor: string | null = null
+// The thread of a post that may have landed: it stays busy until a list asked for after the post has been read.
+let uncertain: string | null = null
 // Folders already searched for a dbt project in vain.
 const searched = new Set<string>()
 
@@ -188,6 +190,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   generation++
   firstWaitSpent = false
   pendingFor = null
+  uncertain = null
   // Work still running when an earlier session ended can never finish, so it must not block this one.
   loadRun = null
   posting = false
@@ -215,6 +218,7 @@ export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   loadAgain = false
   posting = false
   pendingFor = null
+  uncertain = null
   await change($, current => (current.posting === null ? current : { ...current, posting: null }))
 }
 
@@ -306,12 +310,15 @@ const dirOf = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 
 /** Finds the dbt project from a folder when none is known yet, and starts its first load and the poll. */
 async function attach($: EngineInterface, dir: string) {
+  const mine = generation
   const known = (await get($)).root
   // A folder inside the project already loaded belongs to it; one outside may belong to another project.
   if (known && (slashes(dir) === slashes(known) || slashes(dir).startsWith(`${slashes(known).replace(/\/+$/, '')}/`))) return
   // A file of an installed package belongs to that package's own project, not to the one being worked on.
   if (searched.has(dir) || /[\\/](dbt_packages|dbt_modules|node_modules)[\\/]/.test(dir)) return
   const found = await projectOf($, dir)
+  // The lookup may span a session's end: its answer is not applied to the next one.
+  if (mine !== generation) return
   if (!found) {
     searched.add(dir)
     return
@@ -322,10 +329,11 @@ async function attach($: EngineInterface, dir: string) {
   // Decided against the state as it is when written: two reads can discover projects at the same time.
   let switched = false
   await change($, current => {
-    if (current.root === found.root) return current
+    if (mine !== generation || current.root === found.root) return current
     switched = current.root !== null
     return switched ? { ...INITIAL, drafts: current.drafts, ...found } : { ...current, ...found }
   })
+  if (mine !== generation) return
   if (switched) writes++
   // The first load of a project: a read that is waiting on it has already joined it, so this one is not asked twice.
   pendingFor = found.root
@@ -357,15 +365,19 @@ async function load($: EngineInterface): Promise<void> {
     loadAgain = true
     return loadRun
   }
-  const run: Promise<void> = fetchThreads($).finally(() => {
-    if (loadRun === run) loadRun = null
-  })
+  // The run covers its follow-ups: a caller that joined it is released only once the fresh list is in.
+  const run: Promise<void> = (async () => {
+    try {
+      do {
+        loadAgain = false
+        await fetchThreads($)
+      } while (loadAgain)
+    } finally {
+      if (loadRun === run) loadRun = null
+    }
+  })()
   loadRun = run
   await run
-  if (loadAgain) {
-    loadAgain = false
-    await load($)
-  }
 }
 
 async function fetchThreads($: EngineInterface) {
@@ -400,7 +412,14 @@ async function fetchThreads($: EngineInterface) {
     await change($, current => {
       // A new session may have begun while the clock was read: its state is not written to.
       if (mine !== generation) return current
-      return wrote !== writes ? { ...current, loading: false } : { ...current, threads, loadedAt: now, loading: false, error: null }
+      if (wrote !== writes) return { ...current, loading: false }
+      // A list asked for after an uncertain post shows what the docs hold: the thread is free again.
+      const freed = uncertain !== null && current.posting === uncertain
+      if (freed) {
+        uncertain = null
+        posting = false
+      }
+      return { ...current, threads, loadedAt: now, loading: false, error: null, posting: freed ? null : current.posting }
     })
   } catch (error) {
     if (mine !== generation) return
@@ -442,10 +461,12 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
         await change($, current => ({ ...current, posting: null, note }))
         return
       }
-      // Any other failure, a timeout included, may have landed: the thread stays busy until the list shows what the docs hold.
-      await change($, current => ({ ...current, note }))
+      // Any other failure, a timeout included, may have landed: the thread stays busy until a list asked for
+      // after the post has been read, so another press cannot post it twice.
+      uncertain = key
+      writes++
+      await change($, current => ({ ...current, note: `${note} The thread stays locked until the list is read again: press Refresh.` }))
       await load($)
-      if (mine === generation) await change($, current => ({ ...current, posting: null }))
       return
     }
     writes++
@@ -459,7 +480,8 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       threads: resolved ? current.threads.filter(one => one.shareId !== thread.shareId || one.groupId !== thread.groupId) : current.threads,
     }))
     // The buttons are back: the next press must not be dropped while the refresh runs.
-    release()
+    // An uncertain post keeps its lock until a list read after it frees the thread.
+    if (uncertain !== key) release()
     await load($)
   } catch (error) {
     if (mine !== generation) return
@@ -467,9 +489,10 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       ...current,
       note: `Could not confirm the post, it may have gone through (the list is reloaded): ${oneLine(String(error))}`,
     }))
-    // A write that timed out may still have landed: the thread stays busy until the list shows what the docs hold.
+    // A write that timed out may still have landed: the thread stays busy until a list asked for after it has been read.
+    uncertain = key
+    writes++
     await load($)
-    if (mine === generation) await change($, current => ({ ...current, posting: null }))
   } finally {
     release()
   }

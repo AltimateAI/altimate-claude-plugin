@@ -28,7 +28,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void> } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -42,7 +42,7 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
   on('ui.open', () => ({ value: {} }))
   on('ui.toast', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${projectDir}/dbt_project.yml` || (options.otherProject !== undefined && e.path === `${options.otherProject}/dbt_project.yml`) }))
+  on('fs.exists', (_: unknown, e: { path: string }) => options.holdExists && e.path === `${options.otherProject}/dbt_project.yml` ? options.holdExists.then(() => ({ value: true })) : ({ value: e.path === `${projectDir}/dbt_project.yml` || (options.otherProject !== undefined && e.path === `${options.otherProject}/dbt_project.yml`) }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 10, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${projectDir}/dbt_project.yml`) return { value: "name: 'jaffle_shop'\nversion: '1.0'\n" }
@@ -62,6 +62,8 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
       const call = cli.filter(c => c.args.action === 'list').length - 1
       const threads = options.listThreads?.(call) ?? options.threads ?? [RAW]
       if (options.failListFrom !== undefined && call >= options.failListFrom) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'service unavailable', metadata: {} }), stderr: '' } }
+      const heldList = options.holdLists?.[call]
+      if (heldList) return heldList.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }))
       if (options.holdListCall && options.holdListCall.n === call) {
         return options.holdListCall.until.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } }))
       }
@@ -411,4 +413,53 @@ test('a post still running when the session ends (/clear, no new start) does not
   await clock.advance(10)
   expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(2)
   await ui.unmount()
+})
+
+test('a post that may have landed stays locked when a poll was already loading: only a list read after the post frees it', async ($, on) => {
+  let releasePoll!: () => void
+  let releaseCheck!: () => void
+  const { clock, cli } = await start($, on, {
+    timeoutPost: true,
+    holdLists: { 1: new Promise<void>(resolve => (releasePoll = resolve)), 2: new Promise<void>(resolve => (releaseCheck = resolve)) },
+  })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await clock.advance(900_000)
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.advance(10)
+  releasePoll()
+  for (let i = 0; i < 3; i++) await clock.advance(10)
+  // The poll's answer was asked for before the post: the thread is still locked.
+  expect(await ui.find({ type: 'Text', text: /Posting/ })).toBeDefined()
+  releaseCheck()
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Button', label: 'Resolve' })).toBeDefined()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a post that may have landed stays locked while the verification list fails', async ($, on) => {
+  const { clock, cli } = await start($, on, { timeoutPost: true, failListFrom: 1 })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Posting/ })).toBeDefined()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a project lookup that finishes after a new session began does not change that session’s project', async ($, on) => {
+  let release!: () => void
+  const other = '/other'
+  const { clock, cli } = await start($, on, { otherProject: other, holdExists: new Promise<void>(resolve => (release = resolve)), files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
+  void $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
+  await clock.advance(10)
+  await $.session.end({})
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  release()
+  for (let i = 0; i < 3; i++) await clock.advance(10)
+  await clock.advance(FIRST_READ_WAIT_MS)
+  expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).not.toContain('other_shop')
 })
