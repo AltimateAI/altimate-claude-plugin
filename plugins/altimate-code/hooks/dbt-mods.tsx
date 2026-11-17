@@ -2,7 +2,7 @@
 // and Fix on a failed dbt run, a results pane for `dbt show`, the manifest's facts on a model Claude
 // reads, and an environment doctor at session start. Each runs the project's own dbt; none calls a model.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, On, RenderElement } from 'claude-code'
+import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later } from './altimate-cli'
@@ -12,6 +12,7 @@ import {
   columnDrift,
   columnWidths,
   dbtCommands,
+  type DbtCommand,
   envNames,
   doctorNote,
   explainPrompt,
@@ -63,7 +64,7 @@ const HISTORY_KEY = 'dbt-results-history'
 const EDIT_TOOLS = new Set(['Edit', 'Write'])
 // How long an edit's result waits for compile-and-validate before it goes back to Claude without it;
 // a later answer rides on Claude's next tool result.
-const CHECK_HOLD_MS = 30_000
+export const CHECK_HOLD_MS = 30_000
 const DBT_TIMEOUT_MS = 120_000
 const SHOW_LIMIT = 50
 const HISTORY_SIZE = 20
@@ -1345,61 +1346,169 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
   )
 }
 
-/** Claude's reads, edits and dbt commands: model context, compile-and-validate, failed runs, results. */
-async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise<any>): Promise<any> {
-  // One spelling of the file (`a/../b` → `b`), so its path inside the project is read right.
-  const file = (EDIT_TOOLS.has(e.tool) || e.tool === 'Read') && 'file_path' in e ? normalize(String((e as any).file_path)) : null
-  const isSql = !!file && /\.sql$/i.test(file)
-  const command = e.tool === 'Bash' && 'command' in e ? String((e as any).command) : null
-  // Every dbt invocation in the command; the session's folder now, before the command can move it.
-  const invocations = command ? dbtCommands(command) : []
-  const dbt = invocations[0] ?? null
-  // The conversation this tool call belongs to: one that ends (/clear) while it runs gets nothing from it.
+// ─── The tool chain's phases (tool-chain.ts) ──────────────────────────────────────────────────────
+//
+//   callStart        what a call needs from before it runs: the conversation it belongs to, and for a dbt
+//                    command the folder, the time and the run artifact as they are (an observer: it never
+//                    refuses or changes the call);
+//   bashAfter        a command's results: the failed run, the query preview, a re-check of the model;
+//   editAfter        a model Claude edited: compile and validate it, hold its note for up to CHECK_HOLD_MS;
+//   readOrEditAfter  a model Claude read: its manifest facts; and, after any read or edit, the notes that
+//                    missed their own tool result.
+
+/** Whether the dbt helpers are on: the `dbt_mods` option, read when the plugin registers them (off until then). */
+let enabled = false
+
+/** What a call needs from before it ran: taken in `callStart`, used in the after phase of the same call. */
+type Start = {
+  /** The conversation this call belongs to: one that ends (/clear) while it runs gets nothing from it. */
+  asked: number
+  startedAt: number
+  /** Where an invocation ran: the session's folder before the command (Claude's shell keeps its `cd`s). */
+  base: string
+  /** Settles when the run artifact's previous invocation is read and the profile's values are loaded. */
+  ready: Promise<string | null>
+}
+// The calls that have started and not yet finished, by agent and command (Bash) or file (edits).
+const starts = new Map<string, Start>()
+const agentOf = (e: unknown): string | null => (e as { agentId?: string }).agentId ?? null
+const startKey = (e: { tool: string; agentId?: string }, what: string) => `${e.agentId ?? ''}\u0000${e.tool}\u0000${what}`
+const bashOf = (e: { tool: string }): { command: string } | null => (e.tool === 'Bash' && typeof (e as { command?: unknown }).command === 'string' ? (e as unknown as { command: string }) : null)
+const editedFile = (e: { tool: string }): string | null => {
+  const path = (e as { file_path?: unknown }).file_path
+  return EDIT_TOOLS.has(e.tool) && typeof path === 'string' ? normalize(path) : null
+}
+// One per key, the latest: a call refused after it started, or an edit that failed, leaves one behind that the next call of the same key replaces.
+const noteStart = (key: string, start: Start) => void starts.set(key, start)
+const takeStart = (key: string): Start | undefined => {
+  const start = starts.get(key)
+  starts.delete(key)
+  return start
+}
+
+/** Where an invocation ran: the folder after the `cd`s before it, and its project (--project-dir, else that folder's). */
+async function placeOf($: EngineInterface, base: string, one: DbtCommand): Promise<{ dir: string; root: string } | null> {
+  const dir = cdTarget(one.cds, base)
+  // A `cd ~/x` or `cd $DIR` leaves the folder unknown: nothing is filed under a guessed project.
+  if (dir === null) return null
+  const projectDir = one.options.reduce<string | null>((found, value, i) => (one.options[i - 1] === '--project-dir' ? value : found), null)
+  const root = await projectRoot($, projectDir ? (projectDir.startsWith('/') ? projectDir : `${dir.replace(/\/+$/, '')}/${projectDir}`) : dir, false)
+  return root ? { dir, root } : null
+}
+
+/** Before a call runs: the conversation it is in; for a dbt command also the folder, the time and the run artifact as they are now. */
+export async function dbtModsCallStart($: EngineInterface, e: { tool: string; agentId?: string }): Promise<void> {
+  if (!enabled) return
   // Taken before the first wait, so a /clear during it is seen.
   const asked = generation
-  const cwdBefore = command && dbt ? await $.session.cwd().catch(() => null) : null
-  const agentId: string | null = (e as { agentId?: string }).agentId ?? null
-  const startedAt = await $.clock.now()
-  // Where an invocation ran: the session's folder before the command (Claude's shell keeps its `cd`s), moved
-  // by the `cd`s before it; its project: --project-dir, else the folder's.
-  const base = command && dbt ? (cwdBefore ?? ((await $.session.root().catch(() => '.')) as string)) : ''
-  const placeOf = async (one: (typeof invocations)[number]) => {
-    const dir = cdTarget(command!.slice(0, one.at), base)
-    // A `cd ~/x` or `cd $DIR` leaves the folder unknown: nothing is filed under a guessed project.
-    if (dir === null) return null
-    const projectDir = one.options.reduce<string | null>((found, value, i) => (one.options[i - 1] === '--project-dir' ? value : found), null)
-    const root = await projectRoot($, projectDir ? (projectDir.startsWith('/') ? projectDir : `${dir.replace(/\/+$/, '')}/${projectDir}`) : dir, false)
-    return root ? { dir, root } : null
-  }
+  const file = editedFile(e)
+  if (file) return noteStart(startKey(e, file), { asked, startedAt: 0, base: '', ready: Promise.resolve(null) })
+  const bash = bashOf(e)
+  const invocations = bash ? dbtCommands(bash.command) : []
+  if (!bash || invocations.length === 0) return
   const runs = invocations.filter(one => RUN_VERBS.includes(one.verb))
-  const places = command && dbt ? await Promise.all(runs.map(placeOf)) : []
+  const cwd = await $.session.cwd().catch(() => null)
+  const base = cwd ?? ((await $.session.root().catch(() => '.')) as string)
+  const startedAt = await $.clock.now()
+  // The invocation the run's artifact held before the command: an older run's. The profile's values are
+  // loaded before the command's output is read.
+  const ready = (async () => {
+    const first = runs[0] ? await placeOf($, base, runs[0]) : null
+    if (!first) return null
+    const seen = await seenInvocation($, first.root).catch(() => null)
+    await ensureRedactions($, first.root)
+    return seen
+  })()
+  // Nobody awaits it if the call never reaches its after phase.
+  ready.catch(() => {})
+  noteStart(startKey(e, bash.command), { asked, startedAt, base, ready })
+  await ready.catch(() => {})
+}
+
+/** After a Bash call: re-check the checked model, record a dbt run's result, open a `dbt show`'s rows. */
+export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; command: string; agentId?: string }, result: ToolCallResult): Promise<string[]> {
+  if (!enabled) return []
+  const agentId = agentOf(e)
+  const command = e.command
+  const start = takeStart(startKey(e, command))
+  // A command may have changed the checked model.
+  later($, () => recheck($, null))
+  const invocations = dbtCommands(command)
+  if (invocations.length === 0) return pendingLines(agentId)
+  const asked = start?.asked ?? generation
+  const startedAt = start?.startedAt ?? (await $.clock.now())
+  const base = start?.base ?? (((await $.session.cwd().catch(() => null)) ?? ((await $.session.root().catch(() => '.')) as string)))
+  const seen = start ? await start.ready.catch(() => null) : null
+  const runs = invocations.filter(one => RUN_VERBS.includes(one.verb))
+  const places = await Promise.all(runs.map(one => placeOf($, base, one)))
   const firstRun = places[0] ?? null
-  // The invocation the run's artifact held before the command: an older run's.
-  const seen = firstRun ? await seenInvocation($, firstRun.root).catch(() => null) : null
   // The profile's values are loaded before the command's output is read.
-  if (firstRun) await ensureRedactions($, firstRun.root)
-  const result = await next(e)
-  if (result.deny) return result
-
-  // 12 · A model Claude reads: the manifest's facts go with the file.
-  if (isSql && e.tool === 'Read' && !result.isError) {
-    const found = await modelNote($, file!, agentId ?? undefined).catch(() => null)
-    if (found) {
-      $.ui.toast(found.toast, { timeoutMs: 6000 })
-      $.ui.log(`model-context · added to Claude's context: ${basename(file!)}`)
-      return withPending(addContext(result, found.note), agentId)
-    }
-    return withPending(result, agentId)
+  if (firstRun && !start) await ensureRedactions($, firstRun.root)
+  const raw = (result as any).result
+  const output = typeof raw?.stdout === 'string' ? `${raw.stdout}\n${raw.stderr ?? ''}` : String((result as any).text ?? '')
+  // Runs: one result for the whole command. Two or more (`dbt run -s a && dbt test -s a`) are recorded as
+  // one compound run, so only the same compound command or a whole-project build clears its failure.
+  // Runs in two projects in one command (`cd a && dbt run; cd ../b && dbt test`) are not one result.
+  if (firstRun && places.every(place => place?.root === firstRun.root)) {
+    // One piece of output per invocation says which one failed: the exit code, which any of them may have set,
+    // does not. It decides only when the output cannot say (a killed run, no pieces to match). A failure is
+    // cleared only by output that shows every run finished without errors.
+    const verdict = dbtVerdict(output, invocations.map(one => one.verb))
+    const failed = verdict.failed || (!(verdict.mapped && verdict.passed) && !!result.isError)
+    const proven = !failed && verdict.passed
+    const verb = runs.map(one => one.verb).join('+')
+    const select = runs.length === 1 ? runs[0]!.select : runs.map(one => one.select ?? '*').join(' | ')
+    // One context when every run shares it (`-t prod` on each), else each run's in turn.
+    // The folder it ran in too: relative `--profiles-dir .`, `--state` and the environment's paths depend on it.
+    const contexts = runs.map((one, i) => [...one.identity, ...one.env.map(env => `env:${env}`), `cwd:${places[i]!.dir.replace(/\/+$/, '')}`])
+    const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts
+    // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
+    await recordRun($, command.trim(), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked, seen).catch(() => null)
   }
+  // Shows: a command that runs several different shows saves no preview, whatever node dbt names: which
+  // show printed which rows cannot be told. One show, or the same show twice (`dbt show -s a || dbt show -s a`),
+  // owns the preview.
+  const table = showPreview(output) ?? textTable(output)
+  const shows = invocations.filter(one => one.verb === 'show')
+  const identity = (one: DbtCommand) => JSON.stringify([one.argv, one.env, cdTarget(one.cds, base)])
+  const sameShow = shows.every(one => identity(one) === identity(shows[0]!))
+  const show = sameShow ? shows.at(-1) : undefined
+  const shown = show && !result.isError ? await placeOf($, base, show) : null
+  if (show && shown && table) {
+    const select = show.select
+    const inline = select ? null : show.inline
+    // A re-run runs Claude's own invocation again, from where it ran: same flags, same order. One that
+    // depended on its shell (variables, `~`, globs, other commands before it) is kept with no Re-run.
+    const replay = replayArgv(show.argv, 0).slice(0, -6)
+    await showResult(
+      $,
+      { id: JSON.stringify([shown.root, shown.dir, replay, envNames(show.env)]), title: titleOf(select, inline) || 'dbt show', root: shown.root, select, inline, options: show.options, argv: show.replayable ? show.argv : null, cwd: shown.dir, replayable: show.replayable, columns: table.columns, rows: table.rows, limit: show.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
+      true,
+      asked,
+    ).catch(() => null)
+  }
+  return pendingLines(agentId)
+}
 
-  // 07 · A model Claude edits: compile it and run it against the warehouse, then check its columns.
-  if (isSql && EDIT_TOOLS.has(e.tool) && !result.isError) {
-    const root = await projectRoot($, file!, true)
+/** The notes that missed their own tool result, for this agent, as context lines. */
+function pendingLines(agentId: string | null): string[] {
+  return withPending({ context: [] as string[] }, agentId).context
+}
+
+/** After a model Claude edited: compile it and run it against the warehouse, then check its columns. */
+export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string }): Promise<string[]> {
+  if (!enabled || !EDIT_TOOLS.has(e.tool)) return []
+  const path = normalize(file.path)
+  // The conversation this edit belongs to, taken before the edit ran, so a /clear during it is seen.
+  const asked = takeStart(startKey(e, path))?.asked ?? generation
+  const agentId = agentOf(e)
+  if (/\.sql$/i.test(path)) {
+    const root = await projectRoot($, path, true)
     // Only a file under the project's model-paths is a model dbt can show.
     const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
-    const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, file!)) : relative(root, file!).startsWith(`${folder}/`)))
+    const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
     if (root && inModels) {
-      const check = compileAndValidate($, root, file!, asked)
+      const check = compileAndValidate($, root, path, asked)
       const landed = await within($, CHECK_HOLD_MS, check)
       // Landed, and still the newest check of this file in this conversation.
       if (landed && landed.current()) {
@@ -1412,69 +1521,34 @@ async function dbtToolCall($: EngineInterface, e: any, next: (e: any) => Promise
               : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
           { timeoutMs: 6000 },
         )
-        return withPending(addContext(result, landed.note), agentId)
+        return landed.note ? [landed.note] : []
       }
       // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
       if (!landed) check.then(done => void (done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
-      return withPending(result, agentId)
+      return []
     }
   }
-
-  // A shell command, or an edit of another file (schema.yml), may have changed the checked model.
   // An edit of a .yml (a schema file documenting the model for the first time) or of another .sql (a macro
   // the model calls) can change its answer though neither watched file did: check it again regardless.
-  const forced = !!file && EDIT_TOOLS.has(e.tool) && !result.isError && /\.(ya?ml|sql)$/i.test(file)
-  if (command || forced) later($, () => recheck($, forced ? file : null))
+  if (/\.(ya?ml|sql)$/i.test(path)) later($, () => recheck($, path))
+  return []
+}
 
-  // 08 and 09 · Claude's own dbt commands.
-  if (command && dbt) {
-    const raw = (result as any).result
-    const output = typeof raw?.stdout === 'string' ? `${raw.stdout}\n${raw.stderr ?? ''}` : String(result.text ?? '')
-    // Runs: one result for the whole command. Two or more (`dbt run -s a && dbt test -s a`) are recorded as
-    // one compound run, so only the same compound command or a whole-project build clears its failure.
-    // Runs in two projects in one command (`cd a && dbt run; cd ../b && dbt test`) are not one result.
-    if (firstRun && places.every(place => place?.root === firstRun.root)) {
-      // One piece of output per invocation says which one failed: the exit code, which any of them may have set,
-      // does not. It decides only when the output cannot say (a killed run, no pieces to match). A failure is
-      // cleared only by output that shows every run finished without errors.
-      const verdict = dbtVerdict(output, invocations.map(one => one.verb))
-      const failed = verdict.failed || (!(verdict.mapped && verdict.passed) && !!result.isError)
-      const proven = !failed && verdict.passed
-      const verb = runs.map(one => one.verb).join('+')
-      const select = runs.length === 1 ? runs[0]!.select : runs.map(one => one.select ?? '*').join(' | ')
-      // One context when every run shares it (`-t prod` on each), else each run's in turn.
-      // The folder it ran in too: relative `--profiles-dir .`, `--state` and the environment's paths depend on it.
-      const contexts = runs.map((one, i) => [...one.identity, ...one.env.map(env => `env:${env}`), `cwd:${places[i]!.dir.replace(/\/+$/, '')}`])
-      const context = contexts.every(one => JSON.stringify(one) === JSON.stringify(contexts[0])) ? contexts[0]! : contexts
-      // Where it ran includes the environment set for it in the same command (`DBT_TARGET=prod dbt run`).
-      await recordRun($, command.trim(), verb, select, context, firstRun.root, output, failed, proven, startedAt, asked, seen).catch(() => null)
-    }
-    // Shows: a command that runs several different shows saves no preview, whatever node dbt names: which
-    // show printed which rows cannot be told. One show, or the same show twice (`dbt show -s a || dbt show -s a`),
-    // owns the preview.
-    const table = showPreview(output) ?? textTable(output)
-    const shows = invocations.filter(one => one.verb === 'show')
-    const identity = (one: (typeof shows)[number]) => JSON.stringify([one.argv, one.env, cdTarget(command.slice(0, one.at), base)])
-    const sameShow = shows.every(one => identity(one) === identity(shows[0]!))
-    const show = sameShow ? shows.at(-1) : undefined
-    const shown = show && !result.isError ? await placeOf(show) : null
-    if (show && shown) {
-      if (table) {
-        const select = show.select
-        const inline = select ? null : show.inline
-        // A re-run runs Claude's own invocation again, from where it ran: same flags, same order. One that
-        // depended on its shell (variables, `~`, globs, other commands before it) is kept with no Re-run.
-        const replay = replayArgv(show.argv, 0).slice(0, -6)
-        await showResult(
-          $,
-          { id: JSON.stringify([shown.root, shown.dir, replay, envNames(show.env)]), title: titleOf(select, inline) || 'dbt show', root: shown.root, select, inline, options: show.options, argv: show.replayable ? show.argv : null, cwd: shown.dir, replayable: show.replayable, columns: table.columns, rows: table.rows, limit: show.limit ?? 5, ms: (await $.clock.now()) - startedAt, at: await $.clock.now(), error: null, by: 'claude' },
-          true,
-          asked,
-        ).catch(() => null)
-      }
+/** After a read or an edit succeeded: a model that was read brings its manifest facts; then the notes that are due. */
+export async function dbtModsReadOrEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string }): Promise<string[]> {
+  if (!enabled) return []
+  const agentId = agentOf(e)
+  const path = normalize(file.path)
+  // A model Claude reads: the manifest's facts go with the file.
+  if (e.tool === 'Read' && /\.sql$/i.test(path)) {
+    const found = await modelNote($, path, agentId ?? undefined).catch(() => null)
+    if (found) {
+      $.ui.toast(found.toast, { timeoutMs: 6000 })
+      $.ui.log(`model-context · added to Claude's context: ${basename(path)}`)
+      return [found.note, ...pendingLines(agentId)]
     }
   }
-  return withPending(result, agentId)
+  return pendingLines(agentId)
 }
 
 /**
@@ -1494,12 +1568,26 @@ export async function endDbtMods($: EngineInterface) {
   await update($, failureAtom, () => null)
 }
 
-/** A main-conversation turn started: the model context may have been compacted, so it is given again. */
-export function newTurnDbtMods() {
-  contextGiven.clear()
+/** A main-conversation turn started: the model context may have been compacted, so it is given again. A subagent's turn does not. */
+export function newTurnDbtMods(e: { agentId?: string }) {
+  if (enabled && !e.agentId) contextGiven.clear()
 }
 
-export function registerDbtMods(on: On) {
+/** The feature's session start (features/index.ts). */
+export async function sessionStartDbtMods($: EngineInterface, e: Args<'session.start'>) {
+  if (enabled) await startDbtMods($, !!e.isInteractive).catch(error => $.ui.log(`dbt-mods · could not start: ${String(error)}`))
+}
+
+/** The feature's band lines, under the lineage one; none when the helpers are off. */
+export async function bandDbtMods($: EngineInterface, ui: { Box: any; Button: any; Text: any }): Promise<RenderElement | null> {
+  return enabled ? dbtModsBand($, ui) : null
+}
+
+/** Registers the helpers' own hooks (their prompt, commands and panes); the tool calls go through the chain's phases above. */
+export function registerDbtMods(on: On, context: { options: PluginOptions }) {
+  // The dbt helpers can be turned off in the plugin's settings; they run the project's own dbt.
+  enabled = (context.options as { dbt_mods?: boolean } | undefined)?.dbt_mods !== false
+  if (!enabled) return
 
   // The doctor's findings go with the first prompt after they land.
   on('prompt.submit', async ($, e, next) => {
@@ -1509,12 +1597,6 @@ export function registerDbtMods(on: On) {
     $.ui.log('dbt-doctor · added to Claude\'s context: the dbt environment check')
     return next({ ...e, context: [...(e.context ?? []), note] })
   })
-
-  // One hook per tool it watches: the plugin's lineage half hooks every tool call without a matcher.
-  on('tool.call', { tool: 'Read' }, dbtToolCall)
-  on('tool.call', { tool: 'Edit' }, dbtToolCall)
-  on('tool.call', { tool: 'Write' }, dbtToolCall)
-  on('tool.call', { tool: 'Bash' }, dbtToolCall)
 
   on('command.run', { command: SHOW_COMMAND }, async ($, e) => {
     // The conversation that asked, taken before the first wait: a /clear before the query runs keeps its answer out of the new one's pane.
@@ -1735,14 +1817,11 @@ export function registerDbtMods(on: On) {
   })
 }
 
-// Where a shell command runs: the session folder, moved by each `cd` in it.
-const CD = /(?:^|[;&|(\n]\s*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
-function cdTarget(command: string, cwd: string): string | null {
+// Where a shell command runs: the session folder, moved by each `cd` before it (the parser lists them).
+function cdTarget(cds: (string | null)[], cwd: string): string | null {
   let dir = cwd
-  for (const match of command.matchAll(CD)) {
-    const target = match[1]!.replace(/^['"]|['"]$/g, '')
-    // A folder the shell would expand (`~`, a variable) is not one the plugin can name.
-    if (/^~|[$`]/.test(target)) return null
+  for (const target of cds) {
+    if (target === null) return null
     dir = target.startsWith('/') ? target : `${dir.replace(/\/+$/, '')}/${target}`
   }
   return normalize(dir)

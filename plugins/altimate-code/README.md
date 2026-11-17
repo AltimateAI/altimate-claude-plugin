@@ -149,6 +149,19 @@ Opening a dbt folder runs two programs the repository supplies, with no action f
 
 Compile and validate runs a query on your warehouse after every model edit (`dbt show --limit 1`). On a warehouse that bills by bytes scanned or wakes a suspended warehouse for it, that costs money. Set the plugin's `dbt_mods` option to false (in `/config`) to turn all of the helpers off.
 
+## Settings
+
+The plugin has six settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). `dbt_mods` is used; the other five are not used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each controls or will control.
+
+| Setting | Default | What it controls |
+| --- | --- | --- |
+| `dbt_mods` | on | Turns all of the dbt helpers (above) off when false. |
+| `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it waits for your approval (0 never waits; at least 0). Other warehouses are never held. |
+| `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. |
+| `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. Empty uses the default checks. |
+| `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). |
+| `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. |
+
 ## Example prompts
 
 Once installed, try these in Claude Code (or prefix any of them with `/altimate-code:altimate`):

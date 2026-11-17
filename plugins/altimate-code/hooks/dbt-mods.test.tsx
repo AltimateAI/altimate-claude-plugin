@@ -29,7 +29,6 @@ import {
   fitSaved,
   savedRows,
   saysFailed,
-  shellWords,
   targetPath,
   showPreview,
   textTable,
@@ -466,8 +465,8 @@ kitTest('a failed dbt command is read from run_results.json by node name, and fr
 })
 
 kitTest('dbt commands are found behind a cd, a venv path or uv run, with their selection; other text is not one', () => {
-  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], identity: [], at: 0, end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [] })
-  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], identity: ['--limit 5'], at: 8, end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [] })
+  expect(dbtCommand('dbt build -s orders')).toEqual({ verb: 'build', select: 'orders', inline: null, limit: null, options: [], identity: [], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '-s', 'orders'], replayable: true, env: [] })
+  expect(dbtCommand('cd x && .venv/bin/dbt show --select customers --limit 5')).toEqual({ verb: 'show', select: 'customers', inline: null, limit: 5, options: [], identity: ['--limit 5'], at: 8, cds: ['x'], end: 26, argv: ['.venv/bin/dbt', 'show', '--select', 'customers', '--limit', '5'], replayable: true, env: [] })
   // Redirections are the shell's: they are neither selection nor argv.
   expect(dbtCommand('dbt show -s orders 2>&1 | tail -20')?.argv).toEqual(['dbt', 'show', '-s', 'orders'])
   expect(dbtCommand('dbt run -s orders > out.txt 2> err.txt')?.select).toBe('orders')
@@ -475,7 +474,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommand('DBT_PROFILES_DIR=. dbt show -s x')?.replayable).toBe(false)
   expect(dbtCommand('dbt show --target $T -s x')?.replayable).toBe(false)
   // A command split with `\` across lines is one command.
-  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], identity: ['--limit 10'], at: 0, end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [] })
+  expect(dbtCommand('dbt build \\\n  --select stg_x \\\n  --limit 10')).toEqual({ verb: 'build', select: 'stg_x', inline: null, limit: 10, options: [], identity: ['--limit 10'], at: 0, cds: [], end: 9, argv: ['dbt', 'build', '--select', 'stg_x', '--limit', '10'], replayable: true, env: [] })
   // A redirection inside quoted SQL is SQL.
   expect(dbtCommand('dbt show --inline "select 1 as \\"2>1\\"" -s x')?.inline).toBe('select 1 as "2>1"')
   // Comments and background `&` end it; anything the shell would expand or change turns Re-run off.
@@ -521,7 +520,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(replay.options).toEqual(['--target', 'prod', '--target', 'dev', '--target', 'qa'])
   expect(replay.inline).toBe('select "id"')
   expect(replayArgv(replay.argv, 7)).toEqual(['dbt', '--target', 'prod', 'show', '-t', 'dev', '--target', 'qa', '-s', 'orders', '--inline', 'select "id"', '--limit', '7', '--output', 'json', '--log-format', 'json'])
-  expect(shellWords(`a 'b c' "d \\"e\\"" f\\ g`)).toEqual(['a', 'b c', 'd "e"', 'f g'])
+  expect(dbtCommand(`dbt show a 'b c' "d \\"e\\"" f\\ g`)?.argv).toEqual(['dbt', 'show', 'a', 'b c', 'd "e"', 'f g'])
   // A flag inside quoted SQL is SQL, not a flag.
   const quoted = dbtCommand(`dbt show --inline "select '-t prod' as x, '--limit 1000' as y" --limit 4`)
   expect([quoted?.options, quoted?.limit]).toEqual([[], 4])
@@ -540,7 +539,10 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   expect(dbtCommands('dbt deps; dbt run -s a; dbt test -s a').map(one => one.verb)).toEqual(['deps', 'run', 'test'])
   expect(dbtCommand('echo dbt is great')).toBeNull()
   // A dbt command inside another command's quoted argument is not run.
-  expect(dbtCommand('altimate run "Fix the failing test, then re-run `dbt build -s orders`" --agent builder')).toBeNull()
+  expect(dbtCommand("altimate run 'Fix the failing test, then re-run `dbt build -s orders`' --agent builder")).toBeNull()
+  expect(dbtCommand('altimate run "Fix the failing test, then re-run dbt build -s orders" --agent builder')).toBeNull()
+  // Inside double quotes a backtick still runs its command: the shell starts that dbt, so it is one.
+  expect(dbtCommand('altimate run "Fix the failing test, then re-run `dbt build -s orders`" --agent builder')?.verb).toBe('build')
   expect(dbtCommand(`dbt show --inline 'select 1 as "a b"' --limit 2`)?.inline).toBe('select 1 as "a b"')
   expect(projectPaths("model-paths: ['transform']\nmacro-paths:\n  # shared macros\n  - m1\n\n  - m2\nseed-paths: ['../shared']\n")).toEqual(['transform', 'snapshots', 'm1', 'm2', 'tests', 'analyses'])
   expect(projectPaths("model-paths: ['.']\n")).toContain('')

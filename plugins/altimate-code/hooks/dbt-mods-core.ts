@@ -2,6 +2,7 @@
 // lines, run_results.json, the manifest, `dbt --version` and `dbt debug`. Kept apart from the hooks so
 // each reading is tested on dbt's real output.
 import type { DbtFailure, DoctorCheck, ModelContext, QueryResult } from '../types'
+import { isDbtSubcommand, parseDbtCommand, type DbtInvocation } from './dbt-command'
 import { withoutComment } from './lineage-graph'
 
 const ANSI = /\u001b\[[0-9;]*m/g
@@ -207,8 +208,10 @@ export type DbtCommand = {
    * wins, so that order matters). `--exclude-resource-types test` or `--full-refresh` make it a different run; `--threads 8` does not.
    */
   identity: string[]
-  /** Where the dbt invocation starts in the command: a `cd` after it does not move where it ran. */
+  /** Where the dbt invocation starts in the command (its leading assignments and launcher included): a `cd` after it does not move where it ran. */
   at: number
+  /** The folder each `cd` before it names, in order; null for one the plugin cannot name (`cd ~/x`, `cd $DIR`, `cd -`). */
+  cds: (string | null)[]
   /** Where its verb ends in the command: the next invocation is looked for after it. */
   end: number
   /** The dbt invocation as the shell passes it: the executable as written, then every argument, quotes decoded, redirections left out. */
@@ -228,43 +231,6 @@ const DISPLAY_FLAGS = new Set(['--log-format', '--log-format-file', '--log-level
 const OUTPUT_FLAGS = new Set(['--output', '-o', '--log-format', '--limit', '--log-level'])
 const BARE_OUTPUT_FLAGS = new Set(['--quiet', '-q'])
 
-/**
- * Splits a shell command segment into words as a POSIX shell does: single quotes literal, double quotes
- * with backslash escapes, backslashes outside quotes. Variables and globs are left as written.
- */
-export function shellWords(segment: string): string[] {
-  const words: string[] = []
-  let word = ''
-  let has = false
-  for (let i = 0; i < segment.length; i++) {
-    const ch = segment[i]!
-    if (ch === "'") {
-      const end = segment.indexOf("'", i + 1)
-      word += segment.slice(i + 1, end < 0 ? undefined : end)
-      has = true
-      i = end < 0 ? segment.length : end
-    } else if (ch === '"') {
-      has = true
-      for (i++; i < segment.length && segment[i] !== '"'; i++) {
-        if (segment[i] === '\\' && i + 1 < segment.length && '"\\$`\n'.includes(segment[i + 1]!)) i++
-        word += segment[i]
-      }
-    } else if (ch === '\\' && i + 1 < segment.length) {
-      word += segment[++i]
-      has = true
-    } else if (/\s/.test(ch)) {
-      if (has) words.push(word)
-      word = ''
-      has = false
-    } else {
-      word += ch
-      has = true
-    }
-  }
-  if (has) words.push(word)
-  return words
-}
-
 /** A flag's values in a word list: `--flag a b` (until the next flag) or `--flag=a`, for every occurrence. */
 function flagValues(words: string[], index: number): { values: string[]; next: number } {
   const word = words[index]!
@@ -276,70 +242,15 @@ function flagValues(words: string[], index: number): { values: string[]; next: n
   return { values, next: at }
 }
 
-const SUBCOMMANDS = 'run-operation|run|test|build|seed|snapshot|show|compile|parse|retry|deps|ls|list|debug|docs|source|clean|init|clone|environment'
-// dbt's global flags that take a value always consume the next word, even a subcommand word
-// (`dbt --target test run` runs `run`); its boolean flags never do (`dbt --debug run`). Any other flag
-// consumes the next word unless that is a subcommand.
-const VALUE_FLAGS = '-t|--target|--profile|--profiles-dir|--project-dir|--vars|--log-format|--log-format-file|--log-path|--target-path|--log-level|--log-level-file|--printer-width|--state|--defer-state|--threads|--record-timing-info'
-const BOOLEAN_FLAGS = '-d|--debug|--no-partial-parse|--partial-parse|-q|--quiet|--no-print|--use-colors|--no-use-colors|--fail-fast|-x|--warn-error|--no-version-check|--version-check|--write-json|--no-write-json|--use-experimental-parser|--no-send-anonymous-usage-stats|--send-anonymous-usage-stats|--static-parser|--cache-selected-only|--introspect|--no-introspect|--populate-cache|--no-populate-cache|--print|--log-cache-events'
-const DBT_INVOCATION = new RegExp(
-  '(?:^|[\\s;&|(]|\\/)dbt(?:\\.exe)?[ \\t]+' +
-    `((?:(?:(?:${VALUE_FLAGS})(?![\\w-])(?:=\\S+|[ \\t]+(?!-)\\S+)?|(?:${BOOLEAN_FLAGS})(?![\\w-])(?:=\\S+)?|--?[\\w-]+(?:=(?!-)\\S+|[ \\t](?!-)(?!(?:${SUBCOMMANDS})(?![\\w-]))\\S+)?)[ \\t]+)*)` +
-    `(${SUBCOMMANDS})(?![\\w-])`,
-  'm',
-)
-
-/** The dbt command a shell command runs, when it runs one: its verb, selection, inline SQL, limit, context and argv. */
-export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
-  // A `\` at a line's end continues the command: one space each, so positions stay aligned.
-  const command = written.replace(/\\\r?\n/g, m => ' '.repeat(m.length))
-  // Quoted text is an argument, not the command: `altimate run "fix it, then dbt build"` runs no dbt.
-  // Each quoted string is masked to the same length, so positions in it match the command's own.
-  // An escaped character outside quotes (`\\;`) is a literal too, masked the same way.
-  const masked = command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'|\\[^\n]/g, quoted => (quoted[0] === '\\' ? 'xx' : `${quoted[0]}${'x'.repeat(quoted.length - 2)}${quoted[0]}`))
-  // Redirections (`2>&1`, `> out.txt`, `&> log`) are the shell's, found outside quotes and blanked in both.
-  let bare = masked
-  let text = command
-  for (const found of masked.matchAll(/(^|\s)((?:\d*|&)>>?&?\d*|\d*<)(?!<)\s*(?:(?<=[<>]\s*)[^\s;&|()<>]+)?/g)) {
-    const at = found.index! + found[1]!.length
-    const span = found[0].length - found[1]!.length
-    bare = bare.slice(0, at) + ' '.repeat(span) + bare.slice(at + span)
-    text = text.slice(0, at) + ' '.repeat(span) + text.slice(at + span)
-  }
-  // The dbt invocation itself: after a `cd x &&`, a venv's `bin/dbt`, `uv run dbt`, `python -m dbt`.
-  // Every dbt subcommand is found, so a command's invocations line up with the output each one printed;
-  // `run-operation` is not `run`.
-  // The first invocation at or after `searchFrom`; what comes before it (exports, `cd`s) is still read.
-  const found = DBT_INVOCATION.exec(bare.slice(searchFrom))
-  if (!found) return null
-  const match = Object.assign([...found], { index: found.index + searchFrom }) as unknown as RegExpExecArray
-  // The executable's word starts after the last separator before `dbt` (`.venv/bin/dbt` is one word).
-  const dbtAt = match.index + match[0].search(/dbt(?:\.exe)?\s/)
-  const head = bare.slice(0, dbtAt)
-  const start = Math.max(head.search(/[^\s;&|(]*$/), 0)
-  // The subcommands that are not runs, shows or compiles count only where a command starts (after `;`, `&&`,
-  // `|`, a newline, or a wrapper such as `uv run`): `git diff -- dbt docs/` runs no dbt.
-  if (/^(?:run-operation|deps|ls|list|debug|docs|source|clean|init|clone|environment)$/.test(match[2]!)) {
-    const lead = /(?:^|[;&|(\n])([^;&|(\n]*)$/.exec(head.slice(0, start))?.[1] ?? ''
-    if (!/^\s*(?:(?:[A-Za-z_]\w*=\S*|env|time|sudo|exec|nohup|command)\s+|(?:uv|poetry|pipenv|pdm|hatch|rye)\s+run\s+(?:--?[\w-]+(?:[ =](?!-)\S+)?\s+)*|python3?\s+-m\s+)*$/.test(lead)) return dbtCommand(written, match.index + match[0].length)
-  }
-  // Its own arguments end where the shell starts the next command, puts this one in the background, or a comment starts.
-  const stop = bare.slice(start).search(/;|&&|\|\||\||&|\n|\)|\s#/)
-  const end = stop < 0 ? undefined : start + stop
-  const words = shellWords(text.slice(start, end))
-  // Re-run repeats only a plain invocation: nothing in it the shell expands (variables and command
-  // substitution, even in double quotes; `~`; globs; here-docs; comments), and nothing before it but plain
-  // `cd`s and activating a `.venv` in the project, or a plain `uv run`/`poetry run`. Anything else may have
-  // changed what ran.
-  const before = command.slice(0, start)
-  const plainBefore = /^\s*(?:(?:cd\s+[^\s;&|$`~*?]+|(?:source|\.)\s+(?:\.\/)?\.?venv\/bin\/activate)\s*(?:&&|;)\s*)*(?:(?:uv|poetry)\s+run\s+)?$/.test(before)
-  const replayable =
-    plainBefore &&
-    !/[$`~]|<</.test(text.slice(start, end)) &&
-    !/[*?]/.test(bare.slice(start, end)) &&
-    !/\s#/.test(bare.slice(start)) &&
-    !/--env-file/.test(text.slice(start, end))
-  const verb = match[2]!
+/**
+ * The dbt command a parsed invocation is, in the shapes the helpers compare and replay: its verb, selection,
+ * inline SQL, limit, the flags that decide where it ran, what makes one run the same work as another, and
+ * its environment hashed. The shell's own syntax is read once, by parseDbtCommand (dbt-command.ts).
+ */
+function commandOf(command: string, one: DbtInvocation): DbtCommand | null {
+  const verb = one.subcommand
+  if (!isDbtSubcommand(verb)) return null
+  const words = one.argv
   let select: string[] = []
   let inline: string | null = null
   let limit: number | null = null
@@ -359,28 +270,12 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
       i += word.includes('=') && word.startsWith('--') ? 1 : 2
     } else i++
   }
-  // Variables set for it in the same command: a prefix, `env X=…`, or an export before it.
-  // Only real assignments count: words that open a command (`X=1 dbt …`) or follow `export`/`env`.
-  // The value each variable has when dbt runs: a later export or the command's own prefix overrides an earlier one.
-  const env = new Map<string, string>()
-  const parts = [...bare.slice(0, start).matchAll(/[^;&|(\n]+/g)]
-  for (const [i, part] of parts.entries()) {
-    const words = shellWords(command.slice(part.index!, part.index! + part[0].length))
-    // An export lasts for the rest of the command; a `X=1` prefix only for its own command, dbt's when last.
-    const exported = words[0] === 'export'
-    const own = i === parts.length - 1 && part.index! + part[0].length === start
-    if (!exported && !own) continue
-    const from = exported || words[0] === 'env' ? 1 : 0
-    for (const word of words.slice(from)) {
-      if (!/^[A-Za-z_]\w*=/.test(word)) break
-      env.set(word.slice(0, word.indexOf('=')), word)
-    }
-  }
   // Values never leave this function in the clear: they are compared in memory and kept in the failure's
   // context only as a salted hash, and are never persisted (the history keeps the names alone).
-  const context = [...env.values()].map(hashedEnv).sort()
+  const env = one.env.map(hashedEnv).sort()
   const byFlag = new Map<string, { value: string; bool: boolean }[]>()
-  const rest = [...words.slice(1, words.indexOf(verb) < 0 ? undefined : words.indexOf(verb)), ...(words.indexOf(verb) < 0 ? [] : words.slice(words.indexOf(verb) + 1))]
+  const at = words.indexOf(verb!)
+  const rest = [...words.slice(1, at < 0 ? undefined : at), ...(at < 0 ? [] : words.slice(at + 1))]
   for (let i = 0; i < rest.length; ) {
     const word = rest[i]!
     if (!word.startsWith('-')) {
@@ -403,7 +298,20 @@ export function dbtCommand(written: string, searchFrom = 0): DbtCommand | null {
   const identity = [...byFlag]
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, uses]) => (uses.every(one => one.bool) ? (uses.at(-1)!.value === 'false' ? `${key} false` : key) : `${key} ${uses.map(one => one.value || 'true').join(' | ')}`))
-  return { verb, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: start, end: match.index + match[0].length, argv: words, replayable, env: context }
+  // Re-run repeats only a plain invocation: nothing in it the shell expands (variables and command
+  // substitution, even in double quotes; `~`; globs; comments), no environment set for it, and nothing
+  // before it but plain `cd`s and activating a `.venv` in the project, or a plain `uv run`/`poetry run`.
+  // Anything else may have changed what ran.
+  const plainBefore = /^\s*(?:(?:cd\s+[^\s;&|$`~*?]+|(?:source|\.)\s+(?:\.\/)?\.?venv\/bin\/activate)\s*(?:&&|;)\s*)*$/.test(command.slice(0, one.start))
+  const plainLauncher = /^(?:(?:uv|poetry) run )?\S+$/.test(one.binary)
+  const replayable =
+    plainBefore &&
+    plainLauncher &&
+    one.env.length === 0 &&
+    !one.dynamic &&
+    !one.commented &&
+    !words.some(word => /[$`~]/.test(word) || word.includes('--env-file'))
+  return { verb: verb!, select: select.length ? select.join(' ') : null, inline, limit, options, identity, at: one.start, cds: one.cds, end: one.subcommandEnd, argv: words, replayable, env }
 }
 
 // Random for each session and never stored, so a hash cannot be guessed offline from anything on disk.
@@ -463,18 +371,13 @@ export function sha256Hex(text: string): string {
 
 /** Every dbt invocation in a shell command, in order (`dbt run -s a && dbt test -s a` is two). */
 export function dbtCommands(command: string): DbtCommand[] {
-  const found: DbtCommand[] = []
-  let from = 0
-  for (let i = 0; i < 20; i++) {
-    // Each invocation is read in the whole command, so an export before an earlier one still applies.
-    const one = dbtCommand(command, from)
-    if (!one) break
-    found.push(one)
-    // The next search starts after this invocation's verb (a path holding `run` or `test` is not one).
-    from = one.end
-  }
-  return found
+  return parseDbtCommand(command)
+    .map(one => commandOf(command, one))
+    .filter((one): one is DbtCommand => one !== null)
 }
+
+/** The first dbt invocation in a shell command, or null. */
+export const dbtCommand = (command: string): DbtCommand | null => dbtCommands(command)[0] ?? null
 
 /** The argv that runs a captured `dbt show` again with JSON output and `limit` rows, every other argument as it was. */
 export function replayArgv(argv: string[], limit: number): string[] {
