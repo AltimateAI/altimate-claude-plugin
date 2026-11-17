@@ -104,6 +104,31 @@ test('dbt show --inline is estimated from its SQL', async ($, on) => {
   expect(result.deny).toContain('20.0 GiB')
 })
 
+test('a BigQuery table name in backticks inside single quotes is estimated; a backtick outside them is not', async ($, on) => {
+  const q = 'select * from `p.d.t`'
+  const { clock, estimates } = await start($, on, { answers: { [q]: OVER } })
+  const result: any = await $.tool.call(bash(`dbt show --inline '${q}'`))
+  await clock.settle()
+  expect(estimates).toEqual([q])
+  expect(result.deny).toContain('20.0 GiB')
+  const before = estimates.length
+  await $.tool.call(bash('dbt show --inline "select 1" --target `echo prod`'))
+  await $.tool.call(bash('dbt show --inline "select `echo 1`"'))
+  await clock.settle()
+  expect(estimates.length).toBe(before)
+})
+
+test('a cd to another directory makes the no-dry-run verdict forgotten', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  const run = () => $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  expect((await run()).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  await $.tool.call(bash('cd ../bigquery-project'))
+  await clock.settle()
+  expect((await run()).deny).toContain('20.0 GiB')
+})
+
 test('/allow-scan lets the next held command through once, then the one after is held again', async ($, on) => {
   const { clock, estimates, ran } = await start($, on, { answers: { orders: OVER } })
   expect((await $.tool.call(bash('dbt run -s orders')) as any).deny).toBeDefined()

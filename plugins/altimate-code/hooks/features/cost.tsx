@@ -53,7 +53,7 @@ let generation = 0
 let unsupportedSince: number | null = null
 const UNSUPPORTED_KEEP_MS = 10 * 60_000
 /** Commands that can rewrite a model, the project or its profile from the shell: an estimate made before one is not reused. */
-const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+(-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|rm|mv|worktree)|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
+const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+(-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|rm|mv|worktree)|cd|pushd|popd|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
 /** The dbt subcommands that change nothing in the project. */
 const READS_ONLY = new Set(['run', 'build', 'show', 'compile', 'ls', 'list', 'debug', 'parse'])
 
@@ -342,6 +342,23 @@ const SELECT_FLAGS = new Set(['-s', '--select', '-m', '--models', '--model'])
 /** Flags without a value that leave the project, target and compiled SQL as they are. */
 const PLAIN_FLAGS = new Set(['--fail-fast', '-x', '--quiet', '-q'])
 
+/** Whether the shell would expand a `$` or a backtick on the line: inside single quotes (a BigQuery table name, say) they are literal. */
+function expands(command: string): boolean {
+  let quote: string | null = null
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!
+    if (quote === "'") {
+      if (c === "'") quote = null
+    } else if (c === '\\') i++
+    else if (quote === '"') {
+      if (c === '"') quote = null
+      else if (c === '$' || c === '`') return true
+    } else if (c === "'" || c === '"') quote = c
+    else if (c === '$' || c === '`') return true
+  }
+  return false
+}
+
 /**
  * Whether the estimate would be of what the invocation runs. It asks about the session's project at its
  * default target, so it is only so when the line moves neither: the dbt launcher is plain, nothing
@@ -352,7 +369,7 @@ const PLAIN_FLAGS = new Set(['--fail-fast', '-x', '--quiet', '-q'])
 function isPlainInvocation(command: string, invocation: DbtInvocation, all: DbtInvocation[]): boolean {
   // The shell expands `$` and backticks anywhere on the line (arguments, redirections, an earlier call) into
   // flags or environment this check can't see; a line with many calls is not worth reading call by call.
-  if (/[$`]/.test(command) || all.length > MAX_INVOCATIONS) return false
+  if (expands(command) || all.length > MAX_INVOCATIONS) return false
   if (!PLAIN_LAUNCHER.test(invocation.binary)) return false
   let before = command.slice(0, invocation.start)
   for (const earlier of all.filter(one => one.end <= invocation.start).reverse()) {
