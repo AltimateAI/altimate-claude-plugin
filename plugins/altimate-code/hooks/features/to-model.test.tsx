@@ -190,6 +190,13 @@ test("a templated target-path maps against the project's own default target fold
   expect(prompts[0]).toContain('write tpl/transforms/<layer>/m.sql')
 })
 
+test("a file outside any project takes the layout of the project at the session's root", async ($, on) => {
+  const { clock, prompts } = await start($, on, { rootProject: true })
+  await run($, 'm /abs/trap.sql')
+  await clock.settle()
+  expect(prompts[0]).toContain('write transforms/<layer>/m.sql')
+})
+
 test('an absolute target-path is used whole, a model-paths of "." names the project folder', async ($, on) => {
   const { clock, cliArgs, prompts } = await start($, on)
   await run($, 'm abs/q.sql')

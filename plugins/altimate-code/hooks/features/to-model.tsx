@@ -116,7 +116,10 @@ async function sqlOf($: EngineInterface, path: string | null): Promise<{ sql: st
     try {
       const sql = await $.fs.read(full)
       if (!sql.trim()) return { error: `${path} is empty.` }
-      return { sql, source: path, ...(await projectNear($, full, root)) }
+      // A file outside any project is mapped by the CLI against the project of the session's root: the prompt follows that one.
+      const near = await projectNear($, full, root)
+      const project = near.modelsDir || !root ? near : await projectNear($, `${root.replace(/[\\/]$/, '')}/selection.sql`, root)
+      return { sql, source: path, ...project }
     } catch {
       return { error: `Could not read ${path}.` }
     }
@@ -140,7 +143,7 @@ export function targetPathOf(yml: string): string {
 }
 
 /**
- * The dbt project the SQL file sits in: the nearest dbt_project.yml above it, up to the session's root. Its
+ * The dbt project the SQL file sits in: the nearest dbt_project.yml above it, even above the session's root, where the CLI looks too. Its
  * manifest (where its `target-path` puts it; a missing file is the tool's error to report, not a cue to map
  * against another project's manifest) and the folder its models go in. Without a project the tool looks around the working directory.
  */
@@ -167,7 +170,7 @@ async function projectNear($: EngineInterface, file: string, root: string | null
       return { manifest: target.includes('{{') ? `${dir}/target/manifest.json` : manifest, modelsDir }
     }
     const parent = dir.replace(/[\\/][^\\/]*$/, '')
-    if (dir === top || parent === dir) return {}
+    if (parent === dir) return {}
     dir = parent
   }
   return {}
