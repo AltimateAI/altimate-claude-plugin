@@ -686,8 +686,10 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   // With nothing changed this session there is nothing to wait for or hold.
   if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return null
   // The wait is what is left of the gate's budget: the work above counts against the chain's deadline too.
-  const left = GATE_WAIT_MS - ((await $.clock.now()) - startedAt)
-  if (left > 0 && ((await wantsCheck($, true)) || running?.generation === generation)) await within($, left, kick($))
+  if ((await wantsCheck($, true)) || running?.generation === generation) {
+    const left = GATE_WAIT_MS - ((await $.clock.now()) - startedAt)
+    if (left > 0) await within($, left, kick($))
+  }
   const state = await read($, healthAtom)
   // A check that failed or did not finish leaves the changes unchecked: a gate that fails open is no gate.
   if (state && enabled && (state.running || state.pending.length > 0 || state.baseline === null))
