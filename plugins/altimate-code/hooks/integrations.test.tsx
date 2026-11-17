@@ -83,7 +83,7 @@ function fakeCli(on: any, answers: { connect: { exitCode: number; body: Record<s
       case 'open-token-page':
         return reply({ provider: 'jira', variant: 'cloud', tokenUrl: 'https://id.atlassian.com/manage-profile/security/api-tokens' })
       case 'discard':
-        if (answers.discardFails) return reply({ message: 'store locked' }, 1)
+        if (answers.discardFails) return reply({ status: 'failed', message: 'store locked' }, 1)
         secretSet = false
         return reply({ provider: 'jira', status: 'discarded' })
       case 'connect':
@@ -555,5 +555,74 @@ test('signed out: the band and pane offer Sign in to sync and no sync control; t
   expect(calls).toContainEqual(['altimate', 'auth', 'login', '-p', 'altimate-backend', '--method', 'Altimate LLM Gateway'])
   expect(await ui.find({ key: 'sign-in' })).toBeUndefined()
   expect(await ui.find({ key: 'sync-everything' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a failed discard is reported on open and cancel, next to the CLI\'s own failure reason', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
+    const args = e.argv.slice(2)
+    const reply = (body: unknown, exitCode = 0) => ({ value: { exitCode, stdout: JSON.stringify(body), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (args[0] === 'fields') return reply({ status: 'failed', message: 'catalog unavailable' }, 1)
+    if (args[0] === 'discard') return reply({ status: 'failed', message: 'store locked' }, 1)
+    return reply(STATUS)
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'jira-add' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Could not clear earlier input: store locked · catalog unavailable/ })).toBeDefined()
+  await ui.press({ key: 'jira-cancel' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Jira: could not clear what was entered: store locked/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a form without variants loads, and a refused connect that answers with an error field shows that reason', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
+    const args = e.argv.slice(2)
+    const reply = (body: unknown, exitCode = 0) => ({ value: { exitCode, stdout: JSON.stringify(body), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } })
+    if (args[0] === 'fields') return reply({ provider: 'jira', fields: [field('jiraDomain', 'Site', false, { value: 'acme', hasValue: true })] })
+    if (args[0] === 'connect') return reply({ error: 'backend unavailable' }, 1)
+    if (args[0] === 'discard') return reply({ provider: 'jira', status: 'discarded' })
+    return reply(STATUS)
+  })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'jira-add' })
+  await clock.settle()
+  expect((await ui.find({ key: 'jira-jiraDomain' }))?.text).toContain('acme')
+  await ui.press({ key: 'jira-submit' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /backend unavailable/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a refused connect with no usable reason keeps the friendly fallback', async ($, on) => {
+  const clock = mock.clock(on)
+  on('command.register', () => ({ value: { command: 'integrations' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  fakeCli(on, { connect: { exitCode: 1, body: { status: 'failed', message: ' ', error: { code: 1 } } } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await clock.settle()
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'jira-add' })
+  await clock.settle()
+  await ui.press({ key: 'jira-submit' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Jira could not be connected\./ })).toBeDefined()
   await ui.unmount()
 })
