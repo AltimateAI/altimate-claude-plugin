@@ -16,7 +16,14 @@ import {
 
 const engine = () => {
   const logs: string[] = []
-  return { logs, $: { ui: { log: (text: string) => void logs.push(text), status: async () => {} }, command: { register: async () => {} }, state: { get: async (atom: { key?: string }) => ({ value: atom?.key === 'statusParts' ? {} : null }), set: async () => ({ isSet: true }) } } as any }
+  // Enough of the engine for a feature that keeps state, reads files and registers commands; a stub needs none of it.
+  const $ = {
+    ui: { log: (text: string) => void logs.push(text) },
+    fs: { exists: async () => false, read: async () => '' },
+    state: { get: async () => ({ value: null }), set: async () => ({ isSet: true }), update: async () => ({ isSet: true }) },
+    command: { register: async () => {} },
+  }
+  return { logs, $: $ as any }
 }
 
 test('attempt logs a feature function that throws at once, one that rejects, and passes a value on', async () => {
