@@ -348,9 +348,8 @@ async function readRun(
   if (wrote < began - CLOCK_SLACK_MS || wrote > ended + CLOCK_SLACK_MS) return null
   // Several invocations of the writer's subcommand in the call (`dbt build -s a && dbt build -s b`, writing one artifact folder): the
   // file cannot say which one ran when a chain stops early, so it is not recorded rather than guessed.
-  // A retry's file reports the subcommand it retried, so with none of that subcommand the candidates are the retries.
-  const same = invocations.filter(one => one.subcommand === view.command)
-  if ((same.length > 0 ? same : invocations.filter(one => one.subcommand === 'retry')).length > 1) return AMBIGUOUS
+  // A retry's file reports the subcommand it retried, so every retry is a candidate beside the matching subcommand.
+  if (invocations.filter(one => one.subcommand === view.command || one.subcommand === 'retry').length > 1) return AMBIGUOUS
   const written = writer(invocations, view.command)
   const run = written ? toRecord(view, written) : null
   return run && written ? { run, order: all.lastIndexOf(written) } : null
@@ -375,7 +374,11 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   // The bookkeeping below is one block with no await in it: two calls ending together each see the other.
   const began = started.get(startKey(e))
   // A backgrounded call returns at once while dbt keeps running: it stays in flight (until the limit) and records nothing.
-  if (isBackground(e)) return null
+  if (isBackground(e)) {
+    // It keeps running and may replace the artifact any time: stored runs can no longer be retried from it.
+    if (started.get(startKey(e))?.writes) await clearRetries($)
+    return null
+  }
   started.delete(startKey(e))
   if (began === undefined) return null
   // Any other dbt call that ran at the same time, in any folder, may have written the file this call would read: whose
