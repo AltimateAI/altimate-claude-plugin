@@ -32,7 +32,7 @@ const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_order
 })
 
 /** The session beneath the plugin: a store in memory, and the CLI answering `dbt_run_results` with `answer(args)`. */
-async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; refused?: string; slow?: string; slowMs?: number; rootDelay?: number; duringRead?: () => Promise<unknown> } = {}) {
+async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; refused?: string; moved?: string; slow?: string; slowMs?: number; rootDelay?: number; duringRead?: () => Promise<unknown> } = {}) {
   const clock = mock.clock(on, { now: T0 })
   const stored = new Map<string, unknown>()
   const filled: string[] = []
@@ -74,6 +74,7 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
     await clock.advance(e.tool_use_id !== undefined && e.tool_use_id === options.slow ? (options.slowMs ?? 600) : 100)
     if (e.tool_use_id !== undefined && e.tool_use_id === options.denied) throw new Error('cancelled')
     if (e.tool_use_id !== undefined && e.tool_use_id === options.refused) return { deny: 'held by the cost gate' }
+    if (e.tool_use_id !== undefined && e.tool_use_id === options.moved) return { result: { backgroundTaskId: 'task-1' } }
     return { result: { ok: true } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
@@ -375,6 +376,22 @@ test('a command that cannot be replayed faithfully is not recorded: a prefix aft
   expect(resultsInvocations('DATABASE_URL=postgres://alice:hunter2@localhost/w dbt build', ROOT)).toEqual([])
   expect(resultsInvocations('DBT_TARGET=dev dbt build', ROOT)).toHaveLength(1)
   expect(resultsInvocations('cd a && env dbt build', ROOT)).toHaveLength(1)
+})
+
+test('a call the host moved to the background keeps running: a later call overlapping it is not recorded', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-moved', undefined, 'build', AFTER), { moved: 'moved' })
+  const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'moved' })
+  const second: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s b', tool_use_id: 'fg' })
+  expect(first.context ?? []).toEqual([])
+  expect(second.context).toEqual([NOT_RECORDED])
+  expect(stored.has('runs')).toBe(false)
+})
+
+test('a background run-operation clears the stored retry too', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run-operation clean', run_in_background: true, tool_use_id: 'operation' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
 test('dbt docs generate clears the stored retry like run-operation', async ($, on) => {

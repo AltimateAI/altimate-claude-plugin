@@ -318,6 +318,11 @@ export const runsOperation = (command: string) => parseDbtCommand(command).some(
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
 const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(^|[^&])&\s*$/.test(e.command.trim())
+/** The host moved the call to the background: its result names the task (`result.result.backgroundTaskId`). */
+const hostBackgrounded = (result: ToolCallResult | undefined) => {
+  const inner = (result as { result?: { backgroundTaskId?: unknown } } | undefined)?.result
+  return inner?.backgroundTaskId !== undefined || (result as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId !== undefined
+}
 /** The artifact folder a call writes to, as one string: where dbt puts run_results.json. */
 const folderOf = (one: Invocation) =>
   normalize(one.targetPath === null ? `${one.projectDir}/target` : one.targetPath.startsWith('/') ? one.targetPath : `${one.projectDir}/${one.targetPath}`)
@@ -389,9 +394,10 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   const began = started.get(startKey(e))
   // A backgrounded call returns at once while dbt keeps running: it stays in flight (until the limit) and records nothing.
   // The host may also move a long call to the background after the fact; its result then names the task.
-  if (isBackground(e) || (result as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId !== undefined) {
+  if (isBackground(e) || hostBackgrounded(result)) {
     // It keeps running and may replace the artifact any time: stored runs can no longer be retried from it.
-    if (started.get(startKey(e))?.writes) await clearRetries($)
+    const kept = started.get(startKey(e))
+    if (kept?.writes || kept?.operation) await clearRetries($)
     return null
   }
   started.delete(startKey(e))
