@@ -36,7 +36,7 @@ const DEP = { ...insight('base', `${ROOT}/dbt_packages/dep/models/base.sql`, 'Mi
 
 type Options = {
   /** The tool's answer per run (the last repeats). */
-  runs: (ReturnType<typeof insight>[] | { fail: string } | { stale: string })[]
+  runs: (ReturnType<typeof insight>[] | { fail: string } | { stale: string } | { truncated: true })[]
   /** Holds the run with this index (from 0) until released. */
   hold?: { at: number; until: Promise<void> }
   /** Folders that hold a dbt_project.yml (default: the repo). */
@@ -100,7 +100,7 @@ async function start($: any, on: any, options: Options, session: { isInteractive
     if (options.hold?.at === index) await options.hold.until
     const answer = options.runs[Math.min(index, options.runs.length - 1)]!
     const metadata =
-      'fail' in answer ? { success: false, insights: [] } : 'stale' in answer ? { success: true, insights: [OLD_STG], stale_manifest: { message: answer.stale } } : { success: true, insights: answer }
+      'fail' in answer ? { success: false, insights: [] } : 'truncated' in answer ? { success: true, insights: [], truncated: true, total: 9999 } : 'stale' in answer ? { success: true, insights: [OLD_STG], stale_manifest: { message: answer.stale } } : { success: true, insights: answer }
     const output = 'fail' in answer ? answer.fail : ''
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output, metadata }), stderr: '' } }
   })
@@ -409,6 +409,15 @@ test('with the push gate on, stale insights (dbt could not parse) are a failed c
   expect(toasts.at(-1)).toContain('dbt could not parse the project')
   const denied: any = await $.tool.call(command('git push'))
   expect(denied?.deny).toContain('dbt could not parse the project')
+})
+
+test('with the push gate on, a result the engine cut at its size limit is a failed check, not a clean one', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const { clock, toasts } = await start($, on, { runs: [[], { truncated: true }] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(toasts.at(-1)).toContain('too many health insights')
+  const denied: any = await $.tool.call(command('git push'))
+  expect(denied?.deny).toContain('too many health insights')
 })
 
 test('the configured config path is passed to the tool, empty means the defaults', () => {

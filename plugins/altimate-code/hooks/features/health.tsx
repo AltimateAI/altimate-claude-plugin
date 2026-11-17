@@ -482,6 +482,8 @@ async function check($: EngineInterface): Promise<HealthRun> {
   if (result.ok && result.metadata?.success === true && Array.isArray(insights)) {
     // Insights read from the last good manifest are not a check of the changes just made.
     const stale = result.metadata?.stale_manifest as { message?: unknown } | undefined
+    // A result cut at the engine's size limit leaves the changed models' issues unknown: that is no check.
+    if (result.metadata?.truncated === true) return { problem: 'Project health: the project has too many health insights for one check to read, so the changes could not be checked.' }
     if (stale) return { problem: `Project health: ${typeof stale.message === 'string' ? stale.message : 'dbt could not parse the project, so the last good manifest was read.'}` }
     return { insights: insights as HealthInsight[] }
   }
@@ -718,8 +720,12 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
 async function markChanged($: EngineInterface, file: string) {
   const path = norm(file)
   if (!(await isModelFile($, path))) return
-  // A session that opened outside a dbt project checks from its first change to one.
-  if (eligible && !enabled) enabled = true
+  // The CLI finds its project from the session's folder: a model of another project (a nested one, or one beside
+  // the session's) is not covered by its check, so it is not counted as checked.
+  const root = await $.session.root().catch(() => '')
+  const own = root ? await projectAbove($, norm(root)) : null
+  const mine = await projectAbove($, path.replace(/\/[^/]*$/, ''))
+  if (own === null || mine === null || norm(own) !== norm(mine)) return
   await update($, healthAtom, prev => {
     const base = prev ?? fresh()
     return {
