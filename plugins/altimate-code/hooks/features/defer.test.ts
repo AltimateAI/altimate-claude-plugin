@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { effective, rewriteDeferCommand, runsInProject, statusText } from './defer'
+import { effective, nestedProjects, rewriteDeferCommand, runsInProject, statusText } from './defer'
 
 const on = { stateDir: '/work/prod-state' }
 
@@ -299,4 +299,24 @@ test('a project word that goes on after its quotes is not one the settings are j
   expect(runsInProject('dbt run --project-dir "."/../b', '/repo/a', '/repo/a')).toBe(false)
   expect(runsInProject('DBT_PROJECT_DIR="."/../b dbt run', '/repo/a', '/repo/a')).toBe(false)
   expect(runsInProject('dbt run --project-dir "."', '/repo/a', '/repo/a')).toBe(true)
+})
+
+test('on a Windows project path a nested dbt project is found in the form the command is compared in', async () => {
+  const dirs: Record<string, string[]> = { 'C:\\repo': ['nested', 'models'] }
+  const $: any = {
+    fs: {
+      list: async (dir: string) => (dirs[dir] ?? []).map(name => ({ name, kind: 'dir' })),
+      exists: async (file: string) => file === 'C:\\repo/nested/dbt_project.yml',
+    },
+  }
+  const nested = await nestedProjects($, 'C:\\repo')
+  expect([...nested]).toEqual(['C:/repo/nested'])
+  expect(runsInProject('cd nested && dbt build', 'C:\\repo', 'C:\\repo', dir => nested.has(dir))).toBe(false)
+  expect(runsInProject('cd models && dbt build', 'C:\\repo', 'C:\\repo', dir => nested.has(dir))).toBe(true)
+})
+
+test('a Windows --project-dir with backslashes names the project; an escaped space still does not', () => {
+  expect(runsInProject('dbt run --project-dir .\\repo', 'C:/repo', 'C:/repo/repo')).toBe(true)
+  expect(runsInProject('dbt run --project-dir "C:\\other"', 'C:/repo', 'C:/repo')).toBe(false)
+  expect(runsInProject('dbt run --project-dir ./a\\ b', '/repo', '/repo/a')).toBe(false)
 })

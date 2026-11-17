@@ -94,7 +94,7 @@ async function findProject($: EngineInterface): Promise<string | null> {
 }
 
 /** The folders below the project (down to three levels, `dbt_packages` included) that hold a dbt_project.yml of their own, in the form `runsInProject` compares. */
-async function nestedProjects($: EngineInterface, projectDir: string): Promise<Set<string>> {
+export async function nestedProjects($: EngineInterface, projectDir: string): Promise<Set<string>> {
   const found = new Set<string>()
   let level = [projectDir]
   for (let depth = 0; depth < 3 && level.length > 0; depth++) {
@@ -177,7 +177,9 @@ export function runsInProject(command: string, root: string, projectDir: string,
   if (named.length !== (plain.match(/--project-dir[ =]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
   // A path word that goes on after its quotes (`--project-dir "."/../b`) is not one this can work out.
   // An escaped word (`./a\ b`) is cut short by this pattern at the escaped space: not a path this can work out.
-  if (named.some(match => match[1]!.includes('\\'))) return false
+  // On a Windows project path a backslash separates folders; elsewhere any backslash may be an escape.
+  const windows = /^[A-Za-z]:/.test(projectDir)
+  if (named.some(match => (windows ? /\\$/.test(match[1]!) : match[1]!.includes('\\')))) return false
   if (named.some(match => !/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length)))) return false
   if (named.length === 0) return inside(before)
   // Only a single dbt invocation, with the project named inside it, is judged: elsewhere in the line it is another command's.
@@ -373,7 +375,12 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   const root = (await $.session.cwd().catch(() => null)) ?? (await $.session.root().catch(() => null))
   if (!root) return null
   // Only a command that starts or moves below the project can end up in a dbt project of its own.
-  const nested = root !== state.projectDir || /\b(?:cd|pushd)\b/.test(e.command) ? await nestedProjects($, state.projectDir) : new Set<string>()
+  // A shell above or outside the project reaches one only by a `cd`, `pushd` or project option.
+  const project = resolvePath(state.projectDir, '.')?.replace(/\/+$/, '')
+  const here = resolvePath(root, '.')
+  const below = !!project && !!here && (here === project || here.startsWith(`${project}/`))
+  const moves = /\b(?:cd|pushd)\b|--project-dir|DBT_PROJECT_DIR/.test(e.command)
+  const nested = (below && here !== project) || moves ? await nestedProjects($, state.projectDir) : new Set<string>()
   if (!runsInProject(e.command, root, state.projectDir, dir => nested.has(dir))) return null
   const command = rewriteDeferCommand(e.command, effective(state))
   return command === e.command ? null : command
