@@ -140,7 +140,8 @@ export function installToolChain(on: On) {
       bashAfter: (e, result) => featuresBashAfter($, e, result),
       editAfter: (e, result, file) => featuresEditAfter($, e, result, file),
       readOrEditAfter: (e, result, file) => featuresReadOrEditAfter($, e, result, file),
-      readBefore: path => $.fs.read(path),
+      // A file that is not there yet (a Write that creates it) is `null`; one that is there but cannot be read rejects.
+      readBefore: async path => ((await $.fs.exists(path)) ? $.fs.read(path) : null),
       readsBefore: EDIT_READS_BEFORE,
       limit: work => within($, PHASE_TIMEOUT_MS, work),
       log: text => $.ui.log(text, { to: 'debug' }),

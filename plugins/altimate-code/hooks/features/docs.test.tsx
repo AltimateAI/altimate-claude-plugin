@@ -195,14 +195,15 @@ const DOWNSTREAM_AFTER = `models:
         description: "The customer's key, as the shop issues it"
 `
 
-type Options = { downstream?: string; reach?: Record<string, unknown>; coverage?: Record<string, unknown> | null; coverageError?: string; noManifest?: boolean; stale?: boolean }
+type Options = { downstream?: string; reach?: Record<string, unknown>; coverage?: Record<string, unknown> | null; coverageError?: string; noManifest?: boolean; stale?: boolean; newFile?: boolean }
 
 /** A dbt project at /repo with the plugin's MCP server connected, and the session beneath the plugin. */
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
   const calls: string[] = []
   const submitted: string[] = []
-  let schemaReads = 0
+  // A file the edit creates is not there before it, so that read is not made.
+  let schemaReads = options.newFile ? 1 : 0
   let clearing = false
   let downstreamReads = 0
   on('command.register', () => ({ value: { command: 'propagate' } }))
@@ -223,7 +224,7 @@ async function start($: any, on: any, options: Options = {}) {
     submitted.push(e.text)
     return { text: e.text }
   })
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` || (!options.noManifest && e.path === MANIFEST_PATH) }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` || ((e.path === SCHEMA && !options.newFile) || e.path === DOWNSTREAM) || (!options.noManifest && e.path === MANIFEST_PATH) }))
   on('fs.stat', () => ({ value: { kind: 'file', size: 100, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${ROOT}/dbt_project.yml`) return { value: "name: 'shop'\n" }
@@ -502,4 +503,14 @@ test('a bare `-` list item starts its own model or column, its keys on the lines
     ['orders.order_id', 'Order identifier'],
     ['customers.customer_id', 'Customer identifier'],
   ])
+})
+
+test('a schema file the edit creates offers every description it writes', async ($, on) => {
+  const { clock, calls } = await start($, on, { newFile: true })
+  const result: any = await $.tool.call(EDIT)
+  await clock.settle()
+  expect(calls).toContain('cli:impact_analysis')
+  expect(result.context).toHaveLength(2)
+  expect(result.context[0]).toContain('"customer_id": 2 downstream columns can take this description')
+  expect(result.context[1]).toContain('"order_id": 2 downstream columns can take this description')
 })
