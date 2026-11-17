@@ -220,6 +220,12 @@ test('an estimate whose rounded size is within the limit but whose upper bound i
   await clock.settle()
 })
 
+test('an upper bound that formats the same as the limit is not reported as equal to it', async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: bq(10 * GIB, '10.0 GiB', 10 * GIB + 30 * 1024 ** 2) } })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBe('just over 10.0 GiB would be scanned, over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.')
+  await clock.settle()
+})
+
 test('a warehouse found to have no dry run ends a hold from before, and its allowance', async ($, on) => {
   const answers: Record<string, any> = { orders: OVER }
   const { clock, ran, statuses } = await start($, on, { answers })

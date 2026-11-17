@@ -167,10 +167,10 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     // The hold is decided on the upper bound, and the display is the rounded point estimate: either can read
     // as not over the limit when the scan is just past it.
     const scanned =
-      worst.point <= limitBytes
+      worst.point <= limitBytes && formatBytes(worst.bytes) !== formatBytes(limitBytes)
         ? `up to ${formatBytes(worst.bytes)} (≈ ${worst.display} estimated)`
-        : worst.display === formatBytes(limitBytes)
-          ? `just over ${worst.display}`
+        : worst.display === formatBytes(limitBytes) || worst.point <= limitBytes
+          ? `just over ${formatBytes(limitBytes)}`
           : `≈ ${worst.display}`
     return {
       deny: `${scanned} would be scanned, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
