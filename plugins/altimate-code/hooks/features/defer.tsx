@@ -48,7 +48,8 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
   const exportedTarget = /\bexport\b/.test(command) && /\bDBT_TARGET=/.test(command)
   // From the last invocation to the first, so the offsets of those before stay right.
   for (const one of [...parseDbtCommand(command)].sort((a, b) => b.subcommandEnd - a.subcommandEnd)) {
-    if (!one.subcommand) continue
+    // An invocation with a word the parser cannot read (`$FLAGS`, `--target "$T"`) is left as the user wrote it.
+    if (!one.subcommand || one.dynamic) continue
     const flags: string[] = []
     if (stateDir && !exportedState && !NO_DEFER.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE|FAVOR_STATE)=/.test(command.slice(one.start, one.end))) flags.push('--defer', '--state', quote(stateDir), ...(favorState ? ['--favor-state'] : []))
     if (target && !NO_TARGET.has(one.subcommand) && target !== defaultTarget && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
@@ -146,6 +147,8 @@ export function runsInProject(command: string, root: string, projectDir: string)
   const named = [...command.matchAll(PROJECT_DIR)]
   // A project option written with quotes (`"--project-dir" ../b`) is only seen in the plain copy: unknown.
   if (named.length !== (plain.match(/--project-dir[ =]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
+  // A path word that goes on after its quotes (`--project-dir "."/../b`) is not one this can work out.
+  if (named.some(match => !/^(?:[\s;&|)]|$)/.test(command.slice(match.index + match[0].length)))) return false
   if (named.length === 0) return inside(before)
   // Only a single dbt invocation, with the project named inside it, is judged: elsewhere in the line it is another command's.
   if (invocations.length !== 1 || !before) return false
