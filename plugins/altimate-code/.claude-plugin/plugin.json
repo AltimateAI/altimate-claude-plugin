@@ -44,14 +44,14 @@
     "commentsPollSeconds": {
       "type": "number",
       "title": "Team comments refresh (seconds)",
-      "description": "How often the team's comments on shared docs are fetched again.",
+      "description": "Not used yet: team comments aren't in this version. How often the team's comments on shared docs are fetched again.",
       "default": 900,
       "min": 30
     },
     "commentsInContext": {
       "type": "boolean",
       "title": "Team comments in Claude's context",
-      "description": "When on, the open comments on a model Claude reads or edits are added to its context. Off keeps them out of Claude's context.",
+      "description": "Not used yet: team comments aren't in this version. When on, the open comments on a model Claude reads or edits are added to its context. Off keeps them out of Claude's context.",
       "default": true
     }
   }

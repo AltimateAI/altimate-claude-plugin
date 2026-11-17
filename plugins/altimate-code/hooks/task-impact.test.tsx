@@ -144,8 +144,6 @@ async function start($: any, on: any, options: Options = {}) {
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '' } })
     const [bin] = argv
     if (bin === 'altimate' && argv[2] === 'report-event') return ok()
-    // The team-comments feature lists threads at turn start; it is no impact lookup.
-    if (bin === 'altimate' && argv[3] === 'docs_share_comments') return ok(JSON.stringify({ status: 'ok', output: '', metadata: { threads: [] } }))
     if (bin === 'altimate') {
       const args = JSON.parse(String(argv[argv.indexOf('--args') + 1] ?? '{}'))
       if (options.cliFails) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'no', metadata: {} }), stderr: '' } }

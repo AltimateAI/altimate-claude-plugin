@@ -40,7 +40,7 @@ test('attempt logs a feature function that throws at once, one that rejects, and
   expect(logs).toEqual(['runs · sessionStart failed: Error: at once', 'defer · bandLine failed: Error: later'])
 })
 
-test('with every other feature a stub, each phase runs through the features and logs nothing', async () => {
+test('with every feature a stub, each phase runs through the features and logs nothing', async () => {
   const { $, logs } = engine()
   const bash = { tool: 'Bash', command: 'dbt run -s a' } as any
   const file = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
@@ -54,7 +54,5 @@ test('with every other feature a stub, each phase runs through the features and 
   expect(await featuresBashAfter($, bash, {} as any)).toEqual([])
   expect(await featuresEditAfter($, file, {} as any, { path: '/repo/models/a.sql', before: null })).toEqual([])
   expect(await featuresReadOrEditAfter($, file, {} as any, { path: '/repo/models/a.sql' })).toEqual([])
-  // The comments feature is a real one: it needs a real engine and state, and has its own tests, so
-  // what it logs against this bare engine is not what this test is about.
-  expect(logs.filter(line => !line.startsWith('comments · '))).toEqual([])
+  expect(logs).toEqual([])
 })
