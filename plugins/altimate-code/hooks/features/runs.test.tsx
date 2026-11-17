@@ -369,6 +369,21 @@ test('a single build whose artifact cannot be read clears the stored retry: it m
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
+test('a command that cannot be replayed faithfully is not recorded: a prefix after an assignment, or a URL with a password', () => {
+  expect(resultsInvocations('DBT_TARGET=dev env dbt build', ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"database_url":"postgres://alice:hunter2@localhost/w"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations('DATABASE_URL=postgres://alice:hunter2@localhost/w dbt build', ROOT)).toEqual([])
+  expect(resultsInvocations('DBT_TARGET=dev dbt build', ROOT)).toHaveLength(1)
+  expect(resultsInvocations('cd a && env dbt build', ROOT)).toHaveLength(1)
+})
+
+test('dbt docs generate clears the stored retry like run-operation', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt docs generate', tool_use_id: 'docs' })
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+})
+
 test('dbt run-operation clears the stored retry: it replaces the artifact but is no run to record', async ($, on) => {
   const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })

@@ -140,6 +140,7 @@ const SECRET_ASSIGNMENT = /(^|\s)((?=[A-Za-z_])[A-Za-z0-9_]*(?:SECRET|TOKEN|PASS
 const VARS_VALUE = /(?:^|\s)--vars(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g
 const SECRET_NAME = /(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)/i
 const varsHoldSecret = (body: string) => [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => SECRET_NAME.test(match[1]!))
+const CREDENTIAL_URL = /:\/\/[^\s/:@"']+:[^\s@"']+@/
 const redact = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 
 /** The flags `dbt retry` does not take from the run it retries. */
@@ -171,6 +172,10 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     if (command.slice(one.subcommandEnd - subcommand.length, one.subcommandEnd) !== subcommand) continue
     const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
     if (varsHoldSecret(body)) continue
+    // A prefix command (`env`, `time`) after an assignment: the replay would start without it, so it is not replayed.
+    if (/(?:^|\s)[A-Za-z_]\w*=/.test(command.slice(0, one.start).split(/&&|\|\||[;\n|]/).pop()!)) continue
+    // A URL with a password in it holds a credential whatever it is named.
+    if (CREDENTIAL_URL.test(command.slice(one.start, one.end))) continue
     const flagged = PROJECT_DIR_FLAG.exec(body)?.[1]?.replace(/^['"]|['"]$/g, '')
     // A folder that cannot be told, or a target folder the shell expands, is not guessed: the run is not recorded
     // rather than recorded for another project or replayed from another folder.
@@ -308,8 +313,8 @@ export const OVERLAP_LINE = 'run not recorded: overlapping dbt commands'
 /** Whether the command runs dbt at all, with any subcommand. */
 export const runsDbt = (command: string) => parseDbtCommand(command).length > 0
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
-/** `dbt run-operation` replaces run_results.json too, but is no run to record. */
-export const runsOperation = (command: string) => parseDbtCommand(command).some(one => one.subcommand === 'run-operation')
+/** `dbt run-operation` and `dbt docs generate` replace run_results.json too, but are no run to record. */
+export const runsOperation = (command: string) => parseDbtCommand(command).some(one => one.subcommand === 'run-operation' || one.subcommand === 'docs')
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
 const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(^|[^&])&\s*$/.test(e.command.trim())
@@ -377,13 +382,14 @@ async function clearRetries($: EngineInterface): Promise<void> {
 }
 
 /** Reads each project's last run that this call wrote and records them; Claude gets one line each, or null. */
-async function record($: EngineInterface, e: BashCall): Promise<string | null> {
+async function record($: EngineInterface, e: BashCall, result?: ToolCallResult): Promise<string | null> {
   const clearedAtStart = cleared
   const ended = await $.clock.now()
   // The bookkeeping below is one block with no await in it: two calls ending together each see the other.
   const began = started.get(startKey(e))
   // A backgrounded call returns at once while dbt keeps running: it stays in flight (until the limit) and records nothing.
-  if (isBackground(e)) {
+  // The host may also move a long call to the background after the fact; its result then names the task.
+  if (isBackground(e) || (result as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId !== undefined) {
     // It keeps running and may replace the artifact any time: stored runs can no longer be retried from it.
     if (started.get(startKey(e))?.writes) await clearRetries($)
     return null
@@ -577,7 +583,7 @@ export async function bashDropped($: EngineInterface, e: BashCall): Promise<void
 
 /** A dbt command that wrote run_results.json is recorded; Claude gets one line with its outcome. */
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
-  const line = await record($, e)
+  const line = await record($, e, result)
   return line ? [line] : []
 }
 
