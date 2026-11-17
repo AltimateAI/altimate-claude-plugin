@@ -805,35 +805,56 @@ export function columnDrift(documented: string[], returned: string[], quoted: st
   }
 }
 
-// What a saved query may keep: the plugin store takes 4 MiB of JSON in all, the history and bookmarks among
-// other keys, so a cell and a query are bounded.
+// What the history may keep: the plugin store takes 4 MiB of JSON in all, the history and bookmarks among
+// other keys, so a cell, a query and the whole history are bounded, in UTF-8 bytes as the store counts them.
 const SAVED_CELL = 200
-const SAVED_QUERY_BYTES = 32 * 1024
+const SAVED_ENTRY_BYTES = 32 * 1024
+const HISTORY_BYTES = 2 * 1024 * 1024
 
-/** Rows as the history keeps them: a long cell cut as the table cuts it (marked with …), and no more rows than fit the query's byte budget. */
+export const utf8Bytes = (text: string): number => new TextEncoder().encode(text).length
+
+/** Rows as the history keeps them: a long cell cut as the table cuts it (marked with …), and no more rows than fit a query's byte budget. */
 export function savedRows(rows: unknown[][], limit: number): unknown[][] {
   const cut = (value: unknown) => {
     const text = value === null || value === undefined ? null : typeof value === 'object' ? JSON.stringify(value) : typeof value === 'string' ? value : null
     return text !== null && text.length > SAVED_CELL ? `${text.slice(0, SAVED_CELL - 1)}…` : value
   }
   const kept: unknown[][] = []
-  let bytes = 0
+  let bytes = 2
   for (const row of rows.slice(0, limit)) {
     const next = row.map(cut)
-    bytes += JSON.stringify(next).length
-    if (bytes > SAVED_QUERY_BYTES) break
+    // The row's JSON and the comma that joins it.
+    bytes += utf8Bytes(JSON.stringify(next)) + 1
+    if (bytes > SAVED_ENTRY_BYTES) break
     kept.push(next)
   }
   return kept
 }
 
-const SAVED_ENTRY_BYTES = 64 * 1024
-
-/** A saved query as a whole, by its serialized size: its error cut, then rows dropped from the end until it fits. */
-export function fitSaved<T extends { rows: unknown[][]; error: string | null }>(entry: T): T {
+/** A saved query as a whole, by its serialized UTF-8 size: its error cut, then rows dropped from the end, then columns dropped, until it fits. Its inline SQL is never cut: Re-run executes it, and the history's total budget bounds it. */
+export function fitSaved<T extends { rows: unknown[][]; error: string | null; columns?: string[]; inline?: string | null }>(entry: T): T {
   const next = { ...entry, error: entry.error ? entry.error.slice(0, 2000) : entry.error, rows: [...entry.rows] }
-  while (next.rows.length > 0 && JSON.stringify(next).length > SAVED_ENTRY_BYTES) next.rows.pop()
+  const over = () => utf8Bytes(JSON.stringify(next)) > SAVED_ENTRY_BYTES
+  while (next.rows.length > 0 && over()) next.rows.pop()
+  if (over() && next.columns) {
+    const columns = [...next.columns]
+    while (columns.length > 0 && (next.columns = columns, over())) columns.pop()
+  }
   return next
+}
+
+/** The history without its `count` oldest entries: unbookmarked ones first, bookmarks only when those are gone. The list is newest first. */
+export function dropOldest<T extends { bookmarked?: boolean }>(history: T[], count: number): T[] {
+  const order = [...history.filter(one => !one.bookmarked).reverse(), ...history.filter(one => one.bookmarked).reverse()]
+  const gone = new Set(order.slice(0, count))
+  return history.filter(one => !gone.has(one))
+}
+
+/** The history within the store's budget for its key: the oldest unbookmarked entries go first, then the oldest bookmarks. */
+export function budgetHistory<T extends { bookmarked?: boolean }>(history: T[], limit = HISTORY_BYTES): T[] {
+  let kept = history
+  while (kept.length > 0 && utf8Bytes(JSON.stringify(kept)) > limit) kept = dropOldest(kept, 1)
+  return kept
 }
 
 /** A cell as the results table shows it: one line, cut to `width`. */

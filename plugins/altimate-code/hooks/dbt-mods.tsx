@@ -30,6 +30,8 @@ import {
   PROFILES_UNREADABLE,
   projectPaths,
   replayArgv,
+  budgetHistory,
+  dropOldest,
   fitSaved,
   savedRows,
   dbtVerdict,
@@ -198,9 +200,19 @@ function runQueued($: EngineInterface, root: string, argv: () => Promise<string[
 // edit's check does not start it again until a dbt runs there.
 const unrunnable = new Set<string>()
 
-/** Whether a dbt run says there was no dbt to run: the spawn failed (a run that rejected, other than by its timeout), or the shell found no such command (exit 127). */
+/**
+ * Whether a dbt run says there was no dbt to run: the spawn failed (a run that rejected, other than by its
+ * timeout), or it exited non-zero with the shell saying dbt itself is not found (exit 127 naming no other
+ * command). A run that exited 0 never is, whatever its rows say, and another command not found (git, in
+ * `dbt deps`) is not dbt.
+ */
 function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): boolean {
-  return run.exitCode === 127 || /command not found/i.test(`${run.stderr}\n${run.stdout}`) || (run.exitCode === -1 && !/time(?:d)?[ -]?out/i.test(run.stderr))
+  if (run.exitCode === -1) return !/time(?:d)?[ -]?out/i.test(run.stderr)
+  if (run.exitCode === 0) return false
+  // zsh says `zsh: command not found: dbt`, bash and sh `bash: dbt: command not found`: the name is the command's, never the shell's.
+  const names = [...run.stderr.matchAll(/command not found: ([\w./\\-]+)|([\w./\\-]+): command not found/gi)].map(one => (one[1] ?? one[2])!)
+  const missing = names.filter(name => !/^-?(?:ba|z|da|k|c|fi)?sh$/i.test(name)).map(name => name.split(/[\\/]/).pop()!.replace(/\.exe$/i, ''))
+  return missing.length > 0 ? missing.includes('dbt') : run.exitCode === 127
 }
 
 /** Runs the project's dbt in the project, after any dbt this plugin already started there. */
@@ -416,7 +428,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   if (!name) {
     // No manifest that lists the file: dbt runs the query whatever the selection and prints a preview only
     // for a name it carries, so a second show would run it again. Ask dbt for the name first: `ls` runs no query.
-    const listing = await run1(['ls', '--select', selectorFor(null), '--resource-type', 'model', '--indirect-selection', 'empty', '--output', 'json', '--output-keys', 'name', 'resource_type', '--log-format', 'text'])
+    const listing = await run1(['ls', '--select', selectorFor(null), '--resource-type', 'model', '--indirect-selection', 'empty', '--output', 'json', '--output-keys', 'name resource_type', '--log-format', 'text'])
     if (listing === SKIPPED) return replaced()
     if (cannotRun(listing)) return notChecked(NO_DBT)
     const names = listing.exitCode === 0 ? listedNames(listing.stdout) : []
@@ -431,10 +443,10 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   let node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
   let named = typeof node?.node?.name === 'string' ? node.node.name : null
   let preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
-  // No preview, and the fresh manifest names the model otherwise than the old manifest did (its name was old):
-  // the old name selected nothing, so no query ran. Ask once more with the name replaced, not added: a comma
-  // intersects, and the old name and the new one select nothing together.
-  if (run.exitCode === 0 && !preview && knownName && named && !selector.split(',').includes(named)) {
+  // No preview, and the fresh manifest names the model with a name the selector did not carry (an old name that
+  // selected nothing, or none when dbt ls could not give one): ask once more, with the name replaced, not added: a
+  // comma intersects, and the old name and the new one select nothing together. The only case of a second show.
+  if (run.exitCode === 0 && !preview && named && !selector.split(',').includes(named)) {
     const again = await show(selectorFor(named))
     if (again === SKIPPED) return replaced()
     run = again
@@ -655,13 +667,10 @@ async function loadHistory($: EngineInterface) {
 
 /** Saves the history atom to the store, as it stands after the update that called this. */
 async function persistHistory($: EngineInterface) {
-  const history = await read($, historyAtom)
-  // The store refuses a write once its JSON passes 4 MiB in all: the oldest plain entries go first, and the write is tried once more.
-  await $.store.set(HISTORY_KEY, history).catch(async () => {
-    const plain = history.filter(one => !one.bookmarked)
-    const dropped = new Set(plain.slice(Math.floor(plain.length / 2)))
-    await $.store.set(HISTORY_KEY, history.filter(one => !dropped.has(one))).catch(() => {})
-  })
+  const history = budgetHistory(await read($, historyAtom))
+  // The store refuses a write once its JSON passes 4 MiB in all: the oldest half goes (unbookmarked entries
+  // first, then bookmarks), and the write is tried once more.
+  await $.store.set(HISTORY_KEY, history).catch(() => $.store.set(HISTORY_KEY, dropOldest(history, Math.max(1, Math.floor(history.length / 2)))).catch(() => {}))
 }
 
 /** The history as it is kept: the newest plain queries, and the newest bookmarks (a bookmark past the cap is no longer one). */
@@ -1187,7 +1196,7 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
               // Parsing without the packages would only fail again: say what deps said and stop.
               if (deps === SKIPPED || deps.exitCode !== 0) {
                 await update($, doctorAtom, view => (view ? { ...view, busy: null } : view))
-                if (deps !== SKIPPED) $.ui.toast(`✖ dbt deps failed · ${(logErrors(deps.stdout)[0] ?? dbtTail(deps, 1)).slice(0, 160)}`, { timeoutMs: 8000 })
+                if (deps !== SKIPPED) $.ui.toast(`✖ dbt deps failed · ${dbtTail(deps, 1).slice(0, 160)}`, { timeoutMs: 8000 })
                 return
               }
               await parseNow($, doctor.root)

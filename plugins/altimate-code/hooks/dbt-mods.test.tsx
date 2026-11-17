@@ -18,6 +18,8 @@ import {
   nodeForFile,
   projectPaths,
   replayArgv,
+  budgetHistory,
+  dropOldest,
   fitSaved,
   savedRows,
   saysFailed,
@@ -180,6 +182,10 @@ type Options = {
   duringBash?: () => Promise<void>
   /** `dbt deps` fails with this message. */
   depsFails?: string
+  /** The exit code of the failing `dbt deps`; the default is 1. */
+  depsExit?: number
+  /** `dbt ls` exits non-zero. */
+  listFails?: boolean
   /** A file whose stat waits for `until` while it is set. */
   statGate?: { path: string; until?: Promise<void> }
   /** The project's artifact folder, when not `target`. */
@@ -345,8 +351,9 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin !== (options.pathDbtPython ? 'dbt' : DBT)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
     if (verb === 'debug') return { value: { ...(options.debug ?? { exitCode: 0, stdout: DEBUG }), stderr: '' } }
+    if (verb === 'ls' && options.listFails) return { value: { exitCode: 1, stdout: '', stderr: 'ls failed' } }
     if (verb === 'ls') return { value: { exitCode: 0, stdout: `${(options.listed ?? []).map(one => JSON.stringify(typeof one === 'string' ? { name: one } : one)).join('\n')}\n`, stderr: '' } }
-    if (verb === 'deps' && options.depsFails) return { value: { exitCode: 1, stdout: '', stderr: options.depsFails } }
+    if (verb === 'deps' && options.depsFails) return { value: { exitCode: options.depsExit ?? 1, stdout: '', stderr: options.depsFails } }
     if (verb === 'parse') {
       mtimes['target/manifest.json'] = 10_000
       return { value: { exitCode: 0, stdout: 'Performance info: target/perf_info.json', stderr: '' } }
@@ -2037,7 +2044,7 @@ test('a versioned model\'s first check, with no manifest yet, learns its name fr
   const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
   // dbt ls (no query) gives the name; the model is shown once, with it.
-  expect(runs.filter(argv => argv[1] === 'ls')).toEqual([[DBT, 'ls', '--select', 'path:models/legacy.sql,package:shop', '--resource-type', 'model', '--indirect-selection', 'empty', '--output', 'json', '--output-keys', 'name', 'resource_type', '--log-format', 'text']])
+  expect(runs.filter(argv => argv[1] === 'ls')).toEqual([[DBT, 'ls', '--select', 'path:models/legacy.sql,package:shop', '--resource-type', 'model', '--indirect-selection', 'empty', '--output', 'json', '--output-keys', 'name resource_type', '--log-format', 'text']])
   expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,orders'])
   expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
   expect((result.context ?? []).some((note: string) => note.includes('FAILED'))).toBe(false)
@@ -3042,11 +3049,92 @@ test('a /dbt-show asked before a /clear but started after it stays out of the ne
 })
 
 kitTest('a saved query is held to its serialized size as a whole: rows go until it fits, and its error is cut', () => {
-  const entry = { columns: Array.from({ length: 400 }, (_, i) => `c${i}`.padEnd(100, 'x')), rows: Array.from({ length: 300 }, () => ['y'.repeat(190)]), error: 'e'.repeat(10_000) }
+  const entry = { columns: Array.from({ length: 100 }, (_, i) => `c${i}`.padEnd(100, 'x')), rows: Array.from({ length: 300 }, () => ['y'.repeat(190)]), error: 'e'.repeat(10_000) }
   const fit = fitSaved(entry)
-  expect(JSON.stringify(fit).length).toBeLessThanOrEqual(64 * 1024)
+  expect(JSON.stringify(fit).length).toBeLessThanOrEqual(32 * 1024)
   expect(fit.rows.length).toBeGreaterThan(0)
   expect(fit.rows.length).toBeLessThan(entry.rows.length)
   expect(fit.error!.length).toBe(2000)
   expect(fitSaved({ columns: ['a'], rows: [[1]], error: null })).toEqual({ columns: ['a'], rows: [[1]], error: null })
+})
+
+test('a run that exited 0 whose rows say "command not found" does not make dbt unrunnable', async ($, on) => {
+  const { clock, runs } = await start($, on, { show: { rows: [{ msg: 'command not found' }] } })
+  await editOrders($)
+  await clock.settle()
+  const shows = () => runs.filter(argv => argv[1] === 'show').length
+  expect(shows()).toBe(1)
+  await editOrders($)
+  await clock.settle()
+  expect(shows()).toBe(2)
+})
+
+test('a dbt deps that fails because git is not found does not make dbt unrunnable', async ($, on) => {
+  const { clock, runs } = await start($, on, { interactive: true, files: { 'packages.yml': 'packages: []' }, depsFails: 'sh: git: command not found', depsExit: 127 })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  await band.unmount()
+  const result: any = await editOrders($)
+  await clock.settle()
+  expect(runs.some(argv => argv[1] === 'show')).toBe(true)
+  expect(noteOf(result)).not.toContain('dbt could not be run here')
+})
+
+test('dbt ls that fails, a first show with no preview and a fresh manifest that names the model: one re-show with its name, and no FAILED', async ($, on) => {
+  const manifest = { metadata: { project_name: 'shop' }, parent_map: {}, child_map: {}, nodes: { 'model.shop.orders': { name: 'orders', resource_type: 'model', package_name: 'shop', version: 1, original_file_path: 'models/legacy.sql', config: {}, columns: {}, depends_on: { nodes: [] } } } }
+  const { clock, runs, toasts } = await start($, on, { listFails: true, manifestAfterShow: manifest, files: { 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop', 'path:models/legacy.sql,package:shop,orders'])
+  expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
+  expect((result.context ?? []).join('\n')).not.toContain('FAILED')
+})
+
+kitTest('a saved query is measured in UTF-8 bytes; with no rows left its columns are dropped, and its inline SQL is never cut', () => {
+  // 190 three-byte characters a row: 570 bytes, though 190 UTF-16 units.
+  const wide = { columns: ['a'], rows: Array.from({ length: 300 }, () => ['日'.repeat(190)]), error: null }
+  const rows = savedRows(wide.rows, 300)
+  expect(new TextEncoder().encode(JSON.stringify(rows)).length).toBeLessThanOrEqual(32 * 1024)
+  const fit = fitSaved({ ...wide, rows })
+  expect(new TextEncoder().encode(JSON.stringify(fit)).length).toBeLessThanOrEqual(32 * 1024)
+  const big = fitSaved({ columns: Array.from({ length: 2000 }, (_, i) => `col${i}`.padEnd(40, 'x')), rows: [], error: null, inline: 'q'.repeat(40_000) })
+  expect(big.inline).toBe('q'.repeat(40_000))
+  expect(big.columns.length).toBeLessThan(2000)
+  const small = fitSaved({ columns: Array.from({ length: 2000 }, (_, i) => `col${i}`.padEnd(40, 'x')), rows: [], error: null, inline: 'select 1' })
+  expect(small.inline).toBe('select 1')
+  expect(small.columns.length).toBeGreaterThan(0)
+  expect(new TextEncoder().encode(JSON.stringify(small)).length).toBeLessThanOrEqual(32 * 1024)
+})
+
+kitTest('the history is held to its total budget: the oldest unbookmarked entries go first, then the oldest bookmarks', () => {
+  const entry = (title: string, bookmarked: boolean) => ({ title, bookmarked, rows: [['z'.repeat(30_000)]] })
+  const history = [...Array.from({ length: 20 }, (_, i) => entry(`plain${i}`, false)), ...Array.from({ length: 50 }, (_, i) => entry(`mark${i}`, true))]
+  const fit = budgetHistory(history)
+  expect(new TextEncoder().encode(JSON.stringify(fit)).length).toBeLessThanOrEqual(2 * 1024 * 1024)
+  // Every bookmark stays while unbookmarked ones remain to drop; the oldest unbookmarked went.
+  expect(fit.filter(one => one.bookmarked).length).toBe(50)
+  expect(fit.some(one => one.title === 'plain19')).toBe(false)
+  expect(fit.some(one => one.title === 'plain0')).toBe(true)
+  // With bookmarks alone over the budget, the oldest bookmarks go.
+  const only = budgetHistory(Array.from({ length: 80 }, (_, i) => entry(`m${i}`, true)))
+  expect(only.length).toBeLessThan(80)
+  expect(only[0]!.title).toBe('m0')
+  expect(only.some(one => one.title === 'm79')).toBe(false)
+  expect(dropOldest([entry('a', false), entry('b', true), entry('c', false)], 1).map(one => one.title)).toEqual(['a', 'b'])
+  expect(dropOldest([entry('a', false), entry('b', true), entry('c', false)], 3).map(one => one.title)).toEqual([])
+})
+
+test('a refused write that dropping unbookmarked entries cannot cure drops the oldest bookmarks too', async ($, on) => {
+  const marked = Array.from({ length: 8 }, (_, i) => savedQuery(`mark${i}`, true, 'y'.repeat(150)))
+  const bytes = JSON.stringify(marked).length
+  const { clock, store } = await start($, on, { stored: { 'dbt-results-history': marked }, storeLimit: Math.floor(bytes * 0.7) })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  const history = store.get('dbt-results-history') as any[]
+  expect(JSON.stringify(history).length).toBeLessThanOrEqual(Math.floor(bytes * 0.7))
+  expect(history.length).toBeLessThan(9)
+  // The newest bookmarks stay.
+  expect(history.some(one => one.title === 'mark0')).toBe(true)
+  expect(history.some(one => one.title === 'mark7')).toBe(false)
 })
