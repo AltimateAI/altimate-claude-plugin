@@ -243,3 +243,17 @@ test('global options that take a value come before the subcommand, and an unknow
   // No known subcommand: the first word is reported, as before.
   expect(shape('dbt frobnicate')).toEqual([{ ...base, binary: 'dbt', subcommand: 'frobnicate' }])
 })
+
+test('a backslash in double quotes is kept unless it escapes $, a backtick, a quote, a backslash or a newline', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('dbt run --target-path "target\\compiled"')).toEqual([{ ...run, targetPath: 'target\\compiled' }])
+  expect(shape('dbt run -t "p\\"rod" ')).toEqual([{ ...run, target: 'p"rod' }])
+  expect(shape('dbt run -t "pro\\\nd"')).toEqual([{ ...run, target: 'prod' }])
+  expect(shape('dbt run -t pro\\\nd')).toEqual([{ ...run, target: 'prod' }])
+})
+
+test('a $\'…\' word with an escape is not decoded: it is dynamic and reports no value', () => {
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape("dbt run -t $'pro\\x64'")).toEqual([{ ...run, dynamic: true }])
+  expect(shape("dbt run -t $'prod'")).toEqual([{ ...run, target: 'prod' }])
+})

@@ -22,7 +22,7 @@
 export type DbtInvocation = {
   /** How dbt is launched, as written: `dbt`, `.venv/bin/dbt`, `uv run dbt`, `poetry run dbt`. */
   binary: string
-  /** The first word after the launcher's options: `build`, `run`, `test`…; null when there is none. */
+  /** The first known dbt subcommand after the launcher's options (`build`, `run`, `test`…), skipping any other word; null when there is none. */
   subcommand: string | null
   /**
    * Every value given to -s, --select, -m, --models or --model, in order. A value that holds an expansion
@@ -245,7 +245,8 @@ function lex(line: string): Token[] | null {
     if (start < 0) start = i
     if (c === '\\') {
       quote()
-      text += line[i + 1] ?? ''
+      // A backslash before a newline continues the line: it and the newline are not part of the word.
+      if (line[i + 1] !== '\n') text += line[i + 1] ?? ''
       i += 2
     } else if (c === "'") {
       const close = line.indexOf("'", i + 1)
@@ -254,19 +255,27 @@ function lex(line: string): Token[] | null {
       text += line.slice(i + 1, close)
       i = close + 1
     } else if (c === '$' && line[i + 1] === "'") {
-      // `$'…'`: a quoted string in which a backslash escapes the next character.
+      // `$'…'`: a quoted string in which a backslash escapes the next character. Escapes (`\x64`, `\n`)
+      // are not decoded here, so a word that holds one is dynamic and its value is not reported.
       let j = i + 2
       while (j < line.length && line[j] !== "'") j += line[j] === '\\' ? 2 : 1
       if (j >= line.length) return null
       quote()
-      text += line.slice(i + 2, j)
+      const body = line.slice(i + 2, j)
+      if (body.includes('\\')) dynamic = true
+      text += body
       i = j + 1
     } else if (c === '"') {
       quote()
       let j = i + 1
       while (j < line.length && line[j] !== '"') {
         if (line[j] === '\\' && j + 1 < line.length) {
-          text += line[j + 1]
+          // Inside double quotes a backslash only escapes `$`, a backtick, `"`, `\` and a newline.
+          const next = line[j + 1] ?? ''
+          if (next === '\n') {
+            // line continuation: nothing is added
+          } else if ('$`"\\'.includes(next)) text += next
+          else text += '\\' + next
           j += 2
         } else if ((line[j] === '$' && line[j + 1] === '(') || line[j] === '`') {
           const end = substitutionEnd(line, line[j] === '$' ? j + 1 : j)
