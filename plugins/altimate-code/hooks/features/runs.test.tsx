@@ -332,6 +332,28 @@ test('an older call still running in the same folder holds back the later call t
   expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
 })
 
+test('an overlap after a recorded run clears its Re-run failed command: the artifact on disk may no longer be that run', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'first' })
+  expect(kept(stored)[0]!.retryLine).toBe('cd /repo && dbt retry')
+  await Promise.all([
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s b', tool_use_id: 'b' }),
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s c', tool_use_id: 'c' }),
+  ])
+  expect(kept(stored).map(run => run.retryLine)).toEqual([''])
+})
+
+test('a failed run of a chain with two builds is not recorded: the file does not say which one wrote it', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-a', [['model.shop.a', 'error', null]]))
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a && dbt build -s b' })
+  expect(result.context ?? []).toEqual([])
+  expect(stored.has('runs')).toBe(false)
+})
+
+test('Re-run failed keeps --defer-state: dbt retry takes it from the command, not from the run it retries', () => {
+  expect(resultsInvocations('dbt build --defer --defer-state /artifacts/prod', ROOT)[0]!.retryLine).toBe('cd /repo && dbt retry --defer-state /artifacts/prod')
+})
+
 test('two spellings of one project folder overlap: /repo and /repo/models share one target', async ($, on) => {
   const { stored } = await start($, on, () => view('inv-x', undefined, 'build', AFTER))
   const both: any[] = await Promise.all([

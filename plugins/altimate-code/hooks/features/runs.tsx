@@ -140,7 +140,7 @@ const redact = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: s
 
 /** The flags `dbt retry` does not take from the run it retries. */
 const VALUE = `"[^"]*"|'[^']*'|\\S+`
-const KEPT_FLAGS = new RegExp(`(?:^|\\s)((?:--(?:project-dir|profiles-dir|target-path|target|profile)(?:=(?:${VALUE})|\\s+(?:${VALUE})))|(?:-t\\s+(?:${VALUE})))`, 'g')
+const KEPT_FLAGS = new RegExp(`(?:^|\\s)((?:--(?:project-dir|profiles-dir|target-path|defer-state|target|profile)(?:=(?:${VALUE})|\\s+(?:${VALUE})))|(?:-t\\s+(?:${VALUE})))`, 'g')
 const PROJECT_DIR_FLAG = /(?:^|\s)--project-dir(?:=|\s+)("[^"]+"|'[^']+'|\S+)/
 
 /** One dbt invocation that may have written the results. */
@@ -339,6 +339,9 @@ async function readRun($: EngineInterface, invocations: Invocation[], all: Invoc
   // one newer than the call is another command's, which would be recorded with this call's command line.
   const wrote = Date.parse(view.completedAt)
   if (wrote < began - CLOCK_SLACK_MS || wrote > ended + CLOCK_SLACK_MS) return null
+  // Several invocations of the writer's subcommand (`dbt build -s a && dbt build -s b`): the file cannot say which one
+  // wrote it when the run has failures (the first may have stopped the chain), so it is not recorded rather than guessed.
+  if (view.failed > 0 && invocations.filter(one => one.subcommand === view.command).length > 1) return null
   const written = writer(invocations, view.command)
   const run = written ? toRecord(view, written) : null
   return run && written ? { run, order: all.lastIndexOf(written) } : null
@@ -367,7 +370,19 @@ async function record($: EngineInterface, e: BashCall): Promise<string | null> {
   const cutoff = Math.max(ended - IN_FLIGHT_MS, Math.min(ended, ...live.map(other => other.at)))
   while (finished.length > 500 || (finished[0] && finished[0].ended < cutoff)) finished.shift()
   if (!began.writes) return null
-  if (overlapped) return OVERLAP_LINE
+  if (overlapped) {
+    // The artifact on disk may now be this call's: the stored runs of the project can no longer be retried from it.
+    await serially(async () => {
+      const all = await held($)
+      const root = await $.session.root()
+      const kept = all[root]
+      if (!kept?.some(one => one.retryLine)) return
+      const next = fitStore({ ...all, [root]: kept.map(one => ({ ...one, retryLine: '' })) })
+      await $.store.set(STORE_KEY, next)
+      await update($, runsAtom, prev => (prev?.root === root ? { ...prev, runs: next[root] ?? [] } : prev))
+    }).catch(() => {})
+    return OVERLAP_LINE
+  }
   const root = await $.session.root()
   const invocations = resultsInvocations(e.command, root, began.cwd)
   const mine = [...new Set(invocations.map(folderOf))]
@@ -449,7 +464,7 @@ export function register(on: On, context: FeatureContext) {
         <Box>
           <Button key="runs-back" label="Back" onPress={() => show(null)} />
           <Button key="runs-rerun" label="Re-run" onPress={() => fill(asked(open.commandLine))} />
-          {latest && failed.length > 0 ? (
+          {latest && failed.length > 0 && open.retryLine ? (
             <Button key="runs-retry" label="Re-run failed" onPress={() => fill(asked(open.retryLine))} />
           ) : null}
         </Box>
