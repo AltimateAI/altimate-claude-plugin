@@ -4,9 +4,10 @@ import type { EngineInterface, Register } from 'claude-code'
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
 import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
 import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
-import { lineageBand, registerLineage, startLineage } from './lineage'
+import { registerLineage, startLineage } from './lineage'
 import { setStatusPart } from './status-line'
 import { installToolChain } from './tool-chain'
+import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -566,6 +567,7 @@ export const register: Register = (on, options) => {
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
     // Each feature's own start (its commands); one failing is logged and the rest go on.
     await featuresSessionStart($, e)
+    await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
@@ -590,7 +592,7 @@ export const register: Register = (on, options) => {
     // feature's line rides under the lineage one.
     if (e.props.hasSurvey) return next(e)
     const ui = $.ui.resolve(e)
-    const lineage = await lineageBand($, ui)
+    const lineage = await taskBand($, ui)
     const extra = await featureBandLines($, ui)
     const tail =
       extra.length === 0 ? (
@@ -821,6 +823,7 @@ export const register: Register = (on, options) => {
   // tool.call hook (tool-chain.ts).
   registerFeatures(on, { options })
   installToolChain(on)
+  registerTaskImpact(on)
 }
 
 // One row of buttons per provider, chosen by its state. Credentials are added
