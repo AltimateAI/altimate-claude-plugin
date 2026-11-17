@@ -168,16 +168,77 @@ test('prefix options: a lookup, env with options and a NAME=value after a wrappe
     'nohup X=1 dbt run',
     'command X=1 dbt run',
     'exec X=1 dbt run',
-    'env -- dbt run',
   ])
     expect(parseDbtCommand(line)).toEqual([])
   // `command -p` and `command --` still run the command; assignments after env's or a keyword stay assignments.
   expect(shape('command -p dbt run')).toEqual([run])
   expect(shape('command -- dbt run')).toEqual([run])
+  expect(shape('env -- dbt run')).toEqual([run])
   expect(shape('env X=1 Y=2 dbt run')).toEqual([run])
   expect(shape('if X=1 dbt run; then :; fi')).toEqual([run])
   expect(shape('time DBT_TARGET=prod dbt run')).toEqual([{ ...run, target: 'prod' }])
   expect(shape('env DBT_TARGET=prod dbt run')).toEqual([{ ...run, target: 'prod' }])
+})
+
+test('a prefix or launcher option outside its grammar is no invocation: what runs is not known', () => {
+  for (const line of [
+    'command --help dbt run',
+    'command -x dbt run',
+    'command -pv dbt run',
+    'nohup --help dbt run',
+    'nohup -x dbt run',
+    'exec -x dbt run',
+    'time -x dbt run',
+    'time -f %e dbt run',
+    'time -- dbt run',
+    'if -x dbt run; then :; fi',
+    'uv run -- --project x dbt run',
+    'poetry run -- --foo dbt run',
+    'uv run --foo dbt run',
+    'uv run --help dbt run',
+    'uv run -h dbt run',
+    'uvx --version dbt run',
+    'pdm run -l dbt run',
+    // `exec -c` clears the environment, so the assignments in front are not what dbt sees.
+    'DBT_TARGET=prod DBT_STATE=a DBT_DEFER=1 exec -c dbt build',
+    'exec -cl dbt run',
+    // Each launcher reads only its own options.
+    'uv run --no-interaction dbt run',
+    'uv run --ansi dbt run',
+    'poetry run --frozen dbt run',
+    'pipenv run -q dbt run',
+    'hatch run --project x dbt run',
+  ])
+    expect(parseDbtCommand(line)).toEqual([])
+  const run = { ...base, subcommand: 'run' }
+  // Each prefix's own options are read.
+  expect(shape('exec -a mydbt dbt run')).toEqual([{ ...run, binary: 'dbt' }])
+  expect(shape('exec -l dbt run')).toEqual([{ ...run, binary: 'dbt' }])
+  expect(shape('time -p dbt run')).toEqual([{ ...run, binary: 'dbt' }])
+  expect(shape('nohup -- dbt run')).toEqual([{ ...run, binary: 'dbt' }])
+  // Known launcher options, with or without `=`, and `--` before dbt.
+  expect(shape('uv run --project x --frozen -qq dbt run')).toEqual([{ ...run, binary: 'uv run --project x --frozen -qq dbt' }])
+  expect(shape('uv run --with=dbt-duckdb -- dbt run')).toEqual([{ ...run, binary: 'uv run --with=dbt-duckdb -- dbt' }])
+  expect(shape('poetry run -P x dbt run')).toEqual([{ ...run, binary: 'poetry run -P x dbt' }])
+  expect(shape('poetry run -n -vv dbt run')).toEqual([{ ...run, binary: 'poetry run -n -vv dbt' }])
+  expect(shape('pdm run -p x dbt run')).toEqual([{ ...run, binary: 'pdm run -p x dbt' }])
+  expect(shape('uvx --from dbt-core dbt run')).toEqual([{ ...run, binary: 'uvx --from dbt-core dbt' }])
+})
+
+test('a keyword where it is a program name is no invocation; time is a real program', () => {
+  for (const line of ['env if dbt run', 'env then dbt run', 'env ! dbt run', 'nohup ! dbt run', 'env X=1 if dbt run', 'X=1 if dbt run', 'nohup command dbt run', 'env exec dbt run'])
+    expect(parseDbtCommand(line)).toEqual([])
+  const run = { ...base, binary: 'dbt', subcommand: 'run' }
+  expect(shape('nohup time dbt run')).toEqual([run])
+  expect(shape('env nohup dbt run')).toEqual([run])
+  expect(shape('command exec dbt run')).toEqual([run])
+})
+
+test('a backslash ending the line makes it unreadable, so no offset passes its end', () => {
+  expect(parseDbtCommand('DBT_TARGET=x dbt test\\')).toEqual([])
+  expect(parseDbtCommand('dbt run \\')).toEqual([])
+  // A backslash-newline is a line continuation, still read.
+  expect(shape('dbt run \\\n-s a')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', select: ['a'] }])
 })
 
 test('a quoted word is never an assignment, a keyword or a prefix command, but a quoted dbt is dbt', () => {
@@ -202,6 +263,10 @@ test('an expansion is part of its word, and the invocation is dynamic; its value
   expect(shape('dbt run -s `echo a b` -s c')).toEqual([{ ...run, dynamic: true, select: ['c'] }])
   expect(shape('for m in a b; do dbt run -s $m; done')).toEqual([{ ...run, dynamic: true }])
   expect(shape('DBT_TARGET=$T dbt run')).toEqual([{ ...run, dynamic: true }])
+  // An expansion in an assignment ahead of a prefix word still reaches dbt's environment.
+  expect(shape('DBT_TARGET=$T time dbt run')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('DBT_TARGET_PATH=$P nohup dbt run')).toEqual([{ ...run, dynamic: true }])
+  expect(shape('DBT_TARGET=prod time dbt run')).toEqual([{ ...run, target: 'prod' }])
   // The flag wins over the environment, but a dynamic flag value is unknown, not the environment's.
   expect(shape('DBT_TARGET=prod dbt run --target "$T"')).toEqual([{ ...run, dynamic: true }])
   expect(shape('dbt run --select=a,$x -s b')).toEqual([{ ...run, dynamic: true, select: ['b'] }])
