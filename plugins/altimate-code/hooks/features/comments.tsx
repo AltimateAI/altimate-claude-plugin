@@ -69,7 +69,7 @@ let firstWaitSpent = false
 // The project whose first load is scheduled but not started.
 let pendingFor: string | null = null
 // The thread of a post that may have landed: it stays busy until a list asked for after the post has been read.
-let uncertain: { key: string; action: unknown; messages: number; at: number } | null = null
+let uncertain: { key: string; action: unknown; text: string; root: string | null; at: number } | null = null
 // The service lists from a cache that can be five minutes behind a post: a list does not show a post until
 // then, so a resolved thread stays hidden and an unchecked post stays locked until its effect is seen or that long has passed.
 const LIST_LAG_MS = 330_000
@@ -343,10 +343,8 @@ async function attach($: EngineInterface, dir: string) {
   if (mine !== generation) return
   if (switched) {
     writes++
-    // The project in view is a different one: an unchecked post of the first is no longer in view either, and
-    // its lock would never be freed by a list of this one. Going back lists the first project again.
-    // A post still running keeps its own lock until it ends, so it cannot be doubled from the new project.
-    uncertain = null
+    // A post still running, or one that may have landed, keeps its lock across the switch: only a list of its own
+    // project that shows it, or the cache catching up, frees it, so a retry from here or after going back cannot double it.
     // The first read of this project waits for its list, as the first project's did.
     firstWaitSpent = false
   }
@@ -435,12 +433,26 @@ async function fetchThreads($: EngineInterface) {
       // note that told the person to refresh no longer applies.
       // Freed once the list shows the post's effect (a resolved thread is gone, a reply is in), or the cache
       // is old enough to have caught up: a list before that may omit a post that landed.
+      // The reply itself has to be in: a teammate's newer message is not the post.
       const pending = uncertain
-      const there = pending ? threads.find(one => `${one.shareId}:${one.groupId}` === pending.key) : undefined
-      const seen = pending ? (pending.action === 'resolve' ? there === undefined : (there?.messages.length ?? 0) > pending.messages) : false
+      const there = pending && current.root === pending.root ? threads.find(one => `${one.shareId}:${one.groupId}` === pending.key) : undefined
+      const seen =
+        pending !== null &&
+        current.root === pending.root &&
+        (pending.action === 'resolve' ? there === undefined : there?.messages.some(message => sameText(message.text, pending.text)) === true)
       const freed = pending !== null && (seen || now - pending.at >= LIST_LAG_MS)
       if (freed) uncertain = null
-      return { ...current, threads, loadedAt: now, loading: false, error: null, posting: freed ? null : current.posting, note: freed && current.note?.endsWith(LOCKED_NOTE) ? null : current.note }
+      return {
+        ...current,
+        threads,
+        loadedAt: now,
+        loading: false,
+        error: null,
+        posting: freed ? null : current.posting,
+        // A reply that is in the docs is sent: its draft is not kept to be sent again.
+        drafts: freed && seen && pending.action === 'reply' ? { ...current.drafts, [pending.key]: '' } : current.drafts,
+        note: freed && current.note?.endsWith(LOCKED_NOTE) ? null : current.note,
+      }
     })
   } catch (error) {
     if (mine !== generation) return
@@ -492,12 +504,12 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
         await change($, current => (mine !== generation ? current : { ...current, posting: null, note }))
         return
       }
-      // The project in view changed meanwhile: that post is not about this one, and nothing here can be locked for it.
-      if (!(await inView())) return
-      // Any other failure, a timeout included, may have landed: the thread stays busy until a list asked for
-      // after the post has been read, so another press cannot post it twice.
-      uncertain = { key, action: args.action, messages: thread.messages.length, at: await $.clock.now() }
+      // Any other failure, a timeout included, may have landed: posting stays locked until a list of this
+      // project shows the post, so another press cannot post it twice, here or after a switch.
+      uncertain = { key, action: args.action, text: String(args.text ?? ''), root, at: await $.clock.now() }
       writes++
+      // The project in view changed meanwhile: its pane is not told about this post.
+      if (!(await inView())) return
       await change($, current => (mine !== generation ? current : { ...current, note: `${note}${LOCKED_NOTE}` }))
       await load($)
       return
@@ -522,14 +534,14 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     await load($)
   } catch (error) {
     if (mine !== generation) return
+    // A write that timed out may still have landed: posting stays locked until a list shows it.
+    uncertain = { key, action: args.action, text: String(args.text ?? ''), root, at: await $.clock.now() }
+    writes++
     if (!(await inView())) return
     await change($, current => ({
       ...current,
       note: `Could not confirm the post, it may have gone through (the list is reloaded): ${oneLine(String(error))}`,
     }))
-    // A write that timed out may still have landed: the thread stays busy until a list asked for after it has been read.
-    uncertain = { key, action: args.action, messages: thread.messages.length, at: await $.clock.now() }
-    writes++
     await load($)
   } finally {
     release()
@@ -550,6 +562,12 @@ async function resolve($: EngineInterface, thread: CommentsThread) {
 // Pure helpers
 // ---------------------------------------------------------------------------------------------------
 
+/** The service lists a message as one line, so a posted text is compared as one. */
+export const sameText = (listed: string, sent: string) => {
+  const flat = (text: string) => text.replace(/\s+/g, ' ').trim()
+  const want = flat(sent).slice(0, 200)
+  return want !== '' && flat(listed).startsWith(want)
+}
 const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 240)
 const clip = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
 // macOS lists /tmp, /var and /etc under /private: the same folder is named either way.

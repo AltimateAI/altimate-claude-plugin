@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { PHASE_TIMEOUT_MS } from './tool-chain'
-import { FIRST_READ_WAIT_MS, contextBlock, groupByModel, placeThread, projectName, readOptions, relativePath, threadsOnFile, toThread } from './features/comments'
+import { FIRST_READ_WAIT_MS, contextBlock, groupByModel, placeThread, projectName, readOptions, sameText, relativePath, threadsOnFile, toThread } from './features/comments'
 
 const ROOT = '/repo'
 const FILE = `${ROOT}/models/orders.sql`
@@ -489,7 +489,7 @@ test('a read in a second project while the first project’s list is still loadi
   expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toContain('other_shop')
 })
 
-test('an unchecked post does not lock posting for good when a read moves the pane to another project', async ($, on) => {
+test('an unchecked post keeps posting locked after a read moves the pane to another project, until the cache has caught up', async ($, on) => {
   const other = '/other'
   const { clock, cli } = await start($, on, { otherProject: other, timeoutPost: true, listThreads: () => [RAW], files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL }, failListCalls: [1] })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -498,14 +498,20 @@ test('an unchecked post does not lock posting for good when a read moves the pan
   for (let i = 0; i < 3; i++) await clock.settle()
   await $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
   for (let i = 0; i < 4; i++) await clock.advance(FIRST_READ_WAIT_MS)
-  // The other project's lists fail here too, but its thread is not the locked one: its Resolve goes out.
+  // The switch does not drop the lock: a press here would repeat a post that may have landed.
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await clock.advance(340_000)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 3; i++) await clock.settle()
   await ui.press({ key: '7:11-resolve' })
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'resolve').length).toBeGreaterThanOrEqual(2)
   await ui.unmount()
 })
 
-test('a post that times out after the pane moved to another project does not lock that project', async ($, on) => {
+test('a post that times out after the pane moved to another project still locks posting, without a note there', async ($, on) => {
   const other = '/other'
   let release!: () => void
   const { clock, cli } = await start($, on, { otherProject: other, holdTimeoutPost: new Promise<void>(resolve => (release = resolve)), files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
@@ -517,10 +523,17 @@ test('a post that times out after the pane moved to another project does not loc
   for (let i = 0; i < 4; i++) await clock.advance(FIRST_READ_WAIT_MS)
   release()
   for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /may already have been posted/ })).toBeUndefined()
   await ui.press({ key: '7:11-resolve' })
   for (let i = 0; i < 3; i++) await clock.settle()
-  expect(cli.filter(c => c.args.action === 'resolve').length).toBe(2)
+  expect(cli.filter(c => c.args.action === 'resolve').length).toBe(1)
   await ui.unmount()
+})
+
+test('a reply is confirmed by its own text, not by another message in the thread', () => {
+  expect(sameText('Gross is fine.', '  Gross   is fine. ')).toBe(true)
+  expect(sameText('Someone else wrote this', 'Gross is fine.')).toBe(false)
+  expect(sameText('anything', '   ')).toBe(false)
 })
 
 test('a post whose CLI call throws says so and reloads the list', async ($, on) => {
