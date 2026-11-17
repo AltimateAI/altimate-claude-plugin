@@ -35,7 +35,6 @@ import {
   flagOf,
   profilesDirOf,
   withoutDropped,
-  clearRedactions,
   projectPaths,
   replayArgv,
   budgetHistory,
@@ -973,8 +972,10 @@ if not re.fullmatch(r"\\w+", kind):
 out('ok', profile=name, target=target, type=kind)
 `
 
-// Prints the strings in a profile that dbt's errors may echo back: every string under the profile's outputs (all of
-// them, aliases resolved) and the value and default of each env var profiles.yml names. Stdout only, to the plugin.
+// Prints the secrets in a profile that dbt's errors may echo back: every string under the profile's outputs (all of
+// them, aliases resolved) and the value and default of each env var profiles.yml names, found in its decoded values.
+// Identifiers (schema, database, user…) are not secrets and are left out, as an env var used only under one. Stdout
+// only, to the plugin.
 export const PROFILE_REDACT = `import sys; sys.path = [p for p in sys.path if p not in ('', '.')]
 import json, os, re
 try:
@@ -982,6 +983,8 @@ try:
 except Exception:
     yaml = None
 found = []
+PLAIN = ('type', 'threads', 'method', 'port')
+IDENTIFIERS = ('schema', 'database', 'dataset', 'project', 'catalog', 'warehouse', 'role', 'user')
 def keep(value):
     if isinstance(value, bool):
         return
@@ -995,13 +998,27 @@ def keep(value):
 def walk(node):
     if isinstance(node, dict):
         for key, value in node.items():
-            if key not in ('type', 'threads', 'method', 'port'):
+            if key not in PLAIN and key not in IDENTIFIERS:
                 walk(value)
     elif isinstance(node, list):
         for value in node:
             walk(value)
     else:
         keep(node)
+CALL = re.compile(r"env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)")
+def calls(text):
+    for call in CALL.finditer(text):
+        keep(os.environ.get(call.group(2)))
+        keep(call.group(4))
+def scan(node, key=None):
+    if isinstance(node, dict):
+        for name, value in node.items():
+            scan(value, name)
+    elif isinstance(node, list):
+        for value in node:
+            scan(value, key)
+    elif isinstance(node, str) and key not in IDENTIFIERS:
+        calls(node)
 def load(path):
     try:
         with open(path) as f:
@@ -1009,9 +1026,6 @@ def load(path):
     except Exception:
         return ''
 text = load(sys.argv[2])
-for call in re.finditer(r"env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)", text):
-    keep(os.environ.get(call.group(2)))
-    keep(call.group(4))
 try:
     profiles = yaml.safe_load(text) if yaml else None
     project = (yaml.safe_load(load(sys.argv[1])) if yaml else None) or {}
@@ -1020,7 +1034,12 @@ try:
     if isinstance(profile, dict):
         walk(profile.get('outputs'))
 except Exception:
-    pass
+    profiles = None
+# The env_var calls are read in the decoded values (a quoted string may escape its quotes); a file that does not parse is scanned as written.
+if isinstance(profiles, dict):
+    scan(profiles)
+else:
+    calls(text)
 print(json.dumps(dict(redact=found)))
 `
 
@@ -1028,29 +1047,36 @@ print(json.dumps(dict(redact=found)))
 type ProfilesFrom = { dir: string; profilesDir: string | null; profile?: string | null }
 
 /**
- * The profiles.yml dbt reads: the invocation's own `--profiles-dir` (or `DBT_PROFILES_DIR` set for it), relative to the
- * folder it ran in; else the plugin's DBT_PROFILES_DIR (relative to the project), else the project folder's when it has
- * one, else ~/.dbt's. Null when there is none.
+ * The profiles.yml files dbt may read, the first existing one being the one it does: the invocation's own
+ * `--profiles-dir` (or `DBT_PROFILES_DIR` set for it), relative to the folder it ran in; else the plugin's
+ * DBT_PROFILES_DIR (relative to the project); else, by default, the folder it ran in, the project folder, then ~/.dbt.
  */
-async function profilesPath($: EngineInterface, root: string, from?: ProfilesFrom): Promise<string | null> {
+async function profileCandidates($: EngineInterface, root: string, from?: ProfilesFrom): Promise<string[]> {
   const env = async (name: string) => $.process.run(['printenv', name], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '')
   const home = await env('HOME')
   // A relative DBT_PROFILES_DIR is the project's (dbt runs there); `~` is the home folder.
   const rawDir = from?.profilesDir ?? (await env('DBT_PROFILES_DIR'))
   const expanded = rawDir.startsWith('~') && home ? `${home}${rawDir.slice(1)}` : rawDir
   const profilesDir = expanded && !expanded.startsWith('/') ? normalize(`${from?.profilesDir ? from.dir : root}/${expanded}`) : expanded
-  const local = `${root}/profiles.yml`
-  const path = profilesDir ? `${profilesDir}/profiles.yml` : (await $.fs.exists(local).catch(() => false)) ? local : home ? `${home}/.dbt/profiles.yml` : null
-  return path && (await $.fs.exists(path).catch(() => false)) ? path : null
+  const wanted = profilesDir ? [`${profilesDir}/profiles.yml`] : [`${from?.dir ?? root}/profiles.yml`, `${root}/profiles.yml`, ...(home ? [`${home}/.dbt/profiles.yml`] : [])]
+  const found: string[] = []
+  for (const path of new Set(wanted.map(one => normalize(one)))) if (await $.fs.exists(path).catch(() => false)) found.push(path)
+  return found
+}
+
+async function profilesPath($: EngineInterface, root: string): Promise<string | null> {
+  return (await profileCandidates($, root))[0] ?? null
 }
 
 // What was loaded for a profiles.yml (and the profile asked for): when, and the file's time then.
 const redactionLoaded = new Map<string, { mtimeMs: number; at: number }>()
 const REDACTION_REFRESH_MS = 30_000
 
-/** Forgets every value and that it was loaded: the next dbt output loads them again. */
+/**
+ * Makes the next dbt output load the values again. The values already held stay for as long as the plugin runs: a
+ * query that was under way when the conversation ended is still held to them when it finishes.
+ */
 function forgetRedactions() {
-  clearRedactions()
   redactionLoaded.clear()
 }
 
@@ -1062,13 +1088,8 @@ function forgetRedactions() {
  */
 async function ensureRedactions($: EngineInterface, root: string, from?: ProfilesFrom): Promise<void> {
   try {
-    const paths = new Set<string>()
-    const own = await profilesPath($, root)
-    if (own) paths.add(own)
-    if (from?.profilesDir) {
-      const named = await profilesPath($, root, from)
-      if (named) paths.add(named)
-    }
+    const paths = new Set<string>(await profileCandidates($, root))
+    if (from) for (const path of await profileCandidates($, root, from)) paths.add(path)
     for (const path of paths) {
       const key = `${path}|${from?.profile ?? ''}`
       const stat = await $.fs.stat(path).catch(() => null)

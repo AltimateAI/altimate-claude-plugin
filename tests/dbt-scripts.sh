@@ -102,6 +102,13 @@ assert (want == "-" and not found) or want in found, found
   redact "a password reused through an alias" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: &pw SENTINEL_ALIAS\n      threads: *pw\n' SENTINEL_ALIAS
   redact "a JWT with a line break" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: trino\n      method: jwt\n      jwt_token: "eyJSENTINEL_JWT\\n.sig"\n' $'eyJSENTINEL_JWT\n.sig'
   redact "an output that is not the active target" $'shop:\n  target: dev\n  outputs:\n    dev: {type: duckdb}\n    prod: {type: postgres, password: SENTINEL_PROD}\n' SENTINEL_PROD
+  # env_var calls are read in the decoded values: a double-quoted YAML string may escape its quotes.
+  redact "an env_var with escaped quotes: its value" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      sslmode: "{{ env_var(\\"DB_PASSWORD\\", \\"SENTINEL_DEFAULT\\") }}"\n' SENTINEL_ENV_VALUE DB_PASSWORD=SENTINEL_ENV_VALUE
+  redact "an env_var with escaped quotes: its default" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      sslmode: "{{ env_var(\\"DB_PASSWORD\\", \\"SENTINEL_DEFAULT\\") }}"\n' SENTINEL_DEFAULT
+  # Identifiers are not secrets: schema, database, user and the like, and an env var used only under one.
+  redact "identifier keys" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, schema: analytics_prod, database: warehouse_db, dataset: some_dataset, project: some_project, catalog: some_catalog, warehouse: some_warehouse, role: some_role_name, user: some_user_name}\n' -
+  redact "an env var used only under an identifier key" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, schema: "{{ env_var(\'SCH\', \'default_schema\') }}"}\n' - SCH=SENTINEL_SCHEMA
+  redact "an env var used under an identifier and a secret key" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, schema: "{{ env_var(\'SCH\') }}", password: "{{ env_var(\'SCH\') }}"}\n' SENTINEL_SCHEMA SCH=SENTINEL_SCHEMA
   redact "nothing but short values, types and ports" $'shop:\n  target: dev\n  outputs:\n    dev: {type: postgres, method: password, port: 5432, threads: 1234567, user: me}\n' -
 else
   missing "python3 has no PyYAML, so the PROFILE_REDACT checks cannot run"

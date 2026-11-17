@@ -3643,3 +3643,57 @@ kitTest('the doctor note holds no profile value, whichever line carries it', () 
   expect(note).not.toContain('SENTINEL_NOTE_VALUE')
   clearRedactions()
 })
+
+// ─── What is redacted: dbt's messages, across /clear, from the folder dbt ran in ───────────────────
+
+test('a /dbt-show under way when /clear ends the conversation is saved with the profile value removed', async ($, on) => {
+  const url = 'postgresql://alice:SENTINEL_HELD_URL@db.example/d'
+  let release: () => void = () => {}
+  const holdShow = new Promise<void>(resolve => (release = resolve))
+  const { clock, store, runs } = await start($, on, { redact: [url], holdShow, show: { raw: { exitCode: 2, stdout: `Database Error\n  could not translate host name "${url}" to address\n` } } })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  // Until dbt show has started and is held: the profile's values were read before it.
+  await clock.settle()
+  expect(runs.some(argv => argv[1] === 'show')).toBe(true)
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  await clock.settle()
+  const saved = JSON.stringify(store.get('dbt-results-history'))
+  expect(saved).toContain('orders')
+  expect(saved).not.toContain('SENTINEL_HELD_URL')
+})
+
+test('with no profiles folder named, the profiles.yml in the folder dbt ran in is the one whose values are removed', async ($, on) => {
+  const secret = 'SENTINEL_CALLER_PROFILE'
+  const { clock, prompts, setBash } = await start($, on, {
+    cwd: '/proj/caller',
+    runResultsAt: 1,
+    now: 900_000,
+    files: { 'caller/profiles.yml': 'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: SENTINEL_CALLER_PROFILE\n' },
+    redactBy: { '/proj/caller/profiles.yml': [secret] },
+  })
+  setBash({ stdout: `${HEADER}\n${ALIAS_ERR(secret)}`, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /proj -s orders' })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: new RegExp(secret) })).toBeUndefined()
+  await band.press({ key: 'dbt-explain' })
+  await clock.settle()
+  expect(prompts[0]).not.toContain(secret)
+  await band.unmount()
+})
+
+test('query rows are the person\'s data: a value that is also in the profile is shown as it is', async ($, on) => {
+  const { clock } = await start($, on, { redact: ['SENTINEL_ROW_VALUE'], show: { rows: [{ schema_name: 'SENTINEL_ROW_VALUE' }] } })
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /SENTINEL_ROW_VALUE/ })).toBeDefined()
+  await ui.unmount()
+})
+
+kitTest('env_var calls are read in the decoded values, and identifier keys are not secrets', () => {
+  expect(PROFILE_REDACT).toContain('scan(profiles)')
+  expect(PROFILE_REDACT).toContain("IDENTIFIERS = ('schema', 'database', 'dataset', 'project', 'catalog', 'warehouse', 'role', 'user')")
+  expect(PROFILE_REDACT).toContain('key not in IDENTIFIERS')
+})
