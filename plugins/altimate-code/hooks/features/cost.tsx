@@ -302,7 +302,11 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     if (answer === 'unreadable') return unreadable()
     // A /cd while it was being asked: the answer is of the project left, and nothing here is allowed on it.
     const now = await sessionDir($, look, dir)
-    if (look.lost) return unreadable()
+    if (look.lost) {
+      // The answer in hand is still the project's: one over the limit is kept, so the refusal holds the command.
+      if (answer !== 'pending' && answer.kind === 'bytes' && answer.maxBytes > limitBytes) over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
+      return unreadable()
+    }
     if (now !== dir) {
       await leaveProject($)
       seenDir = now
@@ -730,8 +734,8 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) return 'pending'
   // The project may have changed while it ran (an edit, a /cd, or a dbt run let through meanwhile): that answer is of the old one, and the next pass asks again.
+  // A folder lost here is the gate's to refuse: it keeps the answer in hand if it is over the limit.
   const after = await sessionDir($, look, seenDir)
-  if (look.lost) return 'unreadable'
   if (running.generation !== generation || running.dir !== after) {
     if (inflight.get(key) === running) inflight.delete(key)
     return 'pending'

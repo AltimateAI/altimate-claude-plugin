@@ -344,6 +344,22 @@ test('a line refused for its unreadable folder keeps the over-limit answer alrea
   expect(ran).toEqual([])
 })
 
+for (const n of [5, 6]) test(`a folder lost just after an estimate came in over the limit still holds the command for its retry: lookup ${n}`, async ($, on) => {
+  const options: Options = { sequence: { a: [OVER, { success: false, error: 'Access Denied' }] } }
+  const { clock, ran, started } = await start($, on, options)
+  options.stallNth = { n, seen: 0 }
+  const first = $.tool.call(bash('dbt run -s a')) as Promise<any>
+  for (let i = 0; i < 70; i++) await clock.advance(100)
+  expect((await first).deny).toContain('could not be read in time')
+  options.stallNth = undefined
+  await clock.advance(70_000)
+  const retry = $.tool.call(bash('dbt run -s a')) as Promise<any>
+  for (let i = 0; i < 70; i++) await clock.advance(100)
+  expect((await retry).deny).toBeDefined()
+  expect(started).toEqual(['a', 'a'])
+  expect(ran).toEqual([])
+})
+
 test('a lookup lost in one pass does not refuse another pass whose own lookups all answered', async ($, on) => {
   let release: () => void = () => {}
   const options: Options = { answers: { slow: UNDER }, holds: { slow: new Promise<void>(resolve => (release = resolve)) } }
