@@ -10,7 +10,8 @@ All notable changes to this plugin will be documented in this file.
 - What if: each flagged warehouse's cost as serverless and at every smaller size, and whether its cores still fit its queries.
 - Saved since: a flagged warehouse's size and cost are kept on this machine, and a later run that finds it resized says what it cost a month then and now.
 - A line above the prompt when the session edits Databricks bundle or Terraform files or runs a `databricks` compute command: the flagged resource's saving, or a once-a-session offer of `/savings`.
-- `runTool` takes an environment and `noDaemon` for one CLI run.
+- One connection checks every workspace the account's system tables show; the pane counts them and names each finding's workspace.
+- `runTool` takes an environment and `noDaemon` for one CLI run, and hands back a CLI's raw output when it is not an answer (an altimate-code too old for the tool gets "update").
 
 ## [1.7.0] — 2026-11-17
 
