@@ -104,7 +104,7 @@ Arguments for the most used tools (`?` marks optional):
 | `altimate_core_equivalence` | `{"sql1", "sql2"}` |
 | `sql_translate` | `{"sql", "source_dialect", "target_dialect"}` |
 | `finops_analyze_credits` | `{"warehouse"?, "days"?}` |
-| `finops_databricks_savings` | `{"warehouse"?}`: a Databricks connection; returns savings findings with monthly ranges and evidence |
+| `finops_databricks_savings` | `{"warehouse"?, "confirm"}`: a Databricks connection; returns savings findings with monthly ranges and evidence. Pass `"confirm": true` only after the user agrees: it may start their SQL warehouse, which bills, and stops after 9 minutes |
 | `workspace_context` | `{"include_tools"?, "refresh"?}` |
 | `workspace_skill` | `{"workspace_token", "name"}` |
 | `workspace_execute` | `{"workspace_token", "operation", "arguments"}` |

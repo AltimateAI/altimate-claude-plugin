@@ -11,7 +11,7 @@ const PANE = {
   props: { title: 'Databricks savings', isFocused: true, bodyColumns: 96, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
 } as const
 
-// `altimate tool run finops_databricks_savings --args '{}' --json --no-daemon` on a live workspace for
+// `altimate tool run finops_databricks_savings --args '{"confirm":true}' --json --no-daemon` on a live workspace for
 // the seven days to 2026-11-18 (warehouse ids replaced).
 const ANSWER = {
   status: 'ok',
@@ -263,7 +263,7 @@ test('/savings runs the altimate-code tool once with telemetry off and draws its
 
   expect(runs.length).toBe(1)
   // The run stays out of altimate-code's tool daemon, which keeps the environment it started with.
-  expect(runs[0]!.argv.slice(1)).toEqual(['tool', 'run', 'finops_databricks_savings', '--args', '{}', '--json', '--no-daemon'])
+  expect(runs[0]!.argv.slice(1)).toEqual(['tool', 'run', 'finops_databricks_savings', '--args', '{"confirm":true}', '--json', '--no-daemon'])
   expect(runs[0]!.env).toEqual({ ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' })
   // The reply in the conversation names no figure, warehouse or workspace: the findings stay in the pane.
   expect(said.text).toContain('Nothing is sent to Altimate')
@@ -278,7 +278,7 @@ test('/savings runs the altimate-code tool once with telemetry off and draws its
     expect(await ui.find({ type: 'Text', text: /^CLASSIC SMALL warehouse, 95% idle over 11\.0 running hours \(3,107 queries\)$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^2X-SMALL is enough: 12 → 4 DBU an hour, on \$27\.54 spent over 7 days$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^5 SQL warehouses, 0 all-purpose clusters and 0 jobs · the 7 days to 2026-11-18 · connection dbxmega$/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /These were 4 of Altimate's 15 Databricks checks/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /These were 4 of Altimate's 13 Databricks checks/ })).toBeDefined()
     expect((await ui.find({ type: 'Link' }))?.props.href).toBe(SIGNUP_URL)
     await ui.unmount()
   }
@@ -288,7 +288,7 @@ test('/savings <connection> asks for that connection', async ($, on) => {
   const { clock, runs } = await start($, on)
   await savings($, 'prod_dbx')
   await clock.settle()
-  expect(JSON.parse(runs[0]!.argv[5]!)).toEqual({ warehouse: 'prod_dbx' })
+  expect(JSON.parse(runs[0]!.argv[5]!)).toEqual({ warehouse: 'prod_dbx', confirm: true })
 })
 
 test('an argument that is not a connection name never reaches the CLI', async ($, on) => {
@@ -402,8 +402,22 @@ test('Run again checks the same connection again', async ($, on) => {
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'again' })
   await clock.settle()
-  expect(runs.map(one => JSON.parse(one.argv[5]!))).toEqual([{ warehouse: 'prod_dbx' }, { warehouse: 'prod_dbx' }])
+  expect(runs.map(one => JSON.parse(one.argv[5]!))).toEqual([{ warehouse: 'prod_dbx', confirm: true }, { warehouse: 'prod_dbx', confirm: true }])
   await ui.unmount()
+})
+
+test('/savings run by anything but the person (a plugin, the SDK, a schedule) does not query the warehouse', async ($, on) => {
+  const { clock, runs } = await start($, on)
+  for (const kind of ['plugin', 'sdk', 'scheduled-trigger', 'peer'] as const) {
+    const said = await $.command.run({ command: 'savings', args: '', origin: { kind, name: 'other' }, presentation: composer.presentation })
+    expect(said.text).toContain('runs only when you type /savings')
+  }
+  await clock.settle()
+  expect(runs).toEqual([])
+  // Remote Control is the person too.
+  await $.command.run({ command: 'savings', args: '', origin: { kind: 'bridge' }, presentation: composer.presentation })
+  await clock.settle()
+  expect(runs.length).toBe(1)
 })
 
 test('each refusal altimate-code gives is explained in the person\'s terms', () => {
@@ -413,6 +427,12 @@ test('each refusal altimate-code gives is explained in the person\'s terms', () 
   expect(explain('Connection "dbx" does not go through a SQL warehouse. Its http_path must name one').recovery).toContain('/sql/1.0/warehouses/<id>')
   expect(explain("This altimate-code build's altimate-core has no Databricks savings rules. Update altimate-code, then try again.").text).toContain('no Databricks savings check')
   expect(explain('socket hang up').text).toBe('The savings check failed: socket hang up')
+  // The terminal fallback runs the same check: the same connection, the same go-ahead, and the
+  // switches that keep it from contacting Altimate.
+  expect(explain('socket hang up', 'prod_dbx').recovery).toContain(
+    `ALTIMATE_ASSESSMENT_MODE=true ALTIMATE_TELEMETRY_DISABLED=true altimate tool run finops_databricks_savings --args '{"warehouse":"prod_dbx","confirm":true}' --json --no-daemon`,
+  )
+  expect(explain('socket hang up').recovery).toContain(`--args '{"confirm":true}'`)
   // The resolver's words for a connection of another type, as altimate-code writes them.
   const other = explain('The Databricks savings check is not available for snowflake warehouses. Try one of: dbx.')
   expect(other.text).toBe('That connection is not a Databricks one.')
@@ -636,7 +656,8 @@ test('idle clusters and jobs on all-purpose compute get their own evidence and f
   expect(await ui.find({ type: 'Text', text: /^nightly_orders · Job Running on All-Purpose Compute · \$1,870–\$2,805 a month$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^28 runs \(periodic\), 100% of its cost on all-purpose compute, 100% of its cluster's$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^All-purpose cluster 85% idle across 5 active days \(zombie\), average worker CPU 8%, peak 30%$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^Not checked \(the connection cannot read their system tables\): Job Running on All-Purpose Compute\.$/ })).toBeDefined()
+  // The CLI's reason is kept: a refused read reads differently from a run that hit its time limit.
+  expect(await ui.find({ type: 'Text', text: /^Not checked: Job Running on All-Purpose Compute \(INSUFFICIENT_PERMISSIONS\)\.$/ })).toBeDefined()
   await ui.press({ key: 'fix-0' })
   await ui.press({ key: 'fix-1' })
   await clock.settle()

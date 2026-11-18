@@ -19,11 +19,16 @@ const PANE_TITLE = 'Databricks savings'
 const PANE_SIZE = { columns: 96, rows: 34 }
 const TOOL = 'finops_databricks_savings'
 export const SIGNUP_URL = 'https://app.myaltimate.com/register'
-/** How many Databricks detectors Altimate's pipeline runs; the check runs four of them. */
-export const SAAS_CHECK_COUNT = 15
+/** How many Databricks detectors Altimate's pipeline runs (its opportunity marts that emit
+ * opportunities); the check runs four of them. */
+export const SAAS_CHECK_COUNT = 13
 const CHECK_COUNT = 4
-// The queries read seven days of system tables and may start the connection's SQL warehouse.
-const RUN_BUDGET_MS = 5 * 60_000
+// Ten minutes, the most a plugin's process may run. The CLI stops its own check after nine and
+// cancels any query still running on the warehouse, so it ends before it would be killed.
+const RUN_BUDGET_MS = 10 * 60_000
+// The person's own input: Enter at the prompt, or their message through Remote Control. Only
+// these give the check the go-ahead it asks for before it queries (and may start) the warehouse.
+const PERSON_ORIGINS = new Set(['composer', 'bridge'])
 // Set for the tool's run only: altimate-code and altimate-core both read the telemetry switch. Assessment
 // mode also keeps the CLI from its own startup contacts (the one-time telemetry opt-out event, the model
 // catalog, the ripgrep download), so the warehouse is the only host the run reaches; an altimate-code
@@ -266,7 +271,9 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
     ranOn: metadata.ran_on ?? null,
     window: metadata.window,
     checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0, workspaces: Math.max(1, workspaces) },
-    skipped: (metadata.skipped ?? []).map(one => one.check),
+    // Each with the CLI's reason: a check can be skipped for a refused read, for the run's time limit
+    // (its query may still be running), or because core refused its facts.
+    skipped: (metadata.skipped ?? []).map(one => (one.reason ? `${one.check} (${one.reason.trim().replace(/\.$/, '')})` : one.check)),
     limited: metadata.limited ?? [],
     total: { min: report.total.monthly_min, max: report.total.monthly_max, resources: report.total.resources },
     findings: report.findings.map(one => ({
@@ -338,7 +345,7 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
 const tooOldCli = (output: string) => /\bCommands:/.test(output) && /altimate(-code)? /.test(output)
 
 /** The refusal in the person's terms, with the step that fixes it. */
-export function explain(error: string): { text: string; recovery: string } {
+export function explain(error: string, connection: string | null = null): { text: string; recovery: string } {
   if (tooOldCli(error) || /^Unknown tool: finops_databricks_savings/.test(error) || /has no Databricks savings rules/.test(error)) {
     return { text: 'This altimate-code has no Databricks savings check.', recovery: 'Update altimate-code (`altimate upgrade`), then run /savings again.' }
   }
@@ -366,7 +373,11 @@ export function explain(error: string): { text: string; recovery: string } {
       recovery: 'The check reads system.billing, system.compute, system.query and system.lakeflow: ask a workspace admin for SELECT on those schemas, then run /savings again.',
     }
   }
-  return { text: `The savings check failed: ${error.split('\n')[0]!.slice(0, 300)}`, recovery: 'Run /savings again; if it fails again, run the same check in a terminal: `altimate tool run finops_databricks_savings --args \'{}\'`.' }
+  const args = JSON.stringify(connection ? { warehouse: connection, confirm: true } : { confirm: true })
+  return {
+    text: `The savings check failed: ${error.split('\n')[0]!.slice(0, 300)}`,
+    recovery: `Run /savings again; if it fails again, run the same check in a terminal: \`ALTIMATE_ASSESSMENT_MODE=true ALTIMATE_TELEMETRY_DISABLED=true altimate tool run finops_databricks_savings --args '${args}' --json --no-daemon\`.`,
+  }
 }
 
 function checkedText(view: SavingsView): string {
@@ -410,7 +421,9 @@ async function runCheck($: EngineInterface, connection: string | null) {
       $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
       return
     }
-    const result = await runTool($, TOOL, connection ? { warehouse: connection } : {}, { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
+    // Typing /savings is the user's go-ahead, which the tool asks for before it queries the warehouse.
+    const args = connection ? { warehouse: connection, confirm: true } : { confirm: true }
+    const result = await runTool($, TOOL, args, { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
     if (!live()) return
     const metadata = result.metadata as ToolMetadata | null
     const view = toView(metadata)
@@ -418,7 +431,7 @@ async function runCheck($: EngineInterface, connection: string | null) {
       // The CLI's text is only the first line of what it printed; an old altimate-code is told by its whole usage.
       const raw = ('raw' in result ? result.raw : '') || ''
       const error = metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)
-      const why = explain(error || 'no answer')
+      const why = explain(error || 'no answer', connection)
       await update($, messageAtom, () => why)
       $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
       return
@@ -472,6 +485,9 @@ async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_
 /** Adds this feature's own hooks. */
 export function register(on: On, _context: FeatureContext) {
   on('command.run', { command: COMMAND }, async ($, e) => {
+    if (!PERSON_ORIGINS.has(e.origin.kind)) {
+      return { text: 'The savings check runs only when you type /savings: it queries your SQL warehouse, which Databricks starts if it is stopped and bills while it runs.' }
+    }
     const asked = e.args.trim()
     if (asked && !CONNECTION_NAME.test(asked)) {
       return { text: `"${asked}" is not a connection name. Run /savings, or /savings <connection> with an altimate-code Databricks connection.` }
@@ -612,7 +628,7 @@ export function register(on: On, _context: FeatureContext) {
           )
         })}
         {report.skipped.length > 0 ? (
-          <Text dimColor>{`Not checked (the connection cannot read their system tables): ${report.skipped.join(', ')}.`}</Text>
+          <Text dimColor>{`Not checked: ${report.skipped.join('; ')}.`}</Text>
         ) : null}
         {report.limited.length > 0 ? (
           <Text dimColor>{`Only the first 10,000 ${report.limited.join(' and ')} were read; any beyond them were not checked.`}</Text>
@@ -636,7 +652,7 @@ export async function sessionStart($: EngineInterface, _e: Args<'session.start'>
   await update($, busyAtom, () => null)
   await $.command.register({
     name: COMMAND,
-    description: "Check a Databricks workspace's warehouses, clusters and jobs for savings with Altimate's rules: read-only, on your own connection",
+    description: "Check a Databricks workspace's warehouses, clusters and jobs for savings with Altimate's rules: read-only, on your own connection; starts its SQL warehouse if stopped, which bills",
     argumentHint: '[altimate-code connection]',
   })
 }

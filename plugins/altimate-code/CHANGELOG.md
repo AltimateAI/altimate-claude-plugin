@@ -6,6 +6,7 @@ All notable changes to this plugin will be documented in this file.
 
 ### Added
 - `/savings [connection]`: a Databricks savings check beside the chat, over altimate-code's `finops_databricks_savings` tool (four checks: Migrate Classic/Pro to Serverless, Over-Sized Warehouse, Idle Cluster Detection, Job Running on All-Purpose Compute). It runs with your own Databricks connection, in altimate-code's assessment mode (telemetry off and no other contact with Altimate or GitHub: the warehouse is the only host reached; needs an altimate-code release with `ALTIMATE_ASSESSMENT_MODE`) and outside the tool daemon, and shows each finding with its evidence and a monthly range at list price, each resource counted once. Needs an altimate-code release with that tool; with an older one the pane says to update.
+- `/savings` gives the savings tool the go-ahead it asks for (`confirm: true`) only when you ran it yourself; a plugin, the SDK or a schedule gets no run. The check stops after 9 minutes, cancelling any query still on the warehouse, and a check that could not run is named with its reason.
 - Draft the fix: a finding's change goes into the prompt box for Claude to draft against the repository; nothing is sent until you press Enter.
 - What if: each flagged warehouse's cost as serverless and at every smaller size, and whether its cores still fit its queries.
 - Saved since: a flagged warehouse's size and cost are kept on this machine, and a later run that finds it resized says what it cost a month then and now.
