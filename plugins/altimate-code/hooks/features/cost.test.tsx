@@ -811,6 +811,52 @@ test('an edit that voids a running estimate does not let another start beside it
 })
 
 
+test('a run let through while an estimate is still running: the retry does not take that estimate\'s pre-run answer', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  // Not estimated (its own target), so it is let through at once and starts rebuilding.
+  expect(((await $.tool.call(bash('dbt run -s customers --target prod'))) as any).deny).toBeUndefined()
+  release()
+  await clock.settle()
+  options.hold = undefined
+  options.answers = { orders: OVER }
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(estimates).toEqual(['orders', 'orders'])
+})
+
+test('a /cd takes the old project\'s hold off the status line and forgets its last estimate', async ($, on) => {
+  const options: Options = { answers: { orders: OVER } }
+  const { clock, statuses } = await start($, on, options)
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  expect(statuses.filter(Boolean).at(-1)).toContain('held')
+  options.cwd = '/elsewhere/project-b'
+  await $.tool.call(bash('ls'))
+  await clock.settle()
+  expect(statuses.at(-1)).toBeUndefined()
+  const allowed = await $.command.run({ command: 'allow-scan', args: '' } as any)
+  expect(allowed.text).toContain('Nothing is held')
+  const last = await $.command.run({ command: 'scan-cost', args: '' } as any)
+  expect(last.text).toContain('Run /scan-cost <model>')
+})
+
+test('a quoted git option value is read: git -C "my repo" checkout . forgets the verdict', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  const run = () => $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  expect((await run()).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  await $.tool.call(bash('git -C "my repo" checkout .'))
+  await clock.settle()
+  expect((await run()).deny).toContain('20.0 GiB')
+})
+
 test('a lower bound already over the limit holds the command', async ($, on) => {
   const { clock } = await start($, on, { answers: { orders: { success: true, supported: true, adapter: 'bigquery', bytes: 20 * GIB, lowerBound: true, display: '20.0 GiB' } } })
   const result: any = await $.tool.call(bash('dbt run -s orders'))

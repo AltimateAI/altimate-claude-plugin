@@ -44,7 +44,7 @@ let limitBytes = DEFAULT_MAX_SCAN_BYTES
 /** The lines to show under an estimated command's Bash row, by command; each gate pass replaces the last. Taken by bashAfter. */
 const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
-const inflight = new Map<string, { answer: Promise<Answer>; settled: Promise<undefined>; doneAt: number | null; generation: number }>()
+const inflight = new Map<string, { answer: Promise<Answer>; settled: Promise<undefined>; doneAt: number | null; generation: number; voided?: boolean }>()
 /** Estimates that outlasted the gate's wait and are still running, whether or not an edit has voided their answer: nothing else starts beside one. */
 const late = new Set<Promise<undefined>>()
 /** Commands the gate refused while their estimate was running, and when it last did: they have not run, so a retry changes nothing. */
@@ -57,7 +57,7 @@ let unsupportedSince: number | null = null
 let seenDir: string | null = null
 const UNSUPPORTED_KEEP_MS = 10 * 60_000
 /** Commands that can rewrite a model, the project or its profile from the shell: an estimate made before one is not reused. */
-const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+((-[Cc]|--git-dir|--namespace|--work-tree)\s+\S+\s+|-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|worktree)|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
+const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+((-[Cc]|--git-dir|--namespace|--work-tree)\s+(\S+|"[^"]*"|'[^']*')\s+|-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|worktree)|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
 /** Commands that can move the session to another project or target without rewriting a file. */
 const MOVES_DIRECTORY = /(^|[\s;&|(])(cd|pushd|popd)(\s|$)/
 /** The dbt subcommands that rebuild warehouse relations. */
@@ -86,12 +86,9 @@ async function afterShellChange($: EngineInterface, command: string, ran = false
   // A dbt run that has finished may have rebuilt what another model reads: an estimate made before it is stale.
   // Not before the command runs: the gate's own estimates, kept for the retry, would be dropped by every pass.
   if (ran && all.some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) invalidate()
-  if (mutates(all, rest)) {
-    invalidate()
-    // Any rewrite can bring back another target (a git restore does not name the profile).
-    await forgetUnsupported($)
-  } else if (MOVES_DIRECTORY.test(rest)) {
-    // A cd can select another project, which the estimate (keyed by model or SQL) does not name: nothing made before it is reused.
+  // A rewrite can bring back another target (a git restore does not name the profile), and a cd can select another project,
+  // which the estimates (keyed by model or SQL) do not name: nothing made before either is reused.
+  if (mutates(all, rest) || MOVES_DIRECTORY.test(rest)) {
     invalidate()
     await forgetUnsupported($)
   }
@@ -143,6 +140,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   generation++
   unsupportedSince = null
   seenDir = null
+  late.clear()
   await update($, costAtom, () => ({ ...FRESH }))
   await setStatusPart($, 'cost', null)
   await $.command.register({ name: 'allow-scan', description: 'Let the dbt command held for its BigQuery scan size run once, when run again unchanged' })
@@ -186,13 +184,16 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
   // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
   if (!refused.has(e.command)) await afterShellChange($, e.command)
   // A session moved to another project (a /cd) keeps nothing the gate learned in the last one.
-  const dir = await $.session.cwd()
+  const dir = await $.session.cwd().catch(() => seenDir)
   if (seenDir !== null && dir !== seenDir) {
-    invalidate()
+    // What is still running belongs to the project left behind: it holds nothing back here.
+    invalidate(false)
+    late.clear()
     await forgetUnsupported($)
-    await update($, costAtom, prev => (prev?.held || prev?.allowOnce ? { ...prev, held: null, allowOnce: false } : prev))
+    await update($, costAtom, prev => (prev ? { ...prev, held: null, allowOnce: false, lastEstimate: null } : prev))
+    await showStatus($, null)
   }
-  seenDir = dir
+  seenDir = dir ?? null
   const all = parseDbtCommand(e.command)
   const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
   if (invocations.length === 0) return null
@@ -298,8 +299,7 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
       for (const one of over) lines.push(`cost · ${one.label} would scan ${one.display}, over the ${formatBytes(limitBytes)} limit: allowed once`)
       keepNotes(e.command, lines)
       // The hold is spent: the status line stops showing it.
-      const last = (await read($, costAtom))?.lastEstimate
-      await showStatus($, last ? `scan ≈ ${last.display}` : null)
+      await showLastEstimate($)
       return null
     }
     notes.delete(e.command)
@@ -320,8 +320,7 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
   // was not estimated says nothing, so the hold stays.
   if (estimated && (state.held || state.allowOnce)) {
     await update($, costAtom, prev => (prev?.held || prev?.allowOnce ? { ...prev, held: null, allowOnce: false } : prev))
-    const last = (await read($, costAtom))?.lastEstimate
-    await showStatus($, last ? `scan ≈ ${last.display}` : null)
+    await showLastEstimate($)
   }
   keepNotes(e.command, lines)
   return null
@@ -355,11 +354,23 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
 
 /** Drops the answers already in; an estimate still running, which a parallel call may be waiting on, is left to finish. */
 function dropFinished() {
-  for (const [key, entry] of inflight) if (entry.doneAt != null) inflight.delete(key)
+  for (const [key, entry] of inflight) {
+    if (entry.doneAt != null) inflight.delete(key)
+    // A pass already waiting on it takes its answer; a later pass does not, since a run began after it started.
+    else entry.voided = true
+  }
 }
 
-function invalidate() {
+/** An estimate voided while it runs still has its process: nothing starts beside it (unless `track` is false, for a project left). */
+function invalidate(track = true) {
   generation++
+  if (track) {
+    for (const entry of inflight.values()) {
+      if (entry.doneAt != null) continue
+      late.add(entry.settled)
+      void entry.settled.then(() => late.delete(entry.settled))
+    }
+  }
   inflight.clear()
 }
 
@@ -549,6 +560,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   // The look-up and the insert below are one step: nothing is awaited between them, or two passes would each start one.
   const now = await $.clock.now()
   let running = inflight.get(key)
+  if (running?.voided) running = undefined
   // A command whose retries keep coming keeps what it waited for however long the others took: a later answer expiring an earlier one would never let it finish.
   const retrying = refusedAt != null && now - refusedAt <= ANSWER_KEEP_MS
   if (running?.doneAt != null && !retrying && now - running.doneAt > ANSWER_KEEP_MS) running = undefined
@@ -598,6 +610,12 @@ async function rememberEstimate($: EngineInterface, target: string, bytes: numbe
 }
 
 /** The status line's cost part; a failure to draw it is dropped. */
+/** The status line's cost part back to the last estimate, once no hold is left. */
+async function showLastEstimate($: EngineInterface) {
+  const last = (await read($, costAtom))?.lastEstimate
+  await showStatus($, last ? `scan ≈ ${last.display}` : null)
+}
+
 async function showStatus($: EngineInterface, text: string | null) {
   try {
     await setStatusPart($, 'cost', text)
