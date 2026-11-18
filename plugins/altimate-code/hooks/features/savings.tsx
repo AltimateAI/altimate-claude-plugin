@@ -170,14 +170,16 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
             ? 'it is idle almost all the time: set autotermination_minutes to 15, or terminate it if nobody needs it'
             : 'set autotermination_minutes to 30 so idle workers stop billing',
         defines: 'Terraform databricks_cluster, a cluster policy, or JSON',
-        otherwise: `write the JSON for \`databricks clusters edit ${id} --json\``,
+        // `clusters edit` replaces the whole configuration; `update` changes only the masked fields.
+        otherwise: `write the JSON for \`databricks clusters update --json\` (cluster_id "${id}", update_mask "autotermination_minutes" and the new value under cluster)`,
       }
     case 'job_on_all_purpose':
       return {
         noun: 'Job',
         change: "run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster it uses now",
         defines: "the job's bundle resource, Terraform databricks_job, or JSON",
-        otherwise: `write the settings for \`databricks jobs reset ${id} --json\``,
+        // `jobs reset` overwrites every setting; `update` replaces only the top-level fields it names.
+        otherwise: `write the JSON for \`databricks jobs update --json\` (job_id ${id}, and new_settings with the whole tasks list, since it replaces each field it names)`,
       }
     default:
       return { noun: 'Resource', change: 'make the change the evidence points at', defines: 'its definition', otherwise: 'describe the change' }
