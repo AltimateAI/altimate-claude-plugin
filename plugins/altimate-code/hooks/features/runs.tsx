@@ -153,13 +153,15 @@ const VARS_PARENT = /["']?([\w.-]+)["']?\s*:\s*[{[]/g
  * Whether a `--vars` key names a secret. The words of the key (split on `_ - .` and camelCase) decide: `secret`, `token`,
  * `password`/`passwd`/`pwd`, `credential`, `passphrase` and `auth` are secret wherever they sit (`clientsecret` too, run together).
  * `key` and `pass` also name other things (`key_metric`, `pass_rate`), so they count only as the last word or the whole key
- * (`db_key`, `ssh_pass`, `apiKey`) or in a compound (`privatekey`): `key_metric` and `pass_rate` are not secret.
+ * (`db_key`, `ssh_pass`, `apiKey`) or in a compound (`privatekey`): `key_metric` and `pass_rate` are not secret. A `key` that
+ * follows a word naming a kind of dbt key (`unique_key`, `primary_key`, `partition_key`) is a column, not a secret.
  */
+const KEY_KINDS = new Set(['unique', 'primary', 'foreign', 'surrogate', 'natural', 'business', 'partition', 'sort', 'dist', 'cluster', 'row', 'hash', 'composite', 'join', 'lookup'])
 const keyIsSecret = (key: string) => {
   const words = keyWords(key)
   const joined = words.join('')
   const last = words[words.length - 1]
-  return SECRET_PART.test(joined) || words.includes('auth') || words.includes('oauth') || last === 'pass' || last === 'key' || last === 'keys' || KEY_COMPOUND.test(joined)
+  return SECRET_PART.test(joined) || words.includes('auth') || words.includes('oauth') || last === 'pass' || ((last === 'key' || last === 'keys') && !KEY_KINDS.has(words[words.length - 2] ?? '')) || KEY_COMPOUND.test(joined)
 }
 /** A key that names a secret, unless its value is a number, a boolean or null: `token_limit: 3` holds none. */
 const pairHoldsSecret = (key: string, value: string) => keyIsSecret(key) && !/^(?:-?\d[\d.eE+-]*|true|false|null|~)$/i.test(value)
@@ -191,6 +193,19 @@ const withoutState = (head: string) =>
 const PROJECT_DIR_ENV = /(?:^|\s)DBT_PROJECT_DIR=("[^"]+"|'[^']+'|[^\s"']+)/
 const PROJECT_DIR_FLAG = /(?:^|\s)--project-dir(?:=|\s+)("[^"]+"|'[^']+'|\S+)/
 
+/** The options of each launcher that make it run its command in another folder (`dbt-command.ts` knows them as options that take a value). */
+const LAUNCHER_MOVES: Record<string, RegExp> = {
+  uv: /(?:^|\s)(?:--directory|--project)(?:=|\s)/,
+  poetry: /(?:^|\s)(?:-C|-P|--directory|--project)(?:=|\s)/,
+  pdm: /(?:^|\s)(?:-p|--project)(?:=|\s)/,
+}
+const launcherMoves = (head: string) => {
+  const launcher = /(?:^|[\s;&|(])(uv|poetry|pdm)\s+run(?=\s)/.exec(head)
+  if (!launcher) return false
+  const rest = head.slice(launcher.index + launcher[0].length)
+  return LAUNCHER_MOVES[launcher[1]!]!.test(rest.slice(0, Math.max(0, rest.search(/(?:^|[\s/])dbt(?:\s|$)/))))
+}
+
 /** One dbt invocation that may have written the results. */
 export type Invocation = {
   subcommand: string
@@ -216,7 +231,8 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
     if (varsHoldSecret(body)) continue
     // A launcher that changes its own working directory (`uv run --directory x dbt build`) runs dbt elsewhere: the folder is not guessed.
-    if (/(?:^|\s)(?:--directory|--project|--cwd|-C)(?:=|\s)/.test(command.slice(one.start, one.subcommandEnd - subcommand.length))) continue
+    // Only the text before `dbt` is looked at, so a flag-looking word inside a dbt option's value is not taken for one.
+    if (launcherMoves(command.slice(one.start, one.subcommandEnd - subcommand.length))) continue
     // A prefix command (`env`, `time`) after an assignment: the replay would start without it, so it is not replayed.
     if (/(?:^|\s)[A-Za-z_]\w*=/.test(command.slice(0, one.start).split(/&&|\|\||[;\n|]/).pop()!)) continue
     // A URL with a password in it holds a credential whatever it is named.
