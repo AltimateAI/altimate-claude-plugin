@@ -249,7 +249,28 @@ export interface DeferState {
 // Raw SQL to model: the SQL being turned into a dbt model.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface ToModelState {}
+/** How a table of the SQL matched a model or source: every part the same, the same but for case, fewer parts written, or none. */
+export type RelationMatch = 'exact' | 'case_insensitive' | 'partial' | 'none'
+
+export interface ToModelState {
+  /** The model to write. */
+  name: string
+  /** Where the SQL came from: a file path, or "selection". */
+  source: string
+  /** The dialect the tool read the SQL with; null when it did not say. */
+  dialect: string | null
+  /** The folder the project keeps its models in, relative to the session's root, or whole when the project lies outside it; unset when neither the SQL's folder nor the session's root is in a dbt project. */
+  modelsDir?: string
+  /** One row per table, unmatched and partial first. */
+  rows: {
+    raw: string
+    replaceWith: string
+    match: RelationMatch
+    candidates: { replaceWith: string; kind: string; name: string; relationName: string; match: RelationMatch }[]
+  }[]
+  /** The SQL, kept so the prompt can quote it. */
+  sql: string
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Team comments: the shared docs' comments on the project's models.
