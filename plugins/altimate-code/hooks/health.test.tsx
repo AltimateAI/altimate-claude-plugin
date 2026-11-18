@@ -50,6 +50,8 @@ type Options = {
   onStat?: (n: number) => Promise<void> | void
   /** The folder the session's shell is in (default: the engine does not say). */
   cwd?: string
+  /** Holds the folder lookup while it returns a promise. */
+  holdCwd?: () => Promise<void> | undefined
   /** Called when the Bash command itself runs, between the gate and the after-phase. */
   onCall?: () => void
   /** Called at each project lookup; a promise it returns holds the lookup. */
@@ -67,7 +69,11 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
-  if (options.cwd) on('session.cwd', () => ({ value: options.cwd }))
+  if (options.cwd || options.holdCwd)
+    on('session.cwd', async () => {
+      await options.holdCwd?.()
+      return { value: options.cwd }
+    })
   on('ui.toast', (_: unknown, e: { text: string }) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -552,6 +558,19 @@ test('with the push gate on, a write from a dbt-internal folder the shell is in 
   await start($, on, { runs: [[]], cwd: `${ROOT}/target` })
   const allowed: any = await $.tool.call(command(`sed -i 's/a/b/' x.sql && git push`))
   expect(allowed?.deny).toBeUndefined()
+})
+
+test('with the push gate on, a push whose shell-folder lookup stalls is held, not let through', { options: { healthBlocksPush: true } }, async ($, on) => {
+  let stall = false
+  const never = new Promise<void>(() => {})
+  const { clock } = await start($, on, { runs: [[], [NEW_STG]], holdCwd: () => (stall ? never : undefined) })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  stall = true
+  const pending = $.tool.call(command('cd /repo && git push'))
+  await clock.advance(GATE_WAIT_MS + 100)
+  const denied: any = await pending
+  expect(denied?.deny).toContain('could not be read in time')
 })
 
 test('git push is found by its command words, not by its text', () => {
