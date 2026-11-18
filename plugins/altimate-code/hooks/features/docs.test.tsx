@@ -195,7 +195,7 @@ const DOWNSTREAM_AFTER = `models:
         description: "The customer's key, as the shop issues it"
 `
 
-type Options = { downstream?: string; reach?: Record<string, unknown>; coverage?: Record<string, unknown> | null; coverageError?: string; noManifest?: boolean; stale?: boolean; newFile?: boolean }
+type Options = { downstream?: string; reach?: Record<string, unknown>; coverage?: Record<string, unknown> | null; coverageError?: string; noManifest?: boolean; stale?: boolean; newFile?: boolean; manifest?: Record<string, unknown> }
 
 /** A dbt project at /repo with the plugin's MCP server connected, and the session beneath the plugin. */
 async function start($: any, on: any, options: Options = {}) {
@@ -231,6 +231,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('fs.stat', () => ({ value: { kind: 'file', size: 100, mtimeMs: 1, isLink: false } }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${ROOT}/dbt_project.yml`) return { value: "name: 'shop'\n" }
+    if (e.path === MANIFEST_PATH && options.manifest) return { value: JSON.stringify({ nodes: options.manifest }) }
     // The edit's text from before is read first, then the file as the edit left it.
     // Each edit reads the file three times: before it, after it, and when the traces are back.
     if (e.path === SCHEMA) {
@@ -532,11 +533,29 @@ test('an Edit whose before-read failed offers nothing rather than every descript
   expect(result.context ?? []).toEqual([])
 })
 
-test('a source model is traced by its unique_id, so a same-named model of another package is not the one used', async ($, on) => {
-  const { clock, toolArgs } = await start($, on)
+const NODE = (pkg: string, name: string, file = name) => ({ resource_type: 'model', package_name: pkg, name, original_file_path: `models/${file}.sql` })
+
+test('a source model is traced by the unique_id of the project\'s own model, not a same-named one of another package', async ($, on) => {
+  const manifest = { 'model.vendor.stg_orders': NODE('vendor', 'stg_orders'), 'model.shop.stg_orders': NODE('shop', 'stg_orders'), 'model.shop.stg_customers': NODE('shop', 'stg_customers') }
+  const { clock, toolArgs } = await start($, on, { manifest })
   await $.tool.call(EDIT)
   await clock.settle()
   const traced = toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify')
-  expect(traced.length).toBeGreaterThan(0)
-  for (const args of traced) expect(args.model).toMatch(/^model\.shop\./)
+  expect(traced.map(args => args.model)).toEqual(['model.shop.stg_orders'])
+})
+
+test('a versioned model, whose unique_id is not built from its file name, is still found by its file name or its name', async ($, on) => {
+  const manifest = { 'model.shop.stg_orders.v1': NODE('shop', 'stg_orders', 'stg_orders_v1'), 'model.shop.stg_orders.v2': NODE('shop', 'stg_orders', 'stg_orders_v2') }
+  const { clock, toolArgs } = await start($, on, { manifest })
+  await $.tool.call(EDIT)
+  await clock.settle()
+  const traced = toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify')
+  expect(traced.map(args => args.model)).toEqual(['stg_orders'])
+})
+
+test('without a readable manifest a source model is traced by its name', async ($, on) => {
+  const { clock, toolArgs } = await start($, on)
+  await $.tool.call(EDIT)
+  await clock.settle()
+  expect(toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify').map(args => args.model)).toEqual(['stg_orders'])
 })

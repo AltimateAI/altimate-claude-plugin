@@ -335,8 +335,22 @@ const normal = (path: string) => path.replace(/\\/g, '/')
 const tidy = (path: string) => normal(path).replace(/\/(?:\.\/)+/g, '/').replace(/\/{2,}/g, '/')
 
 /** The dbt project the file is a model file of: its closest dbt_project.yml above it, and the file under one of that project's model folders. */
-/** The model as dbt's unique_id, so a model of the same name in another package is never the one traced. */
-const modelRef = (project: Project, model: string) => (project.package ? `model.${project.package}.${model}` : model)
+/**
+ * The model as the manifest's unique_id, so a model of the same name in another package is never the one
+ * traced. Falls back to the plain name when the manifest cannot be read or the project's own model is not
+ * one match (versioned models share a name).
+ */
+async function modelRef($: EngineInterface, project: Project, model: string, stem = model): Promise<string> {
+  if (!project.package) return model
+  try {
+    const nodes = (JSON.parse((await $.fs.read(project.manifest)) ?? '') as { nodes?: Record<string, { resource_type?: string; package_name?: string; name?: string; original_file_path?: string }> }).nodes ?? {}
+    const own = Object.entries(nodes).filter(([, node]) => node?.resource_type === 'model' && node.package_name === project.package)
+    const named = own.filter(([, node]) => node.name === model || (node.original_file_path ?? '').replace(/\.sql$/i, '').split('/').pop() === stem)
+    return named.length === 1 ? named[0][0] : model
+  } catch {
+    return model
+  }
+}
 
 async function projectOf($: EngineInterface, file: string): Promise<Project | null> {
   const path = normal(file)
@@ -404,7 +418,7 @@ async function schemaEdited($: EngineInterface, file: EditedFile, created: boole
   const until = (await $.clock.now()) + ROUND_MS
   const traced = await Promise.all(
     changed.map(async one => {
-      const result = await runTool($, 'impact_analysis', { manifest_path: project.manifest, model: modelRef(project, one.model), column: one.column, change_type: 'modify' }, { until, cliOnly: true }).catch(() => null)
+      const result = await runTool($, 'impact_analysis', { manifest_path: project.manifest, model: await modelRef($, project, one.model), column: one.column, change_type: 'modify' }, { until, cliOnly: true }).catch(() => null)
       return { one, result }
     }),
   )
@@ -452,7 +466,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   const model = normal(file.path).split('/').pop()!.replace(/\.sql$/i, '')
   if (!(await $.fs.exists(project.manifest).catch(() => false))) return []
   const until = (await $.clock.now()) + ROUND_MS
-  const result = await runTool($, 'dbt_docs_coverage', { model: modelRef(project, model), manifest_path: project.manifest }, { until, cliOnly: true }).catch(() => null)
+  const result = await runTool($, 'dbt_docs_coverage', { model: await modelRef($, project, model), manifest_path: project.manifest }, { until, cliOnly: true }).catch(() => null)
   if (!result) return []
   const meta = result.metadata
   if (!result.ok || !meta || meta.success !== true) {
