@@ -176,7 +176,11 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
  * a gate that must hold the call when its own check fails catches that failure and returns `{ deny }`.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
-  const verdict = await gate($, e).finally(() => overNow.delete(e.command))
+  const mine: { note?: object } = {}
+  const verdict = await gate($, e, mine).finally(() => {
+    // Only this pass's own note: a sibling pass for the same command may still be between noting and recording its answer.
+    if (overNow.get(e.command) === mine.note) overNow.delete(e.command)
+  })
   // A dbt run or build that is let through rebuilds relations while it runs: an estimate kept from before it is stale from here.
   if (verdict === null && limitBytes > 0 && parseDbtCommand(e.command).some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) dropFinished()
   return verdict
@@ -193,7 +197,7 @@ async function leaveProject($: EngineInterface) {
 /** Per command: the over-limit answer a pass has in hand but has not yet recorded as the hold. */
 const overNow = new Map<string, { label: string; bytes: number; display: string }>()
 
-async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
+async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
   // Before it runs, not only after: another call can ask while a long command is rewriting the project.
   // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
@@ -266,7 +270,10 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
     }
     estimated = true
     // Noted before any await: a parallel pass for this command whose own estimate fails must still see it.
-    if (answer.maxBytes > limitBytes) overNow.set(e.command, { label, bytes: answer.maxBytes, display: answer.display })
+    if (answer.maxBytes > limitBytes) {
+      mine.note = { label, bytes: answer.maxBytes, display: answer.display }
+      overNow.set(e.command, mine.note as { label: string; bytes: number; display: string })
+    }
     await rememberEstimate($, label, answer.bytes, answer.display)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}`)
     else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
