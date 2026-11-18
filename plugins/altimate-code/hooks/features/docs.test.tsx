@@ -257,7 +257,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
-    if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    if (command !== 'tool' || tool === 'docs_share_comments') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     // The project health check asks for its own tool at session start: not a call this feature makes.
     if (tool === 'dbt_health') return { value: nothingToReport(e.argv)! }
     calls.push(`cli:${tool}`)
