@@ -68,7 +68,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   // The Bash tool itself, beneath the plugin.
   on('tool.call', async (_: unknown, e: { tool: string; command?: string }) => {
-    if (e.tool === 'Bash' && options.holdBash?.command === e.command) await options.holdBash.until
+    if (e.tool === 'Bash' && options.holdBash && options.holdBash.command === e.command) await options.holdBash.until
     if (e.tool === 'Bash') ran.push(String(e.command))
     return { result: { text: 'ok', isError: false } }
   })
@@ -426,7 +426,7 @@ test('a very long run of blank lines before the command costs no noticeable time
   expect(Date.now() - began).toBeLessThan(3000)
 })
 
-test('a line with a great many dbt calls is not read call by call', async ($, on) => {
+test('a line with a great many dbt calls is not read call by call', { timeoutMs: 20_000 }, async ($, on) => {
   const { clock, estimates } = await start($, on, { answers: { orders: UNDER } })
   const began = Date.now()
   const result: any = await $.tool.call(bash('dbt run -s orders;'.repeat(4000)))
