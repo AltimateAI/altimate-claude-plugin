@@ -44,9 +44,9 @@ let limitBytes = DEFAULT_MAX_SCAN_BYTES
 /** The lines to show under an estimated command's Bash row, by command; each gate pass replaces the last. Taken by bashAfter. */
 const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
-const inflight = new Map<string, { answer: Promise<Answer>; doneAt: number | null; generation: number }>()
-/** Estimates whose process is still running, whether or not an edit has voided their answer: one runs per project at a time. */
-const active = new Set<Promise<undefined>>()
+const inflight = new Map<string, { answer: Promise<Answer>; settled: Promise<undefined>; doneAt: number | null; generation: number }>()
+/** Estimates that outlasted the gate's wait and are still running, whether or not an edit has voided their answer: nothing else starts beside one. */
+const late = new Set<Promise<undefined>>()
 /** Commands the gate refused while their estimate was running, and when it last did: they have not run, so a retry changes nothing. */
 const refused = new Map<string, number>()
 /** Moves on whenever the project may have changed: an estimate started before it is never taken as an answer. */
@@ -550,32 +550,30 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   if (!running) {
     // The wait is spent: nothing new starts. Each estimate may start the adapter (dbt deps), and two at once in one project collide.
     if (waitUntil - now <= 0) return 'pending'
-    // Nor while another is still running in this project, whichever command asked for it, even one whose answer an edit voided:
-    // this one waits its turn, within the same bound.
-    while (active.size > 0) {
+    // Nor beside one that already outlasted its wait (its command was refused), whichever command asks, even when an edit voided
+    // its answer: this one waits its turn, within the same bound.
+    while (late.size > 0) {
       const left = waitUntil - (await $.clock.now())
-      if (left <= 0 || !(await within($, left, Promise.all([...active]).then(() => true)))) return 'pending'
+      if (left <= 0 || !(await within($, left, Promise.all([...late]).then(() => true)))) return 'pending'
     }
     // Another pass may have started this same estimate while this waited.
     const started = inflight.get(key)
     if (started && started.doneAt == null) running = started
   }
   if (!running) {
-    const entry: { answer: Promise<Answer>; doneAt: number | null; generation: number } = {
-      answer: estimate($, args, now + ESTIMATE_BUDGET_MS),
-      doneAt: null,
-      generation,
-    }
-    const track = entry.answer.then(() => undefined, () => undefined)
-    active.add(track)
-    void track.then(() => active.delete(track))
+    const answer = estimate($, args, now + ESTIMATE_BUDGET_MS)
+    const entry = { answer, settled: answer.then(() => undefined, () => undefined), doneAt: null as number | null, generation }
     void entry.answer.then(async () => void (entry.doneAt = await $.clock.now())).catch(() => {})
     inflight.set(key, entry)
     running = entry
   }
   const left = waitUntil - (await $.clock.now())
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
-  if (!done) return 'pending'
+  if (!done) {
+    late.add(running.settled)
+    void running.settled.then(() => late.delete(running!.settled))
+    return 'pending'
+  }
   // The project may have changed while it ran: that answer is of the old one, and the next pass asks again.
   if (running.generation !== generation) {
     if (inflight.get(key) === running) inflight.delete(key)
