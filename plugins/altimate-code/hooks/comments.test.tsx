@@ -53,7 +53,8 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
   })
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
-    if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    // Only this feature's own tool is recorded: any other feature's data call (health at session start, say) is not this test's.
+    if (command !== 'tool' || tool !== 'docs_share_comments') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     attempts.push(String(tool))
     if (options.noTool) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'Unknown tool: docs_share_comments', metadata: {} }), stderr: '' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
