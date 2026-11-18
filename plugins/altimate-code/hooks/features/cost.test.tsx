@@ -49,7 +49,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
-    expect(tool).toBe('dbt_cost_estimate')
+    // Another feature's tool (runs asks dbt_run_results) has nothing to report here, and is not an estimate.
+    if (tool !== 'dbt_cost_estimate') return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { found: false } }), stderr: '' } }
     // The adapter starts the project's dbt: the call must carry write permission.
     expect(e.argv).toContain('--allow-write')
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
