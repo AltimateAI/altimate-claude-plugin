@@ -182,6 +182,14 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   return verdict
 }
 
+/** Everything the gate learned in the project just left: its answers, hold, allowance, estimate and band line. */
+async function leaveProject($: EngineInterface) {
+  invalidate()
+  await forgetUnsupported($)
+  await update($, costAtom, prev => (prev ? { ...prev, held: null, allowOnce: false, lastEstimate: null } : prev))
+  await showStatus($, null)
+}
+
 async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
   // Before it runs, not only after: another call can ask while a long command is rewriting the project.
@@ -191,10 +199,7 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
   const dir = await $.session.cwd().catch(() => seenDir)
   if (seenDir !== null && dir !== seenDir) {
     // What is still running belongs to the project left behind: it holds nothing back here, and still holds that project back on return.
-    invalidate()
-    await forgetUnsupported($)
-    await update($, costAtom, prev => (prev ? { ...prev, held: null, allowOnce: false, lastEstimate: null } : prev))
-    await showStatus($, null)
+    await leaveProject($)
   }
   seenDir = dir ?? null
   const all = parseDbtCommand(e.command)
@@ -229,7 +234,11 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
     const label = target.model ?? 'the inline query'
     const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken, refused.get(e.command))
     // A /cd while it was being asked: the answer is of the project left, and nothing here is allowed on it.
-    if (((await $.session.cwd().catch(() => dir)) ?? null) !== (dir ?? null)) invalidate()
+    const now = (await $.session.cwd().catch(() => dir)) ?? null
+    if (now !== (dir ?? null)) {
+      await leaveProject($)
+      seenDir = now
+    }
     // The project changed while this was being asked: nothing it says is published, and the command is refused below.
     if (generation !== startedAt) break
     if (answer === 'pending') {
@@ -380,11 +389,9 @@ async function startWhenIdle<T>(
 ): Promise<T | null> {
   // The project is read again after each wait: a /cd meanwhile moves the check to the project now in use.
   let dir: string | null = null
-  let running: Promise<undefined>[] = []
   for (;;) {
     dir = (await $.session.cwd().catch(() => seenDir)) ?? null
-    const here = dir
-    running = [...active].filter(([, d]) => d === here).map(([p]) => p)
+    const running = [...active].filter(([, d]) => d === dir).map(([p]) => p)
     if (running.length === 0) break
     const left = waitUntil - (await $.clock.now())
     if (left <= 0 || !(await within($, left, Promise.all(running).then(() => true)))) return null

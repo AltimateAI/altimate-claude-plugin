@@ -765,14 +765,17 @@ test('a dbt run that is let through drops the estimates kept from before it', as
   await clock.settle()
   options.hold = undefined
   // Another command's run is let through, and is still running (not yet after-phase) when orders is retried.
-  options.holdBash = { command: 'dbt run -s customers', until: new Promise<void>(() => {}) }
-  void $.tool.call(bash('dbt run -s customers'))
+  let finish!: () => void
+  options.holdBash = { command: 'dbt run -s customers', until: new Promise<void>(resolve => (finish = resolve)) }
+  const customers = $.tool.call(bash('dbt run -s customers'))
   await clock.settle()
   options.answers = { orders: OVER }
   const retry: any = await $.tool.call(bash('dbt run -s orders'))
   await clock.settle()
   expect(retry.deny).toContain('20.0 GiB')
   expect(estimates.filter(e => e === 'orders').length).toBe(2)
+  finish()
+  await customers
 })
 
 test('a second model waits for the estimate running in the project, and starts none while it runs', async ($, on) => {
@@ -1172,7 +1175,7 @@ test('a pending estimate on another command does not carry /allow-scan over to i
 
 test('a /cd away and back does not forget the estimate still running in the project', async ($, on) => {
   const options: Options = { answers: { orders: UNDER, b: UNDER, c: UNDER } }
-  const { clock, started } = await start($, on, options)
+  const { clock, started, ran } = await start($, on, options)
   let release!: () => void
   options.hold = new Promise<void>(resolve => (release = resolve))
   options.holdFor = 'orders'
@@ -1188,6 +1191,14 @@ test('a /cd away and back does not forget the estimate still running in the proj
   const again = $.command.run({ command: 'scan-cost', args: 'c' } as any)
   await clock.advance(4_001)
   expect(((await again) as any).text).toContain('another estimate is still running in this project')
+  expect(started).toEqual(['orders', 'b'])
+  // A Bash pass in the other project must not forget the first project's running estimate either.
+  await $.tool.call(bash('ls'))
+  expect(ran).toEqual(['ls'])
+  options.cwd = undefined
+  const third = $.command.run({ command: 'scan-cost', args: 'd' } as any)
+  await clock.advance(4_001)
+  expect(((await third) as any).text).toContain('another estimate is still running in this project')
   expect(started).toEqual(['orders', 'b'])
   release()
   await first
@@ -1214,8 +1225,25 @@ test('a queued /scan-cost that wakes after a /cd runs under the project now in u
   expect(started).toEqual(['orders', 'b'])
   release()
   await inB
-  await queued
+  expect(((await queued) as any).text).toContain('c would scan 2.0 GiB')
+  expect(started).toEqual(['orders', 'b', 'c'])
   await first
+})
+
+test('a /cd while the gate waits for an estimate also drops the hold of the project left', async ($, on) => {
+  const options: Options = { answers: { a: OVER, b: UNDER } }
+  const { clock } = await start($, on, options)
+  expect(((await $.tool.call(bash('dbt run -s a'))) as any).deny).toContain('20.0 GiB')
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'b'
+  const call = $.tool.call(bash('dbt run -s b'))
+  await clock.advance(500)
+  options.cwd = '/elsewhere/project-b'
+  release()
+  expect(((await call) as any).deny).toContain('The project changed while the scan was being estimated')
+  await clock.settle()
+  expect(((await $.command.run({ command: 'allow-scan', args: '' } as any)) as any).text).toContain('Nothing is held')
 })
 
 test('a /cd while the gate waits for an estimate: its answer is of the project left, so the command is refused', async ($, on) => {
