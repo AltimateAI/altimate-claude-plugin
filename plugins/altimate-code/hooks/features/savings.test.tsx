@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SIGNUP_URL, apiSize, dollars, explain } from './savings'
+import { SIGNUP_URL, apiSize, dollars, explain, mentions } from './savings'
 
 const ROOT = '/repo'
 
@@ -323,7 +323,7 @@ test('a refused query says what to ask an admin for, and is no verdict', async (
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^A query was refused: \[TABLE_OR_VIEW_NOT_FOUND\]/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /ask a workspace admin for SELECT/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /system\.query and system\.lakeflow: ask a workspace admin for SELECT/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /No savings found/ })).toBeUndefined()
   await ui.unmount()
 })
@@ -446,7 +446,7 @@ test('Draft the fix with no prompt box says so instead of claiming it filled one
   await ui.press({ key: 'fix-0' })
   await clock.settle()
   expect(fills).toEqual([])
-  expect(toasts.at(-1)).toContain('There is no prompt box to fill here')
+  expect(toasts.at(-1)).toBe("There is no prompt box here. Ask Claude to draft the fix for Classic's Migrate Classic/Pro to Serverless finding from /savings.")
   await ui.unmount()
 })
 
@@ -622,5 +622,93 @@ test('idle clusters and jobs on all-purpose compute get their own evidence and f
   expect(fills[1]).toContain('set autotermination_minutes to 15, or terminate it if nobody needs it')
   expect(fills[1]).toContain('`databricks clusters edit 0101-abc --json`')
   expect(fills[1]).toContain('If this repository defines it (Terraform databricks_cluster, a cluster policy, or JSON), edit that definition; otherwise write the JSON for `databricks clusters edit 0101-abc --json`. Say what the change does.')
+  await ui.unmount()
+})
+
+test('a databricks command after cd or an environment assignment offers the check too', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Bash', command: 'cd infra && DATABRICKS_HOST=https://x databricks bundle deploy' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('a resource is named in a file only as a whole word', () => {
+  expect(mentions('name = "dev"', 'dev')).toBe(true)
+  expect(mentions('warehouse_id = "a3688f261647f580"', 'a3688f261647f580')).toBe(true)
+  expect(mentions('resource "aws_iot" "devices" {}', 'dev')).toBe(false)
+  expect(mentions('bucket = "etl_bucket"', 'etl')).toBe(false)
+  expect(mentions('name = "dev-2"', 'dev')).toBe(false)
+  expect(mentions('cost (USD)', '(USD)')).toBe(true)
+  expect(mentions('anything', ' ')).toBe(false)
+})
+
+test('when checks were skipped and none found anything, the verdict is only for the checks that ran', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.skipped = [{ check: 'Job Running on All-Purpose Compute', reason: 'INSUFFICIENT_PERMISSIONS' }]
+  answer.metadata.report = { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
+  const { clock, toasts } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  expect(toasts.at(-1)).toBe('Databricks savings check: no savings found on 5 SQL warehouses, 0 all-purpose clusters and 0 jobs; 1 of the 4 checks could not run.')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^No savings found by the 3 of 4 checks that ran\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^No savings found by these 4 checks/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a query that read only its first 10,000 rows is named in the pane', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.limited = ['jobs']
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Only the first 10,000 jobs were read; any beyond them were not checked\.$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the band never starts a second run while one is going', async ($, on) => {
+  const options: any = { files: { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" { name = "Classic" }' } }
+  const { clock, runs } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  // A second run that does not finish yet.
+  let release = () => {}
+  options.hold = new Promise<void>(done => (release = done))
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  // An edit that names a flagged warehouse brings the band back; its Run does not start a third.
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'Classic', new_string: 'Classic' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Classic: / })).toBeDefined()
+  await band.press({ key: 'savings-run' })
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  await band.unmount()
+  release()
+  await clock.settle()
+  await ui.unmount()
+})
+
+test('the first baseline stays: a second run after a resize still says what changed since then', async ($, on) => {
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const resized = JSON.parse(JSON.stringify(ANSWER))
+  const classic = resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  classic.size = 'X_SMALL'
+  classic.window_cost = 13.77
+  const started = await start($, on, { answer: resized, store })
+  await savings($)
+  await started.clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'again' })
+  await started.clock.settle()
+  expect(started.runs.length).toBe(2)
+  expect(started.store.get('savings-baseline:dbxmega:wh-classic')).toEqual(store['savings-baseline:dbxmega:wh-classic'])
+  expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\./ })).toBeDefined()
   await ui.unmount()
 })

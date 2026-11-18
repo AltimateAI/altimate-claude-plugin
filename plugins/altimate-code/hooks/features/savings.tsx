@@ -34,7 +34,7 @@ const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const ADD_CONNECTION =
   'Add a Databricks connection to altimate-code (in ~/.altimate-code/connections.json: type "databricks", server_hostname, the http_path of a SQL warehouse and an access_token), then run /savings again.'
 
-const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-2' })
+const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-3' })
 const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, null as { label: string } | null)
 const messageAtom = atom({ plugin: 'altimate-code', key: 'savingsMessage' } as const, null as { text: string; recovery: string } | null)
 const bandAtom = atom({ plugin: 'altimate-code', key: 'savingsBand' } as const, null as { text: string } | null)
@@ -52,7 +52,7 @@ let offered = false
 const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/[^/]+\.ya?ml|[^/]+\.tf)$/i
 // What marks such a file, or a command, as about warehouses or clusters.
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
-const DATABRICKS_COMMAND = /^\s*databricks\s+(warehouses|clusters|bundle|jobs)\b/
+const DATABRICKS_COMMAND = /(?:^|[\s;&|(])databricks\s+(?:warehouses|clusters|bundle|jobs)\b/
 const BAND_READ_LIMIT = 200_000
 
 export function dollars(value: number): string {
@@ -69,26 +69,32 @@ const percent = (share: unknown) => `${Math.round(Number(share) * 100)}%`
 const percentOf = (value: unknown) => `${Math.round(Number(value))}%`
 const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
 const count = (value: unknown) => Math.round(Number(value) || 0).toLocaleString('en-US')
-const MONTH_PER_WINDOW = 30 / 7
+const DAY_MS = 86_400_000
+
+/** Days a window covers, from its YYYY-MM-DD ends; 7 when they cannot be read. */
+export function windowDays(window: { start: string; end: string }): number {
+  const days = Math.round((Date.parse(window.end) - Date.parse(window.start)) / DAY_MS)
+  return Number.isFinite(days) && days > 0 ? days : 7
+}
 
 /** What a finding rests on, one short line each, from the measured values core returned. */
-export function evidenceLines(evidence: Record<string, unknown>): string[] {
+export function evidenceLines(evidence: Record<string, unknown>, days = 7): string[] {
   switch (evidence.kind) {
     case 'serverless':
       return [
         `${evidence.warehouse_type} ${size(evidence.warehouse_size)} warehouse, ${percent(evidence.idle_ratio)} idle over ${Number(evidence.wall_clock_uptime_hours).toFixed(1)} running hours (${count(evidence.total_query_count)} queries)`,
-        `$${Number(evidence.current_dbu_cost).toFixed(2)} in DBUs over 7 days; serverless would bill $${Number(evidence.projected_serverless_dbu_cost).toFixed(2)} for the busy time alone`,
+        `$${Number(evidence.current_dbu_cost).toFixed(2)} in DBUs over ${days} days; serverless would bill $${Number(evidence.projected_serverless_dbu_cost).toFixed(2)} for the busy time alone`,
       ]
     case 'over_sized':
       return [
         `${size(evidence.current_size)} warehouse used at most ${(Number(evidence.p99_utilization) * 100).toFixed(1)}% of its cores (p99 over ${count(evidence.parallelism_query_count)} queries)`,
         `${percent(evidence.no_spill_query_pct)} of queries never spilled to disk, ${percent(evidence.no_queue_query_pct)} never queued`,
-        `${size(evidence.recommended_size)} is enough: ${count(evidence.current_dbu_per_hour)} → ${count(evidence.recommended_dbu_per_hour)} DBU an hour, on $${Number(evidence.total_cost).toFixed(2)} spent over 7 days`,
+        `${size(evidence.recommended_size)} is enough: ${count(evidence.current_dbu_per_hour)} → ${count(evidence.recommended_dbu_per_hour)} DBU an hour, on $${Number(evidence.total_cost).toFixed(2)} spent over ${days} days`,
       ]
     case 'idle_cluster':
       return [
         `All-purpose cluster ${percent(evidence.idle_ratio)} idle across ${count(evidence.active_days)} active days (${String(evidence.idle_pattern).replace(/_/g, ' ')}), average worker CPU ${percentOf(evidence.avg_cpu_active_pct)}, peak ${percentOf(evidence.peak_cpu_active_pct)}`,
-        `Auto-termination ${evidence.auto_termination_minutes ? `${evidence.auto_termination_minutes} minutes` : 'off'}; $${Number(evidence.total_cost).toFixed(2)} billed outside job runs over 7 days`,
+        `Auto-termination ${evidence.auto_termination_minutes ? `${evidence.auto_termination_minutes} minutes` : 'off'}; $${Number(evidence.total_cost).toFixed(2)} billed outside job runs over ${days} days`,
       ]
     case 'job_on_all_purpose':
       return [
@@ -160,12 +166,12 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
 }
 
 /** The request "Draft the fix" puts in the prompt box: everything Claude needs, and that nothing is to be applied. */
-export function fixRequest(finding: ToolFinding): string {
+export function fixRequest(finding: ToolFinding, days = 7): string {
   const { noun, change, defines, otherwise } = changeOf(finding)
   return [
     'Draft the change for this Databricks savings finding, for me to review. Do not apply or run it.',
     `${noun} ${finding.resource_name} (id ${finding.resource_id}): ${finding.title}, ${range(finding.monthly_min, finding.monthly_max)} a month at list price.`,
-    ...evidenceLines(finding.evidence).map(line => `- ${line}`),
+    ...evidenceLines(finding.evidence, days).map(line => `- ${line}`),
     `The change: ${change}.`,
     `If this repository defines it (${defines}), edit that definition; otherwise ${otherwise}. Say what the change does.`,
   ].join('\n')
@@ -191,6 +197,7 @@ type ToolMetadata = {
   clusters_checked?: number
   jobs_checked?: number
   skipped?: { check: string; reason: string }[]
+  limited?: string[]
   warehouses?: ToolWarehouse[]
   report?: {
     lookback_days: number
@@ -206,12 +213,14 @@ const RESOURCE_NOUN: Record<string, string> = { sql_warehouse: 'SQL warehouse', 
 export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const report = metadata?.report
   if (!metadata?.success || !report || !Array.isArray(report.findings) || !metadata.window) return null
+  const days = report.lookback_days || windowDays(metadata.window)
   return {
     connection: metadata.warehouse ?? null,
     ranOn: metadata.ran_on ?? null,
     window: metadata.window,
     checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0 },
     skipped: (metadata.skipped ?? []).map(one => one.check),
+    limited: metadata.limited ?? [],
     total: { min: report.total.monthly_min, max: report.total.monthly_max, resources: report.total.resources },
     findings: report.findings.map(one => ({
       title: one.title,
@@ -220,8 +229,8 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
       resourceName: one.resource_name,
       monthlyMin: one.monthly_min,
       monthlyMax: one.monthly_max,
-      evidence: evidenceLines(one.evidence),
-      fixRequest: fixRequest(one),
+      evidence: evidenceLines(one.evidence, days),
+      fixRequest: fixRequest(one, days),
     })),
     whatIf: (report.what_if ?? []).map(one => ({
       resourceId: one.resource_id,
@@ -264,8 +273,8 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
         from: `${size(stored.size)} ${stored.type}`,
         to: `${size(warehouse.size)} ${warehouse.type}`,
         since: stored.date,
-        monthlyBefore: stored.windowCost * MONTH_PER_WINDOW,
-        monthlyNow: warehouse.window_cost * MONTH_PER_WINDOW,
+        monthlyBefore: (stored.windowCost * 30) / windowDays(view.window),
+        monthlyNow: (warehouse.window_cost * 30) / windowDays(view.window),
       })
     }
     if (!stored && flagged.has(warehouse.id)) {
@@ -303,7 +312,7 @@ export function explain(error: string): { text: string; recovery: string } {
   if (/TABLE_OR_VIEW_NOT_FOUND|PERMISSION_DENIED|INSUFFICIENT_PERMISSIONS/.test(error)) {
     return {
       text: `A query was refused: ${error.split('\n')[0]!.slice(0, 200)}`,
-      recovery: 'The check reads system.billing, system.compute and system.query: ask a workspace admin for SELECT on those schemas, then run /savings again.',
+      recovery: 'The check reads system.billing, system.compute, system.query and system.lakeflow: ask a workspace admin for SELECT on those schemas, then run /savings again.',
     }
   }
   return { text: `The savings check failed: ${error.split('\n')[0]!.slice(0, 300)}`, recovery: 'Run /savings again; if it fails again, run the same check in a terminal: `altimate tool run finops_databricks_savings --args \'{}\'`.' }
@@ -314,7 +323,10 @@ function checkedText(view: SavingsView): string {
 }
 
 function summary(view: SavingsView): string {
-  if (view.total.resources === 0) return `Databricks savings check: no savings found on ${checkedText(view)}.`
+  if (view.total.resources === 0) {
+    const notRun = view.skipped.length ? `; ${view.skipped.length} of the ${CHECK_COUNT} checks could not run` : ''
+    return `Databricks savings check: no savings found on ${checkedText(view)}${notRun}.`
+  }
   return `Databricks savings check: ${range(view.total.min, view.total.max)} a month on ${view.total.resources} resource${view.total.resources === 1 ? '' : 's'}.`
 }
 
@@ -360,21 +372,28 @@ async function runCheck($: EngineInterface, connection: string | null) {
 }
 
 /** Puts the finding's fix request in the prompt box; nothing is sent until the person presses Enter. */
-async function draftFix($: EngineInterface, request: string) {
-  const filled = await $.prompt.fill({ text: request }).catch(() => null)
+async function draftFix($: EngineInterface, finding: SavingsView['findings'][number]) {
+  const filled = await $.prompt.fill({ text: finding.fixRequest }).catch(() => null)
   $.ui.toast(
     filled?.isFilled
       ? 'The fix request is in your prompt box: edit it, or press Enter to have Claude draft the change.'
-      : 'There is no prompt box to fill here; copy the request from the pane instead.',
+      : `There is no prompt box here. Ask Claude to draft the fix for ${finding.resourceName}'s ${finding.title} finding from /savings.`,
   )
 }
 
+/** Whether `text` names `name` as a whole word: `dev` is not in `devices`. */
+export function mentions(text: string, name: string): boolean {
+  if (!name.trim()) return false
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(text)
+}
+
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
-async function bandFor($: EngineInterface, text: string): Promise<{ text: string } | null> {
+async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text)): Promise<{ text: string } | null> {
   const report = await read($, reportAtom)
-  const named = report?.findings.find(one => text.includes(one.resourceName) || text.includes(one.resourceId))
+  const named = report?.findings.find(one => mentions(text, one.resourceName) || mentions(text, one.resourceId))
   if (named) return { text: `${named.resourceName}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
-  if (report || offered || !COMPUTE_WORDS.test(text)) return null
+  if (report || offered || !aboutCompute) return null
   offered = true
   return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection).' }
 }
@@ -446,7 +465,7 @@ export function register(on: On, _context: FeatureContext) {
         <Box flexDirection="column">
           <Text bold>Databricks savings check</Text>
           <Text dimColor>
-            {checkedText(report)} · the 7 days to {report.window.end}
+            {checkedText(report)} · the {windowDays(report.window)} days to {report.window.end}
             {report.connection ? ` · connection ${report.connection}` : ''}
           </Text>
           <Text dimColor>Read-only, with your own connection. Nothing was sent to Altimate.</Text>
@@ -462,11 +481,15 @@ export function register(on: On, _context: FeatureContext) {
               {range(report.total.min, report.total.max)} a month
             </Text>
             <Text dimColor>
-              on {report.total.resources} resource{report.total.resources === 1 ? '' : 's'}, at list price and the last 7 days' rate, each counted once at its largest saving
+              on {report.total.resources} resource{report.total.resources === 1 ? '' : 's'}, at list price and the last {windowDays(report.window)} days' rate, each counted once at its largest saving
             </Text>
           </Box>
         ) : (
-          <Text>No savings found by these {CHECK_COUNT} checks.</Text>
+          <Text>
+            {report.skipped.length
+              ? `No savings found by the ${CHECK_COUNT - report.skipped.length} of ${CHECK_COUNT} checks that ran.`
+              : `No savings found by these ${CHECK_COUNT} checks.`}
+          </Text>
         )}
         {report.findings.map((one, at) => (
           <Box key={`finding-${at}`} flexDirection="column">
@@ -478,7 +501,7 @@ export function register(on: On, _context: FeatureContext) {
                 </Text>
               ))}
               <Box>
-                <Button key={`fix-${at}`} label="Draft the fix" onPress={() => later($, () => draftFix($, one.fixRequest))} />
+                <Button key={`fix-${at}`} label="Draft the fix" onPress={() => later($, () => draftFix($, one))} />
               </Box>
             </Box>
           </Box>
@@ -513,6 +536,9 @@ export function register(on: On, _context: FeatureContext) {
         })}
         {report.skipped.length > 0 ? (
           <Text dimColor>{`Not checked (the connection cannot read their system tables): ${report.skipped.join(', ')}.`}</Text>
+        ) : null}
+        {report.limited.length > 0 ? (
+          <Text dimColor>{`Only the first 10,000 ${report.limited.join(' and ')} were read; any beyond them were not checked.`}</Text>
         ) : null}
         <Box flexDirection="column" key="pitch">
           <Text dimColor>
@@ -566,8 +592,10 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
         label="Run /savings"
         onPress={() =>
           later($, async () => {
-            await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
+            await update($, bandAtom, () => null)
             await openPane($)
+            if (await read($, busyAtom)) return
+            await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
             await runCheck($, lastConnection)
           })
         }
@@ -587,7 +615,8 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   if (!DATABRICKS_COMMAND.test(e.command)) return
-  const band = await bandFor($, e.command)
+  // A databricks warehouses, clusters, bundle or jobs command is about compute whatever its words.
+  const band = await bandFor($, e.command, true)
   if (band) await update($, bandAtom, () => band)
 }
 

@@ -289,6 +289,8 @@ export type SavingsView = {
   checked: { warehouses: number; clusters: number; jobs: number }
   /** Checks whose system tables the connection could not read. */
   skipped: string[]
+  /** What a query read only the first 10,000 of, e.g. `jobs`. */
+  limited: string[]
   /** Dollars a month at list price, each resource counted once at its largest saving. */
   total: { min: number; max: number; resources: number }
   findings: {
