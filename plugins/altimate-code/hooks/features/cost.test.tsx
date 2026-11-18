@@ -14,6 +14,8 @@ type Options = {
   hold?: Promise<void>
   /** With `hold`: only the estimate of this model or SQL waits. */
   holdFor?: string
+  /** Per model: that model's estimate answers only once its promise resolves. */
+  holds?: Record<string, Promise<void>>
   /** The session's directory; changed mid-test to stand for a /cd. */
   cwd?: string
   /** Drawing the status line throws. */
@@ -58,6 +60,7 @@ async function start($: any, on: any, options: Options = {}) {
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     const key = String(args.model ?? args.sql)
     started.push(key)
+    if (options.holds?.[key]) await options.holds[key]
     if (options.hold && (options.holdFor === undefined || options.holdFor === key)) await options.hold
     estimates.push(key)
     const answer = options.answers?.[key] ?? options.fallback
@@ -1187,5 +1190,30 @@ test('a /cd away and back does not forget the estimate still running in the proj
   expect(((await again) as any).text).toContain('another estimate is still running in this project')
   expect(started).toEqual(['orders', 'b'])
   release()
+  await first
+})
+
+test('a queued /scan-cost that wakes after a /cd runs under the project now in use, behind its running estimate', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER, b: UNDER, c: UNDER } }
+  const { clock, started } = await start($, on, options)
+  let releaseFirst!: () => void
+  let release!: () => void
+  options.holds = { orders: new Promise<void>(resolve => (releaseFirst = resolve)), b: new Promise<void>(resolve => (release = resolve)) }
+  const first = $.command.run({ command: 'scan-cost', args: 'orders' } as any)
+  await clock.advance(100)
+  const queued = $.command.run({ command: 'scan-cost', args: 'c' } as any)
+  await clock.advance(100)
+  options.cwd = '/elsewhere/project-b'
+  const inB = $.command.run({ command: 'scan-cost', args: 'b' } as any)
+  await clock.advance(100)
+  expect(started).toEqual(['orders', 'b'])
+  // The first project's estimate ends: the queued one must not start beside project b's running estimate.
+  releaseFirst()
+  await first
+  await clock.advance(1_000)
+  expect(started).toEqual(['orders', 'b'])
+  release()
+  await inB
+  await queued
   await first
 })

@@ -376,11 +376,16 @@ async function startWhenIdle<T>(
   reuse: () => T | undefined,
   begin: (started: { answer: Promise<Answer>; settled: Promise<undefined> }) => T,
 ): Promise<T | null> {
-  const dir = (await $.session.cwd().catch(() => seenDir)) ?? null
-  const running = () => [...active].filter(([, d]) => d === dir).map(([p]) => p)
-  while (running().length > 0) {
+  // The project is read again after each wait: a /cd meanwhile moves the check to the project now in use.
+  let dir: string | null = null
+  let running: Promise<undefined>[] = []
+  for (;;) {
+    dir = (await $.session.cwd().catch(() => seenDir)) ?? null
+    const here = dir
+    running = [...active].filter(([, d]) => d === here).map(([p]) => p)
+    if (running.length === 0) break
     const left = waitUntil - (await $.clock.now())
-    if (left <= 0 || !(await within($, left, Promise.all(running()).then(() => true)))) return null
+    if (left <= 0 || !(await within($, left, Promise.all(running).then(() => true)))) return null
   }
   return reuse() ?? begin(startEstimate($, args, waitUntil + ESTIMATE_BUDGET_MS, dir))
 }
