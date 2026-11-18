@@ -664,7 +664,7 @@ test('a read-only shell command keeps the answer waiting for the retry', async (
   expect(estimates).toEqual(['orders'])
 })
 
-test('a cd keeps the answer waiting for the retry', async ($, on) => {
+test('a cd drops the answer waiting for the retry: it may have selected another project', async ($, on) => {
   const options: Options = { answers: { orders: UNDER } }
   const { clock, estimates } = await start($, on, options)
   let release!: () => void
@@ -674,12 +674,22 @@ test('a cd keeps the answer waiting for the retry', async ($, on) => {
   expect(((await first) as any).deny).toContain('still being estimated')
   release()
   await clock.settle()
-  await $.tool.call(bash('cd models'))
+  await $.tool.call(bash('cd ../project-b'))
   options.hold = undefined
+  options.answers = { orders: OVER }
   const retry: any = await $.tool.call(bash('dbt run -s orders'))
   await clock.settle()
-  expect(retry.deny).toBeUndefined()
-  expect(estimates).toEqual(['orders'])
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(estimates).toEqual(['orders', 'orders'])
+})
+
+test('a lower-bound-only estimate holds nothing and keeps an existing hold', async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: OVER, cheap: { success: true, supported: true, adapter: 'bigquery', bytes: 0, lowerBound: true, display: '0 Bytes' } } })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('20.0 GiB')
+  const result: any = await $.tool.call(bash('dbt run -s cheap'))
+  await clock.settle()
+  expect(result.context?.join(' ')).toContain('no estimate')
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('20.0 GiB')
 })
 
 for (const restore of [

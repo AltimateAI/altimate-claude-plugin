@@ -74,7 +74,7 @@ function mutates(all: DbtInvocation[], rest: string): boolean {
   return MAY_CHANGE_PROJECT.test(rest)
 }
 
-/** What a shell command did to the project: a rewrite voids the estimates and the verdict; a directory change only the verdict. */
+/** What a shell command did to the project: a rewrite voids the estimates and the verdict; a directory change the same, since it can select another project. */
 async function afterShellChange($: EngineInterface, command: string) {
   const { all, rest } = withoutReads(command)
   if (mutates(all, rest)) {
@@ -82,7 +82,8 @@ async function afterShellChange($: EngineInterface, command: string) {
     // Any rewrite can bring back another target (a git restore does not name the profile).
     await forgetUnsupported($)
   } else if (MOVES_DIRECTORY.test(rest)) {
-    // A cd cannot rewrite a model, so an estimate that is still coming in stays good; only the target may differ.
+    // A cd can select another project, which the estimate (keyed by model or SQL) does not name: nothing made before it is reused.
+    invalidate()
     await forgetUnsupported($)
   }
 }
@@ -483,8 +484,10 @@ async function estimate($: EngineInterface, args: { model?: string; sql?: string
   try {
     const run = await runTool($, 'dbt_cost_estimate', args, { write: true, until })
     if (!run.ok && UNKNOWN_TOOL.test(run.text)) return { kind: 'none', reason: `this altimate-code has no cost estimate: it needs ${NEEDED_VERSION}` }
-    const data = run.metadata as { supported?: unknown; adapter?: unknown; bytes?: unknown; maxBytes?: unknown; display?: unknown; error?: unknown } | null
+    const data = run.metadata as { supported?: unknown; adapter?: unknown; bytes?: unknown; maxBytes?: unknown; lowerBound?: unknown; display?: unknown; error?: unknown } | null
     if (data?.supported === false) return { kind: 'unsupported', adapter: typeof data.adapter === 'string' ? data.adapter : 'this warehouse' }
+    // A dry run that can undercount (a zero, a script) gives no upper bound to hold a command on.
+    if (data?.supported === true && data.lowerBound === true) return { kind: 'none', reason: 'the dry run gave only a lower bound, not a cap' }
     if (data?.supported === true && typeof data.bytes === 'number' && Number.isFinite(data.bytes)) {
       // The tool's upper bound when it gives one: the display is rounded, and the limit is a hard one.
       const maxBytes = typeof data.maxBytes === 'number' && Number.isFinite(data.maxBytes) && data.maxBytes >= data.bytes ? data.maxBytes : data.bytes
