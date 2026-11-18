@@ -303,27 +303,25 @@ test('a stalled pass is not remembered as a project: the next pass, that reads t
   expect(ran).toContain('dbt run -s orders')
 })
 
-test('a folder lookup that fails is no known project either: a verdict of the project left is not reused for a scan', async ($, on) => {
-  const options: Options = { answers: { orders: NO_DRY_RUN } }
-  const { clock } = await start($, on, options)
-  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeUndefined()
-  options.answers = { orders: OVER }
-  options.cwdFails = true
-  const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
+test('a host whose session folder lookup always fails: the project is the session root and the gate works as usual', async ($, on) => {
+  const options: Options = { answers: { fine: UNDER, big: OVER }, cwdFails: true }
+  const { clock, ran, started } = await start($, on, options)
+  const under = $.tool.call(bash('dbt run -s fine')) as Promise<any>
   for (let i = 0; i < 10; i++) await clock.advance(100)
-  expect((await pending).deny).toContain('could not be read in time')
+  expect((await under).deny).toBeUndefined()
+  const over = $.tool.call(bash('dbt run -s big')) as Promise<any>
+  for (let i = 0; i < 10; i++) await clock.advance(100)
+  expect((await over).deny).toContain('over the')
+  expect(started).toEqual(['fine', 'big'])
+  expect(ran).toEqual(['dbt run -s fine'])
 })
 
-test('a folder lookup that fails before any folder was seen refuses the scan too, and starts no estimate', async ($, on) => {
-  const options: Options = { answers: { orders: UNDER } }
-  const { clock, started } = await start($, on, options)
-  options.cwdFails = true
-  // A fresh session: no folder has been read yet.
-  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
-  const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
+test('a host whose session folder lookup always fails still answers /scan-cost', async ($, on) => {
+  const options: Options = { answers: { orders: OVER }, cwdFails: true }
+  const { clock } = await start($, on, options)
+  const run = $.command.run({ command: 'scan-cost', args: 'orders' } as any) as Promise<any>
   for (let i = 0; i < 10; i++) await clock.advance(100)
-  expect((await pending).deny).toContain('could not be read in time')
-  expect(started).toEqual([])
+  expect((await run).text).toContain('would scan 20.0 GiB')
 })
 
 test('a line refused for its unreadable folder keeps the over-limit answer already in hand: its retry is still held when that estimate then fails', async ($, on) => {

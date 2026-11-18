@@ -105,7 +105,7 @@ type Look = { spent: number; lost: boolean }
 const newLook = (): Look => ({ spent: 0, lost: false })
 
 /**
- * The session's folder. A folder that cannot be read is no project and no change of project: it answers `fallback`, the folder
+ * The session's folder. A folder that times out is no project and no change of project: it answers `fallback`, the folder
  * last known, so nothing the gate holds for that project is touched, and the pass is marked lost: its caller refuses what needs the folder.
  */
 async function sessionDir($: EngineInterface, look: Look, fallback: string | null): Promise<string | null> {
@@ -113,8 +113,10 @@ async function sessionDir($: EngineInterface, look: Look, fallback: string | nul
   const left = CWD_WAIT_MS - look.spent
   // Read from the process clock, not the engine's: no await is added between the gate's steps that must stay one.
   const began = Date.now()
-  // A lookup that fails or does not answer in time loses the pass: the folder is not known, and the last one is not assumed.
-  const read = left > 0 ? await within($, left, $.session.cwd().then(dir => ({ dir: dir as string | null }))) : null
+  // A lookup that does not answer in time loses the pass: the folder is not known, and the last one is not assumed.
+  // One that fails outright (a host with no session folder) is the session's root, as before: the gate goes on with it.
+  const failed = async () => ({ dir: (await $.session.root().catch(() => fallback)) as string | null })
+  const read = left > 0 ? await within($, left, $.session.cwd().then(dir => ({ dir: dir as string | null }), failed)) : null
   look.spent += Date.now() - began
   if (!read) {
     look.lost = true
