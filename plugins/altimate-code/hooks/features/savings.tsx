@@ -24,9 +24,12 @@ export const SAAS_CHECK_COUNT = 15
 const CHECK_COUNT = 4
 // The queries read seven days of system tables and may start the connection's SQL warehouse.
 const RUN_BUDGET_MS = 5 * 60_000
-// Set for the tool's run only: altimate-code and altimate-core both read it. The run is kept out of
-// altimate-code's tool daemon, which would keep the environment it started with.
-const NO_TELEMETRY = { ALTIMATE_TELEMETRY_DISABLED: 'true' }
+// Set for the tool's run only: altimate-code and altimate-core both read the telemetry switch. Assessment
+// mode also keeps the CLI from its own startup contacts (the one-time telemetry opt-out event, the model
+// catalog, the ripgrep download), so the warehouse is the only host the run reaches; an altimate-code
+// without assessment mode ignores it. The run is kept out of altimate-code's tool daemon, which would
+// keep the environment it started with.
+const LOCAL_ONLY = { ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' }
 
 // An altimate-code connection name; anything else could read as a CLI flag.
 const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -352,7 +355,7 @@ async function runCheck($: EngineInterface, connection: string | null) {
     await update($, messageAtom, () => null)
     await update($, bandAtom, () => null)
     const until = (await $.clock.now()) + RUN_BUDGET_MS
-    const result = await runTool($, TOOL, connection ? { warehouse: connection } : {}, { cliOnly: true, until, env: NO_TELEMETRY, noDaemon: true })
+    const result = await runTool($, TOOL, connection ? { warehouse: connection } : {}, { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
     if (!live()) return
     const metadata = result.metadata as ToolMetadata | null
     const view = toView(metadata)

@@ -253,7 +253,7 @@ test('/savings runs the altimate-code tool once with telemetry off and draws its
   expect(runs.length).toBe(1)
   // The run stays out of altimate-code's tool daemon, which keeps the environment it started with.
   expect(runs[0]!.argv.slice(1)).toEqual(['tool', 'run', 'finops_databricks_savings', '--args', '{}', '--json', '--no-daemon'])
-  expect(runs[0]!.env).toEqual({ ALTIMATE_TELEMETRY_DISABLED: 'true' })
+  expect(runs[0]!.env).toEqual({ ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' })
   // The reply in the conversation names no figure, warehouse or workspace: the findings stay in the pane.
   expect(said.text).toContain('Nothing is sent to Altimate')
   expect(said.text).not.toMatch(/\$|Classic|dbxmega/)
