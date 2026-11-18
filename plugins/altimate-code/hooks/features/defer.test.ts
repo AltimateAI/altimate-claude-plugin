@@ -267,7 +267,7 @@ test('a dbt project below the project, even under dbt_packages, keeps its own se
   const seen = start($, on, DEFER, { times: 0 }, [ROOT, `${ROOT}/dbt_packages/pkg`, `${ROOT}/nested`])
   let cwd = ROOT
   on('session.cwd', () => ({ value: cwd }))
-  on('fs.list', (_: unknown, e: { path: string }) => ({ value: e.path === ROOT ? [{ name: 'nested', kind: 'dir' }, { name: 'dbt_packages', kind: 'dir' }] : e.path === `${ROOT}/dbt_packages` ? [{ name: 'pkg', kind: 'dir' }] : [] }))
+  on('fs.list', (_: unknown, e: { path: string }) => ({ value: e.path === ROOT ? [{ name: 'nested', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }, { name: 'dbt_packages', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }] : e.path === `${ROOT}/dbt_packages` ? [{ name: 'pkg', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }] : [] }))
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: 'Bash', command: 'cd nested && dbt build' })
   cwd = `${ROOT}/dbt_packages/pkg`
