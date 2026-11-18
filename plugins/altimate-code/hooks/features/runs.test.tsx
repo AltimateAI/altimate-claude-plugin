@@ -603,6 +603,55 @@ test('a call that started while the artifact was being read and is still running
   await running
 })
 
+test('an operation that started while the artifact was being read and is still running leaves the run unrecorded', async ($, on) => {
+  let once = true
+  let running: Promise<unknown> | undefined
+  const { stored, clock } = await start($, on, () => view('inv-op', undefined, 'build', AFTER), {
+    slow: 'op',
+    slowMs: 5000,
+    duringRead: async () => {
+      if (!once) return
+      once = false
+      running = $.tool.call({ tool: 'Bash', command: 'dbt docs generate', tool_use_id: 'op' })
+      await clock.advance(10)
+    },
+  })
+  const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'a' })
+  expect(own(first.context)).toEqual([NOT_RECORDED])
+  expect(stored.has('runs')).toBe(false)
+  await running
+})
+
+test('a pipe-both ampersand is a foreground pipeline, not a background call', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-pipe', undefined, 'build', AFTER))
+  const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a |& tee build.log', tool_use_id: 'one' })
+  expect(own(first.context)).toEqual(['build: 1 ok'])
+  expect(kept(stored)).toHaveLength(1)
+})
+
+test('an ampersand inside a double-quoted argument, escaped quote included, does not background the call', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-dq', undefined, 'build', AFTER))
+  const first: any = await $.tool.call({ tool: 'Bash', command: `dbt build --vars "{\\"source_url\\": \\"https://example.com/d?a=1&b=2\\"}"`, tool_use_id: 'one' })
+  expect(own(first.context)).toEqual(['build: 1 ok'])
+  expect(kept(stored)).toHaveLength(1)
+})
+
+test('authorized_* and similar keys are not secrets; authorization still is', async ($, on) => {
+  expect(resultsInvocations(`dbt build --vars '{"authorized_schemas": "analytics"}'`, ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt build --vars '{"reauthorize": "daily"}'`, ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt build --vars '{"authorization_type": "Bearer x"}'`, ROOT)).toEqual([])
+})
+
+test('a query parameter is a credential only when its name is one: author, assign and monkey are not', async ($, on) => {
+  for (const name of ['author', 'assign', 'monkey']) expect(resultsInvocations(`dbt build --vars '{u: "https://example.com/x?${name}=1"}'`, ROOT)).toHaveLength(1)
+  for (const name of ['api_key', 'access_token', 'sig', 'auth', 'X-Amz-Signature']) expect(resultsInvocations(`dbt build --vars '{u: "https://example.com/x?${name}=1"}'`, ROOT)).toEqual([])
+})
+
+test('a secret on a later line of an unbraced multi-line --vars value is judged too', async ($, on) => {
+  expect(resultsInvocations(`dbt build --vars 'country: US\ndb_password: hunter2'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars 'country: US\nregion: EU'`, ROOT)).toHaveLength(1)
+})
+
 test('a URL with an empty user name and a password is not recorded, and a dashed number is not taken for a number', async ($, on) => {
   expect(resultsInvocations(`dbt build --vars '{source_url: "redis://:s3cret@redis.example.com:6379/0"}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{api_token: 123-456-789}'`, ROOT)).toEqual([])

@@ -87,7 +87,7 @@ test('each phase runs through the features, which find nothing to report and log
   expect(await featuresBashRewrite($, bash)).toBe('dbt run -s a')
   expect(await featuresBashGate($, bash)).toBeNull()
   // A dbt command may get a note from a feature that watches dbt (what a run would scan); a call no feature watches gets none.
-  expect(await featuresBashAfter($, { tool: 'Bash', command: 'ls models' } as any, {} as any)).toEqual([])
+  expect(await featuresBashAfter($, { tool: 'Bash', command: 'ls models', tool_use_id: 'ls' } as any, {} as any)).toEqual([])
   expect(await featuresEditAfter($, file, {} as any, { path: '/repo/models/a.sql', before: null })).toEqual([])
   expect(await featuresReadOrEditAfter($, file, {} as any, { path: '/repo/models/a.sql' })).toEqual([])
   // The runs feature is real here and needs a fuller engine than this stub; every other feature must log nothing.

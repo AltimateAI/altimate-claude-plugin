@@ -142,11 +142,11 @@ const SECRET_NAME = /(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)/i
 /** The words a `--vars` key is made of (`apiKey`, `db_password`, `auth-token`), lower case. */
 const keyWords = (key: string) => key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
 /** Words that name a secret wherever they sit in a key, also run into a longer word (`clientsecret`, `accesstoken`). */
-const SECRET_PART = /secret|token|passw|pwd|credential|passphrase|authoriz|authoris/
+const SECRET_PART = /secret|token|passw|pwd|credential|passphrase|authorization|authorisation/
 /** A key run together from `api`, `private`... and `key` (`apikey`, `privatekey`). */
 const KEY_COMPOUND = /(?:api|private|access|secret|encryption|signing|ssh|master|auth)keys?$/
 /** `key: value` pairs of a flow-style `--vars` value (JSON or YAML); a nested mapping's own pairs are found in turn. */
-const VARS_PAIR = /["']?([\w.-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s{[][^,}]*)/g
+const VARS_PAIR = /["']?([\w.-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s{[][^,}\r\n]*)/g
 /** A key whose value is a mapping or a list: the key alone says whether the whole subtree is secret. */
 const VARS_PARENT = /["']?([\w.-]+)["']?\s*:\s*[{[]/g
 /**
@@ -175,7 +175,7 @@ const holdsSecret = (value: string) => {
 const varsHoldSecret = (body: string) =>
   [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => holdsSecret(match[1]!.startsWith('"') ? match[1]!.replace(/\\(.)/g, '$1') : match[1]!))
 /** A password in the URL's user part, or a secret-named query parameter (`?access_token=`, `&api_key=`): the URL holds a credential whatever it is named. */
-const CREDENTIAL_URL = /:\/\/[^\s/:@"']*:[^\s@"']+@|:\/\/[^\s"']*[?&;][\w.-]*(?:secret|token|passw|pwd|credential|apikey|api_key|api-key|auth|signature|sig|key)[\w.-]*=/i
+const CREDENTIAL_URL = /:\/\/[^\s/:@"']*:[^\s@"']+@|:\/\/[^\s"']*[?&;](?:[\w.-]*(?:secret|token|passw|pwd|credential)[\w.-]*|(?:[\w.-]*[._-])?(?:apikey|auth|signature|sig|key)(?:[._-][\w.-]*)?)=/i
 const redactAssignments = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 /** A value continued onto the next line (backslash, newline) is one word to the shell: joined before the secret is cut out. */
 const redact = (head: string) => {
@@ -388,7 +388,7 @@ export const runsOperation = (command: string) => parseDbtCommand(command).some(
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
-const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(?<![&>])&(?![&>])/.test(e.command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'|\\./g, ' '))
+const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(?<![&>|])&(?![&>])/.test(e.command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'|\\./g, ' '))
 /** The host moved the call to the background: its result names the task (`result.result.backgroundTaskId`). */
 const hostBackgrounded = (result: ToolCallResult | undefined) => {
   const inner = (result as { result?: { backgroundTaskId?: unknown } } | undefined)?.result
@@ -472,8 +472,7 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   // The host may also move a long call to the background after the fact; its result then names the task.
   if (isBackground(e) || hostBackgrounded(result)) {
     // It keeps running and may replace the artifact any time: stored runs can no longer be retried from it.
-    const kept = started.get(startKey(e))
-    if (kept?.writes || kept?.operation) await clearRetries($)
+    if (began?.writes || began?.operation) await clearRetries($)
     return null
   }
   started.delete(startKey(e))
@@ -534,7 +533,7 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   const readEnded = await $.clock.now()
   entry.ended = readEnded
   // A call still running that started after this one ended and writes results may have replaced the artifact as well.
-  if (finished.some(other => other !== entry && other.at >= ended) || [...started.values()].some(other => other.writes && other.at >= ended)) {
+  if (finished.some(other => other !== entry && other.at >= ended) || [...started.values()].some(other => (other.writes || other.operation) && other.at >= ended)) {
     await clearRetries($)
     return OVERLAP_LINE
   }
