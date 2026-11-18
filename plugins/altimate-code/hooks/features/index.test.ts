@@ -32,7 +32,8 @@ const engine = () => {
     process: { run: async (argv: readonly string[]) => nothingToReport(argv) ?? { exitCode: 1, stdout: '', stderr: 'no CLI here' } },
     clock: { now: async () => 0, after: () => {}, every: () => {}, sleep: async () => {} },
     session: { root: async () => '/repo', cwd: async () => '/repo' },
-    store: { get: async () => null, set: async () => {} },
+    store: { get: async () => null, set: async () => {}, keys: async () => [], delete: async () => {} },
+    env: { get: async () => undefined },
     mcp: { connect: async () => ({ isConnected: false, reason: 'not_connected', message: 'off' }) },
   }
   return { logs, $: $ as any }

@@ -86,7 +86,7 @@ type DeferAnswer = {
 const dirname = (path: string) => path.replace(/[\\/]+[^\\/]*$/, '') || '/'
 
 /** The dbt project the session works in: the folder or one above it with a dbt_project.yml, else the only one a level below. */
-async function findProject($: EngineInterface): Promise<string | null> {
+export async function findProject($: EngineInterface): Promise<string | null> {
   // A call that throws at once (an engine without a session) is no project either.
   const root = await Promise.resolve().then(() => $.session.root()).catch(() => null)
   if (!root) return null

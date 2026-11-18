@@ -78,7 +78,7 @@ test('without context lines the result is passed on as it came', async () => {
 })
 
 test('the features are listed in the stated order, and the status line joins its parts in it', () => {
-  expect(FEATURE_IDS).toEqual(['runs', 'defer', 'toModel', 'comments', 'cost', 'health', 'sqlGraph', 'docs', 'cteProfile'])
+  expect(FEATURE_IDS).toEqual(['runs', 'defer', 'toModel', 'comments', 'cost', 'health', 'sqlGraph', 'docs', 'cteProfile', 'savings'])
   expect(STATUS_ORDER).toEqual(['integrations', ...FEATURE_IDS, 'altimateCode'])
   // Parts join in that order whatever order they were set in; feature parts alone get the plugin's mark.
   expect(statusLineOf({ cost: '2 GB', integrations: '1 synced', runs: '3 runs' })).toBe('1 synced · 3 runs · 2 GB')
