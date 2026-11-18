@@ -621,5 +621,6 @@ test('idle clusters and jobs on all-purpose compute get their own evidence and f
   expect(fills[1]).toContain('Cluster shared-analytics (id 0101-abc)')
   expect(fills[1]).toContain('set autotermination_minutes to 15, or terminate it if nobody needs it')
   expect(fills[1]).toContain('`databricks clusters edit 0101-abc --json`')
+  expect(fills[1]).toContain('If this repository defines it (Terraform databricks_cluster, a cluster policy, or JSON), edit that definition; otherwise write the JSON for `databricks clusters edit 0101-abc --json`. Say what the change does.')
   await ui.unmount()
 })

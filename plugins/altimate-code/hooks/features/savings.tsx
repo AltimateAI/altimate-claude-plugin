@@ -119,7 +119,7 @@ type ToolFinding = {
 }
 
 /** The change a finding points at, the noun for its resource, and where the change is written. */
-function changeOf(finding: ToolFinding): { noun: string; change: string; where: string } {
+function changeOf(finding: ToolFinding): { noun: string; change: string; defines: string; otherwise: string } {
   const e = finding.evidence
   const id = finding.resource_id
   switch (e.kind) {
@@ -127,13 +127,15 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; where: 
       return {
         noun: 'Warehouse',
         change: 'switch it to a serverless SQL warehouse (enable_serverless_compute true, warehouse_type PRO)',
-        where: `a Databricks bundle, Terraform databricks_sql_endpoint, or JSON; otherwise write the JSON for \`databricks warehouses edit ${id} --json\``,
+        defines: 'a Databricks bundle, Terraform databricks_sql_endpoint, or JSON',
+        otherwise: `write the JSON for \`databricks warehouses edit ${id} --json\``,
       }
     case 'over_sized':
       return {
         noun: 'Warehouse',
         change: `resize it to ${apiSize(e.recommended_size)} (cluster_size "${apiSize(e.recommended_size)}")`,
-        where: `a Databricks bundle, Terraform databricks_sql_endpoint, or JSON; otherwise write the JSON for \`databricks warehouses edit ${id} --json\``,
+        defines: 'a Databricks bundle, Terraform databricks_sql_endpoint, or JSON',
+        otherwise: `write the JSON for \`databricks warehouses edit ${id} --json\``,
       }
     case 'idle_cluster':
       return {
@@ -142,28 +144,30 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; where: 
           e.idle_pattern === 'zombie'
             ? 'it is idle almost all the time: set autotermination_minutes to 15, or terminate it if nobody needs it'
             : 'set autotermination_minutes to 30 so idle workers stop billing',
-        where: `Terraform databricks_cluster, a cluster policy or JSON; otherwise write the JSON for \`databricks clusters edit ${id} --json\``,
+        defines: 'Terraform databricks_cluster, a cluster policy, or JSON',
+        otherwise: `write the JSON for \`databricks clusters edit ${id} --json\``,
       }
     case 'job_on_all_purpose':
       return {
         noun: 'Job',
         change: "run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster it uses now",
-        where: `the job's bundle resource, Terraform databricks_job or JSON; otherwise write the settings for \`databricks jobs reset ${id} --json\``,
+        defines: "the job's bundle resource, Terraform databricks_job, or JSON",
+        otherwise: `write the settings for \`databricks jobs reset ${id} --json\``,
       }
     default:
-      return { noun: 'Resource', change: 'make the change the evidence points at', where: 'its definition' }
+      return { noun: 'Resource', change: 'make the change the evidence points at', defines: 'its definition', otherwise: 'describe the change' }
   }
 }
 
 /** The request "Draft the fix" puts in the prompt box: everything Claude needs, and that nothing is to be applied. */
 export function fixRequest(finding: ToolFinding): string {
-  const { noun, change, where } = changeOf(finding)
+  const { noun, change, defines, otherwise } = changeOf(finding)
   return [
     'Draft the change for this Databricks savings finding, for me to review. Do not apply or run it.',
     `${noun} ${finding.resource_name} (id ${finding.resource_id}): ${finding.title}, ${range(finding.monthly_min, finding.monthly_max)} a month at list price.`,
     ...evidenceLines(finding.evidence).map(line => `- ${line}`),
     `The change: ${change}.`,
-    `If this repository defines it (${where}), and say what it changes.`,
+    `If this repository defines it (${defines}), edit that definition; otherwise ${otherwise}. Say what the change does.`,
   ].join('\n')
 }
 
