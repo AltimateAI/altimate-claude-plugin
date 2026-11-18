@@ -171,8 +171,11 @@ const holdsSecret = (value: string) => {
   if ([...value.matchAll(VARS_PARENT)].some(parent => keyIsSecret(parent[1]!))) return true
   return pairs.length === 0 ? SECRET_NAME.test(value) : pairs.some(pair => pairHoldsSecret(pair[1]!, pair[2]!))
 }
-const varsHoldSecret = (body: string) => [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => holdsSecret(match[1]!))
-const CREDENTIAL_URL = /:\/\/[^\s/:@"']+:[^\s@"']+@/
+// A double-quoted value is read as the shell reads it, so `"{\"password\": \"x\"}"` is tested as `{"password": "x"}`.
+const varsHoldSecret = (body: string) =>
+  [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => holdsSecret(match[1]!.startsWith('"') ? match[1]!.replace(/\\(.)/g, '$1') : match[1]!))
+/** A password in the URL's user part, or a secret-named query parameter (`?access_token=`, `&api_key=`): the URL holds a credential whatever it is named. */
+const CREDENTIAL_URL = /:\/\/[^\s/:@"']+:[^\s@"']+@|:\/\/[^\s"']*[?&;][\w.-]*(?:secret|token|passw|pwd|credential|apikey|api_key|api-key|auth|signature|sig|key)[\w.-]*=/i
 const redactAssignments = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 /** A value continued onto the next line (backslash, newline) is one word to the shell: joined before the secret is cut out. */
 const redact = (head: string) => {
@@ -182,7 +185,7 @@ const redact = (head: string) => {
 }
 
 /** The flags `dbt retry` does not take from the run it retries. */
-const VALUE = `"[^"]*"|'[^']*'|\\S+`
+const VALUE = `"(?:[^"\\\\]|\\\\.)*"|'[^']*'|\\S+`
 const KEPT_FLAGS = new RegExp(`(?:^|\\s)((?:--(?:project-dir|profiles-dir|target-path|defer-state|target|profile|vars)(?:=(?:${VALUE})|\\s+(?:${VALUE})))|(?:-t(?:\\s+(?:${VALUE})|[^\\s-]\\S*)))`, 'g')
 /** `dbt retry` reads the results of the state folder when one is set (`--state`, `DBT_STATE`): the replay leaves it out so it reads the target folder. `--defer-state` only names the deferral's manifest and stays. */
 const withoutState = (head: string) =>
@@ -366,7 +369,7 @@ async function load($: EngineInterface, root: string, open: string | null = null
 }
 
 /** The Bash calls in flight that run dbt, whatever folder they work in: when each started, by tool-use id. */
-const started = new Map<string, { at: number; cwd: string; writes: boolean; operation: boolean }>()
+const started = new Map<string, { at: number; cwd: string; writes: boolean; operation: boolean; background?: boolean }>()
 /** The dbt calls that just ended: a run is recorded only when no other dbt call overlapped it. */
 const finished: Array<{ at: number; ended: number }> = []
 /** A call in flight longer than this is taken as one that never ended (refused or cancelled), so it stops holding back later calls. */
@@ -470,6 +473,7 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   if (isBackground(e) || hostBackgrounded(result)) {
     // It keeps running and may replace the artifact any time: stored runs can no longer be retried from it.
     const kept = started.get(startKey(e))
+    if (kept) kept.background = true
     if (kept?.writes || kept?.operation) await clearRetries($)
     return null
   }
@@ -530,7 +534,8 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   // meanwhile (one still running writes when it ends, and is told so then), and the file would then be recorded under this call's command line. Nothing is recorded, and Claude is told so.
   const readEnded = await $.clock.now()
   entry.ended = readEnded
-  if (finished.some(other => other !== entry && other.at >= ended)) {
+  // A call still running that started after this one ended and writes results may have replaced the artifact as well.
+  if (finished.some(other => other !== entry && other.at >= ended) || [...started.values()].some(other => other.writes && !other.background && other.at >= ended)) {
     await clearRetries($)
     return OVERLAP_LINE
   }

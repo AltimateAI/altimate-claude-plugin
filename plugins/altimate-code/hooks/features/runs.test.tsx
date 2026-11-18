@@ -583,6 +583,36 @@ test('a recording still reading its artifact when a build is backgrounded stores
   expect(kept(stored).map(run => [run.id, run.retryLine])).toEqual([['inv-a', '']])
 })
 
+test('a call that started while the artifact was being read and is still running leaves the run unrecorded', async ($, on) => {
+  let once = true
+  let running: Promise<unknown> | undefined
+  const { stored, clock } = await start($, on, () => view('inv-b', undefined, 'build', AFTER), {
+    slow: 'b',
+    slowMs: 5000,
+    duringRead: async () => {
+      if (!once) return
+      once = false
+      running = $.tool.call({ tool: 'Bash', command: 'dbt build -s b', tool_use_id: 'b' })
+      await clock.advance(10)
+    },
+  })
+  const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'a' })
+  expect(own(first.context)).toEqual([NOT_RECORDED])
+  expect(stored.has('runs')).toBe(false)
+  await running
+})
+
+test('a shell-escaped double-quoted --vars mapping is read as the shell reads it: a secret in it is not recorded, and a benign one replays whole', async ($, on) => {
+  expect(resultsInvocations('dbt build --vars "{\\"password\\":\\"s3cret\\",\\"url\\":\\"https://example.com\\"}"', ROOT)).toEqual([])
+  const [benign] = resultsInvocations('dbt build --vars "{\\"country\\": \\"US\\"}"', ROOT)
+  expect(benign!.retryLine).toBe('cd /repo && dbt retry --vars "{\\"country\\": \\"US\\"}"')
+})
+
+test('a URL with a secret-named query parameter is not recorded', async ($, on) => {
+  expect(resultsInvocations(`dbt build --vars '{source_url: "https://example.com/data?access_token=s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{source_url: "https://example.com/data?page=2"}'`, ROOT)).toHaveLength(1)
+})
+
 test('two spellings of one project folder overlap: /repo and /repo/models share one target', async ($, on) => {
   const { stored } = await start($, on, () => view('inv-x', undefined, 'build', AFTER))
   const both: any[] = await Promise.all([
