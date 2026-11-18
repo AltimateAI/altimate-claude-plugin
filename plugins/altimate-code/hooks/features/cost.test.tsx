@@ -208,7 +208,25 @@ test('a session folder that could not be read is no project the gate knows: an e
   const pending = $.tool.call(bash('dbt run -s orders'))
   for (let i = 0; i < 70; i++) await clock.advance(100)
   const result: any = await pending
-  expect(result.deny).toContain('20.0 GiB')
+  // Not allowed on the strength of the earlier verdict: the command is refused, to be asked again once the folder can be read.
+  expect(result.deny).toBeDefined()
+})
+
+test('a session folder that stays unreadable is never the same project twice: no verdict is carried from one command to the next', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock, started } = await start($, on, options)
+  options.holdCwd = new Promise<void>(() => {})
+  const run = async () => {
+    const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
+    for (let i = 0; i < 70; i++) await clock.advance(100)
+    return pending
+  }
+  await run()
+  options.answers = { orders: OVER }
+  const second = await run()
+  // Each command asks for its own estimate: the earlier "no dry run here" is not taken for this project.
+  expect(started.filter(key => key === 'orders').length).toBeGreaterThanOrEqual(2)
+  expect(second.deny).toBeDefined()
 })
 
 test('commands that scan nothing are not looked at', async ($, on) => {

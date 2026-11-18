@@ -100,12 +100,14 @@ const ANSWER_KEEP_MS = 60_000
 /** The folder the session is in is asked for this long: a lookup that stalls must not use up the budget of the gates after this one (health's wait is 4 s of the 5 s a phase has). */
 const CWD_WAIT_MS = 80
 
-/** What the folder is taken for when it could not be read in time: no project the gate has seen, so nothing it learned is reused. */
-const UNKNOWN_DIR = '\u0000unknown'
+let unreadable = 0
 
-/** The session's folder, or UNKNOWN_DIR when it cannot be read within CWD_WAIT_MS. */
+/**
+ * The session's folder. One that cannot be read within CWD_WAIT_MS is a different, unknown project each time it is asked:
+ * it never equals one the gate has seen, so no verdict, estimate or allowance is reused for it, and a pass that asks twice is refused as changed.
+ */
 async function sessionDir($: EngineInterface): Promise<string> {
-  return (await within($, CWD_WAIT_MS, $.session.cwd())) ?? UNKNOWN_DIR
+  return (await within($, CWD_WAIT_MS, $.session.cwd())) ?? `\u0000unknown-${++unreadable}`
 }
 
 /** Adds this feature's own hooks. */
