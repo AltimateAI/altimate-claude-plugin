@@ -5,7 +5,7 @@
 // `commentsPollSeconds`. When Claude reads or edits a model that has open threads, one context block
 // names each thread's line and text, so it sees the review before it changes the model; what other
 // people wrote is quoted as data. Replying and resolving are buttons the person presses in the
-// /comments pane; Claude never posts.
+// /comments pane; the plugin gives Claude no way to post (the person's own approved Bash call is outside it).
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
@@ -184,7 +184,7 @@ export function register(on: On, context: FeatureContext) {
           </Box>
         ))}
         <Box>
-          <Button key="refresh" label="Refresh" onPress={() => later($, () => load($))} />
+          <Button key="refresh" label="Refresh" onPress={() => later($, () => { searched.clear(); within.clear(); return load($) })} />
         </Box>
       </Box>
     )
@@ -221,10 +221,11 @@ export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {}
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
+  // /clear ends a session without starting another: the pane keeps its threads and drafts, so the poll goes on
+  // and a post still running or unconfirmed keeps its lock (it describes the shared docs, not the conversation).
+  if (e.reason === 'clear') return
   poll?.cancel()
   poll = null
-  // /clear ends a session without starting another: work still running for it must neither block the next
-  // post or load nor write into what follows.
   generation++
   loadRun = null
   loadAgain = false
@@ -464,7 +465,8 @@ async function fetchThreads($: EngineInterface) {
         current.root === pending.root &&
         // A thread missing from a partial list may only be one the list did not reach.
         (pending.action === 'resolve' ? there === undefined && !partial : there?.messages.some(message => !pending.before.has(message.id) && sameText(message.text, pending.text)) === true)
-      const freed = pending !== null && (seen || now - pending.at >= LIST_LAG_MS)
+      // An old enough list frees the lock only when it is a whole list of the post's own project.
+      const freed = pending !== null && (seen || (now - pending.at >= LIST_LAG_MS && !partial && current.root === pending.root))
       if (freed) uncertain = null
       return {
         ...current,
@@ -525,7 +527,8 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       const note = oneLine(out.text) || 'The comment service did not accept that.'
       // Only a refusal the tool names (no write permission, no text, no ids, a thread that is not open or cannot be checked) is known not to have posted.
       const code = (out.metadata as { error?: unknown } | null)?.error
-      if (typeof code === 'string' && REFUSALS.has(code)) {
+      // The pre-post check that failed says so in its text: nothing was sent.
+      if ((typeof code === 'string' && REFUSALS.has(code)) || /Nothing was sent/i.test(out.text)) {
         await change($, current => (mine !== generation ? current : { ...current, posting: null, note }))
         return
       }

@@ -28,7 +28,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void>; throwPost?: boolean; failListText?: string; listMeta?: Record<string, unknown> } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void>; throwPost?: boolean; failListText?: string; listMeta?: Record<string, unknown>; checkFailPost?: boolean } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -72,6 +72,7 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
     if (options.holdPost) return options.holdPost.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'done', metadata: { success: true } }), stderr: '' } }))
     if (options.holdTimeoutPost) return options.holdTimeoutPost.then(() => timedOut)
     if (options.throwPost) return { value: null }
+    if (options.checkFailPost) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'Could not check the thread: API GET /dbt/dbt_docs_share/all timed out after 15 s. Nothing was sent.', metadata: { success: false, error: 'API GET /dbt/dbt_docs_share/all timed out after 15 s' } }), stderr: '' } }
     if (options.timeoutPost) return timedOut
     if (options.failPost) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'posting needs write permission', metadata: { success: false, error: options.failPostCode ?? 'read_only' } }), stderr: '' } }
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'done', metadata: { success: true } }), stderr: '' } }
@@ -401,7 +402,7 @@ test('after a post that may have landed, the thread stays busy until the verific
   await ui.unmount()
 })
 
-test('a post still running when the session ends (/clear, no new start) does not block the next post', async ($, on) => {
+test('/clear keeps the lock of a post still running, so a second press posts nothing', async ($, on) => {
   const { clock, cli } = await start($, on, { holdPost: new Promise<void>(() => {}) })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await clock.settle()
@@ -410,10 +411,79 @@ test('a post still running when the session ends (/clear, no new start) does not
   expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
   await $.session.end({ reason: 'clear' } as any)
   await clock.advance(10)
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeUndefined()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('/clear keeps the lock of a post that may have landed', async ($, on) => {
+  const { clock, cli } = await start($, on, { timeoutPost: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
   await ui.press({ key: '7:11-resolve' })
-  await clock.advance(10)
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeUndefined()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('the list is still fetched every poll after /clear', async ($, on) => {
+  const { clock, cli } = await start($, on)
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.advance(900_000)
+  await clock.settle()
+  await clock.advance(900_000)
+  await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').length).toBe(3)
+})
+
+test('a post the CLI says was not sent because its pre-post check failed does not lock the thread', async ($, on) => {
+  const { clock, cli } = await start($, on, { checkFailPost: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeDefined()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(2)
   await ui.unmount()
+})
+
+test('a partial list, however old, does not free a post that may have landed', async ($, on) => {
+  const { clock, cli } = await start($, on, { timeoutPost: true, listMeta: { incomplete: true } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await clock.advance(340_000)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeUndefined()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a reply is not confirmed by a message that was already in the thread before it was sent', async ($, on) => {
+  const thread = { ...RAW, messages: [{ id: 101, author: 'Grace Hopper', text: 'Yes' }] }
+  const { clock } = await start($, on, { timeoutPost: true, threads: [thread] })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.input({ key: '7:11-reply', text: 'Yes', kind: 'change' })
+  await ui.press({ key: '7:11-send' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /Posting/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('commentsInContext off keeps the threads out of Claude’s context', { options: { commentsInContext: false } }, async ($, on) => {
+  const { clock, cli } = await start($, on)
+  const r: any = await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list')).toHaveLength(1)
+  expect(r.context ?? []).toEqual([])
 })
 
 test('a post that may have landed stays locked when a poll was already loading: only a list read after the post frees it', async ($, on) => {
@@ -506,6 +576,12 @@ test('an unchecked post keeps posting locked after a read moves the pane to anot
   await clock.advance(340_000)
   await ui.press({ key: 'refresh' })
   for (let i = 0; i < 3; i++) await clock.settle()
+  // An old list of the other project does not free it: only the post's own project can.
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  for (let i = 0; i < 4; i++) await clock.advance(FIRST_READ_WAIT_MS)
   await ui.press({ key: '7:11-resolve' })
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'resolve').length).toBeGreaterThanOrEqual(2)
