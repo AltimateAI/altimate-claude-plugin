@@ -31,6 +31,18 @@ const view = (invocationId: string | null, rows: Row[] = [['model.shop.stg_order
   results: rows.map(([uniqueId, status, message]) => ({ uniqueId, name: uniqueId.split('.').pop()!, status, executionTimeSec: 1.5, message })),
 })
 
+/**
+ * What the other features' data tools answer when there is nothing to report. The runs tests answer them first and
+ * do not record them, so a feature merged beside runs finds a project with nothing to say and adds no line to a call.
+ */
+const OTHER_FEATURES: Record<string, unknown> = {
+  docs_share_comments: { threads: [] },
+  dbt_health: { success: true, insights: [] },
+  dbt_defer_state: { success: true, enabled: false, mode: 'none' },
+  dbt_cost_estimate: { supported: false, adapter: 'none' },
+  dbt_docs_coverage: { success: false },
+}
+
 /** The session beneath the plugin: a store in memory, and the CLI answering `dbt_run_results` with `answer(args)`. */
 async function start($: any, on: any, answer: (args: Record<string, unknown>) => unknown, options: { mcp?: boolean; cwd?: string; denied?: string; refused?: string; moved?: string; slow?: string; slowMs?: number; rootDelay?: number; duringRead?: () => Promise<unknown> } = {}) {
   const clock = mock.clock(on, { now: T0 })
@@ -58,6 +70,8 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
     return { value: { content: [{ type: 'text', text: 'Unknown tool: dbt_run_results' }], isError: true } }
   })
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
+    const other = e.argv[2] === 'run' ? OTHER_FEATURES[String(e.argv[3])] : undefined
+    if (other !== undefined) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: other }), stderr: '' } }
     if (e.argv[1] === 'tool') await options.duringRead?.()
     if (e.argv[1] !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
