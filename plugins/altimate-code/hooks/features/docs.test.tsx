@@ -554,6 +554,23 @@ test('a versioned model, whose unique_id is not built from its file name, is tra
   expect(traced.map(args => args.model)).toEqual(['model.shop.stg_orders.v2'])
 })
 
+test('the latest version is the declared one, and 10 is later than 9', async ($, on) => {
+  const at = (version: number) => ({ ...NODE('shop', 'stg_orders', `stg_orders_v${version}`), version, latest_version: 10 })
+  const manifest = { 'model.shop.stg_orders.v9': at(9), 'model.shop.stg_orders.v10': at(10), 'model.shop.stg_orders.v2': at(2) }
+  const { clock, toolArgs } = await start($, on, { manifest })
+  await $.tool.call(EDIT)
+  await clock.settle()
+  expect(toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify').map(args => args.model)).toEqual(['model.shop.stg_orders.v10'])
+})
+
+test('a SQL edit is traced as the model whose file it is, even when other versions share the name', async ($, on) => {
+  const manifest = { 'model.shop.orders.v1': { ...NODE('shop', 'orders'), version: 1 }, 'model.shop.orders.v2': { ...NODE('shop', 'orders', 'orders_v2'), version: 2 } }
+  const { clock, toolArgs } = await start($, on, { manifest, coverage: { success: true, model: 'orders', percent: 100, documented: [], missing: [], output_columns: [] } })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/orders.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  expect(toolArgs.map(text => JSON.parse(text)).map(args => args.model)).toEqual(['model.shop.orders.v1'])
+})
+
 test('without a readable manifest a source model is traced by the id its own package gives it, never a bare name', async ($, on) => {
   const { clock, toolArgs } = await start($, on)
   await $.tool.call(EDIT)

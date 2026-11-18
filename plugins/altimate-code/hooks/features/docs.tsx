@@ -337,23 +337,32 @@ const normal = (path: string) => path.replace(/\\/g, '/')
 /** A path spelled one way, so the same file named two ways compares equal. */
 const tidy = (path: string) => normal(path).replace(/\/(?:\.\/)+/g, '/').replace(/\/{2,}/g, '/')
 
+type ManifestModel = { resource_type?: string; package_name?: string; name?: string; original_file_path?: string; version?: string | number | null; latest_version?: string | number | null }
+
 /**
  * The model as the manifest's unique_id, so a model of the same name in another package is never the one
- * traced. A model the manifest does not list, or a manifest that cannot be read, gets the id dbt would
- * give it, which finds nothing rather than another package's model. Versioned models share a name; the
- * latest version stands for them.
+ * traced. A SQL file is the model whose file it is; a name in a YAML file is the model of that name, and for
+ * versioned models its latest version stands for them. A model the manifest does not list, or a manifest
+ * that cannot be read, gets the id dbt would give it, which finds nothing rather than another package's model.
  */
-async function modelRef($: EngineInterface, project: Project, model: string, stem = model): Promise<string> {
+async function modelRef($: EngineInterface, project: Project, model: string, byFile = false): Promise<string> {
   if (!project.package) return model
   const built = `model.${project.package}.${model}`
   try {
-    const nodes = (JSON.parse((await $.fs.read(project.manifest)) ?? '') as { nodes?: Record<string, { resource_type?: string; package_name?: string; name?: string; original_file_path?: string }> }).nodes ?? {}
-    const named = Object.entries(nodes)
-      .filter(([, node]) => node?.resource_type === 'model' && node.package_name === project.package)
-      .filter(([, node]) => node.name === model || (node.original_file_path ?? '').replace(/\.sql$/i, '').split('/').pop() === stem)
-      .map(([id]) => id)
-      .sort()
-    return named[named.length - 1] ?? built
+    const nodes = (JSON.parse((await $.fs.read(project.manifest)) ?? '') as { nodes?: Record<string, ManifestModel> }).nodes ?? {}
+    const own = Object.entries(nodes).filter(([, node]) => node?.resource_type === 'model' && node.package_name === project.package)
+    const stem = (node: ManifestModel) => (node.original_file_path ?? '').replace(/\.sql$/i, '').split('/').pop()
+    if (byFile) {
+      const files = own.filter(([, node]) => stem(node) === model)
+      if (files.length === 1) return files[0]![0]
+    }
+    const named = own.filter(([, node]) => node.name === model)
+    if (named.length <= 1) return named[0]?.[0] ?? built
+    const latest = named.find(([, node]) => node.latest_version != null && String(node.version) === String(node.latest_version))
+    if (latest) return latest[0]
+    const number = (node: ManifestModel) => (typeof node.version === 'number' ? node.version : Number.parseFloat(String(node.version)))
+    const [top] = [...named].sort((x, y) => (number(y[1]) || 0) - (number(x[1]) || 0) || (x[0] < y[0] ? 1 : -1))
+    return top![0]
   } catch {
     return built
   }
@@ -474,7 +483,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   const model = normal(file.path).split('/').pop()!.replace(/\.sql$/i, '')
   if (!(await $.fs.exists(project.manifest).catch(() => false))) return []
   const until = (await $.clock.now()) + ROUND_MS
-  const result = await runTool($, 'dbt_docs_coverage', { model: await modelRef($, project, model), manifest_path: project.manifest }, { until, cliOnly: true }).catch(() => null)
+  const result = await runTool($, 'dbt_docs_coverage', { model: await modelRef($, project, model, true), manifest_path: project.manifest }, { until, cliOnly: true }).catch(() => null)
   if (!result) return []
   const meta = result.metadata
   if (!result.ok || !meta || meta.success !== true) {
