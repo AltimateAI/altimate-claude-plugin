@@ -50,6 +50,8 @@ type Options = {
   onStat?: (n: number) => Promise<void> | void
   /** The folder the session's shell is in (default: the engine does not say). */
   cwd?: string
+  /** Called when the Bash command itself runs, between the gate and the after-phase. */
+  onCall?: () => void
   /** Called at each project lookup; a promise it returns holds the lookup. */
   onExists?: () => Promise<void> | void
 }
@@ -98,7 +100,10 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   on('fs.read', () => ({ value: '' }))
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
-  on('tool.call', () => ({ result: { ok: true } }))
+  on('tool.call', () => {
+    options.onCall?.()
+    return { result: { ok: true } }
+  })
   let run = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool = ''] = e.argv
@@ -523,6 +528,15 @@ test('with the push gate on, a push while a re-check is still running is held', 
 test('a relative file a Bash command writes is read from the shell folder an earlier cd left, not the session root', async ($, on) => {
   const { clock, calls, toasts } = await start($, on, { runs: [[], [NEW_STG]], cwd: `${ROOT}/models/staging` })
   await $.tool.call(command(`sed -i 's/a/b/' stg_orders.sql`))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('a cd in the same Bash command is read from the folder the command started in, not the one it left the shell in', async ($, on) => {
+  const options: Options = { runs: [[], [NEW_STG]], cwd: ROOT, onCall: () => (options.cwd = `${ROOT}/models/staging`) }
+  const { clock, calls, toasts } = await start($, on, options)
+  await $.tool.call(command(`cd models/staging && sed -i 's/a/b/' stg_orders.sql`))
   await endTurn($, clock, 't1')
   expect(calls).toHaveLength(2)
   expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])

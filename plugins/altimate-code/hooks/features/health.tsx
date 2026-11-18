@@ -695,6 +695,8 @@ export function pushRefusal(blocks: unknown, command: string, issues: readonly H
  * they have new health issues. A check that cannot run or does not finish holds it too.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
+  // Where the shell is before this command runs: its own `cd`s are read from there, and `bashAfter` sees the folder after them.
+  if (/\b(cd|pushd)\b/.test(e.command)) shellBefore = await shellFolder($)
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) return null
   // The whole decision, folder lookups included, is bounded inside the chain's deadline: past it the gate is given up on and the push runs.
   const decided = await within($, GATE_WAIT_MS, decide($, e))
@@ -724,6 +726,8 @@ async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string }
   return pushRefusal(options.healthBlocksPush, e.command, state?.issues ?? []) ?? 'run'
 }
 
+let shellBefore: string | null = null
+
 /** The folder the session's shell is in now; the session's root when the host does not say. */
 async function shellFolder($: EngineInterface): Promise<string> {
   return (await $.session.cwd().catch(() => null)) || (await $.session.root().catch(() => ''))
@@ -733,7 +737,9 @@ async function shellFolder($: EngineInterface): Promise<string> {
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   const root = await $.session.root().catch(() => '')
   // A relative name is relative to the folder the session's shell is in now: an earlier `cd` moved it.
-  const here = await shellFolder($)
+  // A command with its own `cd` is read from the folder it started in, which the gate noted.
+  const here = shellBefore ?? (await shellFolder($))
+  shellBefore = null
   for (const name of filesWrittenBy(e.command)) await markChanged($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${here}/${name}`, root)
 }
 
