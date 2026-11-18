@@ -622,6 +622,13 @@ test('an unquoted multi-word value under a secret key is a secret, whatever it s
   expect(resultsInvocations(`dbt build --vars '{token_limit: 3 , country: US}'`, ROOT)).toHaveLength(1)
 })
 
+test('an ampersand inside a quoted argument does not make a foreground call a background one', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-q'))
+  const first: any = await $.tool.call({ tool: 'Bash', command: `dbt build --vars '{source_url: "https://example.com/d?page=2&limit=10"}'`, tool_use_id: 'one' })
+  expect(own(first.context)).toEqual(['build: 1 ok'])
+  expect(kept(stored)).toHaveLength(1)
+})
+
 test('an authorization key in --vars is a secret', async ($, on) => {
   expect(resultsInvocations(`dbt build --vars '{"authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{"Authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])

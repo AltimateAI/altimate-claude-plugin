@@ -388,7 +388,7 @@ export const runsOperation = (command: string) => parseDbtCommand(command).some(
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
-const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(?<![&>])&(?![&>])/.test(e.command)
+const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(?<![&>])&(?![&>])/.test(e.command.replace(/"(?:[^"\\]|\\.)*"|'[^']*'|\\./g, ' '))
 /** The host moved the call to the background: its result names the task (`result.result.backgroundTaskId`). */
 const hostBackgrounded = (result: ToolCallResult | undefined) => {
   const inner = (result as { result?: { backgroundTaskId?: unknown } } | undefined)?.result
