@@ -337,25 +337,29 @@ const normal = (path: string) => path.replace(/\\/g, '/')
 /** A path spelled one way, so the same file named two ways compares equal. */
 const tidy = (path: string) => normal(path).replace(/\/(?:\.\/)+/g, '/').replace(/\/{2,}/g, '/')
 
-/** The dbt project the file is a model file of: its closest dbt_project.yml above it, and the file under one of that project's model folders. */
 /**
  * The model as the manifest's unique_id, so a model of the same name in another package is never the one
- * traced. Falls back to the plain name when the manifest cannot be read or the project's own model is not
- * one match (versioned models share a name).
+ * traced. A model the manifest does not list, or a manifest that cannot be read, gets the id dbt would
+ * give it, which finds nothing rather than another package's model. Versioned models share a name; the
+ * latest version stands for them.
  */
 async function modelRef($: EngineInterface, project: Project, model: string, stem = model): Promise<string> {
   if (!project.package) return model
+  const built = `model.${project.package}.${model}`
   try {
     const nodes = (JSON.parse((await $.fs.read(project.manifest)) ?? '') as { nodes?: Record<string, { resource_type?: string; package_name?: string; name?: string; original_file_path?: string }> }).nodes ?? {}
-    const own = Object.entries(nodes).filter(([, node]) => node?.resource_type === 'model' && node.package_name === project.package)
-    const named = own.filter(([, node]) => node.name === model || (node.original_file_path ?? '').replace(/\.sql$/i, '').split('/').pop() === stem)
-    const only = named[0]
-    return named.length === 1 && only ? only[0] : model
+    const named = Object.entries(nodes)
+      .filter(([, node]) => node?.resource_type === 'model' && node.package_name === project.package)
+      .filter(([, node]) => node.name === model || (node.original_file_path ?? '').replace(/\.sql$/i, '').split('/').pop() === stem)
+      .map(([id]) => id)
+      .sort()
+    return named[named.length - 1] ?? built
   } catch {
-    return model
+    return built
   }
 }
 
+/** The dbt project the file is a model file of: its closest dbt_project.yml above it, and the file under one of that project's model folders. */
 async function projectOf($: EngineInterface, file: string): Promise<Project | null> {
   const path = normal(file)
   let dir = path.slice(0, path.lastIndexOf('/'))

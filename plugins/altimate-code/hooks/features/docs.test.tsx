@@ -545,20 +545,20 @@ test('a source model is traced by the unique_id of the project\'s own model, not
   expect(traced.map(args => args.model)).toEqual(['model.shop.stg_orders'])
 })
 
-test('a versioned model, whose unique_id is not built from its file name, is still found by its file name or its name', async ($, on) => {
+test('a versioned model, whose unique_id is not built from its file name, is traced as its latest version', async ($, on) => {
   const manifest = { 'model.shop.stg_orders.v1': NODE('shop', 'stg_orders', 'stg_orders_v1'), 'model.shop.stg_orders.v2': NODE('shop', 'stg_orders', 'stg_orders_v2') }
   const { clock, toolArgs } = await start($, on, { manifest })
   await $.tool.call(EDIT)
   await clock.settle()
   const traced = toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify')
-  expect(traced.map(args => args.model)).toEqual(['stg_orders'])
+  expect(traced.map(args => args.model)).toEqual(['model.shop.stg_orders.v2'])
 })
 
-test('without a readable manifest a source model is traced by its name', async ($, on) => {
+test('without a readable manifest a source model is traced by the id its own package gives it, never a bare name', async ($, on) => {
   const { clock, toolArgs } = await start($, on)
   await $.tool.call(EDIT)
   await clock.settle()
-  expect(toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify').map(args => args.model)).toEqual(['stg_orders'])
+  expect(toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify').map(args => args.model)).toEqual(['model.shop.stg_orders'])
 })
 
 test('a request the engine refused leaves the offers and clears nothing Apply asked for', async ($, on) => {
