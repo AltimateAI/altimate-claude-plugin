@@ -479,6 +479,44 @@ test('the configured config path is passed to the tool, empty means the defaults
   for (const bad of ['/etc/hosts', 'C:\\x.yml', '../x.yml', 'a/../../x.yml']) expect(configPathProblem(bad)).toContain('inside the dbt project')
 })
 
+test('a comment never hides the push that follows it, and a push inside a comment is not a push', () => {
+  expect(isGitPush("# Push this branch's commits\ngit push origin HEAD")).toBe(true)
+  expect(isGitPush("git add -A # don't forget\ngit push")).toBe(true)
+  expect(isGitPush('echo x # ; git push')).toBe(false)
+  expect(isGitPush('git status # git push')).toBe(false)
+  expect(isGitPush('echo a#b && git push')).toBe(true)
+})
+
+test('an unnamed YAML file edited before the baseline lands does not empty the baseline', async ($, on) => {
+  let release!: () => void
+  const until = new Promise<void>(resolve => (release = resolve))
+  const { clock, toasts } = await start($, on, { runs: [[OLD_STG, OLD_FCT]], hold: { at: 0, until } })
+  await $.tool.call(edit(`${ROOT}/models/_sources.yml`))
+  await endTurn($, clock, 't1')
+  release()
+  await clock.settle()
+  expect(toasts).toEqual([])
+})
+
+test('a config path outside the project runs no check and says so', { options: { healthConfigPath: '/etc/hosts' } }, async ($, on) => {
+  const { calls, toasts } = await start($, on, { runs: [[]] })
+  expect(calls).toHaveLength(0)
+  expect(toasts.join('\n')).toContain('inside the dbt project')
+})
+
+test('with the push gate on, a push while a re-check is still running is held', { options: { healthBlocksPush: true } }, async ($, on) => {
+  let release!: () => void
+  const until = new Promise<void>(resolve => (release = resolve))
+  const { clock } = await start($, on, { runs: [[], [NEW_STG]], hold: { at: 1, until } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  const pending = $.tool.call(command('git push'))
+  await clock.advance(GATE_WAIT_MS + 100)
+  const denied: any = await pending
+  expect(denied?.deny).toContain('could not be read in time')
+  release()
+})
+
 test('git push is found by its command words, not by its text', () => {
   for (const line of [
     'git push',

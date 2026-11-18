@@ -263,7 +263,11 @@ export function simpleCommands(line: string): string[][] {
   }
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!
-    if (c === "'") {
+    if (c === '#' && !inWord) {
+      // An unquoted `#` at the start of a word is a comment to the end of the line: its quotes and commands are text.
+      const end = line.indexOf('\n', i)
+      i = end < 0 ? line.length : end - 1
+    } else if (c === "'") {
       quoted = true
       const close = line.indexOf("'", i + 1)
       word += line.slice(i + 1, close < 0 ? line.length : close)
@@ -468,11 +472,11 @@ async function isModelFile($: EngineInterface, file: string): Promise<boolean> {
 
 /** Asks altimate-code's dbt_health for the project's insights. */
 async function check($: EngineInterface): Promise<HealthRun> {
-  const until = (await $.clock.now()) + CHECK_MS
   const badConfig = configPathProblem(options.healthConfigPath)
   if (badConfig) return { problem: badConfig }
   let result: Awaited<ReturnType<typeof runTool>>
   try {
+    const until = (await $.clock.now()) + CHECK_MS
     result = await runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until })
   } catch (error) {
     return { problem: `Project health could not run: ${String(error).split('\n')[0]}` }

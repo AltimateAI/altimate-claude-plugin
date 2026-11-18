@@ -31,14 +31,14 @@
     },
     "healthBlocksPush": {
       "type": "boolean",
-      "title": "Project health blocks git push (not used yet)",
-      "description": "Not used yet: the project health check isn't in this version, so git push is never refused. When it ships, on refuses a push while the check finds new issues in the models you changed; off only shows them.",
+      "title": "Project health blocks git push",
+      "description": "On refuses a git push while the project health check finds new issues in the models you changed this session; off only shows them.",
       "default": false
     },
     "healthConfigPath": {
       "type": "string",
       "title": "Project health check config",
-      "description": "Not used yet: the project health check isn't in this version. Path to a DataPilot health check config file, relative to the dbt project. Empty uses the default checks.",
+      "description": "Path to a DataPilot health check config file, relative to the dbt project. Empty uses the default checks.",
       "default": ""
     },
     "commentsPollSeconds": {
