@@ -724,11 +724,27 @@ test('the folder of a run is the one the artifact was read from: a build in a su
   expect(kept(stored).map(run => [run.id, !!run.retryLine])).toEqual([['inv-b', true], ['inv-a', false]])
 })
 
+test('a dbt call that starts while another call reads its artifact: the first is left out, the later one is recorded', async ($, on) => {
+  let release: () => void = () => {}
+  const gate = new Promise<void>(resolve => (release = resolve))
+  const { stored } = await start($, on, () => view('inv-x', undefined, 'build', AFTER), { duringRead: () => gate })
+  const first = $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'one' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const second = $.tool.call({ tool: 'Bash', command: 'dbt build -s b', tool_use_id: 'two' })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  release()
+  const [one, two]: any[] = await Promise.all([first, second])
+  expect(own(one.context)).toEqual([NOT_RECORDED])
+  expect(kept(stored).map(run => run.commandLine)).toEqual(['cd /repo && dbt build -s b'])
+  expect(own(two.context)).toEqual(['build: 1 ok'])
+})
+
 test('a launcher that changes its own directory is not recorded: the folder dbt ran in is not guessed', () => {
   expect(resultsInvocations('uv run --directory transform dbt build', ROOT)).toEqual([])
   expect(resultsInvocations('uv run dbt build', ROOT)).toHaveLength(1)
   expect(resultsInvocations('poetry run -P transform dbt build', ROOT)).toEqual([])
   expect(resultsInvocations('pdm run -p transform dbt build', ROOT)).toEqual([])
+  expect(resultsInvocations('uvx --from dbt-core --directory transform dbt build', ROOT)).toEqual([])
   // A python version for uv, or text inside a dbt option's value, does not move the folder.
   expect(resultsInvocations('uv run -p 3.12 dbt build', ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt --vars '{"dir": "-C x"}' build`, ROOT)).toHaveLength(1)

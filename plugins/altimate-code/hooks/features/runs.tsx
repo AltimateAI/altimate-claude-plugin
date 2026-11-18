@@ -196,14 +196,15 @@ const PROJECT_DIR_FLAG = /(?:^|\s)--project-dir(?:=|\s+)("[^"]+"|'[^']+'|\S+)/
 /** The options of each launcher that make it run its command in another folder (`dbt-command.ts` knows them as options that take a value). */
 const LAUNCHER_MOVES: Record<string, RegExp> = {
   uv: /(?:^|\s)(?:--directory|--project)(?:=|\s)/,
+  uvx: /(?:^|\s)(?:--directory|--project)(?:=|\s)/,
   poetry: /(?:^|\s)(?:-C|-P|--directory|--project)(?:=|\s)/,
   pdm: /(?:^|\s)(?:-p|--project)(?:=|\s)/,
 }
 const launcherMoves = (head: string) => {
-  const launcher = /(?:^|[\s;&|(])(uv|poetry|pdm)\s+run(?=\s)/.exec(head)
+  const launcher = /(?:^|[\s;&|(])(?:(uv|poetry|pdm)\s+run|(uvx))(?=\s)/.exec(head)
   if (!launcher) return false
   const rest = head.slice(launcher.index + launcher[0].length)
-  return LAUNCHER_MOVES[launcher[1]!]!.test(rest.slice(0, Math.max(0, rest.search(/(?:^|[\s/])dbt(?:\s|$)/))))
+  return LAUNCHER_MOVES[(launcher[1] ?? launcher[2])!]!.test(rest.slice(0, Math.max(0, rest.search(/(?:^|[\s/])dbt(?:\s|$)/))))
 }
 
 /** One dbt invocation that may have written the results. */
@@ -483,7 +484,8 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
     ended - began.at > IN_FLIGHT_MS ||
     live.length > 0 ||
     finished.some(other => other.ended > began.at && other.at < ended)
-  finished.push({ at: began.at, ended })
+  const entry = { at: began.at, ended }
+  finished.push(entry)
   // Kept back to the oldest call still running, never past the limit.
   const cutoff = Math.max(ended - IN_FLIGHT_MS, Math.min(ended, ...live.map(other => other.at)))
   while (finished.length > 500 || (finished[0] && finished[0].ended < cutoff)) finished.shift()
@@ -524,6 +526,14 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
       }),
     ),
   )
+  // The read took time: another dbt call that started after this one ended and has finished since may have replaced the artifact
+  // meanwhile (one still running writes when it ends, and is told so then), and the file would then be recorded under this call's command line. Nothing is recorded, and Claude is told so.
+  const readEnded = await $.clock.now()
+  entry.ended = readEnded
+  if (finished.some(other => other !== entry && other.at >= ended)) {
+    await clearRetries($)
+    return OVERLAP_LINE
+  }
   // This call may have replaced the artifact and it could not be read: what was recorded can no longer be retried from it.
   if (unreadable) {
     await clearRetries($)
