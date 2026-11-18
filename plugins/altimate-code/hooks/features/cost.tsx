@@ -112,6 +112,7 @@ async function sessionDir($: EngineInterface, fallback: string | null): Promise<
   return read ? read.dir : `${UNKNOWN}${++unreadable}`
 }
 
+const UNREADABLE_DENY = 'The project folder could not be read in time, so the scan cannot be estimated. Run the same command again.'
 const UNKNOWN = '\u0000unknown-'
 const isUnknown = (dir: string | null) => dir?.startsWith(UNKNOWN) === true
 
@@ -231,7 +232,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
   if (invocations.length === 0) return null
   // Which project this is cannot be told, so nothing is estimated for it (two estimates could start dbt in one project together) and nothing is let through.
-  if (isUnknown(dir)) return { deny: 'The project folder could not be read in time, so the scan cannot be estimated. Run the same command again.' }
+  if (isUnknown(dir)) return { deny: UNREADABLE_DENY }
   // An edit or a command that changed the project while the answers were coming in makes them void.
   const startedAt = generation
   const state = (await read($, costAtom)) ?? FRESH
@@ -249,6 +250,8 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // One wait for the whole command, however many queries it names.
   const waitUntil = (await $.clock.now()) + GATE_WAIT_MS
   const pending: string[] = []
+  // Any lookup of the folder that goes unanswered during this pass refuses it whole, whatever the later answers say.
+  const lostBefore = unreadable
   // What this pass already has, so the same query named twice on the line is asked for once.
   const taken = new Map<string, Answer>()
   let failed = false
@@ -303,6 +306,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     // Nothing is cleared here: the change already cleared what was older, and a newer pass's estimates are its own.
     return changedDeny(e.command)
   }
+  if (unreadable !== lostBefore) return { deny: UNREADABLE_DENY }
 
   // A finished command's answers are taken: a later one asks again. A pending one keeps them for its retry.
   if (pending.length === 0) for (const key of taken.keys()) inflight.delete(key)

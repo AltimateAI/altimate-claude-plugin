@@ -242,6 +242,15 @@ for (const n of [2, 3, 4, 5, 6]) {
   })
 }
 
+test('a lookup of the session folder lost on one model of a line is not made good by a later model that has no dry run', async ($, on) => {
+  const options: Options = { answers: { first: UNDER, second: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  options.stallNth = { n: 3, seen: 0 }
+  const pending = $.tool.call(bash('dbt run -s first && dbt run -s second')) as Promise<any>
+  for (let i = 0; i < 70; i++) await clock.advance(100)
+  expect(((await pending) as any).deny).toBeDefined()
+})
+
 test('commands that scan nothing are not looked at', async ($, on) => {
   const { clock, estimates, ran } = await start($, on)
   for (const command of ['dbt test -s orders', 'dbt compile -s orders', 'ls', 'git status']) await $.tool.call(bash(command))
