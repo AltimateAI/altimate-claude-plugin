@@ -52,6 +52,8 @@ let offered = false
 const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/[^/]+\.ya?ml|[^/]+\.tf)$/i
 // What marks such a file, or a command, as about warehouses or clusters.
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
+// What marks a file as Databricks config at all: a Terraform `databricks_` resource, or a bundle.
+const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
 const DATABRICKS_COMMAND = /(?:^|[\s;&|(])databricks\s+(?:warehouses|clusters|bundle|jobs)\b/
 const BAND_READ_LIMIT = 200_000
 
@@ -389,9 +391,9 @@ export function mentions(text: string, name: string): boolean {
 }
 
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
-async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text)): Promise<{ text: string } | null> {
+async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
   const report = await read($, reportAtom)
-  const named = report?.findings.find(one => mentions(text, one.resourceName) || mentions(text, one.resourceId))
+  const named = report?.findings.find(one => mentions(text, one.resourceName) || (one.resourceType !== 'job' && mentions(text, one.resourceId)))
   if (named) return { text: `${named.resourceName}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
   if (report || offered || !aboutCompute) return null
   offered = true
@@ -438,7 +440,7 @@ export function register(on: On, _context: FeatureContext) {
         <Box flexDirection="column" gap={1}>
           <Text bold>Databricks savings check</Text>
           <Text dimColor>{running.label}</Text>
-          <Text dimColor>Read-only queries on Databricks system tables, with your own connection. Nothing is sent to Altimate.</Text>
+          <Text dimColor>Read-only queries on Databricks system tables, with your own connection; Databricks starts its SQL warehouse if it is stopped. Nothing is sent to Altimate.</Text>
         </Box>
       )
     }
@@ -521,9 +523,11 @@ export function register(on: On, _context: FeatureContext) {
                 ))}
               </Box>
               {choice ? (
-                <Text color={choice.fits ? 'success' : 'warning'}>
+                <Text color={choice.fits && choice.monthlySaving > 0 ? 'success' : 'warning'}>
                   {choice.label === 'SERVERLESS'
-                    ? `As serverless: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(choice.monthlySaving)} less: it bills only while queries run.`
+                    ? choice.monthlySaving > 0
+                      ? `As serverless: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(choice.monthlySaving)} less: it bills only while queries run.`
+                      : `As serverless: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(-choice.monthlySaving)} more: its queries keep it busy most of the time.`
                     : choice.fits
                       ? `At ${choice.label}: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(choice.monthlySaving)} less. Its ${choice.cores} cores cover the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use).`
                       : `At ${choice.label}: ${dollars(choice.monthlyCost)} a month, but its ${choice.cores} cores are short of the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use): queries would queue.`}

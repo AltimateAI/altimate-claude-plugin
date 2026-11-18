@@ -712,3 +712,38 @@ test('the first baseline stays: a second run after a resize still says what chan
   expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\./ })).toBeDefined()
   await ui.unmount()
 })
+
+test('a serverless choice that would cost more says so, in the warning colour', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const serverless = answer.metadata.report.what_if[0].choices[0]
+  serverless.monthly_cost = 300
+  serverless.monthly_saving = answer.metadata.report.what_if[0].current_monthly_cost - 300
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'whatif-0-0' })
+  await clock.settle()
+  const line = (await ui.find({ type: 'Text', text: /^As serverless: \$300 a month instead of \$118, \$182 more: / })) as any
+  expect(line).toBeDefined()
+  expect(line.props.color).toBe('warning')
+  await ui.unmount()
+})
+
+test('Terraform that is not about Databricks gets no offer; a job is not named by its numeric id', async ($, on) => {
+  const files = {
+    [`${ROOT}/infra/eks.tf`]: 'resource "aws_eks_cluster" "main" { name = "main" }',
+    [`${ROOT}/infra/net.tf`]: 'resource "databricks_sql_endpoint" "bi" { name = "BI" }',
+  }
+  const { clock } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/eks.tf`, old_string: 'main', new_string: 'main' })
+  await clock.settle()
+  let band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+  await band.unmount()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/net.tf`, old_string: 'BI', new_string: 'BI' })
+  await clock.settle()
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+  await band.unmount()
+})
