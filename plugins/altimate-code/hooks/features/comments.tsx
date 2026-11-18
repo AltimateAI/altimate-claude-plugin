@@ -34,6 +34,7 @@ const MAX_BLOCK_CHARS = 6000
 export const FIRST_READ_WAIT_MS = 3_000
 // Files a docs thread can sit on: models, seeds, snapshots, their YAML and docs blocks.
 const MODEL_FILE = /\.(sql|ya?ml|py|md|csv)$/i
+const PARTIAL_NOTE = 'Not every open thread is listed: the service sent only part of the shares, or the list was cut for size.'
 const UNCONFIRMED_NOTE = 'An earlier post is not confirmed yet: press Refresh first.'
 const LOCKED_NOTE = ' The thread stays locked until the list shows the post or a few minutes have passed (the list can lag): press Refresh later.'
 const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids'])
@@ -41,7 +42,7 @@ const MIN_POLL_SECONDS = 30
 const MAX_POLL_SECONDS = 86_400
 const NEEDS_NEWER_CLI = 'Team comments need a newer altimate-code (this one has no docs_share_comments tool): npm install -g altimate-code@latest'
 
-const INITIAL: CommentsState = { root: null, project: null, threads: [], loadedAt: null, loading: false, needs: null, error: null, note: null, drafts: {}, posting: null }
+const INITIAL: CommentsState = { root: null, project: null, threads: [], loadedAt: null, loading: false, needs: null, error: null, partial: null, note: null, drafts: {}, posting: null }
 
 const state = atom({ plugin: 'altimate-code', key: 'comments' } as const, null, { shape: 'comments-1' })
 
@@ -77,6 +78,8 @@ const LIST_LAG_MS = 330_000
 const resolvedAt = new Map<string, number>()
 // Folders already searched for a dbt project in vain.
 const searched = new Set<string>()
+// Folders inside the loaded project known to hold no project of their own.
+const within = new Set<string>()
 
 /** The `commentsPollSeconds` (never under 30 s) and `commentsInContext` settings. */
 export function readOptions(options: Record<string, unknown>): { pollSeconds: number; inContext: boolean } {
@@ -129,6 +132,7 @@ export function register(on: On, context: FeatureContext) {
           </Text>
           {current.root === null && <Text dimColor>No dbt project found yet.</Text>}
           {current.error && <Text color="warning">{current.error}</Text>}
+          {current.partial && <Text color="warning">{current.partial}</Text>}
           {current.note && <Text color="warning">{current.note}</Text>}
         </Box>
         {groups.map(group => (
@@ -202,6 +206,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   loadRun = null
   posting = false
   searched.clear()
+  within.clear()
   interactive = e.isInteractive !== false
   // Nothing of an earlier session is shown in this one.
   await change($, () => INITIAL)
@@ -296,9 +301,11 @@ export async function readOrEditAfter($: EngineInterface, e: FileCall, result: T
 // ---------------------------------------------------------------------------------------------------
 
 /** The dbt project above the folder and its name, or null when there is none. */
-async function projectOf($: EngineInterface, start: string): Promise<{ root: string; project: string | null } | null> {
+async function projectOf($: EngineInterface, start: string, stop?: string): Promise<{ root: string; project: string | null } | null> {
   let dir = start
   for (let i = 0; i < 40; i++) {
+    // Looking for a project nested in the loaded one: its own folder is not looked at again.
+    if (stop !== undefined && slashes(dir) === slashes(stop)) return null
     if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) {
       const text = await $.fs.read(`${dir}/dbt_project.yml`).catch(() => '')
       return { root: dir, project: projectName(text) }
@@ -322,10 +329,16 @@ async function attach($: EngineInterface, dir: string) {
   const mine = generation
   const known = (await get($)).root
   // A folder inside the project already loaded belongs to it; one outside may belong to another project.
-  if (known && (slashes(dir) === slashes(known) || slashes(dir).startsWith(`${slashes(known).replace(/\/+$/, '')}/`))) return
+  const inside = known && (slashes(dir) === slashes(known) || slashes(dir).startsWith(`${slashes(known).replace(/\/+$/, '')}/`))
+  if (inside && (slashes(dir) === slashes(known!) || within.has(dir))) return
   // A file of an installed package belongs to that package's own project, not to the one being worked on.
   if (searched.has(dir) || /[\\/](dbt_packages|dbt_modules|node_modules)[\\/]/.test(dir)) return
-  const found = await projectOf($, dir)
+  // Inside the loaded project, only a project nested below it can claim the folder.
+  const found = await projectOf($, dir, inside ? known! : undefined)
+  if (inside && !found && mine === generation) {
+    within.add(dir)
+    return
+  }
   // The lookup may span a session's end: its answer is not applied to the next one.
   if (mine !== generation) return
   if (!found) {
@@ -371,7 +384,7 @@ async function open($: EngineInterface) {
   await load($)
 }
 
-type Listed = { threads?: unknown[] } | null
+type Listed = { threads?: unknown[]; incomplete?: boolean; truncated?: boolean } | null
 
 /** True when the CLI has no such tool, or only the placeholder one. */
 function lacksTool(text: string): boolean {
@@ -429,6 +442,7 @@ async function fetchThreads($: EngineInterface) {
     // An answer after the poll stopped on a refusal (signed in again since) is the way back to polling.
     if (mine === generation) startPoll($)
     const now = await $.clock.now()
+    const partial = listed.incomplete === true || listed.truncated === true
     // A thread resolved here stays out until the cache has caught up with it.
     const threads = listed.threads
       .map(toThread)
@@ -448,7 +462,8 @@ async function fetchThreads($: EngineInterface) {
       const seen =
         pending !== null &&
         current.root === pending.root &&
-        (pending.action === 'resolve' ? there === undefined : there?.messages.some(message => !pending.before.has(message.id) && sameText(message.text, pending.text)) === true)
+        // A thread missing from a partial list may only be one the list did not reach.
+        (pending.action === 'resolve' ? there === undefined && !partial : there?.messages.some(message => !pending.before.has(message.id) && sameText(message.text, pending.text)) === true)
       const freed = pending !== null && (seen || now - pending.at >= LIST_LAG_MS)
       if (freed) uncertain = null
       return {
@@ -457,6 +472,7 @@ async function fetchThreads($: EngineInterface) {
         loadedAt: now,
         loading: false,
         error: null,
+        partial: partial ? PARTIAL_NOTE : null,
         posting: freed ? null : current.posting,
         // A reply that is in the docs is sent: its draft is not kept to be sent again.
         drafts: freed && seen && pending.action === 'reply' ? { ...current.drafts, [pending.key]: '' } : current.drafts,
@@ -643,12 +659,16 @@ export function placeThread(thread: CommentsThread, text: string | null): number
   if (text !== null && wanted) {
     const body = text.replace(/\r\n/g, '\n')
     const word = /^\w+$/.test(wanted)
+    // The service gives the highlight with its whitespace collapsed: any run of whitespace matches.
+    const pattern = new RegExp(wanted.split(/\s+/).map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+'), 'g')
     const lines: number[] = []
     // Newlines are counted from the previous match on, so placing a thread reads the text once.
     let line = 1
     let counted = 0
-    for (let at = body.indexOf(wanted); at >= 0 && lines.length < 500; at = body.indexOf(wanted, at + 1)) {
-      if (word && (/\w/.test(body[at - 1] ?? '') || /\w/.test(body[at + wanted.length] ?? ''))) continue
+    for (let found = pattern.exec(body); found !== null && lines.length < 500; found = pattern.exec(body)) {
+      const at = found.index
+      pattern.lastIndex = at + 1
+      if (word && (/\w/.test(body[at - 1] ?? '') || /\w/.test(body[at + found[0].length] ?? ''))) continue
       for (let i = body.indexOf('\n', counted); i >= 0 && i < at; i = body.indexOf('\n', counted)) {
         line++
         counted = i + 1

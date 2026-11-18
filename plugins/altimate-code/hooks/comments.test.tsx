@@ -28,7 +28,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void>; throwPost?: boolean; failListText?: string } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void>; throwPost?: boolean; failListText?: string; listMeta?: Record<string, unknown> } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -63,7 +63,7 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
       const call = cli.filter(c => c.args.action === 'list').length - 1
       const threads = options.listThreads?.(call) ?? options.threads ?? [RAW]
       if ((options.failListFrom !== undefined && call >= options.failListFrom) || options.failListCalls?.includes(call)) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: options.failListText ?? 'service unavailable', metadata: {} }), stderr: '' } }
-      const answer = () => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } })
+      const answer = () => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads, ...options.listMeta } }), stderr: '' } })
       const held = options.holdLists?.[call] ?? (options.holdListCall?.n === call ? options.holdListCall.until : options.holdList)
       if (held) return held.then(answer)
       return answer()
@@ -660,4 +660,29 @@ test('opening /comments keeps the project that was read last, not the session fo
   await $.command.run({ command: 'comments', args: '' } as any)
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop', 'other_shop'])
+})
+
+test('a resolve that may have landed is not confirmed by a partial list that lacks the thread, and the pane says the list is partial', async ($, on) => {
+  const { clock } = await start($, on, { timeoutPost: true, listThreads: call => (call === 0 ? [RAW] : []), listMeta: { incomplete: true } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  // The note that the thread stays locked is not cleared by a list that may simply not have reached it.
+  expect(await ui.find({ type: 'Text', text: /stays locked/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Not every open thread is listed/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a highlight whose whitespace the service collapsed is still found on its line', () => {
+  const thread = toThread({ ...RAW, highlight: 'select id, sum(amount)', range: { start: { line: 8 }, end: { line: 8 } } })!
+  expect(placeThread(thread, 'a\n\nselect\n  id,\n  sum(amount) as revenue\n')).toBe(3)
+})
+
+test('a read inside a dbt project nested in the loaded one loads the nested project’s threads', async ($, on) => {
+  const nested = '/repo/child'
+  const { clock, cli } = await start($, on, { otherProject: nested, files: { [FILE]: SQL, [`${nested}/models/orders.sql`]: SQL } })
+  await $.tool.call({ tool: 'Read', file_path: `${nested}/models/orders.sql` })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop'])
 })

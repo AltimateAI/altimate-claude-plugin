@@ -263,6 +263,8 @@ export interface CommentsState {
   needs: string | null
   /** Why the last load failed. */
   error: string | null
+  /** Set when the last list was only part of the threads: what to tell the person. */
+  partial: string | null
   /** The outcome of the last post. */
   note: string | null
   /** Reply text typed so far, by `shareId:groupId`. */
