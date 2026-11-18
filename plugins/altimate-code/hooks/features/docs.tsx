@@ -346,7 +346,8 @@ async function modelRef($: EngineInterface, project: Project, model: string, ste
     const nodes = (JSON.parse((await $.fs.read(project.manifest)) ?? '') as { nodes?: Record<string, { resource_type?: string; package_name?: string; name?: string; original_file_path?: string }> }).nodes ?? {}
     const own = Object.entries(nodes).filter(([, node]) => node?.resource_type === 'model' && node.package_name === project.package)
     const named = own.filter(([, node]) => node.name === model || (node.original_file_path ?? '').replace(/\.sql$/i, '').split('/').pop() === stem)
-    return named.length === 1 ? named[0][0] : model
+    const only = named[0]
+    return named.length === 1 && only ? only[0] : model
   } catch {
     return model
   }
