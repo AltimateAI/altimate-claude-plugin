@@ -28,7 +28,7 @@ const PANE = {
 } as const
 
 /** A dbt project at /repo whose CLI answers docs_share_comments from `threads`; each tool call is recorded. */
-async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void>; throwPost?: boolean } = {}) {
+async function start($: any, on: any, options: { threads?: unknown[]; noTool?: boolean; failPost?: boolean; interactive?: boolean; projectDir?: string; holdList?: Promise<void>; holdListCall?: { n: number; until: Promise<void> }; listThreads?: (call: number) => unknown[]; failListFrom?: number; holdPost?: Promise<void>; files?: Record<string, string>; settle?: boolean; failPostCode?: string; timeoutPost?: boolean; otherProject?: string; holdLists?: Record<number, Promise<void>>; holdExists?: Promise<void>; failListCalls?: number[]; holdTimeoutPost?: Promise<void>; throwPost?: boolean; failListText?: string } = {}) {
   const projectDir = options.projectDir ?? ROOT
   const clock = mock.clock(on)
   const cli: { args: Record<string, unknown>; write: boolean }[] = []
@@ -62,7 +62,7 @@ async function start($: any, on: any, options: { threads?: unknown[]; noTool?: b
     if (args.action === 'list') {
       const call = cli.filter(c => c.args.action === 'list').length - 1
       const threads = options.listThreads?.(call) ?? options.threads ?? [RAW]
-      if ((options.failListFrom !== undefined && call >= options.failListFrom) || options.failListCalls?.includes(call)) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'service unavailable', metadata: {} }), stderr: '' } }
+      if ((options.failListFrom !== undefined && call >= options.failListFrom) || options.failListCalls?.includes(call)) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: options.failListText ?? 'service unavailable', metadata: {} }), stderr: '' } }
       const answer = () => ({ value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads } }), stderr: '' } })
       const held = options.holdLists?.[call] ?? (options.holdListCall?.n === call ? options.holdListCall.until : options.holdList)
       if (held) return held.then(answer)
@@ -630,4 +630,34 @@ test('the first read of a second project waits for that project’s list, as the
   release()
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(done).toBe(true)
+})
+
+test('after the poll stops on a sign-in refusal, a Refresh that works starts it again', async ($, on) => {
+  const { clock, cli } = await start($, on, { failListCalls: [1], failListText: 'API GET /dbt/dbt_docs_share/all failed with status 401' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await clock.advance(900_000)
+  await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').length).toBe(2)
+  // The refusal stopped the poll: nothing is asked while it is signed out.
+  await clock.advance(900_000)
+  await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').length).toBe(2)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').length).toBe(3)
+  await clock.advance(900_000)
+  await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').length).toBe(4)
+  await ui.unmount()
+})
+
+test('opening /comments keeps the project that was read last, not the session folder’s', async ($, on) => {
+  const other = '/other'
+  const { clock, cli } = await start($, on, { otherProject: other, files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
+  await $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await $.command.run({ command: 'comments', args: '' } as any)
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop', 'other_shop'])
 })

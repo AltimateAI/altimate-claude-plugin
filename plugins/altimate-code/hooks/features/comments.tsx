@@ -357,12 +357,17 @@ async function attach($: EngineInterface, dir: string) {
     pendingFor = null
     await load($)
   })
-  // A `-p` run or the SDK has nobody at a pane: it loads once and does not poll.
+  startPoll($)
+}
+
+/** A `-p` run or the SDK has nobody at a pane: it loads once and does not poll. */
+function startPoll($: EngineInterface) {
   if (interactive && poll === null) poll = $.clock.every(pollSeconds * 1000, () => later($, () => load($)))
 }
 
 async function open($: EngineInterface) {
-  await attach($, await $.session.cwd())
+  // The project being read stays the pane's project: only a session with none yet looks at its own folder.
+  if (!(await get($)).root) await attach($, await $.session.cwd())
   await load($)
 }
 
@@ -421,6 +426,8 @@ async function fetchThreads($: EngineInterface) {
       await change($, current => (mine !== generation ? current : { ...current, loading: false, error: oneLine(out.text) || 'Could not load the comments.' }))
       return
     }
+    // An answer after the poll stopped on a refusal (signed in again since) is the way back to polling.
+    if (mine === generation) startPoll($)
     const now = await $.clock.now()
     // A thread resolved here stays out until the cache has caught up with it.
     const threads = listed.threads
