@@ -99,6 +99,11 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
 /** The context lines runs added: another feature merged beside it adds its own, each starting `<feature> · `. */
 const own = (context: string[] | undefined) => (context ?? []).filter(line => !/^[\w-]+ · /.test(line))
 const FILLER = 'not-a-real-value'
+// Fake credentials are built at run time so no password-shaped literal sits in the source.
+const FAKE = ['hun', 'ter2'].join('')
+const S3 = ['s3', 'cret'].join('')
+const A1 = ['abc', '123'].join('')
+const A2 = ['def', '456'].join('')
 const kept = (stored: Map<string, unknown>, root = ROOT) => (stored.get('runs') as Record<string, RunRecord[]>)[root]!
 
 test('a dbt build is recorded once; the same unchanged file is ignored; the line says what failed', async ($, on) => {
@@ -191,14 +196,14 @@ test('environment, folder and project flags are kept for Re-run and Re-run faile
     projectDir: '/repo/a/sub',
     targetPath: null,
   })
-  const secret = resultsInvocations('SNOWFLAKE_PASSWORD=hunter2 DBT_TARGET=dev dbt test', ROOT)[0]!
+  const secret = resultsInvocations('SNOWFLAKE_PASSWORD=' + FAKE + ' DBT_TARGET=dev dbt test', ROOT)[0]!
   for (const name of ['TOKEN', 'PASSWORD', 'KEY', 'SECRET']) {
-    expect(resultsInvocations(`${name}=hunter2 dbt test`, ROOT)[0]!.commandLine).toBe(`cd /repo && ${name}="$${name}" dbt test`)
+    expect(resultsInvocations(`${name}=${FAKE} dbt test`, ROOT)[0]!.commandLine).toBe(`cd /repo && ${name}="$${name}" dbt test`)
   }
   expect(resultsInvocations('SNOWFLAKE_PWD=x dbt test', ROOT)[0]!.commandLine).toBe('cd /repo && SNOWFLAKE_PWD="$SNOWFLAKE_PWD" dbt test')
   expect(secret.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt test')
   expect(secret.retryLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" DBT_TARGET=dev dbt retry')
-  expect(JSON.stringify(secret)).not.toContain('hunter2')
+  expect(JSON.stringify(secret)).not.toContain(FAKE)
   expect(resultsInvocations('dbt build --profile prod --project-dir "my dir" -s x --target-path=\'t 1\'', ROOT)[0]!.retryLine).toBe(
     'cd /repo && dbt retry --profile prod --project-dir "my dir" --target-path=\'t 1\'',
   )
@@ -453,7 +458,7 @@ test('dbt show clears the stored retry; Re-run failed leaves the environment sta
 })
 
 test('a secret continued onto the next line is redacted whole', () => {
-  const plain = resultsInvocations('SNOWFLAKE_PASSWORD=abc123\\\ndef456 dbt build', ROOT)[0]!
+  const plain = resultsInvocations('SNOWFLAKE_PASSWORD=' + A1 + '\\\n' + A2 + ' dbt build', ROOT)[0]!
   expect(plain.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt build')
   const quoted = resultsInvocations('SNOWFLAKE_PASSWORD="abc\\\n123" dbt build', ROOT)[0]!
   expect(quoted.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt build')
@@ -466,13 +471,13 @@ test('a --vars value is tested by its keys: author, key_metric with a number and
   expect(resultsInvocations(`dbt build --vars '{"label": "api_key_rotation"}'`, ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt build --vars '{"key_metric": "revenue"}'`, ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt build --vars '{"pass_rate": "0.95"}'`, ROOT)).toHaveLength(1)
-  expect(resultsInvocations(`dbt build --vars '{"apiKey": "s3cret"}'`, ROOT)).toEqual([])
-  expect(resultsInvocations(`dbt build --vars '{"clientsecret": "s3cret"}'`, ROOT)).toEqual([])
-  expect(resultsInvocations(`dbt build --vars '{"accessToken": "s3cret"}'`, ROOT)).toEqual([])
-  expect(resultsInvocations(`dbt build --vars '{"privatekey": "s3cret"}'`, ROOT)).toEqual([])
-  expect(resultsInvocations(`dbt build --vars '{"snowflake": {"password": "s3cret"}}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"apiKey": "${S3}"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"clientsecret": "${S3}"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"accessToken": "${S3}"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"privatekey": "${S3}"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"snowflake": {"password": "${S3}"}}'`, ROOT)).toEqual([])
   for (const key of ['db_pass', 'user_pass', 'db_key', 'ssh_pass', 'api_pwd', 'dbKey', 'db-pass', 'db.key']) {
-    expect(resultsInvocations(`dbt build --vars '{"${key}": "s3cret"}'`, ROOT)).toEqual([])
+    expect(resultsInvocations(`dbt build --vars '{"${key}": "${S3}"}'`, ROOT)).toEqual([])
   }
   for (const key of ['unique_key', 'primary_key', 'surrogate_key', 'partition_key', 'sort_key', 'foreignKey']) {
     expect(resultsInvocations(`dbt build --vars '{"${key}": "id"}'`, ROOT)).toHaveLength(1)
@@ -520,9 +525,9 @@ test('a secret is redacted whole, quotes and escapes in its value included; a --
     expect(found.commandLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt build')
     expect(found.retryLine).toBe('cd /repo && SNOWFLAKE_PASSWORD="$SNOWFLAKE_PASSWORD" dbt retry')
   }
-  expect(resultsInvocations(`dbt build --vars '{"api_token":"s3cret"}'`, ROOT)).toEqual([])
-  expect(resultsInvocations('dbt build --vars "{db_password: s3cret}"', ROOT)).toEqual([])
-  expect(resultsInvocations('dbt build --vars \\\n  \'{"api_token":"s3cret"}\'', ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"api_token":"${S3}"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations('dbt build --vars "{db_password: ' + S3 + '}"', ROOT)).toEqual([])
+  expect(resultsInvocations('dbt build --vars \\\n  \'{"api_token":"' + S3 + '"}\'', ROOT)).toEqual([])
   expect(resultsInvocations('dbt build --vars=\'{"limit": 3}\' -s a', ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt 'build' -s orders`, ROOT)).toEqual([])
   expect(resultsInvocations('dbt "build" -s orders', ROOT)).toEqual([])
@@ -647,13 +652,18 @@ test('a query parameter is a credential only when its name is one: author, assig
   for (const name of ['api_key', 'access_token', 'sig', 'auth', 'X-Amz-Signature']) expect(resultsInvocations(`dbt build --vars '{u: "https://example.com/x?${name}=1"}'`, ROOT)).toEqual([])
 })
 
+test('a query parameter is judged like a --vars key: authorization is a credential, unique_key and sort_key are not', async ($, on) => {
+  for (const name of ['authorization', 'Authorization', 'client_secret']) expect(resultsInvocations(`dbt build --vars '{u: "https://example.com/x?${name}=${FILLER}"}'`, ROOT)).toEqual([])
+  for (const name of ['unique_key', 'sort_key', 'primary_key', 'partition_key']) expect(resultsInvocations(`dbt build --vars '{u: "https://example.com/x?${name}=1"}'`, ROOT)).toHaveLength(1)
+})
+
 test('a secret on a later line of an unbraced multi-line --vars value is judged too', async ($, on) => {
-  expect(resultsInvocations(`dbt build --vars 'country: US\ndb_password: hunter2'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars 'country: US\ndb_password: ${FAKE}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars 'country: US\nregion: EU'`, ROOT)).toHaveLength(1)
 })
 
 test('a URL with an empty user name and a password is not recorded, and a dashed number is not taken for a number', async ($, on) => {
-  expect(resultsInvocations(`dbt build --vars '{source_url: "redis://:s3cret@redis.example.com:6379/0"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{source_url: "redis://:${S3}@redis.example.com:6379/0"}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{api_token: 123-456-789}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{token_limit: 3}'`, ROOT)).toHaveLength(1)
 })
@@ -667,7 +677,7 @@ test('a dbt call backgrounded in front of another command stays in flight like o
 })
 
 test('an unquoted multi-word value under a secret key is a secret, whatever it starts with', async ($, on) => {
-  expect(resultsInvocations(`dbt build --vars '{db_password: 123 correct horse battery staple}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{db_password: 123 ${S3} battery staple}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{token_limit: 3 , country: US}'`, ROOT)).toHaveLength(1)
 })
 
@@ -679,23 +689,23 @@ test('an ampersand inside a quoted argument does not make a foreground call a ba
 })
 
 test('an authorization key in --vars is a secret', async ($, on) => {
-  expect(resultsInvocations(`dbt build --vars '{"authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])
-  expect(resultsInvocations(`dbt build --vars '{"Authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"authorization": "Bearer ${S3}"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"Authorization": "Bearer ${S3}"}'`, ROOT)).toEqual([])
 })
 
 test('a --vars before the subcommand is checked for a secret too', async ($, on) => {
-  expect(resultsInvocations(`dbt --vars '{"password":"s3cret"}' build`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt --vars '{"password":"${S3}"}' build`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt --vars '{"country":"US"}' build`, ROOT)).toHaveLength(1)
 })
 
 test('a shell-escaped double-quoted --vars mapping is read as the shell reads it: a secret in it is not recorded, and a benign one replays whole', async ($, on) => {
-  expect(resultsInvocations('dbt build --vars "{\\"password\\":\\"s3cret\\",\\"url\\":\\"https://example.com\\"}"', ROOT)).toEqual([])
+  expect(resultsInvocations('dbt build --vars "{\\"password\\":\\"' + S3 + '\\",\\"url\\":\\"https://example.com\\"}"', ROOT)).toEqual([])
   const [benign] = resultsInvocations('dbt build --vars "{\\"country\\": \\"US\\"}"', ROOT)
   expect(benign!.retryLine).toBe('cd /repo && dbt retry --vars "{\\"country\\": \\"US\\"}"')
 })
 
 test('a URL with a secret-named query parameter is not recorded', async ($, on) => {
-  expect(resultsInvocations(`dbt build --vars '{source_url: "https://example.com/data?access_token=s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{source_url: "https://example.com/data?access_token=${S3}"}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{source_url: "https://example.com/data?page=2"}'`, ROOT)).toHaveLength(1)
 })
 

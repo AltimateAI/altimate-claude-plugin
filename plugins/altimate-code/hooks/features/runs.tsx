@@ -175,7 +175,11 @@ const holdsSecret = (value: string) => {
 const varsHoldSecret = (body: string) =>
   [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => holdsSecret(match[1]!.startsWith('"') ? match[1]!.replace(/\\(.)/g, '$1') : match[1]!))
 /** A password in the URL's user part, or a secret-named query parameter (`?access_token=`, `&api_key=`): the URL holds a credential whatever it is named. */
-const CREDENTIAL_URL = /:\/\/[^\s/:@"']*:[^\s@"']+@|:\/\/[^\s"']*[?&;](?:[\w.-]*(?:secret|token|passw|pwd|credential)[\w.-]*|(?:[\w.-]*[._-])?(?:apikey|auth|signature|sig|key)(?:[._-][\w.-]*)?)=/i
+const CREDENTIAL_URL = /:\/\/[^\s/:@"']*:[^\s@"']+@/
+/** A URL's query parameters are judged like `--vars` keys (`authorization` is secret, `unique_key` and `author` are not), plus the signature spellings of signed URLs. */
+const queryHoldsSecret = (text: string) =>
+  [...text.matchAll(/:\/\/[^\s"']*/g)].some(url => [...url[0].matchAll(/[?&;]([\w.-]+)=/g)].some(name => keyIsSecret(name[1]!) || /(?:^|[._-])sig(?:nature)?$/i.test(name[1]!)))
+const holdsCredentialUrl = (text: string) => CREDENTIAL_URL.test(text) || queryHoldsSecret(text)
 const redactAssignments = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 /** A value continued onto the next line (backslash, newline) is one word to the shell: joined before the secret is cut out. */
 const redact = (head: string) => {
@@ -240,7 +244,7 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     // A prefix command (`env`, `time`) after an assignment: the replay would start without it, so it is not replayed.
     if (/(?:^|\s)[A-Za-z_]\w*=/.test(command.slice(0, one.start).split(/&&|\|\||[;\n|]/).pop()!)) continue
     // A URL with a password in it holds a credential whatever it is named.
-    if (CREDENTIAL_URL.test(command.slice(one.start, one.end))) continue
+    if (holdsCredentialUrl(command.slice(one.start, one.end))) continue
     const flagged = (PROJECT_DIR_FLAG.exec(body)?.[1] ?? PROJECT_DIR_ENV.exec(command.slice(one.start, one.subcommandEnd - subcommand.length))?.[1])?.replace(/^['"]|['"]$/g, '')
     // A folder that cannot be told, or a target folder the shell expands, is not guessed: the run is not recorded
     // rather than recorded for another project or replayed from another folder.
