@@ -82,6 +82,7 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
   return { clock, stored, filled, cli, mcpCalls }
 }
 
+const FILLER = 'not-a-real-value'
 const kept = (stored: Map<string, unknown>, root = ROOT) => (stored.get('runs') as Record<string, RunRecord[]>)[root]!
 
 test('a dbt build is recorded once; the same unchanged file is ignored; the line says what failed', async ($, on) => {
@@ -372,8 +373,8 @@ test('a single build whose artifact cannot be read clears the stored retry: it m
 
 test('a command that cannot be replayed faithfully is not recorded: a prefix after an assignment, or a URL with a password', () => {
   expect(resultsInvocations('DBT_TARGET=dev env dbt build', ROOT)).toEqual([])
-  expect(resultsInvocations(`dbt build --vars '{"database_url":"postgres://alice:hunter2@localhost/w"}'`, ROOT)).toEqual([])
-  expect(resultsInvocations('DATABASE_URL=postgres://alice:hunter2@localhost/w dbt build', ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"database_url":"postgres://alice:${FILLER}@localhost/w"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`DATABASE_URL=postgres://alice:${FILLER}@localhost/w dbt build`, ROOT)).toEqual([])
   expect(resultsInvocations('DBT_TARGET=dev dbt build', ROOT)).toHaveLength(1)
   expect(resultsInvocations('cd a && env dbt build', ROOT)).toHaveLength(1)
 })
@@ -411,11 +412,13 @@ test('dbt clean clears the stored retry: it deletes the artifact; dbt docs serve
 })
 
 test('an operation before a build leaves that build retryable; one after it does not', async ($, on) => {
-  const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
+  let reads = 0
+  const { stored } = await start($, on, () => view(reads++ === 0 ? 'inv-a' : 'inv-b', [['model.shop.m', 'error', null]]))
   await $.tool.call({ tool: 'Bash', command: 'dbt run-operation grant && dbt build -s a', tool_use_id: 'first' })
   expect(kept(stored).map(run => run.retryLine)).toEqual(['cd /repo && dbt retry'])
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s b && dbt docs generate', tool_use_id: 'second' })
-  expect(kept(stored).map(run => run.retryLine)).not.toContain('cd /repo && dbt retry')
+  // The second build is a new run (inv-b): it is stored, and its retry is blank because the operation followed it.
+  expect(kept(stored).map(run => [run.id, run.retryLine])).toEqual([['inv-b', ''], ['inv-a', '']])
 })
 
 test('dbt show clears the stored retry; Re-run failed leaves the environment state folder out', async ($, on) => {
@@ -426,6 +429,11 @@ test('dbt show clears the stored retry; Re-run failed leaves the environment sta
   const found = resultsInvocations('DBT_STATE=prod-artifacts DBT_TARGET=dev dbt build --defer', ROOT)[0]!
   expect(found.commandLine).toBe('cd /repo && DBT_STATE=prod-artifacts DBT_TARGET=dev dbt build --defer')
   expect(found.retryLine).toBe('cd /repo && DBT_TARGET=dev dbt retry')
+  // Every spelling that sets the results folder of the retry is left out; --defer-state is not one, dbt retry keeps reading the target folder with it.
+  expect(resultsInvocations('dbt --state prod-artifacts build', ROOT)[0]!.retryLine).toBe('cd /repo && dbt retry')
+  expect(resultsInvocations('dbt --state=prod-artifacts build', ROOT)[0]!.retryLine).toBe('cd /repo && dbt retry')
+  expect(resultsInvocations('DBT_STATE=prod-artifacts dbt --state prod build', ROOT)[0]!.retryLine).toBe('cd /repo && dbt retry')
+  expect(resultsInvocations('DBT_DEFER_STATE=prod-artifacts dbt build', ROOT)[0]!.retryLine).toBe('cd /repo && DBT_DEFER_STATE=prod-artifacts dbt retry')
 })
 
 test('a secret continued onto the next line is redacted whole', () => {
@@ -440,7 +448,14 @@ test('a --vars value is tested by its keys: author, key_metric with a number and
   expect(resultsInvocations(`dbt build --vars '{"author": "data-team"}'`, ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt build --vars '{"pass_rate": 0.9}'`, ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt build --vars '{"label": "api_key_rotation"}'`, ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt build --vars '{"key_metric": "revenue"}'`, ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt build --vars '{"pass_rate": "0.95"}'`, ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt build --vars '{"apiKey": "s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"clientsecret": "s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"accessToken": "s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"privatekey": "s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"snowflake": {"password": "s3cret"}}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"snowflake": {"schema": "raw"}}'`, ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt build --vars '{"limit": 3, "db_password": "x"}'`, ROOT)).toEqual([])
 })
 

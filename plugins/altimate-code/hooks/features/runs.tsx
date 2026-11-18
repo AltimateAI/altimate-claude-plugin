@@ -140,12 +140,20 @@ const SECRET_ASSIGNMENT = /(^|\s)((?=[A-Za-z_])[A-Za-z0-9_]*(?:SECRET|TOKEN|PASS
 const VARS_VALUE = /(?:^|\s)--vars(?:=|\s+)("(?:[^"\\]|\\.)*"|'[^']*'|\S+)/g
 const SECRET_NAME = /(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)/i
 /** The words a `--vars` key is made of (`apiKey`, `db_password`, `auth-token`), lower case. */
-const keyWords = (key: string) => key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/)
-const SECRET_WORDS = new Set(['secret', 'secrets', 'token', 'tokens', 'pass', 'passwd', 'password', 'passwords', 'pwd', 'key', 'keys', 'apikey', 'credential', 'credentials', 'auth'])
-/** `key: value` pairs of a flow-style `--vars` value (JSON or YAML). */
-const VARS_PAIR = /["']?([\w.-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s]+)/g
-/** A key that names a secret, unless its value is a number, a boolean or null: `pass_rate: 0.9` holds none. */
-const pairHoldsSecret = (key: string, value: string) => keyWords(key).some(word => SECRET_WORDS.has(word)) && !/^(?:-?\d[\d.eE+-]*|true|false|null|~)$/i.test(value)
+const keyWords = (key: string) => key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
+/** Words that name a secret wherever they sit in a key, also run into a longer word (`clientsecret`, `accesstoken`). */
+const SECRET_PART = /secret|token|passw|pwd|credential|passphrase/
+/** `key` and `pass` also mean other things (`key_metric`, `pass_rate`): a secret only as the whole key or in a known compound (`api_key`, `privatekey`). */
+const SECRET_KEY = /^(?:pass|keys?)$|(?:api|private|access|secret|encryption|signing|ssh|master|auth)keys?$/
+/** `key: value` pairs of a flow-style `--vars` value (JSON or YAML); a nested mapping's own pairs are found in turn. */
+const VARS_PAIR = /["']?([\w.-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s{[][^,}\s]*)/g
+/** A key that names a secret, unless its value is a number, a boolean or null: `token_limit: 3` holds none. */
+const pairHoldsSecret = (key: string, value: string) => {
+  const words = keyWords(key)
+  const joined = words.join('')
+  const named = SECRET_PART.test(joined) || words.includes('auth') || words.includes('oauth') || SECRET_KEY.test(joined)
+  return named && !/^(?:-?\d[\d.eE+-]*|true|false|null|~)$/i.test(value)
+}
 /** Whether a `--vars` value names a secret. A value that is no `key: value` mapping is tested as a whole text. */
 const holdsSecret = (value: string) => {
   const pairs = [...value.matchAll(VARS_PAIR)]
@@ -164,6 +172,11 @@ const redact = (head: string) => {
 /** The flags `dbt retry` does not take from the run it retries. */
 const VALUE = `"[^"]*"|'[^']*'|\\S+`
 const KEPT_FLAGS = new RegExp(`(?:^|\\s)((?:--(?:project-dir|profiles-dir|target-path|defer-state|target|profile)(?:=(?:${VALUE})|\\s+(?:${VALUE})))|(?:-t\\s+(?:${VALUE})))`, 'g')
+/** `dbt retry` reads the results of the state folder when one is set (`--state`, `DBT_STATE`): the replay leaves it out so it reads the target folder. `--defer-state` only names the deferral's manifest and stays. */
+const withoutState = (head: string) =>
+  head
+    .replace(/(^|\s)DBT_STATE=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[^\s"'\\])*\s*/g, '$1')
+    .replace(new RegExp(`(^|\\s)--state(?:=(?:${VALUE})|\\s+(?:${VALUE}))\\s*`, 'g'), '$1')
 const PROJECT_DIR_FLAG = /(?:^|\s)--project-dir(?:=|\s+)("[^"]+"|'[^']+'|\S+)/
 
 /** One dbt invocation that may have written the results. */
@@ -207,7 +220,7 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
       subcommand,
       commandLine: `${where}${head}${body}`.trim(),
       // `dbt retry` reads the results of the state folder when one is set: the environment's is left out so it reads the target folder.
-      retryLine: `${where}${head.replace(/(^|\s)DBT_STATE=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[^\s"'\\])*\s*/g, '$1')}retry${kept.length ? ` ${kept.join(' ')}` : ''}`.trim(),
+      retryLine: `${where}${withoutState(head)}retry${kept.length ? ` ${kept.join(' ')}` : ''}`.trim(),
       projectDir,
       targetPath: one.targetPath,
     })
