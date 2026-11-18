@@ -384,13 +384,15 @@ function expands(command: string): boolean {
  * default target, so it is only so when the line moves neither: the dbt launcher is plain, nothing
  * precedes the invocation but other dbt invocations, and every flag is one known to leave the query
  * alone, with no expansion on the line. Anything else (another target, defer state, vars, project, a
- * full refresh) is not estimated.
+ * full refresh) is not estimated. Every estimate is of the project as it is when the command starts: what an
+ * earlier step on the same line rebuilds is not known to it, which is the limit of any preflight.
  */
 function isPlainInvocation(command: string, invocation: DbtInvocation, all: DbtInvocation[]): boolean {
   // The shell expands `$` and backticks anywhere on the line (arguments, redirections, an earlier call) into
   // flags or environment this check can't see; a line with many calls is not worth reading call by call.
   if (all.length > MAX_INVOCATIONS || expands(command)) return false
-  if (!PLAIN_LAUNCHER.test(invocation.binary)) return false
+  // A glob or redirect in the arguments leaves the parsed selection incomplete.
+  if (invocation.dynamic || !PLAIN_LAUNCHER.test(invocation.binary)) return false
   let before = command.slice(0, invocation.start)
   for (const earlier of all.filter(one => one.end <= invocation.start).reverse()) {
     before = before.slice(0, earlier.start) + ' ' + before.slice(earlier.end)

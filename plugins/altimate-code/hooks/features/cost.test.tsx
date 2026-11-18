@@ -297,6 +297,7 @@ test('a command that sets its own target, defer state, vars or project is not es
     'uv run --directory other dbt run -s orders',
     "dbt run -s orders --'vars' x",
     'dbt run -s orders --full-refresh',
+    'dbt run -s orders stg_*',
     'dbt run -s orders --full-\\\nrefresh',
     'if true; then cd other; fi; dbt run -s orders',
     'dbt --profiles-dir ci run -s orders',
