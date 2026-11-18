@@ -631,8 +631,8 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const left = waitUntil - (await $.clock.now())
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) return 'pending'
-  // The project may have changed while it ran: that answer is of the old one, and the next pass asks again.
-  if (running.generation !== generation || running.dir !== ((await $.session.cwd().catch(() => seenDir)) ?? null)) {
+  // The project may have changed while it ran (an edit, a /cd, or a dbt run let through meanwhile): that answer is of the old one, and the next pass asks again.
+  if (running.voided || running.generation !== generation || running.dir !== ((await $.session.cwd().catch(() => seenDir)) ?? null)) {
     if (inflight.get(key) === running) inflight.delete(key)
     return 'pending'
   }

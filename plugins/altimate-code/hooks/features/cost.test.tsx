@@ -1260,3 +1260,22 @@ test('a /cd while the gate waits for an estimate: its answer is of the project l
   const result: any = await call
   expect(result.deny).toContain('The project changed while the scan was being estimated')
 })
+
+test('a dbt run let through while the gate waits on its estimate voids that answer: the waiting command is not allowed on it', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  let finish!: () => void
+  options.holdBash = { command: 'dbt run -s customers --target prod', until: new Promise<void>(resolve => (finish = resolve)) }
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(1_000)
+  const rebuild = $.tool.call(bash('dbt run -s customers --target prod'))
+  await clock.advance(10)
+  release()
+  await clock.advance(10)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  finish()
+  await rebuild
+  expect(ran).toEqual(['dbt run -s customers --target prod'])
+})
