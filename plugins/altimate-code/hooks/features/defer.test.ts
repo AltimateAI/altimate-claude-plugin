@@ -399,3 +399,13 @@ test('a Windows --project-dir with backslashes names the project; an escaped spa
   expect(runsInProject('dbt run --project-dir "C:\\other"', 'C:/repo', 'C:/repo')).toBe(false)
   expect(runsInProject('dbt run --project-dir ./a\\ b', '/repo', '/repo/a')).toBe(false)
 })
+
+test('a flag that takes no value before --project-dir leaves it a real option, and a wrapper keeps the assignment before it', () => {
+  expect(runsInProject('dbt run --full-refresh --project-dir /repo/a', '/repo/b', '/repo/a')).toBe(true)
+  expect(runsInProject('dbt run --full-refresh --project-dir ../b', '/repo/a', '/repo/a')).toBe(false)
+  expect(runsInProject('dbt run --exclude --project-dir=/repo/a', '/repo/b', '/repo/a')).toBe(false)
+  const options = { stateDir: '/work/prod-state', favorState: true }
+  expect(rewriteDeferCommand('DBT_FAVOR_STATE=false command dbt run', options)).toBe('DBT_FAVOR_STATE=false command dbt run --defer --state /work/prod-state')
+  expect(rewriteDeferCommand('DBT_FAVOR_STATE=false env dbt run', options)).toBe('DBT_FAVOR_STATE=false env dbt run --defer --state /work/prod-state')
+  expect(rewriteDeferCommand('echo hi; dbt run', options)).toBe('echo hi; dbt run --defer --state /work/prod-state --favor-state')
+})

@@ -23,6 +23,11 @@ const DEFERS = new Set(['build', 'run', 'test', 'compile', 'show', 'snapshot'])
 // Commands that take no target, or take it after a second word (`source freshness`, `docs generate`) this does not read.
 const NO_TARGET = new Set(['deps', 'clean', 'init', 'retry', 'docs', 'source'])
 
+// dbt options that take no value: one of these before `--project-dir` leaves it a real option of the command.
+const FLAG_ONLY = new Set(['full-refresh', 'fail-fast', 'x', 'debug', 'quiet', 'q', 'warn-error', 'version-check', 'no-version-check', 'partial-parse', 'no-partial-parse', 'static-parser', 'no-static-parser', 'use-colors', 'no-use-colors', 'defer', 'no-defer', 'favor-state', 'no-favor-state', 'store-failures', 'empty', 'no-print', 'print', 'log-cache-events', 'introspect', 'no-introspect', 'write-json', 'no-write-json'])
+// The command's own text from the start of its simple command (after `;`, `&`, `|`, a newline or a bracket), so an assignment or a wrapper before `dbt` counts.
+const segmentStart = (command: string, index: number) => Math.max(command.slice(0, index).search(/[^;&|(){}\n]*$/), 0)
+
 const quote = (text: string) => (/^[\w@%+=:,./-]+$/.test(text) ? text : `'${text.replace(/'/g, `'\\''`)}'`)
 
 export type RewriteOptions = {
@@ -54,12 +59,13 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
     // may be among them: such an invocation is left as the user wrote it, as the parser's contract asks.
     if (one.dynamic) continue
     const flags: string[] = []
-    if (stateDir && !exportedState && DEFERS.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE)=/.test(command.slice(one.start, one.end))) {
+    const ownText = command.slice(segmentStart(command, one.start), one.end)
+    if (stateDir && !exportedState && DEFERS.has(one.subcommand) && !one.hasDefer && !one.hasState && !/\bDBT_(?:DEFER|DEFER_STATE)=/.test(ownText)) {
       // The command's own favor-state choice, in a flag or the environment, stands.
-      const own = /--(?:no-)?favor-state\b|\bDBT_FAVOR_STATE=/.test(command.slice(one.start, one.end)) || (/\bexport\b/.test(command) && /\bDBT_FAVOR_STATE=/.test(command))
+      const own = /--(?:no-)?favor-state\b|\bDBT_FAVOR_STATE=/.test(ownText) || (/\bexport\b/.test(command) && /\bDBT_FAVOR_STATE=/.test(command))
       flags.push('--defer', '--state', quote(stateDir), ...(favorState && !own ? ['--favor-state'] : []))
     }
-    if (target && !NO_TARGET.has(one.subcommand) && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(command.slice(one.start, one.end))) flags.push('--target', quote(target))
+    if (target && !NO_TARGET.has(one.subcommand) && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(ownText)) flags.push('--target', quote(target))
     if (flags.length === 0) continue
     out = `${out.slice(0, one.subcommandEnd)} ${flags.join(' ')}${out.slice(one.subcommandEnd)}`
   }
@@ -96,6 +102,12 @@ async function findProject($: EngineInterface): Promise<string | null> {
     if (await $.fs.exists(`${root}/${entry.name}/dbt_project.yml`).catch(() => false)) below.push(`${root}/${entry.name}`)
   }
   return below.length === 1 ? below[0]! : null
+}
+
+/** Whether the word before is an option that takes a value, which this word would then be: not one of dbt's flags that take none. */
+const valueOfPrevious = (before: string) => {
+  const prev = /(?:^|\s)-{1,2}([\w-]+)\s+$/.exec(before)
+  return !!prev && !FLAG_ONLY.has(prev[1]!)
 }
 
 /**
@@ -223,7 +235,7 @@ export function runsInProject(command: string, root: string, projectDir: string,
   }
   // A project named outright is the one to judge; otherwise the folder the command runs from.
   // An option word starts after whitespace: `--exclude=--project-dir=x` is another option's value.
-  const named = [...command.matchAll(PROJECT_DIR)].filter(match => !quoted(command, match.index) && (match.index === 0 || /\s/.test(command[match.index - 1]!)) && !/(?:^|\s)-{1,2}[\w-]+\s+$/.test(command.slice(0, match.index)))
+  const named = [...command.matchAll(PROJECT_DIR)].filter(match => !quoted(command, match.index) && (match.index === 0 || /\s/.test(command[match.index - 1]!)) && !valueOfPrevious(command.slice(0, match.index)))
   // A project option written with quotes (`"--project-dir" ../b`) is only seen in the plain copy: unknown.
   if (named.length !== (plain.match(/--project-dir[\s=]|\bDBT_PROJECT_DIR=/g)?.length ?? 0)) return false
   // A path word that goes on after its quotes (`--project-dir "."/../b`) is not one this can work out.
