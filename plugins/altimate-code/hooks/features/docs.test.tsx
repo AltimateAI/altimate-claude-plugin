@@ -604,6 +604,8 @@ test('a plain description with a blank line in it is read to its last paragraph,
       - name: id
         description: First paragraph
 
+          # a note for the editor
+
           Second paragraph
       - name: status
         description: Plain
