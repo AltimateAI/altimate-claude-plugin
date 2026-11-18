@@ -120,7 +120,7 @@ export function buildPrompt(view: ToModelState): string {
   return lines.join('\n')
 }
 
-async function sqlOf($: EngineInterface, path: string | null): Promise<{ sql: string; source: string; manifest?: string; modelsDir?: string } | { error: string }> {
+async function sqlOf($: EngineInterface, path: string | null): Promise<{ sql: string; source: string; projectDir?: string; modelsDir?: string } | { error: string }> {
   if (path) {
     const root = await $.session.root().catch(() => null)
     const full = isAbsolute(path) || !root ? path : `${root.replace(/[\\/]$/, '')}/${path}`
@@ -129,8 +129,7 @@ async function sqlOf($: EngineInterface, path: string | null): Promise<{ sql: st
       if (!sql.trim()) return { error: `${path} is empty.` }
       // A file outside any project is mapped by the CLI against the project of the session's root: the prompt follows that one.
       const near = await projectNear($, full, root)
-      const project = near.modelsDir || near.error || !root ? near : await projectNear($, `${root.replace(/[\\/]$/, '')}/selection.sql`, root)
-      if (project.error) return { error: project.error }
+      const project = near.modelsDir || !root ? near : await projectNear($, `${root.replace(/[\\/]$/, '')}/selection.sql`, root)
       return { sql, source: path, ...project }
     } catch {
       return { error: `Could not read ${path}.` }
@@ -141,26 +140,17 @@ async function sqlOf($: EngineInterface, path: string | null): Promise<{ sql: st
     // A selection has no file: the project is the one at the session's root, if any.
     const root = await $.session.root().catch(() => null)
     const project = root ? await projectNear($, `${root.replace(/[\\/]$/, '')}/selection.sql`, root) : {}
-    if (project.error) return { error: project.error }
     return { sql: selected.text, source: 'selection', ...project }
   }
   return { error: `No SQL: pass a file path or select the SQL first. ${USAGE}` }
 }
 
-/** The value of a dbt_project.yml's top-level `target-path`: quotes taken off, a trailing comment left out. */
-export function targetPathOf(yml: string): string {
-  const raw = /^target-path:[ \t]*(.*)$/m.exec(yml)?.[1]?.trim() ?? ''
-  const quoted = /^(['"])(.*?)\1/.exec(raw)
-  const value = quoted ? quoted[2]! : raw.replace(/(^|\s)#.*$/, '').trim()
-  return value || 'target'
-}
-
 /**
  * The dbt project the SQL file sits in: the nearest dbt_project.yml above it, even above the session's root, where the CLI looks too. Its
- * manifest (where its `target-path` puts it; a missing file is the tool's error to report, not a cue to map
- * against another project's manifest) and the folder its models go in. Without a project the tool looks around the working directory.
+ * folder, which the CLI resolves the manifest from as dbt does (DBT_TARGET_PATH, then `target-path`), and the folder its models go in.
+ * Without a project the tool looks around the working directory.
  */
-async function projectNear($: EngineInterface, file: string, root: string | null): Promise<{ manifest?: string; modelsDir?: string; error?: string }> {
+async function projectNear($: EngineInterface, file: string, root: string | null): Promise<{ projectDir?: string; modelsDir?: string }> {
   // `.` and `..` are resolved first, so the folders walked are the ones that really lie above the file.
   const kept: string[] = []
   for (const part of file.split(/[\\/]/)) {
@@ -172,20 +162,11 @@ async function projectNear($: EngineInterface, file: string, root: string | null
   for (let step = 0; step < 32 && dir; step++) {
     if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) {
       const yml = await $.fs.read(`${dir}/dbt_project.yml`).catch(() => '')
-      const target = targetPathOf(yml)
-      // dbt takes an absolute target-path as it is, and a relative one from the project's folder.
-      const manifestIn = (folder: string) => `${isAbsolute(folder) ? '' : `${dir}/`}${folder.replace(/^\.\//, '').replace(/[\\/]+$/, '')}/manifest.json`
       const models = (projectLayout(yml).models[0] ?? 'models').replace(/^\.\//, '').replace(/[\\/]+$/, '') || '.'
       // The models folder as the prompt names it: from the session's root, or whole when the project is outside it.
       const inside = dir === top ? '' : top === '' ? dir.replace(/^\//, '') : top && dir.startsWith(`${top}/`) ? dir.slice(top.length + 1) : null
       const modelsDir = inside === null ? [dir, models === '.' ? '' : models].filter(Boolean).join('/') : [inside, models === '.' ? '' : models].filter(Boolean).join('/') || '.'
-      if (/\{[{%]/.test(target)) {
-        // `{{ env_var('NAME', 'default') }}[/more]` is read at its default; any other template is not read here, and the reply says so rather than mapping against a guessed manifest.
-        const simple = /^\{\{\s*env_var\(\s*(['"])[^'"]+\1\s*,\s*(['"])([^'"{}]*)\2\s*\)\s*\}\}([^{}]*)$/.exec(target)
-        if (!simple) return { error: `target-path in ${dir}/dbt_project.yml is a template this command cannot read, so it cannot tell which manifest to map against. Set it to a plain folder, or run dbt compile and try again.` }
-        return { manifest: manifestIn(`${simple[3]}${simple[4]}`.replace(/^\.\//, '').replace(/[\\/]+$/, '') || 'target'), modelsDir }
-      }
-      return { manifest: manifestIn(target), modelsDir }
+      return { projectDir: dir, modelsDir }
     }
     const parent = dir.replace(/[\\/][^\\/]*$/, '')
     if (parent === dir) return {}
@@ -210,7 +191,7 @@ export function register(on: On, context: FeatureContext) {
     if ('error' in got) return { text: got.error }
 
     // The CLI's --json carries the whole metadata, which is where the mapping is.
-    const args = got.manifest ? { sql: got.sql, manifest_path: got.manifest } : { sql: got.sql }
+    const args = got.projectDir ? { sql: got.sql, project_dir: got.projectDir } : { sql: got.sql }
     const result = await runTool($, TOOL, args, { cliOnly: true }).catch((error: unknown) => ({ ok: false, metadata: null, text: String(error), failed: true }))
     const rows = result.ok ? readRows(result.metadata) : null
     if (!rows) {

@@ -1,7 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { targetPathOf } from './to-model'
-
 const ROOT = '/repo'
 const SQL = 'select o.id, c.name from analytics.public.orders o join "PUBLIC"."CUSTOMERS" c on c.id = o.customer_id join raw.events e on e.id = o.id'
 
@@ -37,19 +35,14 @@ async function start($: any, on: any, setup: Setup = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  const files = new Set([`${ROOT}/transform/dbt_project.yml`, `${ROOT}/custom/dbt_project.yml`, `${ROOT}/bare/dbt_project.yml`, `${ROOT}/abs/dbt_project.yml`, `${ROOT}/dot/dbt_project.yml`, `${ROOT}/tpl/dbt_project.yml`, `${ROOT}/tpl2/dbt_project.yml`, `${ROOT}/tpl3/dbt_project.yml`, `${ROOT}/tpl4/dbt_project.yml`])
+  const files = new Set([`${ROOT}/transform/dbt_project.yml`, `${ROOT}/custom/dbt_project.yml`, `${ROOT}/bare/dbt_project.yml`, `${ROOT}/abs/dbt_project.yml`, `${ROOT}/dot/dbt_project.yml`])
   if (setup.rootProject) files.add(`${ROOT}/dbt_project.yml`)
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: files.has(e.path) }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${ROOT}/q.sql` || e.path === `${ROOT}/transform/analyses/q.sql`) return { value: SQL }
-    if ([`${ROOT}/custom/q.sql`, `${ROOT}/bare/q.sql`, `${ROOT}/abs/q.sql`, `${ROOT}/dot/q.sql`, `${ROOT}/tpl/q.sql`, `${ROOT}/tpl2/q.sql`, `${ROOT}/tpl3/q.sql`, `${ROOT}/tpl4/q.sql`, `${ROOT}/sub/q.sql`].includes(e.path)) return { value: SQL }
-    if (e.path === `${ROOT}/abs/dbt_project.yml`) return { value: 'name: a\ntarget-path: /out/build\n' }
+    if ([`${ROOT}/custom/q.sql`, `${ROOT}/bare/q.sql`, `${ROOT}/abs/q.sql`, `${ROOT}/dot/q.sql`, `${ROOT}/sub/q.sql`].includes(e.path)) return { value: SQL }
     if (e.path === `${ROOT}/dot/dbt_project.yml`) return { value: "name: d\nmodel-paths: ['.']\n" }
     if (e.path === `${ROOT}/custom/dbt_project.yml`) return { value: "name: c\ntarget-path: 'artifacts'  # built here\nmodel-paths: ['transforms']\n" }
-    if (e.path === `${ROOT}/tpl/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{{ env_var('X', 'target') }}\"\nmodel-paths: ['transforms']\n" }
-    if (e.path === `${ROOT}/tpl2/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{{ env_var('ART', 'artifacts') }}/out\"\n" }
-    if (e.path === `${ROOT}/tpl3/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{{ var('x') }}\"\n" }
-    if (e.path === `${ROOT}/tpl4/dbt_project.yml`) return { value: "name: t\ntarget-path: \"{% if target.name == 'ci' %}target_ci{% else %}target{% endif %}\"\n" }
     if (e.path === `${ROOT}/dbt_project.yml` && setup.rootYml) return { value: setup.rootYml }
     if (e.path === `${ROOT}/dbt_project.yml`) return { value: "name: r\nmodel-paths: ['transforms']\n" }
     if (e.path === `${ROOT}/bare/dbt_project.yml`) return { value: 'name: b\n' }
@@ -120,11 +113,11 @@ test('the pane lists unmatched rows first, then partial, then matched', async ($
   await ui.unmount()
 })
 
-test("a selection takes the manifest and models folder of the project at the session's root", async ($, on) => {
+test("a selection takes the project folder and models folder of the project at the session's root", async ($, on) => {
   const { clock, cliArgs, prompts } = await start($, on, { rootProject: true, selection: 'select 1 from raw.events', mappings: [MAPPINGS[2]] })
   await run($, 'stg_events')
   await clock.settle()
-  expect(cliArgs).toEqual([{ sql: 'select 1 from raw.events', manifest_path: `${ROOT}/target/manifest.json` }])
+  expect(cliArgs).toEqual([{ sql: 'select 1 from raw.events', project_dir: ROOT }])
   expect(prompts[0]).toContain('write transforms/<layer>/stg_events.sql')
 })
 
@@ -167,31 +160,23 @@ test('a query with no tables submits nothing', async ($, on) => {
   expect(none.prompts).toEqual([])
 })
 
-test('a file in a dbt project below the root maps against that project\'s manifest; one outside any project leaves the tool to look around', async ($, on) => {
+test('a file in a dbt project below the root is mapped against that project; one outside any project leaves the tool to look around', async ($, on) => {
   const { clock, cliArgs } = await start($, on)
   await run($, 'm transform/analyses/q.sql')
   await run($, 'm transform/analyses/../../q.sql')
   await run($, 'm q.sql')
   await clock.settle()
-  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/transform/target/manifest.json` }, { sql: SQL }, { sql: SQL }])
+  expect(cliArgs).toEqual([{ sql: SQL, project_dir: `${ROOT}/transform` }, { sql: SQL }, { sql: SQL }])
 })
 
-test("a project's own target-path and model-paths are used; a manifest missing there is left for the tool to report", async ($, on) => {
+test("a project's own model-paths are used, and its folder is what the tool is given", async ($, on) => {
   const { clock, cliArgs, prompts } = await start($, on)
   await run($, 'm custom/q.sql')
   await run($, 'm bare/q.sql')
   await clock.settle()
-  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/custom/artifacts/manifest.json` }, { sql: SQL, manifest_path: `${ROOT}/bare/target/manifest.json` }])
+  expect(cliArgs).toEqual([{ sql: SQL, project_dir: `${ROOT}/custom` }, { sql: SQL, project_dir: `${ROOT}/bare` }])
   expect(prompts[0]).toContain('write custom/transforms/<layer>/m.sql')
   expect(prompts[1]).toContain('write bare/models/<layer>/m.sql')
-})
-
-test("a templated target-path maps against the project's own default target folder, never another project's manifest, and the models folder still reaches the prompt", async ($, on) => {
-  const { clock, cliArgs, prompts } = await start($, on)
-  await run($, 'm tpl/q.sql')
-  await clock.settle()
-  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/tpl/target/manifest.json` }])
-  expect(prompts[0]).toContain('write tpl/transforms/<layer>/m.sql')
 })
 
 test("a file outside any project takes the layout of the project at the session's root", async ($, on) => {
@@ -199,15 +184,6 @@ test("a file outside any project takes the layout of the project at the session'
   await run($, 'm /abs/trap.sql')
   await clock.settle()
   expect(prompts[0]).toContain('write transforms/<layer>/m.sql')
-})
-
-test("a templated target-path is read at its env_var default; any other template is reported, never guessed", async ($, on) => {
-  const { clock, cliArgs } = await start($, on)
-  await run($, 'm tpl2/q.sql')
-  const unreadable = await run($, 'm tpl3/q.sql')
-  await clock.settle()
-  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/tpl2/artifacts/out/manifest.json` }])
-  expect(unreadable.text).toContain('is a template this command cannot read')
 })
 
 test("a table that several relations match equally is not handed over as a single replacement, and the CLI's project gives the models folder", async ($, on) => {
@@ -229,12 +205,12 @@ test('a table mapped to the model being written is flagged so Claude does not ma
   expect(prompts[0]).toContain('do not make it read itself')
 })
 
-test('an absolute target-path is used whole, a model-paths of "." names the project folder', async ($, on) => {
+test('a model-paths of "." names the project folder', async ($, on) => {
   const { clock, cliArgs, prompts } = await start($, on)
   await run($, 'm abs/q.sql')
   await run($, 'm dot/q.sql')
   await clock.settle()
-  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: '/out/build/manifest.json' }, { sql: SQL, manifest_path: `${ROOT}/dot/target/manifest.json` }])
+  expect(cliArgs).toEqual([{ sql: SQL, project_dir: `${ROOT}/abs` }, { sql: SQL, project_dir: `${ROOT}/dot` }])
   expect(prompts[1]).toContain('write dot/<layer>/m.sql')
 })
 
@@ -306,37 +282,11 @@ test('the pane shows a case-only match, the extra candidates, the dialect, and s
   await again.unmount()
 })
 
-test('target-path reads quoted values, quoted # and Jinja whole, drops a trailing comment, and defaults to target', () => {
-  expect(targetPathOf("name: a\ntarget-path: 'build#dev'  # note\n")).toBe('build#dev')
-  expect(targetPathOf('target-path: "{{ env_var(\'DBT_TARGET_PATH\', \'target\') }}"\n')).toBe("{{ env_var('DBT_TARGET_PATH', 'target') }}")
-  expect(targetPathOf('target-path: out/dir # here\n')).toBe('out/dir')
-  expect(targetPathOf('name: a\n  target-path: nested\n')).toBe('target')
-  expect(targetPathOf('target-path:\nname: a\n')).toBe('target')
-})
-
-test('a Jinja block target-path is reported like any other template, never read as a folder', async ($, on) => {
-  const { clock, cliArgs, prompts } = await start($, on)
-  const reply = await run($, 'm tpl4/q.sql')
-  await clock.settle()
-  expect(reply.text).toContain('is a template this command cannot read')
-  expect(cliArgs).toEqual([])
-  expect(prompts).toEqual([])
-})
-
-test("a selection in a session whose root project has an unreadable target-path is reported, not mapped", async ($, on) => {
-  const { clock, cliArgs, prompts } = await start($, on, { rootProject: true, rootYml: 'name: r\ntarget-path: "{{ var(\'x\') }}"\n', selection: SQL })
-  const reply = await run($, 'm')
-  await clock.settle()
-  expect(reply.text).toContain('is a template this command cannot read')
-  expect(cliArgs).toEqual([])
-  expect(prompts).toEqual([])
-})
-
 test("a project above the session's root is found, and its models folder is named whole", async ($, on) => {
   const { clock, cliArgs, prompts } = await start($, on, { rootProject: true, root: `${ROOT}/sub` })
   await run($, 'm q.sql')
   await clock.settle()
-  expect(cliArgs).toEqual([{ sql: SQL, manifest_path: `${ROOT}/target/manifest.json` }])
+  expect(cliArgs).toEqual([{ sql: SQL, project_dir: ROOT }])
   expect(prompts[0]).toContain('write /repo/transforms/<layer>/m.sql')
 })
 
