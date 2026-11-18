@@ -96,6 +96,8 @@ async function start($: any, on: any, answer: (args: Record<string, unknown>) =>
   return { clock, stored, filled, cli, mcpCalls }
 }
 
+/** The context lines runs added: another feature merged beside it adds its own, each starting `<feature> · `. */
+const own = (context: string[] | undefined) => (context ?? []).filter(line => !/^[\w-]+ · /.test(line))
 const FILLER = 'not-a-real-value'
 const kept = (stored: Map<string, unknown>, root = ROOT) => (stored.get('runs') as Record<string, RunRecord[]>)[root]!
 
@@ -108,13 +110,13 @@ test('a dbt build is recorded once; the same unchanged file is ignored; the line
   const { stored, cli } = await start($, on, () => next)
 
   const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
-  expect(first.context).toEqual(['build: 2 ok, 1 error: fct_sales'])
+  expect(own(first.context)).toEqual(['build: 2 ok, 1 error: fct_sales'])
   expect(kept(stored).map(run => [run.id, run.commandLine, run.total, run.passed, run.failed])).toEqual([['inv-1', 'cd /repo && dbt build -s orders', 3, 2, 1]])
   expect(kept(stored)[0]!.rows[0]!.name).toBe('fct_sales')
 
   // Run again: dbt wrote nothing new (its invocation id is the one recorded).
   const again: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders' })
-  expect(again.context ?? []).toEqual([])
+  expect(own(again.context)).toEqual([])
   expect(kept(stored)).toHaveLength(1)
   expect(cli).toEqual([{ project_dir: ROOT }, { project_dir: ROOT }])
 })
@@ -122,7 +124,7 @@ test('a dbt build is recorded once; the same unchanged file is ignored; the line
 test('the rows come from the CLI even while the plugin MCP server is connected, which does not offer this tool', async ($, on) => {
   const { stored, mcpCalls } = await start($, on, () => view('inv-1'), { mcp: true })
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build' })
-  expect(result.context).toEqual(['build: 1 ok'])
+  expect(own(result.context)).toEqual(['build: 1 ok'])
   expect(mcpCalls).toEqual([])
   expect(kept(stored)).toHaveLength(1)
 })
@@ -138,14 +140,14 @@ test('a Bash call that is no dbt command that writes results reads nothing', asy
 test('no run_results.json: nothing is recorded', async ($, on) => {
   const { stored } = await start($, on, () => ({ ...view(null), found: false, invocationId: null, command: null, completedAt: null, total: 0, passed: 0, failed: 0, skipped: 0, results: [] }))
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt run' })
-  expect(result.context ?? []).toEqual([])
+  expect(own(result.context)).toEqual([])
   expect(stored.has('runs')).toBe(false)
 })
 
 test('a file older than the call is not this call\'s run: dbt stopped before it wrote anything', async ($, on) => {
   const { stored } = await start($, on, () => view('old', [['model.shop.a', 'success', null]], 'build', '2026-11-12T09:00:00.000Z'))
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a' })
-  expect(result.context ?? []).toEqual([])
+  expect(own(result.context)).toEqual([])
   expect(stored.has('runs')).toBe(false)
 })
 
@@ -209,7 +211,7 @@ test('of several dbt commands in one call, the one that wrote the file is record
   // `dbt run` failed, so `dbt test` never ran: the file on disk is the run's.
   const { stored } = await start($, on, () => view('inv-run', [['model.shop.a', 'error', 'boom']], 'run'))
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt run && dbt test' })
-  expect(result.context).toEqual(['run: 0 ok, 1 error: a'])
+  expect(own(result.context)).toEqual(['run: 0 ok, 1 error: a'])
   expect(kept(stored)[0]!.commandLine).toBe('cd /repo && dbt run')
 
   const chain = resultsInvocations('dbt run && dbt test', ROOT)
@@ -223,7 +225,7 @@ test('two dbt calls in different folders that ran together are both left out: an
   const { stored } = await start($, on, args => view(args.project_dir === '/repo/a' ? 'inv-a' : 'inv-b', undefined, 'build', AFTER, String(args.project_dir)))
   const both: any[] = await Promise.all([$.tool.call({ tool: 'Bash', command: 'cd a && dbt build', tool_use_id: 'one' }), $.tool.call({ tool: 'Bash', command: 'cd b && dbt build', tool_use_id: 'two' })])
   expect(stored.has('runs')).toBe(false)
-  expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
+  expect(both.map(one => own(one.context))).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
 })
 
 test('where a command runs follows plain cds only; anything the shell could read differently is not guessed', () => {
@@ -298,7 +300,7 @@ test("one call that runs dbt in two projects records each project's run", async 
   const result: any = await $.tool.call({ tool: 'Bash', command: 'cd a && dbt build; cd ../b && dbt build' })
   expect(cli).toEqual([{ project_dir: '/repo/a' }, { project_dir: '/repo/b' }])
   expect(kept(stored).map(run => run.project).sort()).toEqual(['/repo/a', '/repo/b'])
-  expect(result.context).toEqual(['build: 1 ok\nbuild: 1 ok'])
+  expect(own(result.context)).toEqual(['build: 1 ok\nbuild: 1 ok'])
 })
 
 test('two target folders of one project are read apart, and one read that fails does not lose the other', async ($, on) => {
@@ -309,7 +311,7 @@ test('two target folders of one project are read apart, and one read that fails 
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build --target-path a; dbt build --target-path b' })
   expect(cli.map(args => args.target_path).sort()).toEqual(['a', 'b'])
   expect(kept(stored).map(run => run.id)).toEqual(['inv-a'])
-  expect(result.context).toEqual(['build: 1 ok'])
+  expect(own(result.context)).toEqual(['build: 1 ok'])
 })
 
 test('runs of several projects are kept newest first, whatever the order they were run in', async ($, on) => {
@@ -323,7 +325,7 @@ test('a call takes time and is still recorded: the guard against overlapping cal
   const { stored, clock } = await start($, on, () => view('inv-1'))
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'one' })
   expect(clock.now()).toBeGreaterThan(T0)
-  expect(result.context).toEqual(['build: 1 ok'])
+  expect(own(result.context)).toEqual(['build: 1 ok'])
   expect(kept(stored)).toHaveLength(1)
 })
 
@@ -336,7 +338,7 @@ test('two dbt calls that overlap are not told apart: neither is recorded, and ea
     $.tool.call({ tool: 'Bash', command: 'dbt build -s second', tool_use_id: 'two' }),
   ])
   expect(stored.has('runs')).toBe(false)
-  expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
+  expect(both.map(one => own(one.context))).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
 })
 
 test('an older call still running in the same folder holds back the later call that ends first', async ($, on) => {
@@ -347,7 +349,7 @@ test('an older call still running in the same folder holds back the later call t
     $.tool.call({ tool: 'Bash', command: 'dbt build -s later', tool_use_id: 'later' }),
   ])
   expect(stored.has('runs')).toBe(false)
-  expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
+  expect(both.map(one => own(one.context))).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
 })
 
 test('an overlap after a recorded run clears its Re-run failed command: the artifact on disk may no longer be that run', async ($, on) => {
@@ -367,7 +369,7 @@ for (const command of ['dbt build -s a && dbt build -s b', 'dbt build -s a; dbt 
     await $.tool.call({ tool: 'Bash', command: 'dbt build -s old' })
     expect(kept(stored)[0]!.retryLine).toBe('cd /repo && dbt retry')
     const result: any = await $.tool.call({ tool: 'Bash', command })
-    expect(result.context ?? []).toEqual([])
+    expect(own(result.context)).toEqual([])
     expect(kept(stored).map(run => [run.commandLine, run.retryLine])).toEqual([['cd /repo && dbt build -s old', '']])
   })
 }
@@ -397,8 +399,8 @@ test('a call the host moved to the background keeps running: a later call overla
   const { stored } = await start($, on, () => view('inv-moved', undefined, 'build', AFTER), { moved: 'moved' })
   const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'moved' })
   const second: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s b', tool_use_id: 'fg' })
-  expect(first.context ?? []).toEqual([])
-  expect(second.context).toEqual([NOT_RECORDED])
+  expect(own(first.context)).toEqual([])
+  expect(own(second.context)).toEqual([NOT_RECORDED])
   expect(stored.has('runs')).toBe(false)
 })
 
@@ -533,7 +535,7 @@ test('a chain with two builds clears the stored retry even when its artifact can
 test('two calls writing one explicit artifact folder from different project folders are ambiguous', async ($, on) => {
   const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]))
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /repo/a --target-path /repo/b/target -s a && dbt build --project-dir /repo/b -s b' })
-  expect(result.context ?? []).toEqual([])
+  expect(own(result.context)).toEqual([])
   expect(stored.has('runs')).toBe(false)
 })
 
@@ -565,15 +567,15 @@ test('two spellings of one project folder overlap: /repo and /repo/models share 
     $.tool.call({ tool: 'Bash', command: 'cd models && dbt build', tool_use_id: 'two' }),
   ])
   expect(stored.has('runs')).toBe(false)
-  expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
+  expect(both.map(one => own(one.context))).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
 })
 
 test('a backgrounded dbt call keeps running after its tool returns: a later call overlapping it is not recorded', async ($, on) => {
   const { stored } = await start($, on, () => view('inv-bg', undefined, 'build', AFTER))
   const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a &', tool_use_id: 'bg' })
   const second: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s b', tool_use_id: 'fg' })
-  expect(first.context ?? []).toEqual([])
-  expect(second.context).toEqual([NOT_RECORDED])
+  expect(own(first.context)).toEqual([])
+  expect(own(second.context)).toEqual([NOT_RECORDED])
   expect(stored.has('runs')).toBe(false)
 })
 
@@ -582,7 +584,7 @@ test('a call whose result is a refusal never ran: a later run is recorded, not t
   const held: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders', tool_use_id: 'held' })
   expect(held.deny).toBe('held by the cost gate')
   const rerun: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s orders', tool_use_id: 'rerun' })
-  expect(rerun.context).toEqual(['build: 1 ok'])
+  expect(own(rerun.context)).toEqual(['build: 1 ok'])
   expect(kept(stored).map(run => run.id)).toEqual(['inv-after-hold'])
 })
 
@@ -594,13 +596,13 @@ test('a call whose folder cannot be told still counts as a dbt call that overlap
   ])
   expect(stored.has('runs')).toBe(false)
   expect(cli).toEqual([])
-  expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
+  expect(both.map(one => own(one.context))).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
 })
 
 test('a call whose folder cannot be told, alone, records nothing and says nothing', async ($, on) => {
   const { stored, cli } = await start($, on, () => view('inv-x', undefined, 'build', AFTER))
   const result: any = await $.tool.call({ tool: 'Bash', command: 'cd "$P" && dbt build' })
-  expect(result.context ?? []).toEqual([])
+  expect(own(result.context)).toEqual([])
   expect(cli).toEqual([])
   expect(stored.has('runs')).toBe(false)
 })
@@ -610,12 +612,12 @@ test('dbt calls that follow one another do not overlap: each is recorded', async
   let at = AFTER
   const { stored, clock } = await start($, on, () => view(id, undefined, 'build', at))
   const first: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a' })
-  expect(first.context).toEqual(['build: 1 ok'])
+  expect(own(first.context)).toEqual(['build: 1 ok'])
   await clock.advance(1000)
   id = 'inv-2'
   at = new Date(clock.now()).toISOString()
   const second: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s b' })
-  expect(second.context).toEqual(['build: 1 ok'])
+  expect(own(second.context)).toEqual(['build: 1 ok'])
   expect(kept(stored).map(run => run.id)).toEqual(['inv-2', 'inv-1'])
 })
 
@@ -626,7 +628,7 @@ test('calls that end in the same moment are both left out, even when the host an
     $.tool.call({ tool: 'Bash', command: 'dbt build -s b', tool_use_id: 'two' }),
   ])
   expect(stored.has('runs')).toBe(false)
-  expect(both.map(one => one.context)).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
+  expect(both.map(one => own(one.context))).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
 })
 
 test('a dbt call that writes no results still overlaps: the build is left out, the listing says nothing', async ($, on) => {
@@ -636,7 +638,7 @@ test('a dbt call that writes no results still overlaps: the build is left out, t
     $.tool.call({ tool: 'Bash', command: 'dbt ls', tool_use_id: 'two' }),
   ])
   expect(stored.has('runs')).toBe(false)
-  expect(both.map(one => one.context ?? [])).toEqual([[NOT_RECORDED], []])
+  expect(both.map(one => own(one.context))).toEqual([[NOT_RECORDED], []])
 })
 
 test('a call that ran longer than an hour is not recorded: what ran meanwhile is no longer known', async ($, on) => {
@@ -644,7 +646,7 @@ test('a call that ran longer than an hour is not recorded: what ran meanwhile is
   const { stored, clock } = await start($, on, () => view('inv-x', undefined, 'build', new Date(now()).toISOString()), { slow: 'long', slowMs: 61 * 60 * 1000 })
   now = clock.now
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build', tool_use_id: 'long' })
-  expect(result.context).toEqual([NOT_RECORDED])
+  expect(own(result.context)).toEqual([NOT_RECORDED])
   expect(stored.has('runs')).toBe(false)
 })
 
@@ -656,7 +658,7 @@ test('a call that expires while a later call is running still overlapped it', as
   await clock.advance(59 * 60 * 1000)
   // This one starts at minute 59 and ends past minute 61: the first call's hour ran out in between.
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s later', tool_use_id: 'later-slow' })
-  expect(result.context).toEqual([NOT_RECORDED])
+  expect(own(result.context)).toEqual([NOT_RECORDED])
   expect(stored.has('runs')).toBe(false)
 })
 
@@ -666,12 +668,12 @@ test('a call that never ended (refused or cancelled) overlaps what ran meanwhile
   now = clock.now
   await $.tool.call({ tool: 'Bash', command: 'dbt build -s refused', tool_use_id: 'refused' }).catch(() => {})
   const during: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s next', tool_use_id: 'next' })
-  expect(during.context).toEqual([NOT_RECORDED])
+  expect(own(during.context)).toEqual([NOT_RECORDED])
   expect(stored.has('runs')).toBe(false)
   // After an hour it is taken as one that never ended, and the next call is recorded.
   await clock.advance(61 * 60 * 1000)
   const after: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s later', tool_use_id: 'later' })
-  expect(after.context).toEqual(['build: 1 ok'])
+  expect(own(after.context)).toEqual(['build: 1 ok'])
 })
 
 test('one call that runs dbt twice in one project from two folders records the later run once, with its own line', async ($, on) => {
@@ -691,7 +693,7 @@ test('a run kept later but finished earlier takes its place by completion time',
 test("a file written after the call ended is another command's and is not recorded for this call", async ($, on) => {
   const { stored } = await start($, on, () => view('inv-late', undefined, 'build', '2026-11-13T10:00:30.000Z'))
   const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s first' })
-  expect(result.context ?? []).toEqual([])
+  expect(own(result.context)).toEqual([])
   expect(stored.has('runs')).toBe(false)
 })
 
