@@ -11,6 +11,7 @@ All notable changes to this plugin will be documented in this file.
 - Saved since: a flagged warehouse's size and cost are kept on this machine, and a later run that finds it resized says what it cost a month then and now.
 - A line above the prompt when the session edits Databricks bundle or Terraform files or runs a `databricks` compute command: the flagged resource's saving, or a once-a-session offer of `/savings`.
 - One connection checks every workspace the account's system tables show; the pane counts them and names each finding's workspace.
+- `/savings` asks `altimate --version` first and does not start an altimate-code older than 0.12.12 for the check: before assessment mode, its `tool run` would send the one-time telemetry opt-out event.
 - `runTool` takes an environment and `noDaemon` for one CLI run, and hands back a CLI's raw output when it is not an answer (an altimate-code too old for the tool gets "update").
 
 ## [1.7.0] — 2026-11-17

@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SIGNUP_URL, apiSize, compared, dollars, explain, mentions } from './savings'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, compared, dollars, explain, mentions, supportsSavings } from './savings'
 
 const ROOT = '/repo'
 
@@ -176,6 +176,8 @@ type Options = {
   error?: unknown
   /** What `tool run` prints and exits with, as is (no answer object). */
   output?: { exitCode: number; stdout: string; stderr: string }
+  /** What `altimate --version` prints; the first release with the check unless a test says otherwise. */
+  version?: string
   missingCli?: boolean
   hold?: Promise<void>
   isPlaced?: boolean
@@ -191,6 +193,7 @@ type Options = {
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on, { now: options.now ?? Date.parse('2026-11-17T10:00:00Z') })
   const runs: { argv: string[]; env: Record<string, string> | undefined }[] = []
+  const versionRuns: { env: Record<string, string> | undefined }[] = []
   const toasts: string[] = []
   const fills: string[] = []
   const store = new Map<string, unknown>(Object.entries(options.store ?? {}))
@@ -227,6 +230,11 @@ async function start($: any, on: any, options: Options = {}) {
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { env?: Record<string, string> } }) => {
     const [, command, , tool] = e.argv
+    if (command === '--version') {
+      if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
+      versionRuns.push({ env: e.init?.env })
+      return { value: { exitCode: 0, stdout: `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: '' } }
+    }
     // The other halves of the plugin ask the CLI for other things at session start.
     if (command !== 'tool' || tool !== 'finops_databricks_savings') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     runs.push({ argv: [...e.argv], env: e.init?.env })
@@ -239,7 +247,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('tool.call', () => ({ result: { ok: true } }))
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, runs, toasts, fills, store }
+  return { clock, runs, versionRuns, toasts, fills, store }
 }
 
 const composer = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 200 } }
@@ -790,6 +798,34 @@ test('a failed run also comes as a notice, for a terminal too narrow for the pan
   await savings($)
   await clock.settle()
   expect(toasts.at(-1)).toMatch(/^Databricks savings check: A query was refused: \[TABLE_OR_VIEW_NOT_FOUND\].* ask a workspace admin for SELECT/)
+})
+
+test('an altimate-code older than the check is never started for it: only `--version` runs', async ($, on) => {
+  // 0.12.11 has no assessment mode: its `tool run` would send the one-time opt-out event before failing.
+  const { clock, runs, versionRuns, toasts } = await start($, on, { version: '0.12.11' })
+  await savings($)
+  await clock.settle()
+  expect(versionRuns.length).toBe(1)
+  expect(runs).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^This altimate-code has no Databricks savings check\.$/ })).toBeDefined()
+  expect(toasts.at(-1)).toContain(`It is 0.12.11; update it to ${SAVINGS_MIN_ALTIMATE_CODE} or later`)
+  await ui.unmount()
+})
+
+test('a version that cannot be read is refused too; the first release with the check, and a source build, run it', async ($, on) => {
+  for (const version of ['', 'altimate-code', '0.12', '0.10.0']) {
+    expect(supportsSavings(version)).toBe(false)
+  }
+  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', '0.12.12-beta.1', 'local']) {
+    expect(supportsSavings(version)).toBe(true)
+  }
+  const { clock, runs, versionRuns } = await start($, on, { version: 'local' })
+  await savings($)
+  await clock.settle()
+  expect(versionRuns.length).toBe(1)
+  expect(versionRuns[0]!.env).toEqual({ ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' })
+  expect(runs.length).toBe(1)
 })
 
 test('an altimate-code too old to have `tool run` says to update, from what that CLI really prints', async ($, on) => {

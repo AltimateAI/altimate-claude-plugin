@@ -9,7 +9,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { SavingsView } from '../../types'
-import { MISSING_BINARY, later, runTool } from '../altimate-cli'
+import { MISSING_BINARY, later, runAltimate, runTool } from '../altimate-cli'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -30,6 +30,26 @@ const RUN_BUDGET_MS = 5 * 60_000
 // without assessment mode ignores it. The run is kept out of altimate-code's tool daemon, which would
 // keep the environment it started with.
 const LOCAL_ONLY = { ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' }
+
+/**
+ * The first altimate-code release the check may start. Up to 0.12.11 (the latest release when this was
+ * written) altimate-code has neither the savings tool nor assessment mode, so `tool run` there would only
+ * send the CLI's one-time telemetry opt-out event and then fail. `altimate --version` starts no telemetry,
+ * so it is asked first and an older CLI is never started for the check.
+ */
+export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.12'
+const VERSION_TIMEOUT_MS = 15_000
+
+/** Whether `altimate --version` names a release the check may start; a source build prints `local`. */
+export function supportsSavings(version: string): boolean {
+  if (version === 'local') return true
+  const parts = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version)
+  if (!parts) return false
+  const have = parts.slice(1, 4).map(Number)
+  const need = SAVINGS_MIN_ALTIMATE_CODE.split('.').map(Number)
+  for (let at = 0; at < 3; at++) if (have[at] !== need[at]) return have[at]! > need[at]!
+  return true
+}
 
 // An altimate-code connection name; anything else could read as a CLI flag.
 const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -372,6 +392,18 @@ async function runCheck($: EngineInterface, connection: string | null) {
     await update($, messageAtom, () => null)
     await update($, bandAtom, () => null)
     const until = (await $.clock.now()) + RUN_BUDGET_MS
+    const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY)
+    if (!live()) return
+    const version = String(printed.stdout ?? '').trim().split('\n').pop()?.trim() ?? ''
+    if (!supportsSavings(version)) {
+      const why = {
+        text: 'This altimate-code has no Databricks savings check.',
+        recovery: `${version ? `It is ${version}; u` : 'U'}pdate it to ${SAVINGS_MIN_ALTIMATE_CODE} or later (\`altimate upgrade\`), then run /savings again.`,
+      }
+      await update($, messageAtom, () => why)
+      $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
+      return
+    }
     const result = await runTool($, TOOL, connection ? { warehouse: connection } : {}, { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
     if (!live()) return
     const metadata = result.metadata as ToolMetadata | null
