@@ -24,6 +24,8 @@ type Options = {
   holdCwd?: Promise<void>
   /** Set after start: only this lookup of the session's directory (counted from 1, after it is set) is never answered. */
   stallNth?: { n: number; seen: number }
+  /** Set after start: every lookup of the session's directory fails. */
+  cwdFails?: boolean
   /** Set after start: every lookup of the session's directory takes this long to answer. */
   cwdDelay?: number
   /** Drawing the status line throws. */
@@ -48,6 +50,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.root', () => ({ value: ROOT }))
   on('session.cwd', async ($$: any) => {
     await options.holdCwd
+    if (options.cwdFails) throw new Error('no folder')
     if (options.cwdDelay) await new Promise<void>(resolve => setTimeout(resolve, options.cwdDelay))
     if (options.stallNth && ++options.stallNth.seen === options.stallNth.n) await new Promise<void>(() => {})
     return { value: options.cwd ?? ROOT }
@@ -298,6 +301,17 @@ test('a stalled pass is not remembered as a project: the next pass, that reads t
   await $.command.run({ command: 'allow-scan', args: '' } as any)
   expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeUndefined()
   expect(ran).toContain('dbt run -s orders')
+})
+
+test('a folder lookup that fails is no known project either: a verdict of the project left is not reused for a scan', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  options.cwdFails = true
+  const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  for (let i = 0; i < 10; i++) await clock.advance(100)
+  expect((await pending).deny).toContain('could not be read in time')
 })
 
 test('a lookup lost in one pass does not refuse another pass whose own lookups all answered', async ($, on) => {

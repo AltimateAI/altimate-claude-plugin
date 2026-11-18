@@ -113,8 +113,9 @@ async function sessionDir($: EngineInterface, look: Look, fallback: string | nul
   const left = CWD_WAIT_MS - look.spent
   // Read from the process clock, not the engine's: no await is added between the gate's steps that must stay one.
   const began = Date.now()
-  // A lookup that fails keeps the folder last seen, as before; one that does not answer in time loses the pass.
-  const read = left > 0 ? await within($, left, $.session.cwd().then(dir => ({ dir: dir as string | null }), () => ({ dir: fallback }))) : null
+  // A lookup that does not answer in time loses the pass. One that fails does too once a folder has been seen: the session may
+  // have moved, and the last one is not assumed. With none seen, there is no project to confuse it with, as before.
+  const read = left > 0 ? await within($, left, $.session.cwd().then(dir => ({ dir: dir as string | null }), () => (fallback === null ? { dir: null } : null))) : null
   look.spent += Date.now() - began
   if (!read) {
     look.lost = true
