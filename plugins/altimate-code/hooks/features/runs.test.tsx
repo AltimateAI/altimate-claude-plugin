@@ -570,7 +570,7 @@ test('a backgrounded dbt build clears the stored Re-run failed command: it may r
   expect(kept(stored).map(run => run.retryLine)).toEqual([''])
 })
 
-test('a recording still reading its artifact when a build is backgrounded stores its run without a Re-run failed command', async ($, on) => {
+test('a recording still reading its artifact when a build is backgrounded leaves its run unrecorded: the background build may have replaced the artifact', async ($, on) => {
   let once = true
   const { stored } = await start($, on, () => view('inv-a', [['model.shop.m', 'error', null]]), {
     duringRead: async () => {
@@ -579,8 +579,9 @@ test('a recording still reading its artifact when a build is backgrounded stores
       await $.tool.call({ tool: 'Bash', command: 'dbt build -s b &', tool_use_id: 'bg' })
     },
   })
-  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'a' })
-  expect(kept(stored).map(run => [run.id, run.retryLine])).toEqual([['inv-a', '']])
+  const result: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'a' })
+  expect(own(result.context)).toEqual([NOT_RECORDED])
+  expect(stored.has('runs')).toBe(false)
 })
 
 test('a call that started while the artifact was being read and is still running leaves the run unrecorded', async ($, on) => {
@@ -600,6 +601,11 @@ test('a call that started while the artifact was being read and is still running
   expect(own(first.context)).toEqual([NOT_RECORDED])
   expect(stored.has('runs')).toBe(false)
   await running
+})
+
+test('a --vars before the subcommand is checked for a secret too', async ($, on) => {
+  expect(resultsInvocations(`dbt --vars '{"password":"s3cret"}' build`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt --vars '{"country":"US"}' build`, ROOT)).toHaveLength(1)
 })
 
 test('a shell-escaped double-quoted --vars mapping is read as the shell reads it: a secret in it is not recorded, and a benign one replays whole', async ($, on) => {

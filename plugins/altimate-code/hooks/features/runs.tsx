@@ -233,7 +233,7 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     // A quoted subcommand is not told apart in the source text: the replay line could not be built from it.
     if (command.slice(one.subcommandEnd - subcommand.length, one.subcommandEnd) !== subcommand) continue
     const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
-    if (varsHoldSecret(body)) continue
+    if (varsHoldSecret(command.slice(one.start, one.end))) continue
     // A launcher that changes its own working directory (`uv run --directory x dbt build`) runs dbt elsewhere: the folder is not guessed.
     // Only the text before `dbt` is looked at, so a flag-looking word inside a dbt option's value is not taken for one.
     if (launcherMoves(command.slice(one.start, one.subcommandEnd - subcommand.length))) continue
@@ -369,7 +369,7 @@ async function load($: EngineInterface, root: string, open: string | null = null
 }
 
 /** The Bash calls in flight that run dbt, whatever folder they work in: when each started, by tool-use id. */
-const started = new Map<string, { at: number; cwd: string; writes: boolean; operation: boolean; background?: boolean }>()
+const started = new Map<string, { at: number; cwd: string; writes: boolean; operation: boolean}>()
 /** The dbt calls that just ended: a run is recorded only when no other dbt call overlapped it. */
 const finished: Array<{ at: number; ended: number }> = []
 /** A call in flight longer than this is taken as one that never ended (refused or cancelled), so it stops holding back later calls. */
@@ -473,7 +473,6 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   if (isBackground(e) || hostBackgrounded(result)) {
     // It keeps running and may replace the artifact any time: stored runs can no longer be retried from it.
     const kept = started.get(startKey(e))
-    if (kept) kept.background = true
     if (kept?.writes || kept?.operation) await clearRetries($)
     return null
   }
@@ -535,7 +534,7 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   const readEnded = await $.clock.now()
   entry.ended = readEnded
   // A call still running that started after this one ended and writes results may have replaced the artifact as well.
-  if (finished.some(other => other !== entry && other.at >= ended) || [...started.values()].some(other => other.writes && !other.background && other.at >= ended)) {
+  if (finished.some(other => other !== entry && other.at >= ended) || [...started.values()].some(other => other.writes && other.at >= ended)) {
     await clearRetries($)
     return OVERLAP_LINE
   }
