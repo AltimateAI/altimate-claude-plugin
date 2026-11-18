@@ -199,6 +199,18 @@ test('a session folder that is never answered holds the gate for 80 ms at most: 
   expect(result.deny).toBeUndefined()
 })
 
+test('a session folder that could not be read is no project the gate knows: an earlier verdict is not reused for it', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  options.holdCwd = new Promise<void>(() => {})
+  const pending = $.tool.call(bash('dbt run -s orders'))
+  for (let i = 0; i < 70; i++) await clock.advance(100)
+  const result: any = await pending
+  expect(result.deny).toContain('20.0 GiB')
+})
+
 test('commands that scan nothing are not looked at', async ($, on) => {
   const { clock, estimates, ran } = await start($, on)
   for (const command of ['dbt test -s orders', 'dbt compile -s orders', 'ls', 'git status']) await $.tool.call(bash(command))
