@@ -339,7 +339,7 @@ test('a line refused for its unreadable folder keeps the over-limit answer alrea
   await clock.advance(70_000)
   const retry = $.tool.call(bash(command)) as Promise<any>
   for (let i = 0; i < 70; i++) await clock.advance(100)
-  expect((await retry).deny).toBeDefined()
+  expect((await retry).deny).toContain('over the')
   expect(started.filter(one => one === 'a')).toHaveLength(2)
   expect(ran).toEqual([])
 })
@@ -355,7 +355,7 @@ for (const n of [5, 6]) test(`a folder lost just after an estimate came in over 
   await clock.advance(70_000)
   const retry = $.tool.call(bash('dbt run -s a')) as Promise<any>
   for (let i = 0; i < 70; i++) await clock.advance(100)
-  expect((await retry).deny).toBeDefined()
+  expect((await retry).deny).toContain('over the')
   expect(started).toEqual(['a', 'a'])
   expect(ran).toEqual([])
 })

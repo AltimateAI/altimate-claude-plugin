@@ -269,7 +269,6 @@ test('through the plugin, Claude’s dbt commands run with --defer --state when 
 
 test('a dbt project below the project, even under dbt_packages, keeps its own settings; the shell folder from an earlier cd counts', async ($, on) => {
   const seen = start($, on, DEFER, { times: 0 }, [ROOT, `${ROOT}/dbt_packages/pkg`, `${ROOT}/nested`])
-  cwd = ROOT
   on('fs.list', (_: unknown, e: { path: string }) => ({ value: e.path === ROOT ? [{ name: 'nested', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }, { name: 'dbt_packages', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }] : e.path === `${ROOT}/dbt_packages` ? [{ name: 'pkg', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }] : [] }))
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: 'Bash', command: 'cd nested && dbt build' })

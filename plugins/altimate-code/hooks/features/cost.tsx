@@ -266,9 +266,9 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // One wait for the whole command, however many queries it names.
   const waitUntil = (await $.clock.now()) + GATE_WAIT_MS
   const pending: string[] = []
-  // The refusal for a folder that could not be read keeps what the pass already found over the limit, and marks the command refused:
-  // its retry is no change, and a failed estimate then cannot free a command already known to be expensive.
-  const unreadable = async () => {
+  // A refusal that keeps what the pass already found over the limit, and marks the command refused: its retry is no change,
+  // and a failed estimate then cannot free a command already known to be expensive.
+  const refuse = async (deny: string) => {
     // What a project changed meanwhile left is not this pass's to record.
     if (generation !== startedAt) return changedDeny(e.command)
     if (over.length > 0) {
@@ -285,8 +285,9 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     }
     notes.delete(e.command)
     refused.set(e.command, await $.clock.now())
-    return { deny: UNREADABLE_DENY }
+    return { deny }
   }
+  const unreadable = () => refuse(UNREADABLE_DENY)
   // What this pass already has, so the same query named twice on the line is asked for once.
   const taken = new Map<string, Answer>()
   let failed = false
@@ -348,7 +349,6 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     // Nothing is cleared here: the change already cleared what was older, and a newer pass's estimates are its own.
     return changedDeny(e.command)
   }
-  if (look.lost) return unreadable()
 
   // A finished command's answers are taken: a later one asks again. A pending one keeps them for its retry.
   if (pending.length === 0) for (const key of taken.keys()) inflight.delete(key)
@@ -356,18 +356,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // An estimate still running decides nothing yet, and spends no allowance: the command is refused until it is in.
   if (pending.length > 0) {
     // What is already known to be over the limit stays held, so a failed estimate on the retry cannot free it.
-    if (over.length > 0) {
-      const worst = over.reduce((a, b) => (b.bytes > a.bytes ? b : a))
-      await update($, costAtom, prev => {
-        const current = prev ?? FRESH
-        // An allowance belongs to the command it was given for: another command's hold does not inherit it.
-        const same = current.held?.command === e.command
-        return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
-      })
-    }
-    notes.delete(e.command)
-    refused.set(e.command, await $.clock.now())
-    return { deny: `The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.` }
+    return refuse(`The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.`)
   }
 
   // A command held earlier stays held while its estimate cannot be made again: only /allow-scan or an estimate under the limit frees it.
