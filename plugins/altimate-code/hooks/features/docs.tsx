@@ -589,7 +589,12 @@ export function register(on: On, context: FeatureContext) {
                       }
                     }
                     try {
-                      await $.prompt.submit({ text: prompt })
+                      const answer = (await $.prompt.submit({ text: prompt })) as { drop?: unknown } | undefined
+                      // A request the engine or a hook refused was not sent: the offers stay for the next Apply.
+                      if (answer && typeof answer === 'object' && answer.drop !== undefined) {
+                        for (const key of marks) applied.delete(key)
+                        return
+                      }
                     } catch (error) {
                       // A request that was not sent asked for nothing.
                       for (const key of marks) applied.delete(key)

@@ -195,7 +195,7 @@ const DOWNSTREAM_AFTER = `models:
         description: "The customer's key, as the shop issues it"
 `
 
-type Options = { downstream?: string; reach?: Record<string, unknown>; coverage?: Record<string, unknown> | null; coverageError?: string; noManifest?: boolean; stale?: boolean; newFile?: boolean; manifest?: Record<string, unknown> }
+type Options = { refuse?: boolean; downstream?: string; reach?: Record<string, unknown>; coverage?: Record<string, unknown> | null; coverageError?: string; noManifest?: boolean; stale?: boolean; newFile?: boolean; manifest?: Record<string, unknown> }
 
 /** A dbt project at /repo with the plugin's MCP server connected, and the session beneath the plugin. */
 async function start($: any, on: any, options: Options = {}) {
@@ -225,6 +225,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('prompt.submit', (_: unknown, e: { text: string }) => {
     submitted.push(e.text)
+    if (options.refuse) return { drop: 'refused' }
     return { text: e.text }
   })
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` || ((e.path === SCHEMA && !options.newFile) || e.path === DOWNSTREAM) || (!options.noManifest && e.path === MANIFEST_PATH) }))
@@ -558,4 +559,19 @@ test('without a readable manifest a source model is traced by its name', async (
   await $.tool.call(EDIT)
   await clock.settle()
   expect(toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify').map(args => args.model)).toEqual(['stg_orders'])
+})
+
+test('a request the engine refused leaves the offers and clears nothing Apply asked for', async ($, on) => {
+  const { clock, submitted } = await start($, on, { refuse: true })
+  await $.tool.call(EDIT)
+  await clock.settle()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'docs-apply' })
+  await clock.settle()
+  expect(submitted).toHaveLength(1)
+  expect(await pane.find({ type: 'Button', text: /\[x\] fct_orders\.customer_id/ })).toBeDefined()
+  await pane.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as any)
+  expect(await band.find({ type: 'Text', text: /can take this description/ })).toBeDefined()
+  await band.unmount()
 })
