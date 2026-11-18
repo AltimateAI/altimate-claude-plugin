@@ -179,8 +179,8 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
         noun: 'Job',
         change: "run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster it uses now",
         defines: "the job's bundle resource, Terraform databricks_job, or JSON",
-        // `jobs reset` overwrites every setting; `update` changes only the settings it is given.
-        otherwise: `write the JSON for \`databricks jobs update --json\` (job_id ${id}, and new_settings with the tasks' new cluster)`,
+        // A task listed in `jobs update` replaces that whole task, so the draft starts from the job as it is.
+        otherwise: `write the JSON for \`databricks jobs update --json\`: start from \`databricks jobs get ${id}\` and give each task you change whole, with only its cluster changed`,
       }
     default:
       return { noun: 'Resource', change: 'make the change the evidence points at', defines: 'its definition', otherwise: 'describe the change' }

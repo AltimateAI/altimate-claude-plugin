@@ -631,7 +631,7 @@ test('idle clusters and jobs on all-purpose compute get their own evidence and f
   await clock.settle()
   expect(fills[0]).toContain('Job nightly_orders (id 9001)')
   expect(fills[0]).toContain('give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id')
-  expect(fills[0]).toContain("`databricks jobs update --json` (job_id 9001, and new_settings with the tasks' new cluster)")
+  expect(fills[0]).toContain('`databricks jobs update --json`: start from `databricks jobs get 9001` and give each task you change whole, with only its cluster changed')
   expect(fills[0]).not.toContain('jobs reset')
   expect(fills[1]).toContain('Cluster shared-analytics (id 0101-abc)')
   expect(fills[1]).toContain('set autotermination_minutes to 15, or terminate it if nobody needs it')
