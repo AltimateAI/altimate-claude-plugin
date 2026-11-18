@@ -142,7 +142,7 @@ const SECRET_NAME = /(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)/i
 /** The words a `--vars` key is made of (`apiKey`, `db_password`, `auth-token`), lower case. */
 const keyWords = (key: string) => key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
 /** Words that name a secret wherever they sit in a key, also run into a longer word (`clientsecret`, `accesstoken`). */
-const SECRET_PART = /secret|token|passw|pwd|credential|passphrase/
+const SECRET_PART = /secret|token|passw|pwd|credential|passphrase|authoriz|authoris/
 /** A key run together from `api`, `private`... and `key` (`apikey`, `privatekey`). */
 const KEY_COMPOUND = /(?:api|private|access|secret|encryption|signing|ssh|master|auth)keys?$/
 /** `key: value` pairs of a flow-style `--vars` value (JSON or YAML); a nested mapping's own pairs are found in turn. */

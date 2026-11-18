@@ -603,6 +603,11 @@ test('a call that started while the artifact was being read and is still running
   await running
 })
 
+test('an authorization key in --vars is a secret', async ($, on) => {
+  expect(resultsInvocations(`dbt build --vars '{"authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"Authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])
+})
+
 test('a --vars before the subcommand is checked for a secret too', async ($, on) => {
   expect(resultsInvocations(`dbt --vars '{"password":"s3cret"}' build`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt --vars '{"country":"US"}' build`, ROOT)).toHaveLength(1)
