@@ -239,7 +239,7 @@ export interface ToModelState {
   source: string
   /** The dialect the tool read the SQL with; null when it did not say. */
   dialect: string | null
-  /** The folder the project keeps its models in, relative to the session's root, or whole when the project lies outside it; unset when the SQL is not in a dbt project. */
+  /** The folder the project keeps its models in, relative to the session's root, or whole when the project lies outside it; unset when neither the SQL's folder nor the session's root is in a dbt project. */
   modelsDir?: string
   /** One row per table, unmatched and partial first. */
   rows: {
