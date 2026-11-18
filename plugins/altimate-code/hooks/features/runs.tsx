@@ -473,6 +473,7 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
     return null
   }
   const mine = [...new Set(invocations.map(folderOf))]
+  const explicitFolder = invocations.some(one => one.targetPath !== null)
   // Several invocations writing one artifact folder (`dbt build -s a && dbt build -s b`, a retry beside another command):
   // the file cannot say which one ran when a chain stops early, so nothing is recorded, whether the file can be read or not.
   const groups = mine.map(folder => invocations.filter(one => folderOf(one) === folder))
@@ -496,10 +497,18 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
     // Only the folder that could not be read is unknown: the runs read from the others keep their retry command.
     clearedAtStart++
   }
-  // Two spellings of one folder read one file: of its runs the later invocation's is the one that wrote it.
+  // Two spellings of one folder read one file: when the later invocation stopped before it wrote, the file is the earlier one's,
+  // and the file cannot say which it is, so (as for two commands writing one folder) nothing is recorded.
   const latest = new Map<string, { run: RunRecord; order: number }>()
+  let aliased = false
   for (const one of read) {
-    if (one && (latest.get(one.run.id)?.order ?? -1) < one.order) latest.set(one.run.id, one)
+    if (!one) continue
+    if (latest.has(one.run.id)) aliased = true
+    if ((latest.get(one.run.id)?.order ?? -1) < one.order) latest.set(one.run.id, one)
+  }
+  if (aliased) {
+    await clearRetries($)
+    return null
   }
   // Oldest first, so the history stays newest first.
   const runs = [...latest.values()].map(one => one.run).sort((a, b) => Date.parse(a.completedAt) - Date.parse(b.completedAt))
@@ -511,6 +520,8 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
     for (const run of runs) {
       // The same file as the last recording: nothing new was written.
       if (kept.find(one => one.project === run.project)?.id === run.id) continue
+      // An explicit artifact folder may be shared with another project: that project's last run is then no longer what the file holds.
+      if (explicitFolder) kept = kept.map(one => (one.project === run.project || !one.retryLine ? one : { ...one, retryLine: '' }))
       kept = withRun(kept, cleared === clearedAtStart ? run : { ...run, retryLine: '' })
       noted.push(summaryLine(run))
     }

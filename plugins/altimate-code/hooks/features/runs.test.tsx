@@ -676,11 +676,20 @@ test('a call that never ended (refused or cancelled) overlaps what ran meanwhile
   expect(own(after.context)).toEqual(['build: 1 ok'])
 })
 
-test('one call that runs dbt twice in one project from two folders records the later run once, with its own line', async ($, on) => {
+test('one call that runs dbt twice in one project from two folders records nothing: the file cannot say which one wrote it', async ($, on) => {
   const { stored } = await start($, on, () => view('inv-two'))
   // Both read /repo/target/run_results.json: the tool answers with the project above the folder it is given.
   await $.tool.call({ tool: 'Bash', command: 'dbt build; cd models && dbt build -s x' })
-  expect(kept(stored).map(run => [run.id, run.commandLine])).toEqual([['inv-two', 'cd /repo/models && dbt build -s x']])
+  expect(stored.has('runs')).toBe(false)
+})
+
+test('a run with an explicit artifact folder takes the retry of another project away: that folder may be the same one', async ($, on) => {
+  let reads = 0
+  const { stored } = await start($, on, () => view(reads++ === 0 ? 'inv-a' : 'inv-b', [['model.shop.m', 'error', null]], 'build', AFTER, reads === 1 ? '/a' : '/b'))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /a --target-path /shared', tool_use_id: 'one' })
+  expect(kept(stored).map(run => [run.id, !!run.retryLine])).toEqual([['inv-a', true]])
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /b --target-path /shared', tool_use_id: 'two' })
+  expect(kept(stored).map(run => [run.id, !!run.retryLine])).toEqual([['inv-b', true], ['inv-a', false]])
 })
 
 test('a run kept later but finished earlier takes its place by completion time', () => {
