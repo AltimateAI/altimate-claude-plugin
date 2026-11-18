@@ -138,6 +138,8 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 What dbt Power User does in VS Code, inside the Claude Code session. Each helper runs the project's own dbt (`.venv` or `venv` in the project folder, `bin/dbt` or `Scripts\dbt.exe`, else `dbt` on `PATH`), one at a time per project, and makes no model-provider call on its own (only **Explain** and **Fix with Altimate Code**, when you press them, hand a failure to Claude or Altimate Code).
 
+The helpers read dbt's artifacts (`manifest.json`, `run_results.json`) from the `target-path` the project's `dbt_project.yml` names, else `target/`. A path set by `DBT_TARGET_PATH` or a command's `--target-path` is not followed: with one, the check cannot compare columns, model context and the doctor's freshness use the project's folder, and a failed run's nodes are not read from the other folder (a failure dbt printed still shows).
+
 Opening a dbt folder runs two programs the repository supplies, with no action from you: at session start the plugin runs the project's own `.venv/bin/dbt --version` (a `venv` or `Scripts\dbt.exe` too) and the Python that dbt's launcher names, to check them. Trust the folder before you open it in Claude Code.
 
 
