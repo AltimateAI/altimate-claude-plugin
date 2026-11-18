@@ -528,6 +528,11 @@ test('a secret is redacted whole, quotes and escapes in its value included; a --
   expect(resultsInvocations('dbt "build" -s orders', ROOT)).toEqual([])
 })
 
+test('Re-run failed keeps --vars: the project may need them to load; a secret one was never recorded', () => {
+  expect(resultsInvocations(`dbt build -s a --vars '{"warehouse_schema": "analytics"}'`, ROOT)[0]!.retryLine).toBe(`cd /repo && dbt retry --vars '{"warehouse_schema": "analytics"}'`)
+  expect(resultsInvocations('dbt build --vars=x:1', ROOT)[0]!.retryLine).toBe('cd /repo && dbt retry --vars=x:1')
+})
+
 test('Re-run failed keeps the target however the flag is written: -t prod, -tprod, --target=prod', () => {
   for (const flag of ['-t prod', '-tprod', '--target=prod', '--target prod']) {
     expect(resultsInvocations(`dbt build ${flag}`, ROOT)[0]!.retryLine).toBe(`cd /repo && dbt retry ${flag}`)

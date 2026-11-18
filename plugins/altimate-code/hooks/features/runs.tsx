@@ -183,7 +183,7 @@ const redact = (head: string) => {
 
 /** The flags `dbt retry` does not take from the run it retries. */
 const VALUE = `"[^"]*"|'[^']*'|\\S+`
-const KEPT_FLAGS = new RegExp(`(?:^|\\s)((?:--(?:project-dir|profiles-dir|target-path|defer-state|target|profile)(?:=(?:${VALUE})|\\s+(?:${VALUE})))|(?:-t(?:\\s+(?:${VALUE})|[^\\s-]\\S*)))`, 'g')
+const KEPT_FLAGS = new RegExp(`(?:^|\\s)((?:--(?:project-dir|profiles-dir|target-path|defer-state|target|profile|vars)(?:=(?:${VALUE})|\\s+(?:${VALUE})))|(?:-t(?:\\s+(?:${VALUE})|[^\\s-]\\S*)))`, 'g')
 /** `dbt retry` reads the results of the state folder when one is set (`--state`, `DBT_STATE`): the replay leaves it out so it reads the target folder. `--defer-state` only names the deferral's manifest and stays. */
 const withoutState = (head: string) =>
   head
