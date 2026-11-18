@@ -18,6 +18,7 @@ import {
   EDIT_AFTER_TIMEOUT_MS,
   EDIT_READS_BEFORE,
   featuresBashAfter,
+  featuresBashDropped,
   featuresBashGate,
   featuresBashRewrite,
   featuresCallStart,
@@ -52,7 +53,7 @@ export const PHASES: readonly Phase[] = ['bashRewrite', 'bashGate', 'bashAfter',
 export const PHASE_TIMEOUT_MS = 5_000
 
 /** A phase's own deadline when it is not PHASE_TIMEOUT_MS: the edit phase holds an edit's result for a slow check. */
-const PHASE_DEADLINES: Partial<Record<Phase | 'readBefore' | 'callStart', number>> = { editAfter: EDIT_AFTER_TIMEOUT_MS }
+const PHASE_DEADLINES: Partial<Record<Phase | 'readBefore' | 'callStart' | 'bashDropped', number>> = { editAfter: EDIT_AFTER_TIMEOUT_MS }
 
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
 
@@ -80,6 +81,8 @@ export type ChainSteps = {
   /** Before the call runs, after the rewrites and the gate: what a feature notes of the call as it was. Never refuses or changes it. */
   callStart?: (e: ToolCallInput) => Promise<void>
   bashAfter: (e: BashCall, result: ToolCallResult) => Promise<string[]>
+  /** Told when a Bash call will not reach bashAfter because a gate refused it or its result is a refusal. */
+  bashDropped?: (e: BashCall) => Promise<void>
   editAfter: (e: FileCall, result: ToolCallResult, file: EditedFile) => Promise<string[]>
   readOrEditAfter: (e: FileCall, result: ToolCallResult, file: { path: string }) => Promise<string[]>
   /** The file's text before an edit; called only when `readsBefore` is set. */
@@ -92,7 +95,7 @@ export type ChainSteps = {
 }
 
 /** The phase's value, or `fallback` (logged) when it ran out of time, failed or threw. */
-async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore' | 'callStart', fallback: T, run: () => Promise<T>): Promise<T> {
+async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore' | 'callStart' | 'bashDropped', fallback: T, run: () => Promise<T>): Promise<T> {
   try {
     // Wrapped, so a legitimate null value is told apart from the deadline's null.
     const ms = PHASE_DEADLINES[phase] ?? PHASE_TIMEOUT_MS
@@ -117,7 +120,10 @@ export async function beforeCall(input: ToolCallInput, steps: ChainSteps): Promi
     const command = await bounded(steps, 'bashRewrite', bash.command, () => steps.bashRewrite(bash))
     if (command !== bash.command) e = { ...e, command } as ToolCallInput
     const deny = await bounded(steps, 'bashGate', null, () => steps.bashGate({ ...bash, command }))
-    if (deny) return { e, deny, before: null }
+    if (deny) {
+      await bounded<void>(steps, 'bashDropped', undefined, async () => steps.bashDropped?.({ ...bash, command }))
+      return { e, deny, before: null }
+    }
   }
   if (steps.callStart) await bounded<void>(steps, 'callStart', undefined, () => steps.callStart!(e))
   const path = filePathOf(e)
@@ -127,7 +133,11 @@ export async function beforeCall(input: ToolCallInput, steps: ChainSteps): Promi
 
 /** The phases after the call ran: bashAfter, editAfter, readOrEditAfter; their lines go to `context`. */
 export async function afterCall(e: ToolCallInput, result: ToolCallResult, before: string | null, steps: ChainSteps): Promise<ToolCallResult> {
-  if (result.deny !== undefined) return result
+  if (result.deny !== undefined) {
+    const dropped = bashCallOf(e)
+    if (dropped) await bounded<void>(steps, 'bashDropped', undefined, async () => steps.bashDropped?.(dropped))
+    return result
+  }
   const lines: string[] = []
   const bash = bashCallOf(e)
   if (bash) lines.push(...(await bounded<string[]>(steps, 'bashAfter', [], () => steps.bashAfter(bash, result))))
@@ -150,6 +160,7 @@ export function installToolChain(on: On) {
       bashGate: e => featuresBashGate($, e),
       callStart: e => featuresCallStart($, e),
       bashAfter: (e, result) => featuresBashAfter($, e, result),
+      bashDropped: e => featuresBashDropped($, e),
       editAfter: (e, result, file) => featuresEditAfter($, e, result, file),
       readOrEditAfter: (e, result, file) => featuresReadOrEditAfter($, e, result, file),
       readBefore: path => $.fs.read(path),

@@ -120,14 +120,21 @@ test('the plugin registers the chain: one tool.call hook for Bash and the file t
   const tool: RegExp = chains[0]!.matcher.tool
   expect(['Bash', 'Read', 'Edit', 'Write', 'MultiEdit'].every(name => tool.test(name))).toBe(true)
   expect(tool.test('Grep')).toBe(false)
-  // With every feature a stub, the chain hands the call on unchanged and passes its result back.
-  // The deadline never fires, so every phase reaches its stub and none is given up on.
+  // The chain hands the call on unchanged and passes its result back, and the features' phases do run: the runs
+  // feature reads the session's folder in bashRewrite, which only a phase that ran can do. The deadline never fires.
   const seen: any[] = []
   const logged: string[] = []
-  const $ = { fs: { read: async () => null }, clock: { after: () => {} }, ui: { log: (text: string) => void logged.push(text) } }
+  const asked: string[] = []
+  const $ = {
+    fs: { read: async () => null },
+    clock: { after: () => {}, now: async () => 0 },
+    session: { cwd: async () => (asked.push('cwd'), '/repo'), root: async () => '/repo' },
+    ui: { log: (text: string) => void logged.push(text) },
+  }
   const result = await chains[0]!.handler($, { tool: 'Bash', command: 'dbt run -s orders' }, async (e: any) => (seen.push(e), ok))
   expect(seen).toEqual([{ tool: 'Bash', command: 'dbt run -s orders' }])
   expect(result).toBe(ok)
+  expect(asked.length).toBeGreaterThan(0)
   expect(logged.filter(text => text.startsWith('tool chain ·'))).toEqual([])
 })
 
@@ -206,4 +213,19 @@ test('a deadline or a logger that throws drops only that phase: the gate after i
   const pre = await beforeCall({ tool: 'Bash', command: 'dbt run' } as any, steps)
   expect(pre.deny).toEqual({ deny: 'refused' })
   expect(seen).toEqual(['bashRewrite:dbt run', 'bashGate:dbt run'])
+})
+
+test('a call a gate refuses is reported as dropped, and so is one whose result is a refusal; a call that runs is not', async () => {
+  const dropped: string[] = []
+  const bashDropped = async (e: { command: string }) => void dropped.push(e.command)
+  const refused = recording({ bashGate: async () => ({ deny: 'held' }), bashDropped })
+  expect((await beforeCall({ tool: 'Bash', command: 'dbt build -s a' } as any, refused.steps)).deny).toEqual({ deny: 'held' })
+  expect(dropped).toEqual(['dbt build -s a'])
+
+  const open = recording({ bashDropped })
+  const call = { tool: 'Bash', command: 'dbt build -s b' } as any
+  await afterCall(call, { deny: 'later' } as any, null, open.steps)
+  expect(dropped).toEqual(['dbt build -s a', 'dbt build -s b'])
+  await afterCall(call, ok, null, open.steps)
+  expect(dropped).toHaveLength(2)
 })

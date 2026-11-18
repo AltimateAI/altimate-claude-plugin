@@ -272,7 +272,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.cwd', async () => {
     // The first read is the defer feature's gate (features/defer.tsx), before the call starts; the hold is on
     // the dbt helpers' own read of the folder, the second.
-    if (options.holdCwd && ++cwdCalls === 2) await options.holdCwd
+    if (options.holdCwd && ++cwdCalls === 8) await options.holdCwd
     return { value: options.cwd ?? ROOT }
   })
   const opened: string[] = []
