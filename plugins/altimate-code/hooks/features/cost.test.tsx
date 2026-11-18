@@ -251,6 +251,19 @@ test('a lookup of the session folder lost on one model of a line is not made goo
   expect(((await pending) as any).deny).toBeDefined()
 })
 
+test('a lookup lost on the first of many models refuses at once: the later models are not worked through first', async ($, on) => {
+  const answers: Record<string, any> = {}
+  const line = Array.from({ length: 20 }, (_, i) => `dbt run -s m${i}`).join(' && ')
+  for (let i = 0; i < 20; i++) answers[`m${i}`] = UNDER
+  const options: Options = { answers }
+  const { clock, started } = await start($, on, options)
+  options.stallNth = { n: 3, seen: 0 }
+  const pending = $.tool.call(bash(line)) as Promise<any>
+  for (let i = 0; i < 70; i++) await clock.advance(100)
+  expect(((await pending) as any).deny).toBeDefined()
+  expect(started.length).toBeLessThan(3)
+})
+
 test('commands that scan nothing are not looked at', async ($, on) => {
   const { clock, estimates, ran } = await start($, on)
   for (const command of ['dbt test -s orders', 'dbt compile -s orders', 'ls', 'git status']) await $.tool.call(bash(command))

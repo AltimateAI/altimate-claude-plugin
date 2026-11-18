@@ -263,6 +263,8 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     }
     const label = target.model ?? 'the inline query'
     const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken, refused.get(e.command))
+    // The folder could not be read in time: the rest of the line is not looked at, or the chain's own deadline would let the whole command through first.
+    if (unreadable !== lostBefore) return { deny: UNREADABLE_DENY }
     // A /cd while it was being asked: the answer is of the project left, and nothing here is allowed on it.
     const now = (await sessionDir($, dir)) ?? null
     if (now !== (dir ?? null)) {
