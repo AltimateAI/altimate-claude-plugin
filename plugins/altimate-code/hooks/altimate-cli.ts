@@ -194,8 +194,13 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
   if (result.exitCode === 0 && (!data || typeof data !== 'object' || typeof data.status !== 'string')) {
     return { metadata: null as any, text: 'the answer could not be read', ok: false }
   }
-  // A CLI that printed something other than its answer object (its usage, from an altimate-code too old to
-  // have the command) hands that output back as `raw`, so the caller can say what went wrong.
-  const raw = data ? undefined : `${result.stdout ?? ''}\n${result.stderr ?? ''}`.trim().slice(0, 4000)
-  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? '', ok: result.exitCode === 0 && data?.status !== 'error', raw }
+  // A crash, or a failure the CLI prints as plain text, has no answer object: its first line is what to show.
+  // An answer cut off mid-JSON is no message, so only what the CLI printed to stderr is shown for it.
+  // The whole output also comes back as `raw` (an altimate-code too old to have the command prints its
+  // usage instead of an answer), so the caller can say what went wrong.
+  const out = result.stdout.trim()
+  const answered = data && typeof data === 'object'
+  const said = answered ? '' : ((out.startsWith('{') ? '' : out) || String(result.stderr ?? '').trim()).split('\n')[0]!.slice(0, 500)
+  const raw = answered ? undefined : `${result.stdout ?? ''}\n${result.stderr ?? ''}`.trim().slice(0, 4000)
+  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? said, ok: result.exitCode === 0 && data?.status !== 'error', raw }
 }

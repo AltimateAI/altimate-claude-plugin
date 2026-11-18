@@ -223,7 +223,27 @@ export interface RunsState {}
 // Defer and target: the target and defer state dbt commands run with.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface DeferState {}
+export interface DeferState {
+  /** The dbt project the session works in; null when there is none (nothing is rewritten). */
+  projectDir: string | null
+  /** The project's Power User setting turns defer on and gives a usable state directory. */
+  enabled: boolean
+  favorState: boolean
+  mode: 'local' | 'remote' | 'none'
+  /** The directory passed as `--state`; null when there is none to use. */
+  stateDir: string | null
+  /** Why defer is configured but cannot be applied. */
+  reason: string | null
+  /** /defer on or off for this session; null follows the project's setting. */
+  override: boolean | null
+  /** The profile's default target and its output names. */
+  defaultTarget: string | null
+  targets: string[]
+  /** /target for this session; null leaves the command's own or the profile's default. */
+  target: string | null
+  /** When reading the setting failed (engine clock, ms); null when it was read. */
+  failedAt: number | null
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Raw SQL to model: the SQL being turned into a dbt model.
@@ -276,7 +296,29 @@ export interface DocsState {}
 // Profile CTEs: each CTE's row count and timing.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface CteProfileState {}
+export type CteTier = 'hot' | 'warm' | 'cool'
+
+export interface CteRow {
+  name: string
+  line: number
+  /** Offset of the WITH keyword the CTE belongs to: CTEs of one WITH clause build on each other. */
+  clause: number
+  status: 'pending' | 'running' | 'done' | 'failed'
+  /** Wall time of the count query, which holds every earlier CTE of its clause (a warehouse may skip those the CTE does not use). */
+  queryMs?: number
+  rows?: number
+  /** Time this CTE adds over the one before it. */
+  marginalMs?: number
+  tier?: CteTier
+  error?: string
+}
+
+export interface CteProfileState {
+  model: string
+  status: 'listing' | 'running' | 'stopping' | 'done' | 'stopped' | 'failed'
+  rows: CteRow[]
+  message?: string
+}
 
 /** One /savings run's answer, as the pane draws it. */
 export type SavingsView = {

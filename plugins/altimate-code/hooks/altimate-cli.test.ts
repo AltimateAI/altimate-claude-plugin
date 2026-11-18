@@ -51,6 +51,28 @@ test('a write call never asks the MCP server, even when one is connected', async
   expect(argvs.map(argv => argv.slice(1))[1]).toEqual(['tool', 'run', 'dbt_manifest', '--args', '{}', '--json'])
 })
 
+test('a failure with no answer object keeps its first line of text; one with an object keeps the object\'s', async () => {
+  const failing = (run: () => unknown) => {
+    const { $ } = standIn(() => null)
+    $.process.run = async () => run()
+    return $
+  }
+  const text = async (run: () => unknown) => (await runTool(failing(run), 'dbt_manifest', {})).text
+  expect(await text(() => ({ exitCode: 1, stdout: 'Error: no such tool\nusage: altimate tool run', stderr: 'ignored' }))).toBe('Error: no such tool')
+  expect(await text(() => ({ exitCode: 1, stdout: '', stderr: '\nTypeError: crashed\n    at main' }))).toBe('TypeError: crashed')
+  expect(await text(() => ({ exitCode: 1, stdout: 'x'.repeat(900), stderr: '' }))).toBe('x'.repeat(500))
+  expect(await text(() => ({ exitCode: 1, stdout: '', stderr: '' }))).toBe('')
+  // An answer cut off mid-JSON is no message: only stderr, if any, is shown.
+  expect(await text(() => ({ exitCode: 1, stdout: '{"status":"ok","out', stderr: '' }))).toBe('')
+  expect(await text(() => ({ exitCode: 1, stdout: '{"status":"ok","out', stderr: 'Killed: out of memory' }))).toBe('Killed: out of memory')
+  // An answer object speaks for itself: its output, or nothing, never a line of stderr.
+  expect(await text(() => ({ exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'boom', metadata: {} }), stderr: 'noise' }))).toBe('boom')
+  expect(await text(() => ({ exitCode: 1, stdout: JSON.stringify({ status: 'error', metadata: {} }), stderr: 'noise' }))).toBe('')
+  const result = await runTool(failing(() => ({ exitCode: 2, stdout: 'plain failure' })), 'dbt_manifest', {})
+  // The whole output also comes back as `raw`, for a caller that reads more than its first line.
+  expect(result).toEqual({ metadata: null, text: 'plain failure', ok: false, raw: 'plain failure' })
+})
+
 test('within handles the work\'s rejection before it sets the deadline, so a throwing clock leaves none unhandled', async () => {
   let handled = false
   // A work that rejects, recording when a rejection handler is attached.
