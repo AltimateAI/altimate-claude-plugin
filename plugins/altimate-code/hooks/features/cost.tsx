@@ -45,6 +45,8 @@ let limitBytes = DEFAULT_MAX_SCAN_BYTES
 const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
 const inflight = new Map<string, { answer: Promise<Answer>; doneAt: number | null; generation: number }>()
+/** Estimates whose process is still running, whether or not an edit has voided their answer: one runs per project at a time. */
+const active = new Set<Promise<undefined>>()
 /** Commands the gate refused while their estimate was running, and when it last did: they have not run, so a retry changes nothing. */
 const refused = new Map<string, number>()
 /** Moves on whenever the project may have changed: an estimate started before it is never taken as an answer. */
@@ -548,13 +550,25 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   if (!running) {
     // The wait is spent: nothing new starts. Each estimate may start the adapter (dbt deps), and two at once in one project collide.
     if (waitUntil - now <= 0) return 'pending'
-    // Nor while another is still running in this project, whichever command asked for it.
-    for (const other of inflight.values()) if (other.doneAt == null && other.generation === generation) return 'pending'
+    // Nor while another is still running in this project, whichever command asked for it, even one whose answer an edit voided:
+    // this one waits its turn, within the same bound.
+    while (active.size > 0) {
+      const left = waitUntil - (await $.clock.now())
+      if (left <= 0 || !(await within($, left, Promise.all([...active]).then(() => true)))) return 'pending'
+    }
+    // Another pass may have started this same estimate while this waited.
+    const started = inflight.get(key)
+    if (started && started.doneAt == null) running = started
+  }
+  if (!running) {
     const entry: { answer: Promise<Answer>; doneAt: number | null; generation: number } = {
       answer: estimate($, args, now + ESTIMATE_BUDGET_MS),
       doneAt: null,
       generation,
     }
+    const track = entry.answer.then(() => undefined, () => undefined)
+    active.add(track)
+    void track.then(() => active.delete(track))
     void entry.answer.then(async () => void (entry.doneAt = await $.clock.now())).catch(() => {})
     inflight.set(key, entry)
     running = entry
