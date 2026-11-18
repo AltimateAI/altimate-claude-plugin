@@ -174,6 +174,8 @@ type Options = {
   answer?: unknown
   /** `tool run` exits 1 with this answer, as altimate-code does for a tool it does not have. */
   error?: unknown
+  /** What `tool run` prints and exits with, as is (no answer object). */
+  output?: { exitCode: number; stdout: string; stderr: string }
   missingCli?: boolean
   hold?: Promise<void>
   isPlaced?: boolean
@@ -231,6 +233,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
     if (options.hold) await options.hold
     if (options.error) return { value: { exitCode: 1, stdout: JSON.stringify(options.error), stderr: '' } }
+    if (options.output) return { value: options.output }
     return { value: { exitCode: 0, stdout: JSON.stringify(options.answer ?? ANSWER), stderr: '' } }
   })
   on('tool.call', () => ({ result: { ok: true } }))
@@ -787,6 +790,28 @@ test('a failed run also comes as a notice, for a terminal too narrow for the pan
   await savings($)
   await clock.settle()
   expect(toasts.at(-1)).toMatch(/^Databricks savings check: A query was refused: \[TABLE_OR_VIEW_NOT_FOUND\].* ask a workspace admin for SELECT/)
+})
+
+test('an altimate-code too old to have `tool run` says to update, from what that CLI really prints', async ($, on) => {
+  // altimate-code 0.10.0 on `tool run`: exit 1, nothing on stdout, its banner and usage on stderr. The
+  // CLI helper's text is only the first non-blank line (the banner), so the pane reads the whole output.
+  const stderr = [
+    '                                                  ',
+    '▄▀█ █   ▀█▀ █ █▀▄▀█ ▄▀█ ▀█▀ █▀▀ █▀▀ █▀█ █▀▄ █▀▀',
+    '█▀█ █▄▄  █  █ █ ▀ █ █▀█  █  ██▄ █▄▄ █▄█ █▄▀ ██▄',
+    '',
+    'Commands:',
+    '  altimate-code completion           generate shell completion script',
+    '  altimate-code mcp                  manage MCP (Model Context Protocol) servers',
+    '  altimate-code [project]            start altimate-code tui                               [default]',
+  ].join('\n')
+  const { clock, toasts } = await start($, on, { output: { exitCode: 1, stdout: '', stderr } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^This altimate-code has no Databricks savings check\.$/ })).toBeDefined()
+  expect(toasts.at(-1)).toContain('altimate upgrade')
+  await ui.unmount()
 })
 
 test('an altimate-code too old to have `tool run` says to update, not "failed"', () => {
