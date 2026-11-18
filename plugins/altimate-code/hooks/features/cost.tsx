@@ -176,7 +176,7 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
  * a gate that must hold the call when its own check fails catches that failure and returns `{ deny }`.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
-  const verdict = await gate($, e)
+  const verdict = await gate($, e).finally(() => overNow.delete(e.command))
   // A dbt run or build that is let through rebuilds relations while it runs: an estimate kept from before it is stale from here.
   if (verdict === null && limitBytes > 0 && parseDbtCommand(e.command).some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) dropFinished()
   return verdict
@@ -189,6 +189,9 @@ async function leaveProject($: EngineInterface) {
   await update($, costAtom, prev => (prev ? { ...prev, held: null, allowOnce: false, lastEstimate: null } : prev))
   await showStatus($, null)
 }
+
+/** Per command: the over-limit answer a pass has in hand but has not yet recorded as the hold. */
+const overNow = new Map<string, { label: string; bytes: number; display: string }>()
 
 async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
@@ -262,6 +265,8 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
       continue
     }
     estimated = true
+    // Noted before any await: a parallel pass for this command whose own estimate fails must still see it.
+    if (answer.maxBytes > limitBytes) overNow.set(e.command, { label, bytes: answer.maxBytes, display: answer.display })
     await rememberEstimate($, label, answer.bytes, answer.display)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}`)
     else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
@@ -293,8 +298,12 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
   }
 
   // A command held earlier stays held while its estimate cannot be made again: only /allow-scan or an estimate under the limit frees it.
-  if (over.length === 0 && failed && state.held?.command === e.command && state.held.bytes > limitBytes) {
-    over.push({ label: state.held.target, bytes: state.held.bytes, point: state.held.bytes, display: state.held.display })
+  // The hold is read now, not from the state taken before the estimates: a parallel call may have recorded it meanwhile.
+  // Or from an over-limit answer a parallel pass for the same command has in hand and has not recorded yet.
+  const stored = over.length === 0 && failed ? (await read($, costAtom))?.held : null
+  const heldNow = stored && stored.command === e.command ? { label: stored.target, bytes: stored.bytes, display: stored.display } : overNow.get(e.command)
+  if (over.length === 0 && failed && heldNow && heldNow.bytes > limitBytes) {
+    over.push({ label: heldNow.label, bytes: heldNow.bytes, point: heldNow.bytes, display: heldNow.display })
   }
 
   if (over.length > 0) {

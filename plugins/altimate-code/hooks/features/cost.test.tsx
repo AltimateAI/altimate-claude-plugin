@@ -10,6 +10,8 @@ type Options = {
   answers?: Record<string, Record<string, unknown> | 'unknown-tool'>
   /** The adapter's answer for everything else. */
   fallback?: Record<string, unknown>
+  /** Answers given in turn for a model, before `answers` applies again. */
+  sequence?: Record<string, Record<string, unknown>[]>
   /** The CLI answers only once this resolves. */
   hold?: Promise<void>
   /** With `hold`: only the estimate of this model or SQL waits. */
@@ -63,7 +65,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (options.holds?.[key]) await options.holds[key]
     if (options.hold && (options.holdFor === undefined || options.holdFor === key)) await options.hold
     estimates.push(key)
-    const answer = options.answers?.[key] ?? options.fallback
+    const answer = options.sequence?.[key]?.shift() ?? options.answers?.[key] ?? options.fallback
     if (answer === 'unknown-tool') {
       return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: `Unknown tool: ${tool}. Run \`altimate-code tool list\` to see the available tools.`, metadata: {} }), stderr: '' } }
     }
@@ -1281,4 +1283,20 @@ test('a dbt run let through while the gate waits on its estimate voids that answ
   finish()
   await rebuild
   expect(ran).toEqual(['dbt run -s customers --target prod'])
+})
+
+test('a parallel call whose estimate fails is held by the hold another call recorded meanwhile', async ($, on) => {
+  const options: Options = { sequence: { orders: [OVER, { success: false, error: 'Access Denied' }] } }
+  const { clock, ran } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  const second = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(500)
+  release()
+  await clock.advance(100)
+  const results: any[] = [await first, await second]
+  await clock.settle()
+  expect(results.every(r => typeof r?.deny === 'string')).toBe(true)
+  expect(ran).toEqual([])
 })
