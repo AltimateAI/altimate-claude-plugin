@@ -269,13 +269,19 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // The refusal for a folder that could not be read keeps what the pass already found over the limit, and marks the command refused:
   // its retry is no change, and a failed estimate then cannot free a command already known to be expensive.
   const unreadable = async () => {
+    // What a project changed meanwhile left is not this pass's to record.
+    if (generation !== startedAt) return changedDeny(e.command)
     if (over.length > 0) {
       const worst = over.reduce((x, y) => (y.bytes > x.bytes ? y : x))
-      await update($, costAtom, prev => {
-        const current = prev ?? FRESH
-        const same = current.held?.command === e.command
-        return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
-      })
+      try {
+        await update($, costAtom, prev => {
+          const current = prev ?? FRESH
+          const same = current.held?.command === e.command
+          return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+        })
+      } catch {
+        // The refusal stands whether or not the hold could be recorded: a gate that throws lets the call run.
+      }
     }
     notes.delete(e.command)
     refused.set(e.command, await $.clock.now())
