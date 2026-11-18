@@ -44,6 +44,9 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {}
 
+/** A Bash call that a gate refused, or whose result is a refusal, never reaches `bashAfter`: the place to let go of what this feature kept for it. */
+export async function bashDropped($: EngineInterface, e: BashCall): Promise<void> {}
+
 /** `file.before` holds the text from before the edit only when `editReadsBefore` is true. */
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {}
 

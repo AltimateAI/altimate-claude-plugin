@@ -159,9 +159,25 @@ test('a phase that never settles is given up on: the call passes through unchang
   expect(await afterCall(edit, ok, null, steps)).toBe(ok)
   expect(seen).toEqual(
     ['bashRewrite', 'bashGate', 'bashAfter', 'readBefore', 'editAfter', 'readOrEditAfter'].map(
-      phase => `log:tool chain · ${phase} did not finish within 5000 ms or failed: the call goes on unchanged`,
+      phase => `log:tool chain · ${phase} did not finish within ${phase === 'editAfter' ? 35000 : 5000} ms or failed: the call goes on unchanged`,
     ),
   )
+})
+
+test('the edit phase may hold an edit longer than the others: a slow check still rides on its result', async () => {
+  const deadlines: number[] = []
+  const { steps } = recording({
+    editAfter: async () => ['held note'],
+    limit: (async (work: Promise<unknown>, ms: number) => {
+      deadlines.push(ms)
+      return work
+    }) as any,
+  })
+  const edit = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
+  const result = await afterCall(edit, ok, null, steps)
+  expect((result as any).context).toContain('held note')
+  // editAfter, then readOrEditAfter.
+  expect(deadlines).toEqual([35000, 5000])
 })
 
 test('a phase that throws at once is treated like one that timed out', async () => {
@@ -190,4 +206,19 @@ test('a deadline or a logger that throws drops only that phase: the gate after i
   const pre = await beforeCall({ tool: 'Bash', command: 'dbt run' } as any, steps)
   expect(pre.deny).toEqual({ deny: 'refused' })
   expect(seen).toEqual(['bashRewrite:dbt run', 'bashGate:dbt run'])
+})
+
+test('a call a gate refuses is reported as dropped, and so is one whose result is a refusal; a call that runs is not', async () => {
+  const dropped: string[] = []
+  const bashDropped = async (e: { command: string }) => void dropped.push(e.command)
+  const refused = recording({ bashGate: async () => ({ deny: 'held' }), bashDropped })
+  expect((await beforeCall({ tool: 'Bash', command: 'dbt build -s a' } as any, refused.steps)).deny).toEqual({ deny: 'held' })
+  expect(dropped).toEqual(['dbt build -s a'])
+
+  const open = recording({ bashDropped })
+  const call = { tool: 'Bash', command: 'dbt build -s b' } as any
+  await afterCall(call, { deny: 'later' } as any, null, open.steps)
+  expect(dropped).toEqual(['dbt build -s a', 'dbt build -s b'])
+  await afterCall(call, ok, null, open.steps)
+  expect(dropped).toHaveLength(2)
 })

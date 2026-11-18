@@ -2,6 +2,7 @@ import { expect, test } from 'claude-code/testing'
 
 import { nothingToReport } from '../inert-features'
 import {
+  registerFeatures,
   attempt,
   featureBandLines,
   featuresBashAfter,
@@ -86,8 +87,22 @@ test('each phase runs through the features, which find nothing to report and log
   expect(await featuresBashRewrite($, bash)).toBe('dbt run -s a')
   expect(await featuresBashGate($, bash)).toBeNull()
   // A dbt command may get a note from a feature that watches dbt (what a run would scan); a call no feature watches gets none.
-  expect(await featuresBashAfter($, { tool: 'Bash', command: 'ls models' } as any, {} as any)).toEqual([])
+  expect(await featuresBashAfter($, { tool: 'Bash', command: 'ls models', tool_use_id: 'ls' } as any, {} as any)).toEqual([])
   expect(await featuresEditAfter($, file, {} as any, { path: '/repo/models/a.sql', before: null })).toEqual([])
   expect(await featuresReadOrEditAfter($, file, {} as any, { path: '/repo/models/a.sql' })).toEqual([])
-  expect(logs).toEqual([])
+  // The runs feature is real here and needs a fuller engine than this stub; every other feature must log nothing.
+  expect(logs.filter(line => !line.startsWith('runs · '))).toEqual([])
+})
+
+test('a feature whose register throws never reaches the caller, so the tool hook after the features still installs', () => {
+  let calls = 0
+  const on = new Proxy(() => {}, {
+    get: () => on,
+    apply: () => {
+      calls++
+      throw new Error('refused matcher')
+    },
+  }) as any
+  expect(() => registerFeatures(on, { options: {} } as any)).not.toThrow()
+  expect(calls).toBeGreaterThan(0)
 })

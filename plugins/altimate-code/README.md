@@ -136,7 +136,7 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 ## Settings
 
-The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). None is used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each will control.
+The plugin has six settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). `dbt_mods` is used, and so are `healthBlocksPush` and `healthConfigPath`, by the project health check. `maxScanBytes` and the comments settings are not used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each controls or will control.
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
