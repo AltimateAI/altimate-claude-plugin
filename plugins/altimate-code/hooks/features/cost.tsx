@@ -651,6 +651,8 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   // The look-up and the insert below are one step: nothing is awaited between them, or two passes would each start one.
   const now = await $.clock.now()
   const here = (await sessionDir($, seenDir)) ?? null
+  // Which project this is cannot be told: nothing is reused, nothing starts, and the command is refused until it can be.
+  if (isUnknown(here)) return 'pending'
   let running = inflight.get(key)
   // An answer made in another project is of that project's models, not this one's.
   if (running && (running.generation !== generation || running.dir !== here)) running = undefined

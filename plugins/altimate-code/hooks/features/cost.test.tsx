@@ -22,6 +22,8 @@ type Options = {
   cwd?: string
   /** Set after start: the session's directory is not answered until this resolves. */
   holdCwd?: Promise<void>
+  /** Set after start: only this lookup of the session's directory (counted from 1, after it is set) is never answered. */
+  stallNth?: { n: number; seen: number }
   /** Drawing the status line throws. */
   statusFails?: boolean
   /** The Bash tool runs this command only once this resolves. */
@@ -44,6 +46,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.root', () => ({ value: ROOT }))
   on('session.cwd', async () => {
     await options.holdCwd
+    if (options.stallNth && ++options.stallNth.seen === options.stallNth.n) await new Promise<void>(() => {})
     return { value: options.cwd ?? ROOT }
   })
   on('ui.log', () => ({ value: undefined }))
@@ -226,6 +229,18 @@ test('a session folder that cannot be read is an unknown project: no verdict is 
   }
   expect(started).toEqual(['orders'])
 })
+
+// The lookups the gate makes, one after another: whichever one is not answered, the project is not known and the command is refused.
+for (const n of [2, 3, 4, 5, 6]) {
+  test(`a scan is not let through on a project that cannot be told: the gate's lookup number ${n} of the session folder is not answered`, async ($, on) => {
+    const options: Options = { answers: { orders: UNDER } }
+    const { clock } = await start($, on, options)
+    options.stallNth = { n, seen: 0 }
+    const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
+    for (let i = 0; i < 70; i++) await clock.advance(100)
+    expect(((await pending) as any).deny).toBeDefined()
+  })
+}
 
 test('commands that scan nothing are not looked at', async ($, on) => {
   const { clock, estimates, ran } = await start($, on)
