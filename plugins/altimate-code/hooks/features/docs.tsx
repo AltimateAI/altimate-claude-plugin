@@ -364,14 +364,16 @@ async function projectOf($: EngineInterface, file: string): Promise<Project | nu
 // Only a message about the tool itself: "model not found" is the model's.
 const MISSING_TOOL = /unknown tool|no such tool|invalid tool|dbt_docs_coverage[^\n]*not (?:an? )?(?:exposed|available|found|registered)/i
 
-async function schemaEdited($: EngineInterface, file: EditedFile): Promise<string[]> {
+async function schemaEdited($: EngineInterface, file: EditedFile, created: boolean): Promise<string[]> {
   const project = await projectOf($, file.path)
   if (!project) return []
   const after = await $.fs.read(file.path).catch(() => null)
   // A file that is gone writes nothing, so what was offered from it no longer holds.
   const written = columnDescriptions(after ?? '')
   // A before-text that could not be read says nothing about what changed: no offer rather than every description.
-  const fresh = after === null || (file as { beforeUnknown?: boolean }).beforeUnknown ? [] : changedDescriptions(file.before, after)
+  // An Edit replaces text that was in the file, so a missing before-text there is a failed read, not a new file.
+  const unknown = (file as { beforeUnknown?: boolean }).beforeUnknown === true || (file.before === null && !created)
+  const fresh = after === null || unknown ? [] : changedDescriptions(file.before, after)
   // Writing the description Apply asked for is the copy being made, not a new description to offer;
   // any other text written to that column is a new description.
   const all = fresh.filter(one => {
@@ -662,7 +664,10 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
 
 /** `file.before` holds the text from before the edit only when `editReadsBefore` is true. */
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
-  if (/\.ya?ml$/i.test(file.path)) return schemaEdited($, file)
+  if (/\.ya?ml$/i.test(file.path)) {
+    const oldText = (e as { old_string?: unknown }).old_string
+    return schemaEdited($, file, e.tool === 'Write' || (e.tool === 'Edit' && oldText === ''))
+  }
   if (/\.sql$/i.test(file.path)) return sqlEdited($, file)
 }
 

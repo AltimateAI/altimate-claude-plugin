@@ -511,12 +511,20 @@ test('a bare `-` list item starts its own model or column, its keys on the lines
   ])
 })
 
-test('a schema file the edit creates offers every description it writes', async ($, on) => {
+test('a schema file the call creates offers every description it writes', async ($, on) => {
   const { clock, calls } = await start($, on, { newFile: true })
-  const result: any = await $.tool.call(EDIT)
+  const result: any = await $.tool.call({ tool: 'Write', file_path: SCHEMA, content: AFTER })
   await clock.settle()
   expect(calls).toContain('cli:impact_analysis')
   expect(result.context).toHaveLength(2)
   expect(result.context[0]).toContain('"customer_id": 2 downstream columns can take this description')
   expect(result.context[1]).toContain('"order_id": 2 downstream columns can take this description')
+})
+
+test('an Edit whose before-read failed offers nothing rather than every description in the file', async ($, on) => {
+  const { clock, calls } = await start($, on, { newFile: true })
+  const result: any = await $.tool.call(EDIT)
+  await clock.settle()
+  expect(calls).not.toContain('cli:impact_analysis')
+  expect(result.context ?? []).toEqual([])
 })
