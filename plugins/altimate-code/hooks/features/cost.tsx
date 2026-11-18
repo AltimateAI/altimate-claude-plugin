@@ -46,7 +46,7 @@ const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
 const inflight = new Map<string, { answer: Promise<Answer>; settled: Promise<undefined>; doneAt: number | null; generation: number; voided?: boolean }>()
 /** Every estimate whose process is still running (gate or /scan-cost), whether or not an edit has voided its answer: one runs per project at a time. */
-const active = new Set<Promise<undefined>>()
+const active = new Map<Promise<undefined>, string | null>()
 /** Commands the gate refused while their estimate was running, and when it last did: they have not run, so a retry changes nothing. */
 const refused = new Map<string, number>()
 /** Moves on whenever the project may have changed: an estimate started before it is never taken as an answer. */
@@ -190,9 +190,8 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
   // A session moved to another project (a /cd) keeps nothing the gate learned in the last one.
   const dir = await $.session.cwd().catch(() => seenDir)
   if (seenDir !== null && dir !== seenDir) {
-    // What is still running belongs to the project left behind: it holds nothing back here.
+    // What is still running belongs to the project left behind: it holds nothing back here, and still holds that project back on return.
     invalidate()
-    active.clear()
     await forgetUnsupported($)
     await update($, costAtom, prev => (prev ? { ...prev, held: null, allowOnce: false, lastEstimate: null } : prev))
     await showStatus($, null)
@@ -357,10 +356,10 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
 }
 
 /** Runs the estimate and counts it as running until it settles. */
-function startEstimate($: EngineInterface, args: { model?: string; sql?: string }, until: number) {
+function startEstimate($: EngineInterface, args: { model?: string; sql?: string }, until: number, dir: string | null) {
   const answer = estimate($, args, until)
   const settled = answer.then(() => undefined, () => undefined)
-  active.add(settled)
+  active.set(settled, dir)
   void settled.then(() => active.delete(settled))
   return { answer, settled }
 }
@@ -377,11 +376,13 @@ async function startWhenIdle<T>(
   reuse: () => T | undefined,
   begin: (started: { answer: Promise<Answer>; settled: Promise<undefined> }) => T,
 ): Promise<T | null> {
-  while (active.size > 0) {
+  const dir = (await $.session.cwd().catch(() => seenDir)) ?? null
+  const running = () => [...active].filter(([, d]) => d === dir).map(([p]) => p)
+  while (running().length > 0) {
     const left = waitUntil - (await $.clock.now())
-    if (left <= 0 || !(await within($, left, Promise.all([...active]).then(() => true)))) return null
+    if (left <= 0 || !(await within($, left, Promise.all(running()).then(() => true)))) return null
   }
-  return reuse() ?? begin(startEstimate($, args, waitUntil + ESTIMATE_BUDGET_MS))
+  return reuse() ?? begin(startEstimate($, args, waitUntil + ESTIMATE_BUDGET_MS, dir))
 }
 
 /** Drops the answers already in; an estimate still running, which a parallel call may be waiting on, is left to finish. */

@@ -1166,3 +1166,26 @@ test('a pending estimate on another command does not carry /allow-scan over to i
   expect(retry.deny).toContain('20.0 GiB')
   expect(ran).toEqual([])
 })
+
+test('a /cd away and back does not forget the estimate still running in the project', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER, b: UNDER, c: UNDER } }
+  const { clock, started } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'orders'
+  const first = $.command.run({ command: 'scan-cost', args: 'orders' } as any)
+  await clock.advance(500)
+  // Another project is not held back by it.
+  options.cwd = '/elsewhere/project-b'
+  const other = $.command.run({ command: 'scan-cost', args: 'b' } as any)
+  await clock.advance(500)
+  expect(((await other) as any).text).toContain('b would scan 2.0 GiB')
+  // Back in the first project, a second estimate waits its turn and gives up after the short wait.
+  options.cwd = undefined
+  const again = $.command.run({ command: 'scan-cost', args: 'c' } as any)
+  await clock.advance(4_001)
+  expect(((await again) as any).text).toContain('another estimate is still running in this project')
+  expect(started).toEqual(['orders', 'b'])
+  release()
+  await first
+})

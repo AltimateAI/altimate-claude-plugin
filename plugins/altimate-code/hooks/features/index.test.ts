@@ -18,9 +18,11 @@ const engine = () => {
   const logs: string[] = []
   // Enough of the engine for a feature that keeps state, reads files and registers commands; a stub needs none of it.
   const $ = {
-    ui: { log: (text: string) => void logs.push(text) },
+    ui: { log: (text: string) => void logs.push(text), status: () => {} },
+    session: { cwd: async () => '/repo' },
+    clock: { now: async () => 0 },
     fs: { exists: async () => false, read: async () => '' },
-    state: { get: async () => ({ value: null }), set: async () => ({ isSet: true }), update: async () => ({ isSet: true }) },
+    state: { get: async () => ({ value: {} }), set: async () => ({ isSet: true }), update: async () => ({ isSet: true }) },
     command: { register: async () => {} },
   }
   return { logs, $: $ as any }
@@ -42,14 +44,14 @@ test('attempt logs a feature function that throws at once, one that rejects, and
 
 test('with every feature a stub, each phase runs through the features and logs nothing', async () => {
   const { $, logs } = engine()
-  const bash = { tool: 'Bash', command: 'dbt run -s a' } as any
+  const bash = { tool: 'Bash', command: 'dbt compile -s a' } as any
   const file = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
   await featuresSessionStart($, {} as any)
   await featuresTurnStart($, {} as any)
   await featuresTurnComplete($, {} as any, {} as any)
   await featuresSessionEnd($, {} as any)
   expect(await featureBandLines($, {} as any)).toEqual([])
-  expect(await featuresBashRewrite($, bash)).toBe('dbt run -s a')
+  expect(await featuresBashRewrite($, bash)).toBe('dbt compile -s a')
   expect(await featuresBashGate($, bash)).toBeNull()
   expect(await featuresBashAfter($, bash, {} as any)).toEqual([])
   expect(await featuresEditAfter($, file, {} as any, { path: '/repo/models/a.sql', before: null })).toEqual([])
