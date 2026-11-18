@@ -342,6 +342,8 @@ export type SavingsView = {
     resourceType: string
     resourceId: string
     resourceName: string
+    /** As the workspace spells it, to recognise it in files and commands. */
+    matchName: string
     /** The workspace it is in; null when the check read only one. */
     workspace: string | null
     monthlyMin: number
