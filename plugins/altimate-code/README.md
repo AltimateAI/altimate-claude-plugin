@@ -52,7 +52,7 @@ If altimate-code is not on PATH or not configured, the plugin surfaces the failu
 1. A **SessionStart hook** adds a description of the available tools and both modes to the session, and copies the linked workspace's skills (see below). It does not start the MCP server. In a linked project, the [team rules](#team-rules) hooks add the workspace's rules too.
 2. **MCP mode.** Claude calls `warehouse_list`, `warehouse_add`, `sql_execute` (`tables` returns columns and value profiles; large results spill to a local file), `sql_materialize` (session-local `scratch` DuckDB for cross-database joins), `answer_commit`, and `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence`, `sql_translate`.
 3. **CLI mode.** The **skill** has Claude run `altimate tool context` once (connections, schema listing, analyst method), then `altimate tool run <name> --args '<json>'` through Bash and reason over the structured output. `altimate tool list --json` shows every tool and its input schema. A warm process per project starts automatically.
-4. Calls are read-only unless you approve `--allow-write` (CLI mode); `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are always blocked. Read-only is enforced by the database on Postgres, SQLite and DuckDB and by SQL classification elsewhere, so use a read-only DB user for the strongest boundary.
+4. Calls are read-only unless you approve `--allow-write` (CLI mode), except the project health check: it runs `dbt_health` with write, without asking, because the dbt project's integration refreshes `target/` (and runs `dbt deps`), so it starts only in an interactive session (or with `healthBlocksPush` on) that is inside a dbt project, and has no separate off switch; `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are always blocked. Read-only is enforced by the database on Postgres, SQLite and DuckDB and by SQL classification elsewhere, so use a read-only DB user for the strongest boundary.
 5. For long multi-step jobs, or when you invoke **`/altimate-code:altimate <task>`** for work that needs the agent, Claude Code runs `altimate run "<your task>"` locally with the `builder` agent (or `analyst` for a data question when MCP is unavailable), which uses your configured LLM provider.
 6. Warehouse queries and dbt commands run **locally under your credentials**. If the installed CLI predates the `tool` subcommand, the skill falls back to delegation.
 
@@ -136,12 +136,12 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 ## Settings
 
-The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). None is used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each will control.
+The plugin has five settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). `healthBlocksPush` and `healthConfigPath` are used by the project health check. `maxScanBytes` and the comments settings are not used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each controls.
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
 | `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it waits for your approval (0 never waits; at least 0). Other warehouses are never held. |
-| `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. |
+| `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. If the first check of a session lands after you changed a model, that model's existing issues count as new (the baseline then lacks them). The reverse also holds: a model you drop from a schema file before that first check lands has its new issues taken as existing, so a push is not held for them. |
 | `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. Empty uses the default checks. |
 | `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). |
 | `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. |

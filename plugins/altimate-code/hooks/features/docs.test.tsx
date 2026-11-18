@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { PHASE_TIMEOUT_MS } from '../tool-chain'
 import { ROUND_MS, applyPrompt, candidatesFrom, changedDescriptions, columnDescriptions, modelPaths, sentGroups } from './docs'
+import { nothingToReport } from '../inert-features'
 
 const ROOT = '/repo'
 const MANIFEST_PATH = `${ROOT}/target/manifest.json`
@@ -257,6 +258,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
     if (command !== 'tool' || tool === 'docs_share_comments') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    // The project health check asks for its own tool at session start: not a call this feature makes.
+    if (tool === 'dbt_health') return { value: nothingToReport(e.argv)! }
     calls.push(`cli:${tool}`)
     toolArgs.push(String(e.argv[5]))
     if (tool === 'dbt_docs_coverage') {
