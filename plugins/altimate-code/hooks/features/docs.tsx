@@ -328,13 +328,16 @@ export function applyPrompt(groups: DocsGroup[], skipped: string[]): string | nu
 // The project around an edited file
 // ---------------------------------------------------------------------------------------------------
 
-type Project = { root: string; manifest: string; models: string[] }
+type Project = { root: string; manifest: string; models: string[]; package?: string }
 
 const normal = (path: string) => path.replace(/\\/g, '/')
 /** A path spelled one way, so the same file named two ways compares equal. */
 const tidy = (path: string) => normal(path).replace(/\/(?:\.\/)+/g, '/').replace(/\/{2,}/g, '/')
 
 /** The dbt project the file is a model file of: its closest dbt_project.yml above it, and the file under one of that project's model folders. */
+/** The model as dbt's unique_id, so a model of the same name in another package is never the one traced. */
+const modelRef = (project: Project, model: string) => (project.package ? `model.${project.package}.${model}` : model)
+
 async function projectOf($: EngineInterface, file: string): Promise<Project | null> {
   const path = normal(file)
   let dir = path.slice(0, path.lastIndexOf('/'))
@@ -348,7 +351,8 @@ async function projectOf($: EngineInterface, file: string): Promise<Project | nu
         if (name === '' || name === '.') return path.startsWith(`${dir}/`) && !/^(?:target|dbt_packages|dbt_modules|node_modules|venv|site-packages|dist|build|\.[^/]+)\//.test(path.slice(dir.length + 1))
         return path.startsWith(`${dir}/${name}/`)
       })
-      return under ? { root: dir, manifest: `${dir}/target/manifest.json`, models: folders } : null
+      const pkg = /^name:\s*['"]?([A-Za-z0-9_]+)['"]?\s*(?:#.*)?$/m.exec(text ?? '')?.[1]
+      return under ? { root: dir, manifest: `${dir}/target/manifest.json`, models: folders, ...(pkg && { package: pkg }) } : null
     }
     const up = dir.slice(0, dir.lastIndexOf('/'))
     if (up === dir) break
@@ -400,7 +404,7 @@ async function schemaEdited($: EngineInterface, file: EditedFile, created: boole
   const until = (await $.clock.now()) + ROUND_MS
   const traced = await Promise.all(
     changed.map(async one => {
-      const result = await runTool($, 'impact_analysis', { manifest_path: project.manifest, model: one.model, column: one.column, change_type: 'modify' }, { until, cliOnly: true }).catch(() => null)
+      const result = await runTool($, 'impact_analysis', { manifest_path: project.manifest, model: modelRef(project, one.model), column: one.column, change_type: 'modify' }, { until, cliOnly: true }).catch(() => null)
       return { one, result }
     }),
   )
@@ -448,7 +452,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   const model = normal(file.path).split('/').pop()!.replace(/\.sql$/i, '')
   if (!(await $.fs.exists(project.manifest).catch(() => false))) return []
   const until = (await $.clock.now()) + ROUND_MS
-  const result = await runTool($, 'dbt_docs_coverage', { model, manifest_path: project.manifest }, { until, cliOnly: true }).catch(() => null)
+  const result = await runTool($, 'dbt_docs_coverage', { model: modelRef(project, model), manifest_path: project.manifest }, { until, cliOnly: true }).catch(() => null)
   if (!result) return []
   const meta = result.metadata
   if (!result.ok || !meta || meta.success !== true) {

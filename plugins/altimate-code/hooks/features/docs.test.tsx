@@ -202,6 +202,7 @@ async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
   const calls: string[] = []
   const submitted: string[] = []
+  const toolArgs: string[] = []
   // A file the edit creates is not there before it, so that read is not made.
   let schemaReads = options.newFile ? 1 : 0
   // The read before the edit of a file that is not there yet fails.
@@ -255,6 +256,7 @@ async function start($: any, on: any, options: Options = {}) {
     const [, command, , tool] = e.argv
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     calls.push(`cli:${tool}`)
+    toolArgs.push(String(e.argv[5]))
     if (tool === 'dbt_docs_coverage') {
       if (options.coverageError) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: options.coverageError, metadata: { success: false } }), stderr: '' } }
       const body = options.coverage === null ? { status: 'error', output: 'Unknown tool: dbt_docs_coverage', metadata: {} } : { status: 'ok', output: 'coverage', metadata: options.coverage }
@@ -268,6 +270,7 @@ async function start($: any, on: any, options: Options = {}) {
   return {
     clock,
     calls,
+    toolArgs,
     submitted,
     /** The next schema edit removes the description instead of writing it. */
     clear: () => {
@@ -527,4 +530,13 @@ test('an Edit whose before-read failed offers nothing rather than every descript
   await clock.settle()
   expect(calls).not.toContain('cli:impact_analysis')
   expect(result.context ?? []).toEqual([])
+})
+
+test('a source model is traced by its unique_id, so a same-named model of another package is not the one used', async ($, on) => {
+  const { clock, toolArgs } = await start($, on)
+  await $.tool.call(EDIT)
+  await clock.settle()
+  const traced = toolArgs.map(text => JSON.parse(text)).filter(args => args.change_type === 'modify')
+  expect(traced.length).toBeGreaterThan(0)
+  for (const args of traced) expect(args.model).toMatch(/^model\.shop\./)
 })
