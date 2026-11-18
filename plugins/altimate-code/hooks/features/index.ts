@@ -4,7 +4,7 @@
 // A plugin hooks each shared event once (a second hook on an event without a matcher is refused), and
 // the engine refuses `$` handed to anything but a function it can name, so this file calls every
 // feature's functions by name instead of looping over a list. A feature fills in its own file only.
-// A function that throws, at once or as a rejection, is logged and skipped: one feature's failure never stops another or the call.
+// A function that throws, at once or as a rejection, is logged and skipped: one feature's failure never stops another or the call. A `register` failure is silent (`$` is not available at load).
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { BashCall, EditedFile, FileCall } from '../tool-chain'
@@ -18,6 +18,7 @@ import {
   bashRewrite as runsBashRewrite,
   bashGate as runsBashGate,
   bashAfter as runsBashAfter,
+  bashDropped as runsBashDropped,
   editAfter as runsEditAfter,
   readOrEditAfter as runsReadOrEditAfter,
   editReadsBefore as runsEditReadsBefore,
@@ -297,6 +298,11 @@ export async function featuresBashGate($: EngineInterface, e: BashCall): Promise
   if (!gate) take(await attempt($, 'docs', 'bashGate', () => docsBashGate($, e)))
   if (!gate) take(await attempt($, 'cteProfile', 'bashGate', () => cteProfileBashGate($, e)))
   return gate
+}
+
+/** A Bash call that a gate refused, or whose result is a refusal, never reaches bashAfter: the features that kept it let go. */
+export async function featuresBashDropped($: EngineInterface, e: BashCall): Promise<void> {
+  await attempt($, 'runs', 'bashDropped', () => runsBashDropped($, e))
 }
 
 /** The context lines every feature adds after a Bash call ran. */

@@ -217,7 +217,50 @@ export type PlanImpactView = {
 // Runs (/runs): the dbt commands Claude ran and their results.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface RunsState {}
+export type RunRow = {
+  uniqueId: string
+  name: string
+  status: string
+  executionTimeSec: number | null
+  /** Cut to a few hundred characters. */
+  message: string | null
+}
+
+export type RunRecord = {
+  /** The artifact's invocation id; when the artifact has none, the project folder plus its completion time. */
+  id: string
+  /** The dbt project folder the run was read from. */
+  project: string
+  /** The command as Claude ran it, with the folder it ran in and a secret's value left out; what Re-run fills in. */
+  commandLine: string
+  /** `dbt retry` with the launcher, environment and folder flags the command had; what Re-run failed fills in. */
+  retryLine: string
+  /** The folder run_results.json was read from, as the command named it; absent in a run stored before it was kept. */
+  folder?: string
+  /** The dbt subcommand the artifact names (`build`, `run`…). */
+  command: string
+  elapsedSec: number | null
+  completedAt: string
+  /** Every node dbt reported. */
+  total: number
+  /** Nodes that succeeded, passed or warned. */
+  passed: number
+  /** Nodes that errored or failed. */
+  failed: number
+  /** Nodes dbt skipped. */
+  skipped: number
+  /** The rows kept: failures first, then the rest, at most as many as the plugin holds. */
+  rows: RunRow[]
+}
+
+export interface RunsState {
+  /** The session folder the runs below were recorded for. */
+  root: string
+  /** Newest first, at most 50 of each project: a session folder that covers several dbt projects holds up to 50 per project. */
+  runs: RunRecord[]
+  /** The run the pane shows in full; null for the list. */
+  open: string | null
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Defer and target: the target and defer state dbt commands run with.
@@ -469,7 +512,7 @@ declare module 'claude-code' {
       /** The status line's parts by owner, `integrations` and each feature's id (hooks/status-line.ts). */
       statusParts: Record<string, string>
       /** hooks/features/: RunsState. */
-      runs: RunsState | null
+      runs: Shaped<RunsState | null>
       /** hooks/features/: DeferState. */
       defer: DeferState | null
       /** hooks/features/: ToModelState. */
