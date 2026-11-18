@@ -305,7 +305,12 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     const now = await sessionDir($, look, dir)
     if (look.lost) {
       // The answer in hand is still the project's: one over the limit is kept, so the refusal holds the command.
-      if (answer !== 'pending' && answer.kind === 'bytes' && answer.maxBytes > limitBytes) over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
+      if (answer !== 'pending' && answer.kind === 'bytes' && answer.maxBytes > limitBytes) {
+        // Noted before any await, as on the normal path: a parallel pass for this command whose own estimate fails must still see it.
+        mine.note = { label, bytes: answer.maxBytes, display: answer.display }
+        overNow.set(e.command, mine.note as { label: string; bytes: number; display: string })
+        over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
+      }
       return unreadable()
     }
     if (now !== dir) {
