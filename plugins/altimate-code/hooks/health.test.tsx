@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
+import { PHASE_TIMEOUT_MS } from './tool-chain'
+import { GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
 
 const ROOT = '/repo'
 const STG = `${ROOT}/models/staging/stg_orders.sql`
@@ -702,4 +703,8 @@ test('the band line and the report', () => {
   expect(bandText([NEW_STG])).toBe('1 new health issue · stg_orders: hard coded references · /health')
   expect(bandText([])).toBe('')
   expect(reportText([NEW_STG])).toBe('- stg_orders: hard coded references (warning) stg_orders reads raw.orders directly → Fix Hard coded references')
+})
+
+test('the push gate waits for less than the tool chain gives a phase, so a held push is never given up on', () => {
+  expect(GATE_WAIT_MS).toBeLessThan(PHASE_TIMEOUT_MS)
 })

@@ -26,7 +26,7 @@ const COMMAND = 'health'
 const CHECK_MS = 9 * 60_000
 /** How long the push gate waits for a check: inside the tool chain's phase deadline, past which a gate is given up on and the push runs. */
 // The tool chain gives a phase 5 s; the push gate waits inside that. Kept here, not imported, to avoid an import cycle with the chain.
-const GATE_WAIT_MS = 4_000
+export const GATE_WAIT_MS = 4_000
 /** How long /health waits for a running check before it answers with what it has. */
 const COMMAND_WAIT_MS = 3_000
 /** The most issues the push refusal and the report list. */
