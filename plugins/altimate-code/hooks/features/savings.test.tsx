@@ -312,7 +312,9 @@ test('with no Databricks connection the pane says how to add one, and gives no v
   expect(await ui.find({ type: 'Text', text: /^altimate-code has no Databricks connection\.$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /connections\.json/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /No savings found|a month$/ })).toBeUndefined()
-  expect(toasts.filter(text => text.startsWith('Databricks savings check'))).toEqual([])
+  // The notice says what is missing, and is no verdict.
+  expect(toasts.at(-1)).toMatch(/^Databricks savings check: altimate-code has no Databricks connection\. /)
+  expect(toasts.filter(text => /no savings found|a month/.test(text))).toEqual([])
   await ui.unmount()
 })
 
@@ -746,4 +748,29 @@ test('Terraform that is not about Databricks gets no offer; a job is not named b
   band = await $.ui.mount(BAND)
   expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
   await band.unmount()
+})
+
+test('across several workspaces the pane counts them and names each finding\'s workspace, and so does the fix request', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses.forEach((one: any, at: number) => (one.workspace_id = at === 0 ? '2056943136844690' : '7474657820801318'))
+  answer.metadata.report.findings.forEach((one: any) => (one.workspace_id = '2056943136844690'))
+  const { clock, fills } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^5 SQL warehouses, 0 all-purpose clusters and 0 jobs in 2 workspaces · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Classic \(workspace 2056943136844690\) · Migrate Classic\/Pro to Serverless · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Databricks checks, on 2 workspaces\./ })).toBeDefined()
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  expect(fills[0]).toContain('(id wh-classic, workspace 2056943136844690)')
+  await ui.unmount()
+})
+
+test('a failed run also comes as a notice, for a terminal too narrow for the pane', async ($, on) => {
+  const answer = failure('[TABLE_OR_VIEW_NOT_FOUND] The table or view `system`.`compute`.`warehouse_events` cannot be found. SQLSTATE: 42P01')
+  const { clock, toasts } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  expect(toasts.at(-1)).toMatch(/^Databricks savings check: A query was refused: \[TABLE_OR_VIEW_NOT_FOUND\].* ask a workspace admin for SELECT/)
 })

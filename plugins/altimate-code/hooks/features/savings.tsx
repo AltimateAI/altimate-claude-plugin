@@ -34,7 +34,7 @@ const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const ADD_CONNECTION =
   'Add a Databricks connection to altimate-code (in ~/.altimate-code/connections.json: type "databricks", server_hostname, the http_path of a SQL warehouse and an access_token), then run /savings again.'
 
-const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-3' })
+const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-4' })
 const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, null as { label: string } | null)
 const messageAtom = atom({ plugin: 'altimate-code', key: 'savingsMessage' } as const, null as { text: string; recovery: string } | null)
 const bandAtom = atom({ plugin: 'altimate-code', key: 'savingsBand' } as const, null as { text: string } | null)
@@ -121,6 +121,7 @@ type ToolFinding = {
   resource_type: string
   resource_id: string
   resource_name: string
+  workspace_id?: string | null
   monthly_min: number
   monthly_max: number
   evidence: Record<string, unknown>
@@ -172,7 +173,7 @@ export function fixRequest(finding: ToolFinding, days = 7): string {
   const { noun, change, defines, otherwise } = changeOf(finding)
   return [
     'Draft the change for this Databricks savings finding, for me to review. Do not apply or run it.',
-    `${noun} ${finding.resource_name} (id ${finding.resource_id}): ${finding.title}, ${range(finding.monthly_min, finding.monthly_max)} a month at list price.`,
+    `${noun} ${finding.resource_name} (id ${finding.resource_id}${finding.workspace_id ? `, workspace ${finding.workspace_id}` : ''}): ${finding.title}, ${range(finding.monthly_min, finding.monthly_max)} a month at list price.`,
     ...evidenceLines(finding.evidence, days).map(line => `- ${line}`),
     `The change: ${change}.`,
     `If this repository defines it (${defines}), edit that definition; otherwise ${otherwise}. Say what the change does.`,
@@ -187,7 +188,7 @@ type ToolWhatIf = {
   choices: { label: string; monthly_cost: number; monthly_saving: number; fits: boolean; cores: number; cores_needed: number }[]
 }
 
-type ToolWarehouse = { id: string; name: string; type: string; size: string | null; window_cost: number }
+type ToolWarehouse = { id: string; workspace_id?: string | null; name: string; type: string; size: string | null; window_cost: number }
 
 type ToolMetadata = {
   success?: boolean
@@ -216,11 +217,12 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const report = metadata?.report
   if (!metadata?.success || !report || !Array.isArray(report.findings) || !metadata.window) return null
   const days = report.lookback_days || windowDays(metadata.window)
+  const workspaces = new Set((metadata.warehouses ?? []).map(one => one.workspace_id).filter(Boolean)).size
   return {
     connection: metadata.warehouse ?? null,
     ranOn: metadata.ran_on ?? null,
     window: metadata.window,
-    checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0 },
+    checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0, workspaces: Math.max(1, workspaces) },
     skipped: (metadata.skipped ?? []).map(one => one.check),
     limited: metadata.limited ?? [],
     total: { min: report.total.monthly_min, max: report.total.monthly_max, resources: report.total.resources },
@@ -229,6 +231,7 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
       resourceType: one.resource_type,
       resourceId: one.resource_id,
       resourceName: one.resource_name,
+      workspace: workspaces > 1 ? (one.workspace_id ?? null) : null,
       monthlyMin: one.monthly_min,
       monthlyMax: one.monthly_max,
       evidence: evidenceLines(one.evidence, days),
@@ -321,7 +324,8 @@ export function explain(error: string): { text: string; recovery: string } {
 }
 
 function checkedText(view: SavingsView): string {
-  return `${view.checked.warehouses} SQL warehouses, ${view.checked.clusters} all-purpose clusters and ${view.checked.jobs} jobs`
+  const across = view.checked.workspaces > 1 ? ` in ${view.checked.workspaces} workspaces` : ''
+  return `${view.checked.warehouses} SQL warehouses, ${view.checked.clusters} all-purpose clusters and ${view.checked.jobs} jobs${across}`
 }
 
 function summary(view: SavingsView): string {
@@ -351,7 +355,9 @@ async function runCheck($: EngineInterface, connection: string | null) {
     const view = toView(metadata)
     if (!view) {
       const error = (result.metadata as ToolMetadata | null)?.error ?? result.text
-      await update($, messageAtom, () => explain(error || 'no answer'))
+      const why = explain(error || 'no answer')
+      await update($, messageAtom, () => why)
+      $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
       return
     }
     const today = new Date(await $.clock.now()).toISOString().slice(0, 10)
@@ -363,11 +369,11 @@ async function runCheck($: EngineInterface, connection: string | null) {
   } catch (error) {
     if (!live()) return
     const missing = MISSING_BINARY.test(String(error))
-    await update($, messageAtom, () =>
-      missing
-        ? { text: 'altimate-code is not installed.', recovery: 'Install it (`npm install -g altimate-code`), add a Databricks connection, then run /savings again.' }
-        : explain(String(error)),
-    )
+    const why = missing
+      ? { text: 'altimate-code is not installed.', recovery: 'Install it (`npm install -g altimate-code`), add a Databricks connection, then run /savings again.' }
+      : explain(String(error))
+    await update($, messageAtom, () => why)
+    $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
   } finally {
     if (live()) await update($, busyAtom, () => null)
   }
@@ -495,7 +501,7 @@ export function register(on: On, _context: FeatureContext) {
         )}
         {report.findings.map((one, at) => (
           <Box key={`finding-${at}`} flexDirection="column">
-            <Text bold>{`${one.resourceName} · ${one.title} · ${range(one.monthlyMin, one.monthlyMax)} a month`}</Text>
+            <Text bold>{`${one.resourceName}${one.workspace ? ` (workspace ${one.workspace})` : ''} · ${one.title} · ${range(one.monthlyMin, one.monthlyMax)} a month`}</Text>
             <Box flexDirection="column" paddingLeft={2}>
               {one.evidence.map((line, row) => (
                 <Text key={`finding-${at}-${row}`} dimColor>
@@ -546,7 +552,7 @@ export function register(on: On, _context: FeatureContext) {
         ) : null}
         <Box flexDirection="column" key="pitch">
           <Text dimColor>
-            These were {CHECK_COUNT} of Altimate's {SAAS_CHECK_COUNT} Databricks checks, on one workspace. Altimate runs all {SAAS_CHECK_COUNT} every day on every workspace
+            These were {CHECK_COUNT} of Altimate's {SAAS_CHECK_COUNT} Databricks checks, on {report.checked.workspaces === 1 ? 'one workspace' : `${report.checked.workspaces} workspaces`}. Altimate runs all {SAAS_CHECK_COUNT} every day on every workspace
             you connect, tracks what each change saves, and its Auto Tune can change a SQL warehouse's size and auto-stop for you.
           </Text>
           <Link href={SIGNUP_URL} label="See all of it in Altimate: app.myaltimate.com/register" />

@@ -286,7 +286,8 @@ export type SavingsView = {
   ranOn: string | null
   /** The days the check read (YYYY-MM-DD, UTC). */
   window: { start: string; end: string }
-  checked: { warehouses: number; clusters: number; jobs: number }
+  /** What was read; `workspaces` counts the Databricks workspaces the warehouses span. */
+  checked: { warehouses: number; clusters: number; jobs: number; workspaces: number }
   /** Checks whose system tables the connection could not read. */
   skipped: string[]
   /** What a query read only the first 10,000 of, e.g. `jobs`. */
@@ -299,6 +300,8 @@ export type SavingsView = {
     resourceType: string
     resourceId: string
     resourceName: string
+    /** The workspace it is in; null when the check read only one. */
+    workspace: string | null
     monthlyMin: number
     monthlyMax: number
     evidence: string[]
