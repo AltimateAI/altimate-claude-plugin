@@ -542,6 +542,12 @@ test('a cd in the same Bash command is read from the folder the command started 
   expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
 })
 
+test('with the push gate on, an edit-and-push written from the folder an earlier cd left is held', { options: { healthBlocksPush: true } }, async ($, on) => {
+  await start($, on, { runs: [[]], cwd: `${ROOT}/models/staging` })
+  const denied: any = await $.tool.call(command(`sed -i 's/a/b/' stg_orders.sql && git push`))
+  expect(denied?.deny).toContain('Run them as separate commands')
+})
+
 test('git push is found by its command words, not by its text', () => {
   for (const line of [
     'git push',
