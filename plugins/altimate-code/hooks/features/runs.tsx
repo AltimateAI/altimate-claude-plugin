@@ -143,20 +143,30 @@ const SECRET_NAME = /(?:SECRET|TOKEN|PASS|PASSWORD|PWD|KEY|CREDENTIAL|AUTH)/i
 const keyWords = (key: string) => key.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)
 /** Words that name a secret wherever they sit in a key, also run into a longer word (`clientsecret`, `accesstoken`). */
 const SECRET_PART = /secret|token|passw|pwd|credential|passphrase/
-/** `key` and `pass` also mean other things (`key_metric`, `pass_rate`): a secret only as the whole key or in a known compound (`api_key`, `privatekey`). */
-const SECRET_KEY = /^(?:pass|keys?)$|(?:api|private|access|secret|encryption|signing|ssh|master|auth)keys?$/
+/** A key run together from `api`, `private`... and `key` (`apikey`, `privatekey`). */
+const KEY_COMPOUND = /(?:api|private|access|secret|encryption|signing|ssh|master|auth)keys?$/
 /** `key: value` pairs of a flow-style `--vars` value (JSON or YAML); a nested mapping's own pairs are found in turn. */
 const VARS_PAIR = /["']?([\w.-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s{[][^,}\s]*)/g
-/** A key that names a secret, unless its value is a number, a boolean or null: `token_limit: 3` holds none. */
-const pairHoldsSecret = (key: string, value: string) => {
+/** A key whose value is a mapping or a list: the key alone says whether the whole subtree is secret. */
+const VARS_PARENT = /["']?([\w.-]+)["']?\s*:\s*[{[]/g
+/**
+ * Whether a `--vars` key names a secret. The words of the key (split on `_ - .` and camelCase) decide: `secret`, `token`,
+ * `password`/`passwd`/`pwd`, `credential`, `passphrase` and `auth` are secret wherever they sit (`clientsecret` too, run together).
+ * `key` and `pass` also name other things (`key_metric`, `pass_rate`), so they count only as the last word or the whole key
+ * (`db_key`, `ssh_pass`, `apiKey`) or in a compound (`privatekey`): `key_metric` and `pass_rate` are not secret.
+ */
+const keyIsSecret = (key: string) => {
   const words = keyWords(key)
   const joined = words.join('')
-  const named = SECRET_PART.test(joined) || words.includes('auth') || words.includes('oauth') || SECRET_KEY.test(joined)
-  return named && !/^(?:-?\d[\d.eE+-]*|true|false|null|~)$/i.test(value)
+  const last = words[words.length - 1]
+  return SECRET_PART.test(joined) || words.includes('auth') || words.includes('oauth') || last === 'pass' || last === 'key' || last === 'keys' || KEY_COMPOUND.test(joined)
 }
+/** A key that names a secret, unless its value is a number, a boolean or null: `token_limit: 3` holds none. */
+const pairHoldsSecret = (key: string, value: string) => keyIsSecret(key) && !/^(?:-?\d[\d.eE+-]*|true|false|null|~)$/i.test(value)
 /** Whether a `--vars` value names a secret. A value that is no `key: value` mapping is tested as a whole text. */
 const holdsSecret = (value: string) => {
   const pairs = [...value.matchAll(VARS_PAIR)]
+  if ([...value.matchAll(VARS_PARENT)].some(parent => keyIsSecret(parent[1]!))) return true
   return pairs.length === 0 ? SECRET_NAME.test(value) : pairs.some(pair => pairHoldsSecret(pair[1]!, pair[2]!))
 }
 const varsHoldSecret = (body: string) => [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => holdsSecret(match[1]!))

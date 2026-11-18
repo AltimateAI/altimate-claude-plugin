@@ -471,6 +471,15 @@ test('a --vars value is tested by its keys: author, key_metric with a number and
   expect(resultsInvocations(`dbt build --vars '{"accessToken": "s3cret"}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{"privatekey": "s3cret"}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{"snowflake": {"password": "s3cret"}}'`, ROOT)).toEqual([])
+  for (const key of ['db_pass', 'user_pass', 'db_key', 'ssh_pass', 'api_pwd', 'dbKey', 'db-pass', 'db.key']) {
+    expect(resultsInvocations(`dbt build --vars '{"${key}": "s3cret"}'`, ROOT)).toEqual([])
+  }
+  // A secret-named parent holding a mapping or a list: the whole subtree is secret.
+  expect(resultsInvocations(`dbt build --vars '{"secrets": {"value": "x"}}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"tokens": ["a", "b"]}'`, ROOT)).toEqual([])
+  expect(resultsInvocations('dbt build --vars "{credentials: {user: a, value: b}}"', ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{"key_metric": {"name": "revenue"}}'`, ROOT)).toHaveLength(1)
+  expect(resultsInvocations(`dbt build --vars '{"pass_rate": 0.9, "key_metric": "x"}'`, ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt build --vars '{"snowflake": {"schema": "raw"}}'`, ROOT)).toHaveLength(1)
   expect(resultsInvocations(`dbt build --vars '{"limit": 3, "db_password": "x"}'`, ROOT)).toEqual([])
 })
