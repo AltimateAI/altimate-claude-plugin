@@ -352,6 +352,12 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
   await forgetUnsupported($)
 }
 
+/** Nothing starts beside this estimate until its process has settled. */
+function holdBack(entry: { settled: Promise<undefined> }) {
+  late.add(entry.settled)
+  void entry.settled.then(() => late.delete(entry.settled))
+}
+
 /** Drops the answers already in; an estimate still running, which a parallel call may be waiting on, is left to finish. */
 function dropFinished() {
   for (const [key, entry] of inflight) {
@@ -359,8 +365,7 @@ function dropFinished() {
     // A pass already waiting on it takes its answer; a later pass does not, since a run began after it started.
     else {
       entry.voided = true
-      late.add(entry.settled)
-      void entry.settled.then(() => late.delete(entry.settled))
+      holdBack(entry)
     }
   }
 }
@@ -371,8 +376,7 @@ function invalidate(track = true) {
   if (track) {
     for (const entry of inflight.values()) {
       if (entry.doneAt != null) continue
-      late.add(entry.settled)
-      void entry.settled.then(() => late.delete(entry.settled))
+      holdBack(entry)
     }
   }
   inflight.clear()
@@ -591,8 +595,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const left = waitUntil - (await $.clock.now())
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) {
-    late.add(running.settled)
-    void running.settled.then(() => late.delete(running!.settled))
+    holdBack(running)
     return 'pending'
   }
   // The project may have changed while it ran: that answer is of the old one, and the next pass asks again.
@@ -613,13 +616,13 @@ async function rememberEstimate($: EngineInterface, target: string, bytes: numbe
   } catch {}
 }
 
-/** The status line's cost part; a failure to draw it is dropped. */
 /** The status line's cost part back to the last estimate, once no hold is left. */
 async function showLastEstimate($: EngineInterface) {
   const last = (await read($, costAtom))?.lastEstimate
   await showStatus($, last ? `scan ≈ ${last.display}` : null)
 }
 
+/** The status line's cost part; a failure to draw it is dropped. */
 async function showStatus($: EngineInterface, text: string | null) {
   try {
     await setStatusPart($, 'cost', text)

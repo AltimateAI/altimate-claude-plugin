@@ -26,6 +26,8 @@ type Options = {
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
   const estimates: string[] = []
+  /** Estimates asked for, before any hold: one that has started and not yet answered is in here. */
+  const started: string[] = []
   const ran: string[] = []
   const statuses: (string | undefined)[] = []
   on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
@@ -55,6 +57,7 @@ async function start($: any, on: any, options: Options = {}) {
     expect(e.argv).toContain('--allow-write')
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     const key = String(args.model ?? args.sql)
+    started.push(key)
     if (options.hold && (options.holdFor === undefined || options.holdFor === key)) await options.hold
     estimates.push(key)
     const answer = options.answers?.[key] ?? options.fallback
@@ -71,7 +74,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, estimates, ran, statuses }
+  return { clock, estimates, ran, statuses, started }
 }
 
 const bq = (bytes: number, display: string, maxBytes = bytes) => ({ success: true, supported: true, adapter: 'bigquery', bytes, maxBytes, display })
@@ -833,17 +836,25 @@ test('a run let through while an estimate is still running: the retry does not t
 
 test('a voided running estimate is not reused and holds the next one back until it settles', async ($, on) => {
   const options: Options = { answers: { orders: UNDER } }
-  const { clock, estimates } = await start($, on, options)
+  const { clock, estimates, started } = await start($, on, options)
   let release!: () => void
   options.hold = new Promise<void>(resolve => (release = resolve))
+  let finish!: () => void
+  options.holdBash = { command: 'dbt run -s customers --target prod', until: new Promise<void>(resolve => (finish = resolve)) }
+  // Still inside the gate's wait when the run is let through (and still running): nothing has timed it out yet.
   const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(1_000)
+  const rebuild = $.tool.call(bash('dbt run -s customers --target prod'))
+  await clock.advance(10)
+  const again = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(500)
+  expect(started).toEqual(['orders'])
   await clock.advance(4_001)
   expect(((await first) as any).deny).toContain('still being estimated')
-  expect(((await $.tool.call(bash('dbt run -s customers --target prod'))) as any).deny).toBeUndefined()
-  const again = $.tool.call(bash('dbt run -s orders'))
-  await clock.advance(4_001)
   expect(((await again) as any).deny).toContain('still being estimated')
-  expect(estimates).toEqual([])
+  expect(started).toEqual(['orders'])
+  finish()
+  await rebuild
   release()
   await clock.settle()
   expect(estimates).toEqual(['orders'])
