@@ -1035,7 +1035,8 @@ IDENTIFIERS = ('schema', 'database', 'dataset', 'project', 'catalog', 'warehouse
 def keep(value):
     if isinstance(value, bool):
         return
-    if isinstance(value, (int, float)):
+    # Numbers and dates (PyYAML parses an unquoted 2026-11-18 as one) are printed as dbt renders them: as text.
+    if not isinstance(value, str) and value is not None:
         value = str(value)
     # Short values (and so every number under 6 digits) are skipped: too common to cut from dbt's text.
     if not isinstance(value, str) or len(value) < 6:
@@ -1053,6 +1054,9 @@ if jinja2 is not None:
     try:
         engine = jinja2.Environment()
         engine.globals['env_var'] = env_var
+        # dbt's own filters: a template that uses one must still render, or its env_var reads are lost.
+        for name in ('as_text', 'as_number', 'as_bool', 'as_native'):
+            engine.filters[name] = lambda value: value
     except Exception:
         engine = None
 CALL = re.compile(r"env_var\\(\\s*([\\x22\\x27])([^\\x22\\x27]+)\\1\\s*(?:,\\s*([\\x22\\x27])([^\\x22\\x27]*)\\3\\s*)?\\)")
@@ -1154,7 +1158,7 @@ async function profilesPath($: EngineInterface, root: string): Promise<string | 
 }
 
 // What was loaded for a profiles.yml (and the profile asked for): when, and the file's time then.
-const redactionLoaded = new Map<string, { mtimeMs: number; at: number }>()
+const redactionLoaded = new Map<string, { mtimeMs: number; at: number; done: Promise<void> }>()
 const REDACTION_REFRESH_MS = 30_000
 
 /**
@@ -1183,12 +1187,19 @@ async function ensureRedactions($: EngineInterface, root: string, from?: Profile
       const stat = await $.fs.stat(path).catch(() => null)
       const now = await $.clock.now()
       const seen = redactionLoaded.get(key)
-      if (seen && stat && seen.mtimeMs === stat.mtimeMs && now - seen.at < REDACTION_REFRESH_MS) continue
-      redactionLoaded.set(key, { mtimeMs: stat?.mtimeMs ?? 0, at: now })
-      const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path, ...(from?.profile ? [from.profile] : [])], { cwd: root, timeoutMs: 30_000, stdin: JSON.stringify({ env }) })
-      if (run.exitCode !== 0) continue
-      const answer = JSON.parse(run.stdout) as { redact?: unknown }
-      if (Array.isArray(answer.redact)) setRedactions(key, answer.redact.filter((one): one is string => typeof one === 'string'))
+      // A load still running is waited for, not skipped: a caller that gets ahead of it would read dbt's output with no values yet.
+      if (seen && stat && seen.mtimeMs === stat.mtimeMs && now - seen.at < REDACTION_REFRESH_MS) {
+        await seen.done
+        continue
+      }
+      const done = (async () => {
+        const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path, ...(from?.profile ? [from.profile] : [])], { cwd: root, timeoutMs: 30_000, stdin: JSON.stringify({ env }) })
+        if (run.exitCode !== 0) return
+        const answer = JSON.parse(run.stdout) as { redact?: unknown }
+        if (Array.isArray(answer.redact)) setRedactions(key, answer.redact.filter((one): one is string => typeof one === 'string'))
+      })().catch(() => {})
+      redactionLoaded.set(key, { mtimeMs: stat?.mtimeMs ?? 0, at: now, done })
+      await done
     }
   } catch {}
 }

@@ -169,6 +169,8 @@ type Options = {
   storeGetFails?: () => boolean
   /** The values the project's Python prints for the redaction script. */
   redact?: string[]
+  /** The profile's value script does not answer until this settles. */
+  holdRedact?: Promise<void>
   /** Collects what is written to the redaction-aware run_results script's standard input. */
   stdins?: { argv: string[]; stdin: string | undefined }[]
   /** The values the redaction script prints, given the assignments it was sent on stdin. */
@@ -349,7 +351,10 @@ async function start($: any, on: any, options: Options = {}) {
   let shows = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string } }) => {
     runs.push([...e.argv])
-    if (e.argv[2] === PROFILE_REDACT) redactSent.push({ argv: [...e.argv], stdin: e.init?.stdin })
+    if (e.argv[2] === PROFILE_REDACT) {
+      redactSent.push({ argv: [...e.argv], stdin: e.init?.stdin })
+      await options.holdRedact
+    }
     if (e.argv[2] === RUN_FAILURES) options.stdins?.push({ argv: [...e.argv], stdin: e.init?.stdin })
     cwds.push(e.init?.cwd ?? '')
     // The first dbt show waits until the test lets it go.
@@ -3723,6 +3728,23 @@ test('two projects that read one profiles.yml each have its values loaded: the s
   await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /proj2 -s orders' })
   await clock.settle()
   expect(new Set(redactSent.filter(one => one.argv[4] === '/proj/profiles.yml').map(one => one.argv[3]))).toEqual(new Set(['/proj/dbt_project.yml', '/proj2/dbt_project.yml']))
+})
+
+test('a check that starts while another call loads the profile values waits for them, rather than reading dbt\'s error with none', async ($, on) => {
+  let release!: () => void
+  const secret = 'SENTINEL_RACE_PASSWORD'
+  const { clock, setBash } = await start($, on, { redact: [secret], holdRedact: new Promise<void>(go => (release = go)), show: { raw: { exitCode: 2, stdout: ALIAS_ERR(secret) } } })
+  setBash({ stdout: HEADER, isError: false })
+  const first = $.tool.call({ tool: 'Bash', command: 'dbt build -s customers' })
+  await clock.settle()
+  const second = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  release()
+  const [, edited]: any[] = await Promise.all([first, second])
+  await clock.settle()
+  const notes = (edited.context ?? []).filter((note: string) => note.startsWith('Altimate compile-and-validate'))
+  expect(notes.length).toBe(1)
+  expect(notes.join('\n')).not.toContain(secret)
 })
 
 test('query rows are the person\'s data: a value that is also in the profile is shown as it is', async ($, on) => {

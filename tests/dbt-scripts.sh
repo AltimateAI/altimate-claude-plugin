@@ -119,6 +119,8 @@ assert (want == "-" and not found) or want in found, found
   redact "a default holding the opposite quote" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\', \\"SENTINEL\'PASSWORD\\") }}"\n' "SENTINEL'PASSWORD"
   redact "a nested filter: the env value" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\') | trim }}"\n' SENTINEL_FILTERED X="  SENTINEL_FILTERED  "
   redact "a nested filter: the rendered field" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\') | trim | upper }}"\n' SENTINEL_UPPER X=sentinel_upper
+  redact "a date-shaped password reused through an alias" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: &pw 2026-11-18\n      sslmode: *pw\n' 2026-11-18
+  redact "dbt's own filters render: the env value under as_text" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\') | as_text }}"\n' SENTINEL_AS_TEXT X=SENTINEL_AS_TEXT
   redact "a template that errors is taken as written" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ var(\'SENTINEL_UNDEFINED\') }}"\n' "{{ var('SENTINEL_UNDEFINED') }}"
   redact "a template that errors still gives the env_var before it" $'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n      password: "{{ env_var(\'X\') ~ var(\'y\') }}"\n' SENTINEL_BEFORE_ERROR X=SENTINEL_BEFORE_ERROR
   # profile named by an env var in dbt_project.yml
