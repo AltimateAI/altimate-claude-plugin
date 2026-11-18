@@ -136,7 +136,7 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 ## Databricks savings check
 
-`/savings [connection]` checks a Databricks workspace for savings with four of Altimate's Databricks checks: Classic or Pro SQL warehouses that would cost less as serverless, warehouses larger than their queries need, idle all-purpose clusters, and scheduled jobs running on all-purpose compute. A pane beside the chat shows each finding with what it rests on and a monthly range at list price, each resource counted once at its largest saving.
+`/savings [connection]` checks a Databricks workspace for savings with four of Altimate's Databricks checks: Classic or Pro SQL warehouses that would cost less as serverless, warehouses larger than their queries need, idle all-purpose clusters, and scheduled or continuous jobs running on all-purpose clusters. A pane beside the chat shows each finding with what it rests on and a monthly range at list price, each resource counted once at its largest saving.
 
 - **Draft the fix.** Each finding has a button that puts the change in your prompt box (serverless, a smaller `cluster_size`, auto-termination, or a job cluster) for Claude to draft against your bundle or Terraform, or as CLI JSON. Nothing is sent until you press Enter, and nothing is applied.
 - **What if.** For each flagged warehouse, press serverless or any smaller size to see what it would cost a month and whether its cores still cover what its queries need.
