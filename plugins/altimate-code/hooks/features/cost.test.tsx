@@ -860,6 +860,59 @@ test('a voided running estimate is not reused and holds the next one back until 
   expect(estimates).toEqual(['orders'])
 })
 
+test('parallel dbt calls estimate one at a time: the second starts when the first is in', async ($, on) => {
+  const options: Options = { answers: { a: UNDER, b: UNDER } }
+  const { clock, started } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'a'
+  const both = Promise.all([$.tool.call(bash('dbt run -s a')), $.tool.call(bash('dbt run -s b'))])
+  await clock.advance(1_000)
+  expect(started).toEqual(['a'])
+  release()
+  const results: any[] = await both
+  await clock.settle()
+  expect(started).toEqual(['a', 'b'])
+  // The first run finished while the second was being estimated, which moved the project on: the second asks again.
+  expect(results[0].deny).toBeUndefined()
+  expect(results[1].deny).toContain('Run the same command again')
+})
+
+test('/scan-cost does not start beside a running gate estimate', async ($, on) => {
+  const options: Options = { answers: { a: UNDER, orders: UNDER } }
+  const { clock, started } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'a'
+  const gate = $.tool.call(bash('dbt run -s a'))
+  await clock.advance(500)
+  const scan = $.command.run({ command: 'scan-cost', args: 'orders' } as any)
+  await clock.advance(1_000)
+  expect(started).toEqual(['a'])
+  release()
+  await gate
+  expect(((await scan) as any).text).toContain('orders would scan 2.0 GiB')
+  expect(started).toEqual(['a', 'orders'])
+})
+
+test('a gate estimate does not start beside a running /scan-cost', async ($, on) => {
+  const options: Options = { answers: { a: UNDER, orders: UNDER } }
+  const { clock, started } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'orders'
+  const scan = $.command.run({ command: 'scan-cost', args: 'orders' } as any)
+  await clock.advance(500)
+  const gate = $.tool.call(bash('dbt run -s a'))
+  await clock.advance(1_000)
+  expect(started).toEqual(['orders'])
+  release()
+  await scan
+  expect(((await gate) as any).deny).toBeUndefined()
+  await clock.settle()
+  expect(started).toEqual(['orders', 'a'])
+})
+
 test('a /cd takes the old project\'s hold off the status line and forgets its last estimate', async ($, on) => {
   const options: Options = { answers: { orders: OVER } }
   const { clock, statuses } = await start($, on, options)
