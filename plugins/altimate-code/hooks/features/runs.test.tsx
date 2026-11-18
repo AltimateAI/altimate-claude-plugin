@@ -603,6 +603,20 @@ test('a call that started while the artifact was being read and is still running
   await running
 })
 
+test('a URL with an empty user name and a password is not recorded, and a dashed number is not taken for a number', async ($, on) => {
+  expect(resultsInvocations(`dbt build --vars '{source_url: "redis://:s3cret@redis.example.com:6379/0"}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{api_token: 123-456-789}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{token_limit: 3}'`, ROOT)).toHaveLength(1)
+})
+
+test('a dbt call backgrounded in front of another command stays in flight like one that ends the command', async ($, on) => {
+  const { stored } = await start($, on, () => view('inv-bg', undefined, 'build', AFTER))
+  await $.tool.call({ tool: 'Bash', command: 'dbt build -s a > /dev/null 2>&1 & echo started', tool_use_id: 'bg' })
+  const second: any = await $.tool.call({ tool: 'Bash', command: 'dbt run -s b', tool_use_id: 'fg' })
+  expect(own(second.context)).toEqual([NOT_RECORDED])
+  expect(stored.has('runs')).toBe(false)
+})
+
 test('an authorization key in --vars is a secret', async ($, on) => {
   expect(resultsInvocations(`dbt build --vars '{"authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{"Authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])

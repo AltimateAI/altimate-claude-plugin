@@ -164,7 +164,7 @@ const keyIsSecret = (key: string) => {
   return SECRET_PART.test(joined) || words.includes('auth') || words.includes('oauth') || last === 'pass' || ((last === 'key' || last === 'keys') && !KEY_KINDS.has(words[words.length - 2] ?? '')) || KEY_COMPOUND.test(joined)
 }
 /** A key that names a secret, unless its value is a number, a boolean or null: `token_limit: 3` holds none. */
-const pairHoldsSecret = (key: string, value: string) => keyIsSecret(key) && !/^(?:-?\d[\d.eE+-]*|true|false|null|~)$/i.test(value)
+const pairHoldsSecret = (key: string, value: string) => keyIsSecret(key) && !/^(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null|~)$/i.test(value)
 /** Whether a `--vars` value names a secret. A value that is no `key: value` mapping is tested as a whole text. */
 const holdsSecret = (value: string) => {
   const pairs = [...value.matchAll(VARS_PAIR)]
@@ -175,7 +175,7 @@ const holdsSecret = (value: string) => {
 const varsHoldSecret = (body: string) =>
   [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => holdsSecret(match[1]!.startsWith('"') ? match[1]!.replace(/\\(.)/g, '$1') : match[1]!))
 /** A password in the URL's user part, or a secret-named query parameter (`?access_token=`, `&api_key=`): the URL holds a credential whatever it is named. */
-const CREDENTIAL_URL = /:\/\/[^\s/:@"']+:[^\s@"']+@|:\/\/[^\s"']*[?&;][\w.-]*(?:secret|token|passw|pwd|credential|apikey|api_key|api-key|auth|signature|sig|key)[\w.-]*=/i
+const CREDENTIAL_URL = /:\/\/[^\s/:@"']*:[^\s@"']+@|:\/\/[^\s"']*[?&;][\w.-]*(?:secret|token|passw|pwd|credential|apikey|api_key|api-key|auth|signature|sig|key)[\w.-]*=/i
 const redactAssignments = (head: string) => head.replace(SECRET_ASSIGNMENT, (_all, space: string, name: string) => `${space}${name}="$${name}"`)
 /** A value continued onto the next line (backslash, newline) is one word to the shell: joined before the secret is cut out. */
 const redact = (head: string) => {
@@ -388,7 +388,7 @@ export const runsOperation = (command: string) => parseDbtCommand(command).some(
 /** Whether the command runs a dbt subcommand that writes run_results.json, whatever folder or project it names. */
 export const writesResults = (command: string) => parseDbtCommand(command).some(one => one.subcommand !== null && WRITES_RESULTS.has(one.subcommand))
 /** Whether the call hands dbt to the background: the tool returns at once, the command is still running. */
-const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(^|[^&])&\s*$/.test(e.command.trim())
+const isBackground = (e: BashCall) => (e as { run_in_background?: unknown }).run_in_background === true || /(?<![&>])&(?![&>])/.test(e.command)
 /** The host moved the call to the background: its result names the task (`result.result.backgroundTaskId`). */
 const hostBackgrounded = (result: ToolCallResult | undefined) => {
   const inner = (result as { result?: { backgroundTaskId?: unknown } } | undefined)?.result
