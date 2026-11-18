@@ -40,9 +40,12 @@ const LOCAL_ONLY = { ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MO
 export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.12'
 const VERSION_TIMEOUT_MS = 15_000
 
-/** Whether `altimate --version` names a release the check may start; a source build prints `local`. */
+/**
+ * Whether `altimate --version` names a release the check may start. A source build prints `local`
+ * whatever its age (an old checkout without assessment mode does too), so it is refused like any
+ * version that cannot be read; a build made with the release script carries its version.
+ */
 export function supportsSavings(version: string): boolean {
-  if (version === 'local') return true
   const parts = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version)
   if (!parts) return false
   const have = parts.slice(1, 4).map(Number)
@@ -398,7 +401,10 @@ async function runCheck($: EngineInterface, connection: string | null) {
     if (!supportsSavings(version)) {
       const why = {
         text: 'This altimate-code has no Databricks savings check.',
-        recovery: `${version ? `It is ${version}; u` : 'U'}pdate it to ${SAVINGS_MIN_ALTIMATE_CODE} or later (\`altimate upgrade\`), then run /savings again.`,
+        recovery:
+          version === 'local'
+            ? `It is a source build, which does not show whether it has assessment mode; use a released altimate-code ${SAVINGS_MIN_ALTIMATE_CODE} or later, then run /savings again.`
+            : `${version ? `It is ${version}; u` : 'U'}pdate it to ${SAVINGS_MIN_ALTIMATE_CODE} or later (\`altimate upgrade\`), then run /savings again.`,
       }
       await update($, messageAtom, () => why)
       $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)

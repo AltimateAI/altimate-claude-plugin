@@ -813,14 +813,24 @@ test('an altimate-code older than the check is never started for it: only `--ver
   await ui.unmount()
 })
 
-test('a version that cannot be read is refused too; the first release with the check, and a source build, run it', async ($, on) => {
-  for (const version of ['', 'altimate-code', '0.12', '0.10.0']) {
+test('a version that cannot be read, or a source build, is refused; the first release with the check runs it', async ($, on) => {
+  // A source build prints `local` whatever its age, old checkouts without assessment mode included.
+  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local']) {
     expect(supportsSavings(version)).toBe(false)
   }
-  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', '0.12.12-beta.1', 'local']) {
+  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', '0.12.12-beta.1']) {
     expect(supportsSavings(version)).toBe(true)
   }
-  const { clock, runs, versionRuns } = await start($, on, { version: 'local' })
+  const local = await start($, on, { version: 'local' })
+  await savings($)
+  await local.clock.settle()
+  expect(local.versionRuns.length).toBe(1)
+  expect(local.runs).toEqual([])
+  expect(local.toasts.at(-1)).toContain('It is a source build, which does not show whether it has assessment mode')
+})
+
+test('the first release with the check is started, with both switches on its version probe', async ($, on) => {
+  const { clock, runs, versionRuns } = await start($, on, { version: SAVINGS_MIN_ALTIMATE_CODE })
   await savings($)
   await clock.settle()
   expect(versionRuns.length).toBe(1)
