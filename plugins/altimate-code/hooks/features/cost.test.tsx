@@ -1217,3 +1217,18 @@ test('a queued /scan-cost that wakes after a /cd runs under the project now in u
   await queued
   await first
 })
+
+test('a /cd while the gate waits for an estimate: its answer is of the project left, so the command is refused', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, started } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'orders'
+  const call = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(500)
+  expect(started).toEqual(['orders'])
+  options.cwd = '/elsewhere/project-b'
+  release()
+  const result: any = await call
+  expect(result.deny).toContain('The project changed while the scan was being estimated')
+})

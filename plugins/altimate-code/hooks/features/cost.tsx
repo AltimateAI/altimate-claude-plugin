@@ -44,7 +44,7 @@ let limitBytes = DEFAULT_MAX_SCAN_BYTES
 /** The lines to show under an estimated command's Bash row, by command; each gate pass replaces the last. Taken by bashAfter. */
 const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
-const inflight = new Map<string, { answer: Promise<Answer>; settled: Promise<undefined>; doneAt: number | null; generation: number; voided?: boolean }>()
+const inflight = new Map<string, { answer: Promise<Answer>; settled: Promise<undefined>; doneAt: number | null; generation: number; dir: string | null; voided?: boolean }>()
 /** Every estimate whose process is still running (gate or /scan-cost), whether or not an edit has voided its answer: one runs per project at a time. */
 const active = new Map<Promise<undefined>, string | null>()
 /** Commands the gate refused while their estimate was running, and when it last did: they have not run, so a retry changes nothing. */
@@ -228,6 +228,8 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
     }
     const label = target.model ?? 'the inline query'
     const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken, refused.get(e.command))
+    // A /cd while it was being asked: the answer is of the project left, and nothing here is allowed on it.
+    if (((await $.session.cwd().catch(() => dir)) ?? null) !== (dir ?? null)) invalidate()
     // The project changed while this was being asked: nothing it says is published, and the command is refused below.
     if (generation !== startedAt) break
     if (answer === 'pending') {
@@ -361,7 +363,7 @@ function startEstimate($: EngineInterface, args: { model?: string; sql?: string 
   const settled = answer.then(() => undefined, () => undefined)
   active.set(settled, dir)
   void settled.then(() => active.delete(settled))
-  return { answer, settled }
+  return { answer, settled, dir }
 }
 
 /**
@@ -374,7 +376,7 @@ async function startWhenIdle<T>(
   args: { model?: string; sql?: string },
   waitUntil: number,
   reuse: () => T | undefined,
-  begin: (started: { answer: Promise<Answer>; settled: Promise<undefined> }) => T,
+  begin: (started: { answer: Promise<Answer>; settled: Promise<undefined>; dir: string | null }) => T,
 ): Promise<T | null> {
   // The project is read again after each wait: a /cd meanwhile moves the check to the project now in use.
   let dir: string | null = null
@@ -589,8 +591,10 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   if (had) return had
   // The look-up and the insert below are one step: nothing is awaited between them, or two passes would each start one.
   const now = await $.clock.now()
+  const here = (await $.session.cwd().catch(() => seenDir)) ?? null
   let running = inflight.get(key)
-  if (running?.voided) running = undefined
+  // An answer made in another project is of that project's models, not this one's.
+  if (running?.voided || (running && running.dir !== here)) running = undefined
   // A command whose retries keep coming keeps what it waited for however long the others took: a later answer expiring an earlier one would never let it finish.
   const retrying = refusedAt != null && now - refusedAt <= ANSWER_KEEP_MS
   if (running?.doneAt != null && !retrying && now - running.doneAt > ANSWER_KEEP_MS) running = undefined
@@ -608,7 +612,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
         return other && other.doneAt == null && !other.voided ? other : undefined
       },
       started => {
-        const made = { answer: started.answer, settled: started.settled, doneAt: null as number | null, generation, voided: false }
+        const made = { answer: started.answer, settled: started.settled, doneAt: null as number | null, generation, dir: started.dir, voided: false }
         void made.answer.then(async () => void (made.doneAt = await $.clock.now())).catch(() => {})
         inflight.set(key, made)
         return made
@@ -621,7 +625,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) return 'pending'
   // The project may have changed while it ran: that answer is of the old one, and the next pass asks again.
-  if (running.generation !== generation) {
+  if (running.generation !== generation || running.dir !== ((await $.session.cwd().catch(() => seenDir)) ?? null)) {
     if (inflight.get(key) === running) inflight.delete(key)
     return 'pending'
   }
