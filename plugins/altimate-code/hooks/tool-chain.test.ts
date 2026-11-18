@@ -93,7 +93,7 @@ test('through the plugin, a Bash call reaches the tool unchanged and its result 
   on('ui.status', () => ({ value: undefined }))
   on('session.root', () => ({ value: '/repo' }))
   on('fs.exists', () => ({ value: false }))
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => ({ value: nothingToReport(e.argv) ?? { exitCode: 1, stdout: '', stderr: 'no CLI here' } }))
+  on('process.run', (_: unknown, e: { argv: readonly string[] }) => ({ value: { isStdoutTruncated: false, isStderrTruncated: false, ...(nothingToReport(e.argv) ?? { exitCode: 1, stdout: '', stderr: 'no CLI here' }) } }))
   const calls: any[] = []
   on('tool.call', (_: unknown, e: any) => {
     calls.push(e)
