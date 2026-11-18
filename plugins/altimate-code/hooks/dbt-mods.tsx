@@ -1178,7 +1178,8 @@ async function ensureRedactions($: EngineInterface, root: string, from?: Profile
     for (const path of paths) {
       // The assignments set for the command change what the profile renders to: another load for them. The key stays in memory.
       const env = Object.fromEntries((from?.env ?? []).map(one => [one.slice(0, one.indexOf('=')), one.slice(one.indexOf('=') + 1)]))
-      const key = `${path}|${from?.profile ?? ''}|${JSON.stringify(env)}`
+      // The project too: another project's dbt_project.yml may select another profile of the same profiles.yml.
+      const key = `${root}|${path}|${from?.profile ?? ''}|${JSON.stringify(env)}`
       const stat = await $.fs.stat(path).catch(() => null)
       const now = await $.clock.now()
       const seen = redactionLoaded.get(key)

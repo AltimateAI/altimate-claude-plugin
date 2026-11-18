@@ -175,6 +175,8 @@ type Options = {
   redactFrom?: (env: Record<string, string>) => string[]
   /** The same, for the profiles.yml at one path (the script's second argument). */
   redactBy?: Record<string, string[]>
+  /** More project folders, each with a dbt_project.yml. */
+  extraProjects?: string[]
   /** What the project's Python prints for the profile script; the default is an ok duckdb output. */
   profileAnswer?: { exitCode: number; stdout: string }
   /** What the plugin's store held from an earlier session. */
@@ -250,7 +252,7 @@ async function start($: any, on: any, options: Options = {}) {
     delete files['target/manifest.json']
     mtimes[`${options.target}/manifest.json`] = mtimes['target/manifest.json']!
   }
-  const exists = (path: string) => path === ROOT || (path.startsWith(`${ROOT}/`) && (path.slice(ROOT.length + 1) in files || Object.keys(files).some(one => one.startsWith(`${path.slice(ROOT.length + 1)}/`))))
+  const exists = (path: string) => path === ROOT || (options.extraProjects ?? []).some(one => path === one || path === `${one}/dbt_project.yml`) || (path.startsWith(`${ROOT}/`) && (path.slice(ROOT.length + 1) in files || Object.keys(files).some(one => one.startsWith(`${path.slice(ROOT.length + 1)}/`))))
   const registered: string[] = []
   const storeGets: string[] = []
   const redactSent: { argv: string[]; stdin: string | undefined }[] = []
@@ -3712,6 +3714,15 @@ test('with no profiles folder named, the profiles.yml in the folder dbt ran in i
   await band.unmount()
 })
 
+test('two projects that read one profiles.yml each have its values loaded: the second is not skipped by the first\'s load', async ($, on) => {
+  const { clock, setBash, redactSent } = await start($, on, { extraProjects: ['/proj2'], runResultsAt: 1, now: 900_000, files: { 'profiles.yml': 'shop:\n  target: dev\n  outputs:\n    dev:\n      type: postgres\n' } })
+  setBash({ stdout: `${HEADER}\n`, isError: false })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /proj -s orders' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /proj2 -s orders' })
+  await clock.settle()
+  expect(new Set(redactSent.filter(one => one.argv[4] === '/proj/profiles.yml').map(one => one.argv[3]))).toEqual(new Set(['/proj/dbt_project.yml', '/proj2/dbt_project.yml']))
+})
+
 test('query rows are the person\'s data: a value that is also in the profile is shown as it is', async ($, on) => {
   const { clock } = await start($, on, { redact: ['SENTINEL_ROW_VALUE'], show: { rows: [{ schema_name: 'SENTINEL_ROW_VALUE' }] } })
   await $.command.run({ command: 'dbt-show', args: 'orders' })
@@ -3839,3 +3850,17 @@ for (const [what, command] of [
     await band.unmount()
   })
 }
+
+kitTest('dbt debug\'s error is scrubbed whole before it is cut, so a value that crosses the cut leaves no fragment', () => {
+  const secret = 'SENTINEL_CROSSING_THE_CUT_VALUE'
+  setRedactions('/proj', [secret])
+  try {
+    // The value starts 10 characters before the 300th, so a cut first would leave its first 10.
+    const text = `Connection test: [ERROR] ${'x'.repeat(265)}${secret} trailing`
+    const detail = debugInfo(text).detail ?? ''
+    expect(detail).not.toContain('SENTINEL_')
+    expect(detail).toContain('xxxx')
+  } finally {
+    clearRedactions()
+  }
+})

@@ -775,7 +775,7 @@ export function debugInfo(output: string): { adapterType: string | null; connect
   const adapterType = /adapter type:\s*(\S+)/i.exec(text)?.[1] ?? /\btype:\s*(\w+)/.exec(text)?.[1] ?? null
   const ok = /Connection test:\s*\[OK/i.test(text)
   const failed = /Connection test:\s*\[ERROR|Connection test:\s*\[FAIL|Could not find profile|Profile loading failed/i.exec(text)
-  const detail = failed ? (profilesError(text) ? PROFILES_UNREADABLE : scrubDbt(text.slice(failed.index, failed.index + 300).split('\n').slice(0, 3).join(' ').trim(), false)) : null
+  const detail = failed ? (profilesError(text) ? PROFILES_UNREADABLE : scrubDbt(text.slice(failed.index), false).slice(0, 300).split('\n').slice(0, 3).join(' ').trim()) : null
   const pythonVersion = /python version:\s*(\S+)/i.exec(text)?.[1] ?? null
   return { adapterType, connection: ok ? 'ok' : failed ? 'failed' : null, detail, pythonVersion }
 }
