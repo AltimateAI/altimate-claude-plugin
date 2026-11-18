@@ -188,6 +188,8 @@ type Options = {
   canFill?: boolean
   /** What `$.store` holds when the session starts. */
   store?: Record<string, unknown>
+  /** The tool run rejects with this, as `$.process.run` does on its timeout. */
+  runRejects?: string
 }
 
 async function start($: any, on: any, options: Options = {}) {
@@ -239,6 +241,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (command !== 'tool' || tool !== 'finops_databricks_savings') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     runs.push({ argv: [...e.argv], env: e.init?.env })
     if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
+    if (options.runRejects) return { deny: options.runRejects }
     if (options.hold) await options.hold
     if (options.error) return { value: { exitCode: 1, stdout: JSON.stringify(options.error), stderr: '' } }
     if (options.output) return { value: options.output }
@@ -418,6 +421,13 @@ test('/savings run by anything but the person (a plugin, the SDK, a schedule) do
   await $.command.run({ command: 'savings', args: '', origin: { kind: 'bridge' }, presentation: composer.presentation })
   await clock.settle()
   expect(runs.length).toBe(1)
+})
+
+test('a run that throws (the process timed out) offers the terminal fallback for the same connection', async ($, on) => {
+  const { clock, toasts } = await start($, on, { runRejects: 'the command ran past its 600000 ms timeout' })
+  await savings($, 'prod_dbx')
+  await clock.settle()
+  expect(toasts.at(-1)).toContain(`--args '{"warehouse":"prod_dbx","confirm":true}' --json --no-daemon`)
 })
 
 test('each refusal altimate-code gives is explained in the person\'s terms', () => {

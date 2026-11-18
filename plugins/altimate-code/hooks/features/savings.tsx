@@ -447,7 +447,7 @@ async function runCheck($: EngineInterface, connection: string | null) {
     const missing = MISSING_BINARY.test(String(error))
     const why = missing
       ? { text: 'altimate-code is not installed.', recovery: 'Install it (`npm install -g altimate-code`), add a Databricks connection, then run /savings again.' }
-      : explain(String(error))
+      : explain(String(error), connection)
     await update($, messageAtom, () => why)
     $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
   } finally {
@@ -479,7 +479,7 @@ async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_
   if (named) return { text: `${named.resourceName}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
   if (report || offered || !aboutCompute) return null
   offered = true
-  return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection).' }
+  return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection; it starts the SQL warehouse if it is stopped, which bills).' }
 }
 
 /** Adds this feature's own hooks. */
