@@ -97,6 +97,14 @@ async function afterShellChange($: EngineInterface, command: string, ran = false
 /** An answer nobody took within this long is dropped: the model may have changed since. */
 const ANSWER_KEEP_MS = 60_000
 
+/** The folder the session is in is asked for this long: a lookup that stalls must not use up the budget of the gates after this one (health's wait is 4 s of the 5 s a phase has). */
+const CWD_WAIT_MS = 80
+
+/** The session's folder, or `fallback` when it cannot be read within CWD_WAIT_MS. */
+async function sessionDir($: EngineInterface, fallback: string | null): Promise<string | null> {
+  return (await within($, CWD_WAIT_MS, $.session.cwd())) ?? fallback
+}
+
 /** Adds this feature's own hooks. */
 export function register(on: On, context: FeatureContext) {
   const configured = Number((context.options as Record<string, unknown> | undefined)?.maxScanBytes)
@@ -203,7 +211,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
   if (!refused.has(e.command)) await afterShellChange($, e.command)
   // A session moved to another project (a /cd) keeps nothing the gate learned in the last one.
-  const dir = await $.session.cwd().catch(() => seenDir)
+  const dir = await sessionDir($, seenDir)
   if (seenDir !== null && dir !== seenDir) {
     // What is still running belongs to the project left behind: it holds nothing back here, and still holds that project back on return.
     await leaveProject($)
@@ -241,7 +249,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     const label = target.model ?? 'the inline query'
     const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken, refused.get(e.command))
     // A /cd while it was being asked: the answer is of the project left, and nothing here is allowed on it.
-    const now = (await $.session.cwd().catch(() => dir)) ?? null
+    const now = (await sessionDir($, dir)) ?? null
     if (now !== (dir ?? null)) {
       await leaveProject($)
       seenDir = now
@@ -419,7 +427,7 @@ async function startWhenIdle<T>(
   // The project is read again after each wait: a /cd meanwhile moves the check to the project now in use.
   let dir: string | null = null
   for (;;) {
-    dir = (await $.session.cwd().catch(() => seenDir)) ?? null
+    dir = (await sessionDir($, seenDir)) ?? null
     const running = [...active].filter(([, d]) => d === dir).map(([p]) => p)
     if (running.length === 0) break
     const left = waitUntil - (await $.clock.now())
@@ -628,7 +636,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   if (had) return had
   // The look-up and the insert below are one step: nothing is awaited between them, or two passes would each start one.
   const now = await $.clock.now()
-  const here = (await $.session.cwd().catch(() => seenDir)) ?? null
+  const here = (await sessionDir($, seenDir)) ?? null
   let running = inflight.get(key)
   // An answer made in another project is of that project's models, not this one's.
   if (running && (running.generation !== generation || running.dir !== here)) running = undefined
@@ -662,7 +670,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) return 'pending'
   // The project may have changed while it ran (an edit, a /cd, or a dbt run let through meanwhile): that answer is of the old one, and the next pass asks again.
-  if (running.generation !== generation || running.dir !== ((await $.session.cwd().catch(() => seenDir)) ?? null)) {
+  if (running.generation !== generation || running.dir !== ((await sessionDir($, seenDir)) ?? null)) {
     if (inflight.get(key) === running) inflight.delete(key)
     return 'pending'
   }

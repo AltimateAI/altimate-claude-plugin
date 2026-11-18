@@ -20,6 +20,8 @@ type Options = {
   holds?: Record<string, Promise<void>>
   /** The session's directory; changed mid-test to stand for a /cd. */
   cwd?: string
+  /** Set after start: the session's directory is not answered until this resolves. */
+  holdCwd?: Promise<void>
   /** Drawing the status line throws. */
   statusFails?: boolean
   /** The Bash tool runs this command only once this resolves. */
@@ -40,7 +42,10 @@ async function start($: any, on: any, options: Options = {}) {
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
-  on('session.cwd', () => ({ value: options.cwd ?? ROOT }))
+  on('session.cwd', async () => {
+    await options.holdCwd
+    return { value: options.cwd ?? ROOT }
+  })
   on('ui.log', () => ({ value: undefined }))
   on('ui.status', (_: unknown, e: { text?: string }) => {
     if (options.statusFails) throw new Error('no status line')
@@ -177,6 +182,30 @@ test('a selection that is not one plain model passes, saying there is no estimat
   await clock.settle()
   expect(estimates).toEqual([])
   expect(ran).toHaveLength(4)
+})
+
+test('a session folder that is never answered does not hold a command that scans nothing for more than 80 ms', async ($, on) => {
+  const options: Options = {}
+  const { clock, ran } = await start($, on, options)
+  options.holdCwd = new Promise<void>(() => {})
+  // Without the bound this call never finishes: the gate waits for the folder, and a gate after it would never run.
+  const pending = $.tool.call(bash('git push'))
+  for (let i = 0; i < 80; i++) await clock.advance(100)
+  const result: any = await pending
+  expect(result.deny).toBeUndefined()
+  expect(ran).toEqual(['git push'])
+})
+
+test('a session folder that is never answered holds a dbt run for 80 ms at most, then the estimate goes on', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, ran } = await start($, on, options)
+  options.holdCwd = new Promise<void>(() => {})
+  const pending = $.tool.call(bash('dbt run -s orders'))
+  for (let i = 0; i < 80; i++) await clock.advance(100)
+  await clock.settle()
+  const result: any = await pending
+  expect(result.deny).toBeUndefined()
+  expect(ran).toEqual(['dbt run -s orders'])
 })
 
 test('commands that scan nothing are not looked at', async ($, on) => {
