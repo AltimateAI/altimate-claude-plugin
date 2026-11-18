@@ -37,7 +37,7 @@ const MODEL_FILE = /\.(sql|ya?ml|py|md|csv)$/i
 const PARTIAL_NOTE = 'Not every open thread is listed: the service sent only part of the shares, or the list was cut for size.'
 const UNCONFIRMED_NOTE = 'An earlier post is not confirmed yet: press Refresh first.'
 const LOCKED_NOTE = ' The thread stays locked until the list shows the post or a few minutes have passed (the list can lag): press Refresh later.'
-const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids'])
+const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids', 'unknown_thread', 'incomplete_list'])
 const MIN_POLL_SECONDS = 30
 const MAX_POLL_SECONDS = 86_400
 const NEEDS_NEWER_CLI = 'Team comments need a newer altimate-code (this one has no docs_share_comments tool): npm install -g altimate-code@latest'
@@ -523,7 +523,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
     const sent = out.ok && (out.metadata as { success?: boolean } | null)?.success !== false
     if (!sent) {
       const note = oneLine(out.text) || 'The comment service did not accept that.'
-      // Only a refusal the tool names (no write permission, no text, no ids) is known not to have posted.
+      // Only a refusal the tool names (no write permission, no text, no ids, a thread that is not open or cannot be checked) is known not to have posted.
       const code = (out.metadata as { error?: unknown } | null)?.error
       if (typeof code === 'string' && REFUSALS.has(code)) {
         await change($, current => (mine !== generation ? current : { ...current, posting: null, note }))

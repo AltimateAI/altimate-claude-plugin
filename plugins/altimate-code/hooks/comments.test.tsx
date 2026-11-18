@@ -701,3 +701,15 @@ test('a folder without a project of its own is looked up again from another proj
   await read(`${child}/analyses/a.sql`)
   expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop', 'jaffle_shop', 'other_shop'])
 })
+
+test('a post to a thread a teammate already resolved says nothing was sent and does not lock the other threads', async ($, on) => {
+  const { clock, cli } = await start($, on, { failPost: true, failPostCode: 'unknown_thread' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(2)
+  await ui.unmount()
+})
