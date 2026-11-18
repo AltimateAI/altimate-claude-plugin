@@ -692,6 +692,20 @@ test('a run read from a folder takes the retry of another run read from the same
   expect(kept(stored).map(run => [run.id, !!run.retryLine])).toEqual([['inv-b', true], ['inv-a', false]])
 })
 
+test('the folder of a run is the one the artifact was read from: a build in a subfolder is replaced by another project writing the project folder', async ($, on) => {
+  let reads = 0
+  const { stored } = await start($, on, () => view(reads++ === 0 ? 'inv-a' : 'inv-b', [['model.shop.m', 'error', null]], 'build', AFTER, reads === 1 ? '/repo' : '/b'))
+  await $.tool.call({ tool: 'Bash', command: 'cd models && dbt build', tool_use_id: 'one' })
+  expect(kept(stored).map(run => [run.id, !!run.retryLine])).toEqual([['inv-a', true]])
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /b --target-path /repo/target', tool_use_id: 'two' })
+  expect(kept(stored).map(run => [run.id, !!run.retryLine])).toEqual([['inv-b', true], ['inv-a', false]])
+})
+
+test('a launcher that changes its own directory is not recorded: the folder dbt ran in is not guessed', () => {
+  expect(resultsInvocations('uv run --directory transform dbt build', ROOT)).toEqual([])
+  expect(resultsInvocations('uv run dbt build', ROOT)).toHaveLength(1)
+})
+
 test('DBT_PROJECT_DIR in front of the command names the project like --project-dir', () => {
   const found = resultsInvocations('DBT_PROJECT_DIR=transform dbt build', ROOT)[0]!
   expect(found.projectDir).toBe('/repo/transform')

@@ -205,6 +205,8 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     if (command.slice(one.subcommandEnd - subcommand.length, one.subcommandEnd) !== subcommand) continue
     const body = command.slice(one.subcommandEnd - subcommand.length, one.end)
     if (varsHoldSecret(body)) continue
+    // A launcher that changes its own working directory (`uv run --directory x dbt build`) runs dbt elsewhere: the folder is not guessed.
+    if (/(?:^|\s)(?:--directory|--project|--cwd|-C)(?:=|\s)/.test(command.slice(one.start, one.subcommandEnd - subcommand.length))) continue
     // A prefix command (`env`, `time`) after an assignment: the replay would start without it, so it is not replayed.
     if (/(?:^|\s)[A-Za-z_]\w*=/.test(command.slice(0, one.start).split(/&&|\|\||[;\n|]/).pop()!)) continue
     // A URL with a password in it holds a credential whatever it is named.
@@ -406,7 +408,7 @@ async function readRun(
   if (wrote < began - CLOCK_SLACK_MS) return null
   const written = writer(invocations, view.command)
   const run = written ? toRecord(view, written) : null
-  return run && written ? { run: { ...run, folder: folderOf(written) }, order: all.lastIndexOf(written) } : null
+  return run && written ? { run: { ...run, folder: folderOf({ ...written, projectDir: view.projectDir ?? written.projectDir }) }, order: all.lastIndexOf(written) } : null
 }
 
 /** Counts the clearings: a recording that began before one stores its run without a retry command. */
@@ -518,11 +520,16 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
     const all = await held($)
     let kept = all[root] ?? []
     const noted: string[] = []
-    for (const run of runs) {
+    for (let run of runs) {
       // The same file as the last recording: nothing new was written.
       if (kept.find(one => one.project === run.project)?.id === run.id) continue
-      // The file this run was read from replaces what another run (of another project, or a run of a folder spelled differently) left there: its retry would read this run.
-      if (run.folder) kept = kept.map(one => (one.folder === run.folder && one.id !== run.id && one.retryLine ? { ...one, retryLine: '' } : one))
+      // The file this run was read from replaces what another run left there, so that run's retry would read this one; a run
+      // older than one already kept there is not the file's content any more, and has no retry itself.
+      const at = Date.parse(run.completedAt)
+      const sameFile = (one: RunRecord) => !!run.folder && one.folder === run.folder && one.id !== run.id
+      const stale = kept.some(one => sameFile(one) && Date.parse(one.completedAt) > at)
+      kept = kept.map(one => (sameFile(one) && one.retryLine && Date.parse(one.completedAt) <= at ? { ...one, retryLine: '' } : one))
+      if (stale) run = { ...run, retryLine: '' }
       kept = withRun(kept, cleared === clearedAtStart ? run : { ...run, retryLine: '' })
       noted.push(summaryLine(run))
     }
