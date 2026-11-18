@@ -48,6 +48,8 @@ type Options = {
   holdStat?: Promise<void>
   /** Called with the number of each folder lookup (from 1). */
   onStat?: (n: number) => Promise<void> | void
+  /** The folder the session's shell is in (default: the engine does not say). */
+  cwd?: string
   /** Called at each project lookup; a promise it returns holds the lookup. */
   onExists?: () => Promise<void> | void
 }
@@ -63,6 +65,7 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
+  if (options.cwd) on('session.cwd', () => ({ value: options.cwd }))
   on('ui.toast', (_: unknown, e: { text: string }) => {
     toasts.push(e.text)
     return { value: undefined }
@@ -515,6 +518,14 @@ test('with the push gate on, a push while a re-check is still running is held', 
   const denied: any = await pending
   expect(denied?.deny).toContain('could not be read in time')
   release()
+})
+
+test('a relative file a Bash command writes is read from the shell folder an earlier cd left, not the session root', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { runs: [[], [NEW_STG]], cwd: `${ROOT}/models/staging` })
+  await $.tool.call(command(`sed -i 's/a/b/' stg_orders.sql`))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
 })
 
 test('git push is found by its command words, not by its text', () => {

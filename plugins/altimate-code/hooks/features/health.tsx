@@ -708,8 +708,8 @@ const hold = (why: string) => ({
 async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string } | 'run'> {
   const startedAt = await $.clock.now()
   // An edit in the same command would run before any check of it.
-  const root = await $.session.root().catch(() => '')
-  for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
+  const here = await shellFolder($)
+  for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${here}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
   // With nothing changed this session there is nothing to wait for or hold.
   if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return 'run'
   // The wait is what is left of the gate's budget: the work above counts against the chain's deadline too.
@@ -724,10 +724,17 @@ async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string }
   return pushRefusal(options.healthBlocksPush, e.command, state?.issues ?? []) ?? 'run'
 }
 
+/** The folder the session's shell is in now; the session's root when the host does not say. */
+async function shellFolder($: EngineInterface): Promise<string> {
+  return (await $.session.cwd().catch(() => null)) || (await $.session.root().catch(() => ''))
+}
+
 /** A model file Bash writes (a `sed -i`, a redirect, a `git checkout -- file`) is checked like one Claude edited. */
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   const root = await $.session.root().catch(() => '')
-  for (const name of filesWrittenBy(e.command)) await markChanged($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`, root)
+  // A relative name is relative to the folder the session's shell is in now: an earlier `cd` moved it.
+  const here = await shellFolder($)
+  for (const name of filesWrittenBy(e.command)) await markChanged($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${here}/${name}`, root)
 }
 
 async function markChanged($: EngineInterface, file: string, root: string) {
