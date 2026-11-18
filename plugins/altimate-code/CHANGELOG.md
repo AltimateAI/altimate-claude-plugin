@@ -5,8 +5,12 @@ All notable changes to this plugin will be documented in this file.
 ## [1.8.0] — 2026-11-17
 
 ### Added
-- `/savings [connection]`: a Databricks SQL warehouse savings check beside the chat. It runs altimate-code's `finops_databricks_savings` tool (Migrate Classic/Pro to Serverless and Over-Sized Warehouse) with your own Databricks connection and telemetry off, and shows each finding with its evidence and a monthly range at list price, each warehouse counted once. Needs an altimate-code release with that tool; with an older one the pane says to update. It is a feature under `hooks/features/` like the others.
-- `runTool` and `runAltimate` take an optional environment for one CLI run.
+- `/savings [connection]`: a Databricks savings check beside the chat, over altimate-code's `finops_databricks_savings` tool (four checks: Migrate Classic/Pro to Serverless, Over-Sized Warehouse, Idle Cluster Detection, Job Running on All-Purpose Compute). It runs with your own Databricks connection, with telemetry off and outside the tool daemon, and shows each finding with its evidence and a monthly range at list price, each resource counted once. Needs an altimate-code release with that tool; with an older one the pane says to update.
+- Draft the fix: a finding's change goes into the prompt box for Claude to draft against the repository; nothing is sent until you press Enter.
+- What if: each flagged warehouse's cost as serverless and at every smaller size, and whether its cores still fit its queries.
+- Saved since: a flagged warehouse's size and cost are kept on this machine, and a later run that finds it resized says what it cost a month then and now.
+- A line above the prompt when the session edits Databricks bundle or Terraform files or runs a `databricks` compute command: the flagged resource's saving, or a once-a-session offer of `/savings`.
+- `runTool` takes an environment and `noDaemon` for one CLI run.
 
 ## [1.7.0] — 2026-11-17
 

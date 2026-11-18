@@ -114,7 +114,7 @@ Each event carries the step and the Claude Code session id (`claude:<id>`) only:
 
 ## The Databricks savings check
 
-`/savings` runs altimate-code's `finops_databricks_savings` tool on your machine, with your own Databricks connection. It reads usage from your workspace's system tables and decides the savings locally. The plugin runs it with telemetry turned off, so no usage event about the run is sent to Altimate, and the findings are shown in a pane, not added to the conversation. When Claude runs the same tool itself, its answer is a tool result like any other and reaches your model provider.
+`/savings` runs altimate-code's `finops_databricks_savings` tool on your machine, with your own Databricks connection. It reads usage from your workspace's system tables and decides the savings locally. The plugin runs it with telemetry turned off and outside altimate-code's tool daemon, so no usage event about the run is sent to Altimate, and the findings are shown in a pane, not added to the conversation. To tell what a later change saved, the plugin keeps each flagged warehouse's size, type and weekly cost in Claude Code's local plugin store on your machine. **Draft the fix** puts one finding's details in your prompt box; they reach your model provider only if you send that prompt. When Claude runs the same tool itself, its answer is a tool result like any other and reaches your model provider.
 
 ## Usage telemetry
 

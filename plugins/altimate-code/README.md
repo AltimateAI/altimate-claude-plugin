@@ -136,11 +136,15 @@ Rule drafting uses altimate-code's own model (sign in to the Altimate LLM Gatewa
 
 ## Databricks savings check
 
-`/savings [connection]` checks a Databricks workspace's SQL warehouses for savings with two of Altimate's Databricks checks: Classic or Pro warehouses that would cost less as serverless, and warehouses larger than their queries need. A pane beside the chat shows each finding with what it rests on (idle share, cores used, spill and queueing, DBUs and cost) and a monthly range at list price, each warehouse counted once at its largest saving.
+`/savings [connection]` checks a Databricks workspace for savings with four of Altimate's Databricks checks: Classic or Pro SQL warehouses that would cost less as serverless, warehouses larger than their queries need, idle all-purpose clusters, and scheduled jobs running on all-purpose compute. A pane beside the chat shows each finding with what it rests on and a monthly range at list price, each resource counted once at its largest saving.
 
-- **What runs.** altimate-code's `finops_databricks_savings` tool, with your own altimate-code Databricks connection (the first one, or the one named). It reads seven days of Databricks system tables (`system.billing`, `system.compute`, `system.query`) on the connection's SQL warehouse, which Databricks starts if it is stopped. Nothing is written.
+- **Draft the fix.** Each finding has a button that puts the change in your prompt box (serverless, a smaller `cluster_size`, auto-termination, or a job cluster) for Claude to draft against your bundle or Terraform, or as CLI JSON. Nothing is sent until you press Enter, and nothing is applied.
+- **What if.** For each flagged warehouse, press serverless or any smaller size to see what it would cost a month and whether its cores still cover what its queries need.
+- **Saved since.** The first run that flags a warehouse remembers its size and cost on this machine (`$.store`). A later run that finds it resized says what it cost a month then and now.
+- **At the right moment.** Editing a bundle, `resources/*.yml` or Terraform file, or running a `databricks` warehouses, clusters, bundle or jobs command, shows a line above the prompt: the flagged resource's saving when the file names it, else a once-a-session offer of `/savings`. Nothing runs by itself.
+- **What runs.** altimate-code's `finops_databricks_savings` tool, with your own altimate-code Databricks connection (the first one that runs through a SQL warehouse, or the one named). It reads seven days of Databricks system tables (`system.billing`, `system.compute`, `system.query`, `system.lakeflow`) on that SQL warehouse, which Databricks starts if it is stopped. A check whose tables the connection cannot read is named as not checked; the others still report.
 - **What it needs.** An altimate-code with that tool, and a Databricks connection whose `http_path` is a SQL warehouse (`/sql/1.0/warehouses/<id>`) with an access token that can read those system tables.
-- **What leaves your machine.** The plugin runs the tool with `ALTIMATE_TELEMETRY_DISABLED=true`, so neither altimate-code nor altimate-core sends usage telemetry for it. The findings stay in the pane: they do not enter the conversation. Claude can also run the same tool itself (it is listed for it); its answer then reaches your model provider like any other tool result.
+- **What leaves your machine.** The plugin runs the tool with `ALTIMATE_TELEMETRY_DISABLED=true` and `--no-daemon`, so neither altimate-code nor altimate-core sends usage telemetry for it. The findings stay in the pane until you send a Draft the fix request. Claude can also run the same tool itself; its answer then reaches your model provider like any other tool result.
 
 ## Settings
 

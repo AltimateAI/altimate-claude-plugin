@@ -284,21 +284,35 @@ export type SavingsView = {
   connection: string | null
   /** The SQL warehouse its queries ran on. */
   ranOn: string | null
-  /** The days the check read, `start` inclusive and `end` at 06:00 UTC (YYYY-MM-DD). */
+  /** The days the check read (YYYY-MM-DD, UTC). */
   window: { start: string; end: string }
-  warehousesChecked: number
-  /** Dollars a month at list price, each warehouse counted once at its largest saving. */
-  total: { min: number; max: number; warehouses: number }
+  checked: { warehouses: number; clusters: number; jobs: number }
+  /** Checks whose system tables the connection could not read. */
+  skipped: string[]
+  /** Dollars a month at list price, each resource counted once at its largest saving. */
+  total: { min: number; max: number; resources: number }
   findings: {
     title: string
-    warehouseId: string
-    warehouseName: string
+    /** `sql_warehouse`, `cluster` or `job`. */
+    resourceType: string
+    resourceId: string
+    resourceName: string
     monthlyMin: number
     monthlyMax: number
     evidence: string[]
     /** The request "Draft the fix" puts in the prompt box: the change, for Claude to draft and the person to review. */
     fixRequest: string
   }[]
+  /** What each flagged warehouse would cost at other sizes or as serverless. */
+  whatIf: {
+    resourceId: string
+    resourceName: string
+    currentLabel: string
+    currentMonthly: number
+    choices: { label: string; monthlyCost: number; monthlySaving: number; fits: boolean; cores: number; coresNeeded: number }[]
+  }[]
+  /** Warehouses whose size or type changed since a run first flagged them, and what that did to their cost. */
+  changes: { name: string; from: string; to: string; since: string; monthlyBefore: number; monthlyNow: number }[]
 }
 
 declare module 'claude-code' {
@@ -368,6 +382,8 @@ declare module 'claude-code' {
       savingsMessage: { text: string; recovery: string } | null
       /** The line above the prompt when the session touches Databricks config; null when there is none. */
       savingsBand: { text: string } | null
+      /** The alternative pressed in the pane's what-if row; null when none is. */
+      savingsWhatIf: { resourceId: string; label: string } | null
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */

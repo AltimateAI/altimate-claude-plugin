@@ -1,8 +1,9 @@
-// Savings: /savings checks a Databricks workspace's SQL warehouses for savings with Altimate's rules.
+// Savings: /savings checks a Databricks workspace's SQL warehouses, all-purpose clusters and jobs for
+// savings with Altimate's rules.
 //
-// The check is altimate-code's `finops_databricks_savings` tool: it measures each warehouse's usage
+// The check is altimate-code's `finops_databricks_savings` tool: it measures each resource's usage
 // from Databricks system tables with the person's own altimate-code connection, and altimate-core
-// decides what qualifies and what it saves. This feature only asks for it and draws the answer
+// decides what qualifies, what it saves, and what each flagged warehouse would cost instead. This feature only asks for it and draws the answer
 // beside the chat, with telemetry off for that run, so nothing about the run reaches Altimate.
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
@@ -18,9 +19,9 @@ const PANE_TITLE = 'Databricks savings'
 const PANE_SIZE = { columns: 96, rows: 34 }
 const TOOL = 'finops_databricks_savings'
 export const SIGNUP_URL = 'https://app.myaltimate.com/register'
-/** How many Databricks detectors Altimate's pipeline runs; the check runs two of them. */
+/** How many Databricks detectors Altimate's pipeline runs; the check runs four of them. */
 export const SAAS_CHECK_COUNT = 15
-const CHECK_COUNT = 2
+const CHECK_COUNT = 4
 // The queries read seven days of system tables and may start the connection's SQL warehouse.
 const RUN_BUDGET_MS = 5 * 60_000
 // Set for the tool's run only: altimate-code and altimate-core both read it. The run is kept out of
@@ -33,10 +34,12 @@ const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const ADD_CONNECTION =
   'Add a Databricks connection to altimate-code (in ~/.altimate-code/connections.json: type "databricks", server_hostname, the http_path of a SQL warehouse and an access_token), then run /savings again.'
 
-const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-1' })
+const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-2' })
 const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, null as { label: string } | null)
 const messageAtom = atom({ plugin: 'altimate-code', key: 'savingsMessage' } as const, null as { text: string; recovery: string } | null)
 const bandAtom = atom({ plugin: 'altimate-code', key: 'savingsBand' } as const, null as { text: string } | null)
+// The alternative pressed in the pane's what-if row: which warehouse, and which choice.
+const whatIfAtom = atom({ plugin: 'altimate-code', key: 'savingsWhatIf' } as const, null as { resourceId: string; label: string } | null)
 
 // Each run takes a number; /clear, a resume or a reload moves it on, so a run still waiting on
 // Databricks when the conversation changed never writes its report into the new one.
@@ -63,22 +66,38 @@ function range(min: number, max: number): string {
 }
 
 const percent = (share: unknown) => `${Math.round(Number(share) * 100)}%`
+const percentOf = (value: unknown) => `${Math.round(Number(value))}%`
 const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
 const count = (value: unknown) => Math.round(Number(value) || 0).toLocaleString('en-US')
+const MONTH_PER_WINDOW = 30 / 7
 
 /** What a finding rests on, one short line each, from the measured values core returned. */
 export function evidenceLines(evidence: Record<string, unknown>): string[] {
-  if (evidence.kind === 'serverless') {
-    return [
-      `${evidence.warehouse_type} ${size(evidence.warehouse_size)} warehouse, ${percent(evidence.idle_ratio)} idle over ${Number(evidence.wall_clock_uptime_hours).toFixed(1)} running hours (${count(evidence.total_query_count)} queries)`,
-      `$${Number(evidence.current_dbu_cost).toFixed(2)} in DBUs over 7 days; serverless would bill $${Number(evidence.projected_serverless_dbu_cost).toFixed(2)} for the busy time alone`,
-    ]
+  switch (evidence.kind) {
+    case 'serverless':
+      return [
+        `${evidence.warehouse_type} ${size(evidence.warehouse_size)} warehouse, ${percent(evidence.idle_ratio)} idle over ${Number(evidence.wall_clock_uptime_hours).toFixed(1)} running hours (${count(evidence.total_query_count)} queries)`,
+        `$${Number(evidence.current_dbu_cost).toFixed(2)} in DBUs over 7 days; serverless would bill $${Number(evidence.projected_serverless_dbu_cost).toFixed(2)} for the busy time alone`,
+      ]
+    case 'over_sized':
+      return [
+        `${size(evidence.current_size)} warehouse used at most ${(Number(evidence.p99_utilization) * 100).toFixed(1)}% of its cores (p99 over ${count(evidence.parallelism_query_count)} queries)`,
+        `${percent(evidence.no_spill_query_pct)} of queries never spilled to disk, ${percent(evidence.no_queue_query_pct)} never queued`,
+        `${size(evidence.recommended_size)} is enough: ${count(evidence.current_dbu_per_hour)} → ${count(evidence.recommended_dbu_per_hour)} DBU an hour, on $${Number(evidence.total_cost).toFixed(2)} spent over 7 days`,
+      ]
+    case 'idle_cluster':
+      return [
+        `All-purpose cluster ${percent(evidence.idle_ratio)} idle across ${count(evidence.active_days)} active days (${String(evidence.idle_pattern).replace(/_/g, ' ')}), average worker CPU ${percentOf(evidence.avg_cpu_active_pct)}, peak ${percentOf(evidence.peak_cpu_active_pct)}`,
+        `Auto-termination ${evidence.auto_termination_minutes ? `${evidence.auto_termination_minutes} minutes` : 'off'}; $${Number(evidence.total_cost).toFixed(2)} billed outside job runs over 7 days`,
+      ]
+    case 'job_on_all_purpose':
+      return [
+        `${count(evidence.run_count)} runs (${String(evidence.trigger_type ?? 'manual').toLowerCase()}), ${percent(evidence.all_purpose_share)} of its cost on all-purpose compute, ${percent(evidence.job_share_of_cluster)} of its cluster's`,
+        `$${Number(evidence.all_purpose_rate_per_dbu).toFixed(3)} a DBU now; a job cluster would be about $${Number(evidence.jobs_rate_per_dbu).toFixed(3)}${evidence.jobs_rate_estimated ? ' (estimated: the workspace billed no jobs compute)' : ''}`,
+      ]
+    default:
+      return []
   }
-  return [
-    `${size(evidence.current_size)} warehouse used at most ${(Number(evidence.p99_utilization) * 100).toFixed(1)}% of its cores (p99 over ${count(evidence.parallelism_query_count)} queries)`,
-    `${percent(evidence.no_spill_query_pct)} of queries never spilled to disk, ${percent(evidence.no_queue_query_pct)} never queued`,
-    `${size(evidence.recommended_size)} is enough: ${count(evidence.current_dbu_per_hour)} → ${count(evidence.recommended_dbu_per_hour)} DBU an hour, on $${Number(evidence.total_cost).toFixed(2)} spent over 7 days`,
-  ]
 }
 
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
@@ -89,36 +108,74 @@ export function apiSize(value: unknown): string {
     .join('-')
 }
 
-/** The change a finding points at, in plain words with the setting it means. */
-function changeOf(evidence: Record<string, unknown>): string {
-  return evidence.kind === 'serverless'
-    ? 'switch it to a serverless SQL warehouse (enable_serverless_compute true, warehouse_type PRO)'
-    : `resize it to ${apiSize(evidence.recommended_size)} (cluster_size "${apiSize(evidence.recommended_size)}")`
+type ToolFinding = {
+  title: string
+  resource_type: string
+  resource_id: string
+  resource_name: string
+  monthly_min: number
+  monthly_max: number
+  evidence: Record<string, unknown>
+}
+
+/** The change a finding points at, the noun for its resource, and where the change is written. */
+function changeOf(finding: ToolFinding): { noun: string; change: string; where: string } {
+  const e = finding.evidence
+  const id = finding.resource_id
+  switch (e.kind) {
+    case 'serverless':
+      return {
+        noun: 'Warehouse',
+        change: 'switch it to a serverless SQL warehouse (enable_serverless_compute true, warehouse_type PRO)',
+        where: `a Databricks bundle, Terraform databricks_sql_endpoint, or JSON; otherwise write the JSON for \`databricks warehouses edit ${id} --json\``,
+      }
+    case 'over_sized':
+      return {
+        noun: 'Warehouse',
+        change: `resize it to ${apiSize(e.recommended_size)} (cluster_size "${apiSize(e.recommended_size)}")`,
+        where: `a Databricks bundle, Terraform databricks_sql_endpoint, or JSON; otherwise write the JSON for \`databricks warehouses edit ${id} --json\``,
+      }
+    case 'idle_cluster':
+      return {
+        noun: 'Cluster',
+        change:
+          e.idle_pattern === 'zombie'
+            ? 'it is idle almost all the time: set autotermination_minutes to 15, or terminate it if nobody needs it'
+            : 'set autotermination_minutes to 30 so idle workers stop billing',
+        where: `Terraform databricks_cluster, a cluster policy or JSON; otherwise write the JSON for \`databricks clusters edit ${id} --json\``,
+      }
+    case 'job_on_all_purpose':
+      return {
+        noun: 'Job',
+        change: "run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster it uses now",
+        where: `the job's bundle resource, Terraform databricks_job or JSON; otherwise write the settings for \`databricks jobs reset ${id} --json\``,
+      }
+    default:
+      return { noun: 'Resource', change: 'make the change the evidence points at', where: 'its definition' }
+  }
 }
 
 /** The request "Draft the fix" puts in the prompt box: everything Claude needs, and that nothing is to be applied. */
-export function fixRequest(finding: { title: string; warehouse_id: string; warehouse_name: string; monthly_min: number; monthly_max: number; evidence: Record<string, unknown> }): string {
+export function fixRequest(finding: ToolFinding): string {
+  const { noun, change, where } = changeOf(finding)
   return [
-    `Draft the change for this Databricks savings finding, for me to review. Do not apply or run it.`,
-    `Warehouse ${finding.warehouse_name} (id ${finding.warehouse_id}): ${finding.title}, ${range(finding.monthly_min, finding.monthly_max)} a month at list price.`,
+    'Draft the change for this Databricks savings finding, for me to review. Do not apply or run it.',
+    `${noun} ${finding.resource_name} (id ${finding.resource_id}): ${finding.title}, ${range(finding.monthly_min, finding.monthly_max)} a month at list price.`,
     ...evidenceLines(finding.evidence).map(line => `- ${line}`),
-    `The change: ${changeOf(finding.evidence)}.`,
-    `If this repository defines the warehouse (a Databricks bundle, Terraform databricks_sql_endpoint, or JSON), edit that definition. Otherwise write the JSON for \`databricks warehouses edit ${finding.warehouse_id} --json\` and say what it changes.`,
+    `The change: ${change}.`,
+    `If this repository defines it (${where}), and say what it changes.`,
   ].join('\n')
 }
 
-type ToolReport = {
-  lookback_days: number
-  findings: {
-    title: string
-    warehouse_id: string
-    warehouse_name: string
-    monthly_min: number
-    monthly_max: number
-    evidence: Record<string, unknown>
-  }[]
-  total: { monthly_min: number; monthly_max: number; warehouses: number }
+type ToolWhatIf = {
+  resource_id: string
+  resource_name: string
+  current_label: string
+  current_monthly_cost: number
+  choices: { label: string; monthly_cost: number; monthly_saving: number; fits: boolean; cores: number; cores_needed: number }[]
 }
+
+type ToolWarehouse = { id: string; name: string; type: string; size: string | null; window_cost: number }
 
 type ToolMetadata = {
   success?: boolean
@@ -127,8 +184,19 @@ type ToolMetadata = {
   warehouse?: string
   ran_on?: string
   warehouses_checked?: number
-  report?: ToolReport
+  clusters_checked?: number
+  jobs_checked?: number
+  skipped?: { check: string; reason: string }[]
+  warehouses?: ToolWarehouse[]
+  report?: {
+    lookback_days: number
+    findings: ToolFinding[]
+    total: { monthly_min: number; monthly_max: number; resources: number }
+    what_if?: ToolWhatIf[]
+  }
 }
+
+const RESOURCE_NOUN: Record<string, string> = { sql_warehouse: 'SQL warehouse', cluster: 'cluster', job: 'job' }
 
 /** The tool's answer as the pane draws it, or null when it is not a report. */
 export function toView(metadata: ToolMetadata | null): SavingsView | null {
@@ -138,18 +206,71 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
     connection: metadata.warehouse ?? null,
     ranOn: metadata.ran_on ?? null,
     window: metadata.window,
-    warehousesChecked: metadata.warehouses_checked ?? 0,
-    total: { min: report.total.monthly_min, max: report.total.monthly_max, warehouses: report.total.warehouses },
+    checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0 },
+    skipped: (metadata.skipped ?? []).map(one => one.check),
+    total: { min: report.total.monthly_min, max: report.total.monthly_max, resources: report.total.resources },
     findings: report.findings.map(one => ({
       title: one.title,
-      warehouseId: one.warehouse_id,
-      warehouseName: one.warehouse_name,
+      resourceType: one.resource_type,
+      resourceId: one.resource_id,
+      resourceName: one.resource_name,
       monthlyMin: one.monthly_min,
       monthlyMax: one.monthly_max,
       evidence: evidenceLines(one.evidence),
       fixRequest: fixRequest(one),
     })),
+    whatIf: (report.what_if ?? []).map(one => ({
+      resourceId: one.resource_id,
+      resourceName: one.resource_name,
+      currentLabel: one.current_label,
+      currentMonthly: one.current_monthly_cost,
+      choices: one.choices.map(choice => ({
+        label: size(choice.label),
+        monthlyCost: choice.monthly_cost,
+        monthlySaving: choice.monthly_saving,
+        fits: choice.fits,
+        cores: choice.cores,
+        coresNeeded: choice.cores_needed,
+      })),
+    })),
+    changes: [],
   }
+}
+
+/** What a warehouse was when a run first flagged it, kept across sessions to tell what a change saved. */
+type Baseline = { date: string; type: string; size: string | null; windowCost: number }
+
+const baselineKey = (connection: string, warehouseId: string) => `savings-baseline:${connection}:${warehouseId}`
+
+/**
+ * Each flagged warehouse's state is kept the first time a run flags it. A later run that finds its
+ * size or type changed reports what it cost a month then and now, from the two windows' measured cost.
+ */
+export async function trackChanges($: EngineInterface, view: SavingsView, warehouses: ToolWarehouse[], today: string): Promise<SavingsView['changes']> {
+  const connection = view.connection ?? 'default'
+  const flagged = new Set(view.findings.filter(one => one.resourceType === 'sql_warehouse').map(one => one.resourceId))
+  const changes: SavingsView['changes'] = []
+  for (const warehouse of warehouses) {
+    const key = baselineKey(connection, warehouse.id)
+    const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
+    const changed = stored && (stored.size !== warehouse.size || stored.type !== warehouse.type)
+    if (stored && changed) {
+      changes.push({
+        name: warehouse.name,
+        from: `${size(stored.size)} ${stored.type}`,
+        to: `${size(warehouse.size)} ${warehouse.type}`,
+        since: stored.date,
+        monthlyBefore: stored.windowCost * MONTH_PER_WINDOW,
+        monthlyNow: warehouse.window_cost * MONTH_PER_WINDOW,
+      })
+    }
+    if (!stored && flagged.has(warehouse.id)) {
+      await $.store
+        .set(key, { date: today, type: warehouse.type, size: warehouse.size, windowCost: warehouse.window_cost } satisfies Baseline)
+        .catch(() => undefined)
+    }
+  }
+  return changes
 }
 
 /** The refusal in the person's terms, with the step that fixes it. */
@@ -184,9 +305,13 @@ export function explain(error: string): { text: string; recovery: string } {
   return { text: `The savings check failed: ${error.split('\n')[0]!.slice(0, 300)}`, recovery: 'Run /savings again; if it fails again, run the same check in a terminal: `altimate tool run finops_databricks_savings --args \'{}\'`.' }
 }
 
+function checkedText(view: SavingsView): string {
+  return `${view.checked.warehouses} SQL warehouses, ${view.checked.clusters} all-purpose clusters and ${view.checked.jobs} jobs`
+}
+
 function summary(view: SavingsView): string {
-  if (view.total.warehouses === 0) return `Databricks savings check: no savings found on ${view.warehousesChecked} SQL warehouses.`
-  return `Databricks savings check: ${range(view.total.min, view.total.max)} a month on ${view.total.warehouses} SQL warehouse${view.total.warehouses === 1 ? '' : 's'}.`
+  if (view.total.resources === 0) return `Databricks savings check: no savings found on ${checkedText(view)}.`
+  return `Databricks savings check: ${range(view.total.min, view.total.max)} a month on ${view.total.resources} resource${view.total.resources === 1 ? '' : 's'}.`
 }
 
 async function openPane($: EngineInterface) {
@@ -204,12 +329,17 @@ async function runCheck($: EngineInterface, connection: string | null) {
     const until = (await $.clock.now()) + RUN_BUDGET_MS
     const result = await runTool($, TOOL, connection ? { warehouse: connection } : {}, { cliOnly: true, until, env: NO_TELEMETRY, noDaemon: true })
     if (!live()) return
-    const view = toView(result.metadata as ToolMetadata | null)
+    const metadata = result.metadata as ToolMetadata | null
+    const view = toView(metadata)
     if (!view) {
       const error = (result.metadata as ToolMetadata | null)?.error ?? result.text
       await update($, messageAtom, () => explain(error || 'no answer'))
       return
     }
+    const today = new Date(await $.clock.now()).toISOString().slice(0, 10)
+    view.changes = await trackChanges($, view, metadata?.warehouses ?? [], today)
+    if (!live()) return
+    await update($, whatIfAtom, () => null)
     await update($, reportAtom, () => view)
     $.ui.toast(summary(view))
   } catch (error) {
@@ -238,11 +368,11 @@ async function draftFix($: EngineInterface, request: string) {
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
 async function bandFor($: EngineInterface, text: string): Promise<{ text: string } | null> {
   const report = await read($, reportAtom)
-  const named = report?.findings.find(one => text.includes(one.warehouseName) || text.includes(one.warehouseId))
-  if (named) return { text: `${named.warehouseName}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
+  const named = report?.findings.find(one => text.includes(one.resourceName) || text.includes(one.resourceId))
+  if (named) return { text: `${named.resourceName}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
   if (report || offered || !COMPUTE_WORDS.test(text)) return null
   offered = true
-  return { text: 'Databricks compute in play: check its SQL warehouses for savings with /savings (read-only, on your own connection).' }
+  return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection).' }
 }
 
 /** Adds this feature's own hooks. */
@@ -256,7 +386,7 @@ export function register(on: On, _context: FeatureContext) {
       await openPane($)
       return { text: 'The Databricks savings check is already running in the side pane.' }
     }
-    await update($, busyAtom, () => ({ label: "Checking the workspace's SQL warehouses…" }))
+    await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
     const opened = await openPane($)
     later($, () => runCheck($, asked || null))
     if (opened && opened.isPlaced === false) {
@@ -270,7 +400,8 @@ export function register(on: On, _context: FeatureContext) {
     const report = await read($, reportAtom)
     const running = await read($, busyAtom)
     const message = await read($, messageAtom)
-    const again = () => later($, () => update($, busyAtom, () => ({ label: "Checking the workspace's SQL warehouses…" })).then(() => runCheck($, lastConnection)))
+    const picked = await read($, whatIfAtom)
+    const again = () => later($, () => update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" })).then(() => runCheck($, lastConnection)))
     const close = () => later($, () => $.ui.close({ id: PANE }))
     const buttons = (
       <Box gap={1} key="buttons">
@@ -311,17 +442,23 @@ export function register(on: On, _context: FeatureContext) {
         <Box flexDirection="column">
           <Text bold>Databricks savings check</Text>
           <Text dimColor>
-            {report.warehousesChecked} SQL warehouses · the 7 days to {report.window.end} 06:00 UTC{report.connection ? ` · connection ${report.connection}` : ''}
+            {checkedText(report)} · the 7 days to {report.window.end}
+            {report.connection ? ` · connection ${report.connection}` : ''}
           </Text>
           <Text dimColor>Read-only, with your own connection. Nothing was sent to Altimate.</Text>
         </Box>
-        {report.total.warehouses > 0 ? (
+        {report.changes.map((one, at) => (
+          <Text key={`change-${at}`} color="success">
+            {`${one.name}: ${one.from} → ${one.to} since ${one.since}. ${dollars(one.monthlyBefore)} a month then, ${dollars(one.monthlyNow)} now${one.monthlyBefore > one.monthlyNow ? `: ${dollars(one.monthlyBefore - one.monthlyNow)} a month saved` : ''}.`}
+          </Text>
+        ))}
+        {report.total.resources > 0 ? (
           <Box flexDirection="column">
             <Text bold color="success">
               {range(report.total.min, report.total.max)} a month
             </Text>
             <Text dimColor>
-              on {report.total.warehouses} SQL warehouse{report.total.warehouses === 1 ? '' : 's'}, at list price and the last 7 days' rate, each warehouse counted once at its largest saving
+              on {report.total.resources} resource{report.total.resources === 1 ? '' : 's'}, at list price and the last 7 days' rate, each counted once at its largest saving
             </Text>
           </Box>
         ) : (
@@ -329,7 +466,7 @@ export function register(on: On, _context: FeatureContext) {
         )}
         {report.findings.map((one, at) => (
           <Box key={`finding-${at}`} flexDirection="column">
-            <Text bold>{`${one.warehouseName} · ${one.title} · ${range(one.monthlyMin, one.monthlyMax)} a month`}</Text>
+            <Text bold>{`${one.resourceName} · ${one.title} · ${range(one.monthlyMin, one.monthlyMax)} a month`}</Text>
             <Box flexDirection="column" paddingLeft={2}>
               {one.evidence.map((line, row) => (
                 <Text key={`finding-${at}-${row}`} dimColor>
@@ -342,6 +479,37 @@ export function register(on: On, _context: FeatureContext) {
             </Box>
           </Box>
         ))}
+        {report.whatIf.map((one, at) => {
+          const choice = picked?.resourceId === one.resourceId ? one.choices.find(c => c.label === picked.label) : undefined
+          return (
+            <Box key={`whatif-${at}`} flexDirection="column">
+              <Text bold>{`What if ${one.resourceName} (${dollars(one.currentMonthly)} a month now) were…`}</Text>
+              <Box gap={1} flexWrap="wrap">
+                {one.choices.map((c, k) => (
+                  <Button
+                    key={`whatif-${at}-${k}`}
+                    label={`${c.label} ${dollars(c.monthlyCost)}${c.fits ? '' : ' ⚠'}`}
+                    onPress={() => later($, () => update($, whatIfAtom, () => ({ resourceId: one.resourceId, label: c.label })))}
+                  />
+                ))}
+              </Box>
+              {choice ? (
+                <Text color={choice.fits ? 'success' : 'warning'}>
+                  {choice.label === 'SERVERLESS'
+                    ? `As serverless: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(choice.monthlySaving)} less: it bills only while queries run.`
+                    : choice.fits
+                      ? `At ${choice.label}: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(choice.monthlySaving)} less. Its ${choice.cores} cores cover the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use).`
+                      : `At ${choice.label}: ${dollars(choice.monthlyCost)} a month, but its ${choice.cores} cores are short of the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use): queries would queue.`}
+                </Text>
+              ) : (
+                <Text dimColor>Press a size to see what it would cost and whether it fits.</Text>
+              )}
+            </Box>
+          )
+        })}
+        {report.skipped.length > 0 ? (
+          <Text dimColor>{`Not checked (the connection cannot read their system tables): ${report.skipped.join(', ')}.`}</Text>
+        ) : null}
         <Box flexDirection="column" key="pitch">
           <Text dimColor>
             These were {CHECK_COUNT} of Altimate's {SAAS_CHECK_COUNT} Databricks checks, on one workspace. Altimate runs all {SAAS_CHECK_COUNT} every day on every workspace
@@ -361,7 +529,7 @@ export async function sessionStart($: EngineInterface, _e: Args<'session.start'>
   await update($, busyAtom, () => null)
   await $.command.register({
     name: COMMAND,
-    description: "Check a Databricks workspace's SQL warehouses for savings with Altimate's rules: read-only, on your own connection",
+    description: "Check a Databricks workspace's warehouses, clusters and jobs for savings with Altimate's rules: read-only, on your own connection",
     argumentHint: '[altimate-code connection]',
   })
 }
@@ -376,6 +544,7 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   lastConnection = null
   offered = false
   await update($, bandAtom, () => null)
+  await update($, whatIfAtom, () => null)
   await update($, reportAtom, () => null)
   await update($, busyAtom, () => null)
   await update($, messageAtom, () => null)
@@ -393,7 +562,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
         label="Run /savings"
         onPress={() =>
           later($, async () => {
-            await update($, busyAtom, () => ({ label: "Checking the workspace's SQL warehouses…" }))
+            await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
             await openPane($)
             await runCheck($, lastConnection)
           })
