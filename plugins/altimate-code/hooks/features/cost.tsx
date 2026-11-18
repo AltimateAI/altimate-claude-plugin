@@ -254,7 +254,8 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
   }
 
   if (generation !== startedAt) {
-    inflight.clear()
+    // Only what this pass could have started: a newer pass's estimates are its own.
+    for (const [key, entry] of inflight) if (entry.generation < generation) inflight.delete(key)
     notes.delete(e.command)
     return { deny: 'The project changed while the scan was being estimated. Run the same command again.' }
   }
