@@ -311,10 +311,10 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
   return changes
 }
 
-/** The refusal in the person's terms, with the step that fixes it. */
 /** An altimate-code without `tool run` prints its usage (its commands) instead of an answer. */
 const tooOldCli = (output: string) => /\bCommands:/.test(output) && /altimate(-code)? /.test(output)
 
+/** The refusal in the person's terms, with the step that fixes it. */
 export function explain(error: string): { text: string; recovery: string } {
   if (tooOldCli(error) || /^Unknown tool: finops_databricks_savings/.test(error) || /has no Databricks savings rules/.test(error)) {
     return { text: 'This altimate-code has no Databricks savings check.', recovery: 'Update altimate-code (`altimate upgrade`), then run /savings again.' }
@@ -379,7 +379,7 @@ async function runCheck($: EngineInterface, connection: string | null) {
     if (!view) {
       // The CLI's text is only the first line of what it printed; an old altimate-code is told by its whole usage.
       const raw = ('raw' in result ? result.raw : '') || ''
-      const error = (result.metadata as ToolMetadata | null)?.error ?? (tooOldCli(raw) ? raw : result.text || raw)
+      const error = metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)
       const why = explain(error || 'no answer')
       await update($, messageAtom, () => why)
       $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
