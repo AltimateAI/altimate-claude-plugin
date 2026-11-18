@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { nothingToReport } from '../inert-features'
 import { cteCount, inputsOf, orderNodes } from './sql-graph'
 
 const ROOT = '/repo'
@@ -52,6 +53,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
+    const inert = nothingToReport(e.argv)
+    if (inert) return { value: inert }
     const [, command] = e.argv
     // The integrations half of the plugin asks the CLI for its status at session start.
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
