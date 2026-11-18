@@ -548,6 +548,12 @@ test('with the push gate on, an edit-and-push written from the folder an earlier
   expect(denied?.deny).toContain('Run them as separate commands')
 })
 
+test('with the push gate on, a write from a dbt-internal folder the shell is in is no model edit', { options: { healthBlocksPush: true } }, async ($, on) => {
+  await start($, on, { runs: [[]], cwd: `${ROOT}/target` })
+  const allowed: any = await $.tool.call(command(`sed -i 's/a/b/' x.sql && git push`))
+  expect(allowed?.deny).toBeUndefined()
+})
+
 test('git push is found by its command words, not by its text', () => {
   for (const line of [
     'git push',
