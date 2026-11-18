@@ -56,6 +56,8 @@ const UNSUPPORTED_KEEP_MS = 10 * 60_000
 const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+((-[Cc]|--git-dir|--namespace|--work-tree)\s+\S+\s+|-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|worktree)|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
 /** Commands that can move the session to another project or target without rewriting a file. */
 const MOVES_DIRECTORY = /(^|[\s;&|(])(cd|pushd|popd)(\s|$)/
+/** The dbt subcommands that rebuild warehouse relations. */
+const REBUILDS = new Set(['run', 'build'])
 /** The dbt subcommands that change nothing in the project. */
 const READS_ONLY = new Set(['run', 'build', 'show', 'compile', 'ls', 'list', 'debug', 'parse'])
 
@@ -75,8 +77,11 @@ function mutates(all: DbtInvocation[], rest: string): boolean {
 }
 
 /** What a shell command did to the project: a rewrite voids the estimates and the verdict; a directory change the same, since it can select another project. */
-async function afterShellChange($: EngineInterface, command: string) {
+async function afterShellChange($: EngineInterface, command: string, ran = false) {
   const { all, rest } = withoutReads(command)
+  // A dbt run that has finished may have rebuilt what another model reads: an estimate made before it is stale.
+  // Not before the command runs: the gate's own estimates, kept for the retry, would be dropped by every pass.
+  if (ran && all.some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) invalidate()
   if (mutates(all, rest)) {
     invalidate()
     // Any rewrite can bring back another target (a git restore does not name the profile).
@@ -272,6 +277,9 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     if (granted) {
       for (const one of over) lines.push(`cost · ${one.label} would scan ${one.display}, over the ${formatBytes(limitBytes)} limit: allowed once`)
       keepNotes(e.command, lines)
+      // The hold is spent: the status line stops showing it.
+      const last = (await read($, costAtom))?.lastEstimate
+      await showStatus($, last ? `scan ≈ ${last.display}` : null)
       return null
     }
     notes.delete(e.command)
@@ -314,7 +322,7 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
   notes.delete(e.command)
   refused.delete(e.command)
   // A shell command can rewrite a model or the profile (a git restore, a sed): no earlier estimate is reused after one.
-  await afterShellChange($, e.command)
+  await afterShellChange($, e.command, true)
   return lines
 }
 

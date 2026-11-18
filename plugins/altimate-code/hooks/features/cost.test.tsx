@@ -130,8 +130,9 @@ test('a cd to another directory makes the no-dry-run verdict forgotten', async (
 })
 
 test('/allow-scan lets the next held command through once, then the one after is held again', async ($, on) => {
-  const { clock, estimates, ran } = await start($, on, { answers: { orders: OVER } })
+  const { clock, estimates, ran, statuses } = await start($, on, { answers: { orders: OVER } })
   expect((await $.tool.call(bash('dbt run -s orders')) as any).deny).toBeDefined()
+  expect(statuses.filter(Boolean).at(-1)).toContain('held')
 
   const allowed = await $.command.run({ command: 'allow-scan', args: '' } as any)
   expect(allowed.text).toContain('runs once')
@@ -139,6 +140,7 @@ test('/allow-scan lets the next held command through once, then the one after is
   await clock.settle()
   expect(through.deny).toBeUndefined()
   expect(through.context).toEqual(['cost · orders would scan 20.0 GiB, over the 10.0 GiB limit: allowed once'])
+  expect(statuses.filter(Boolean).at(-1)).not.toContain('held')
   expect(ran).toEqual(['dbt run -s orders'])
 
   expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
@@ -681,6 +683,26 @@ test('a cd drops the answer waiting for the retry: it may have selected another 
   await clock.settle()
   expect(retry.deny).toContain('20.0 GiB')
   expect(estimates).toEqual(['orders', 'orders'])
+})
+
+test('a dbt run that has finished drops the estimates made before it', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER, customers: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  options.hold = undefined
+  await $.tool.call(bash('dbt run -s customers'))
+  await clock.settle()
+  options.answers = { orders: OVER }
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(estimates.filter(e => e === 'orders').length).toBe(2)
 })
 
 test('a lower-bound-only estimate holds nothing and keeps an existing hold', async ($, on) => {
