@@ -1,7 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { commandDir } from './lineage'
 import { buildGraph, subgraph } from './lineage-graph'
 import { MANIFEST } from './lineage-graph.test'
+import { nothingToReport } from './inert-features'
 
 const ROOT = '/repo'
 const MANIFEST_PATH = `${ROOT}/target/manifest.json`
@@ -189,6 +191,8 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { content: [], isError: true } }
   })
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
+    const inert = nothingToReport(e.argv)
+    if (inert) return { value: inert }
     const [, command, , tool] = e.argv
     // A slow CLI dbt_lineage: it answers once the test lets it.
     if (command === 'tool' && tool === 'dbt_lineage' && options.holdCliLineage) await options.holdCliLineage
@@ -1740,4 +1744,18 @@ test("the pane's MCP column trace that never answers is given up on, and the CLI
   expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeGreaterThan(-1)
   expect(calls.indexOf('mcp:impact_analysis:revenue')).toBeLessThan(calls.indexOf('cli:impact_analysis:revenue'))
   expect(logs.some(line => line.includes('impact_analysis(fct_orders, column: revenue) · read by 2 models'))).toBe(true)
+})
+
+test('each cd in a command moves the folder it reads from, after any separator or blank line', () => {
+  expect(commandDir('cd a && cd "b c"; cd /abs\n  cd rel', '/repo')).toBe('/abs/rel')
+  expect(commandDir('ls;\n\n   cd models | cat', '/repo')).toBe('/repo/models')
+  expect(commandDir('echo cd nowhere', '/repo')).toBe('/repo')
+})
+
+test('a very long run of blank lines before a command is read at once', () => {
+  const began = Date.now()
+  expect(commandDir(`${'\n'.repeat(64000)}cd models`, '/repo')).toBe('/repo/models')
+  expect(commandDir(`${'\n'.repeat(64000)}dbt run -s orders`, '/repo')).toBe('/repo')
+  for (const blank of ['\r', '\r\n', '\u2028', '\u2029']) expect(commandDir(`${blank.repeat(32000)}cd models`, '/repo')).toBe('/repo/models')
+  expect(Date.now() - began).toBeLessThan(500)
 })
