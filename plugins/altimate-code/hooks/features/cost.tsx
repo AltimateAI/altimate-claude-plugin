@@ -266,6 +266,21 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // One wait for the whole command, however many queries it names.
   const waitUntil = (await $.clock.now()) + GATE_WAIT_MS
   const pending: string[] = []
+  // The refusal for a folder that could not be read keeps what the pass already found over the limit, and marks the command refused:
+  // its retry is no change, and a failed estimate then cannot free a command already known to be expensive.
+  const unreadable = async () => {
+    if (over.length > 0) {
+      const worst = over.reduce((x, y) => (y.bytes > x.bytes ? y : x))
+      await update($, costAtom, prev => {
+        const current = prev ?? FRESH
+        const same = current.held?.command === e.command
+        return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+      })
+    }
+    notes.delete(e.command)
+    refused.set(e.command, await $.clock.now())
+    return { deny: UNREADABLE_DENY }
+  }
   // What this pass already has, so the same query named twice on the line is asked for once.
   const taken = new Map<string, Answer>()
   let failed = false
@@ -278,10 +293,10 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     const label = target.model ?? 'the inline query'
     const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken, refused.get(e.command), look)
     // The folder could not be read in time: the rest of the line is not looked at, or the chain's own deadline would let the whole command through first.
-    if (answer === 'unreadable') return { deny: UNREADABLE_DENY }
+    if (answer === 'unreadable') return unreadable()
     // A /cd while it was being asked: the answer is of the project left, and nothing here is allowed on it.
     const now = await sessionDir($, look, dir)
-    if (look.lost) return { deny: UNREADABLE_DENY }
+    if (look.lost) return unreadable()
     if (now !== dir) {
       await leaveProject($)
       seenDir = now
@@ -323,7 +338,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     // Nothing is cleared here: the change already cleared what was older, and a newer pass's estimates are its own.
     return changedDeny(e.command)
   }
-  if (look.lost) return { deny: UNREADABLE_DENY }
+  if (look.lost) return unreadable()
 
   // A finished command's answers are taken: a later one asks again. A pending one keeps them for its retry.
   if (pending.length === 0) for (const key of taken.keys()) inflight.delete(key)

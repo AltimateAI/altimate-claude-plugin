@@ -326,6 +326,21 @@ test('a folder lookup that fails before any folder was seen refuses the scan too
   expect(started).toEqual([])
 })
 
+test('a line refused for its unreadable folder keeps the over-limit answer already in hand: its retry is still held when that estimate then fails', async ($, on) => {
+  const options: Options = { answers: { b: UNDER }, sequence: { a: [OVER, { success: false, error: 'Access Denied' }] } }
+  const { clock, ran } = await start($, on, options)
+  const command = 'dbt run -s a && dbt run -s b > run.log'
+  options.stallNth = { n: 7, seen: 0 }
+  const first = $.tool.call(bash(command)) as Promise<any>
+  for (let i = 0; i < 70; i++) await clock.advance(100)
+  expect((await first).deny).toContain('could not be read in time')
+  options.stallNth = undefined
+  const retry = $.tool.call(bash(command)) as Promise<any>
+  for (let i = 0; i < 70; i++) await clock.advance(100)
+  expect((await retry).deny).toBeDefined()
+  expect(ran).toEqual([])
+})
+
 test('a lookup lost in one pass does not refuse another pass whose own lookups all answered', async ($, on) => {
   let release: () => void = () => {}
   const options: Options = { answers: { slow: UNDER }, holds: { slow: new Promise<void>(resolve => (release = resolve)) } }
