@@ -60,10 +60,23 @@ const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
 const DATABRICKS_COMMAND = /(?:^|[\s;&|(])databricks\s+(?:warehouses|clusters|bundle|jobs)\b/
 const BAND_READ_LIMIT = 200_000
 
+function money(value: number, cents: boolean): string {
+  const rounded = cents ? Math.round(value * 100) / 100 : Math.round(value)
+  const [whole, fraction] = rounded.toFixed(cents ? 2 : 0).split('.')
+  return `$${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fraction ? `.${fraction}` : ''}`
+}
+
 export function dollars(value: number): string {
-  const rounded = value >= 100 ? Math.round(value) : Math.round(value * 100) / 100
-  const [whole, cents] = rounded.toFixed(value >= 100 ? 0 : 2).split('.')
-  return `$${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${cents ? `.${cents}` : ''}`
+  return money(value, value < 100)
+}
+
+/** Two monthly amounts and the gap between them, as a sentence that compares them shows them: all
+ * three to the cent when either is under $100, so the gap it states is the gap between the amounts
+ * it shows ("$19.05 instead of $125.50, $106.45 less", not "$19.05 instead of $126, $106 less"). */
+export function compared(was: number, now: number): { was: string; now: string; gap: string } {
+  const cents = Math.abs(was) < 100 || Math.abs(now) < 100
+  const round = (value: number) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
+  return { was: money(was, cents), now: money(now, cents), gap: money(Math.abs(round(was) - round(now)), cents) }
 }
 
 function range(min: number, max: number): string {
@@ -484,11 +497,14 @@ export function register(on: On, _context: FeatureContext) {
           </Text>
           <Text dimColor>Read-only, with your own connection. Nothing was sent to Altimate.</Text>
         </Box>
-        {report.changes.map((one, at) => (
-          <Text key={`change-${at}`} color="success">
-            {`${one.name}: ${one.from} → ${one.to} since ${one.since}. ${dollars(one.monthlyBefore)} a month then, ${dollars(one.monthlyNow)} now${one.monthlyBefore > one.monthlyNow ? `: ${dollars(one.monthlyBefore - one.monthlyNow)} a month saved` : ''}.`}
-          </Text>
-        ))}
+        {report.changes.map((one, at) => {
+          const amounts = compared(one.monthlyBefore, one.monthlyNow)
+          return (
+            <Text key={`change-${at}`} color="success">
+              {`${one.name}: ${one.from} → ${one.to} since ${one.since}. ${amounts.was} a month then, ${amounts.now} now${one.monthlyBefore > one.monthlyNow ? `: ${amounts.gap} a month saved` : ''}.`}
+            </Text>
+          )
+        })}
         {report.total.resources > 0 ? (
           <Box flexDirection="column">
             <Text bold color="success">
@@ -522,6 +538,7 @@ export function register(on: On, _context: FeatureContext) {
         ))}
         {report.whatIf.map((one, at) => {
           const choice = picked?.resourceId === one.resourceId ? one.choices.find(c => c.label === picked.label) : undefined
+          const amounts = choice ? compared(one.currentMonthly, choice.monthlyCost) : undefined
           return (
             <Box key={`whatif-${at}`} flexDirection="column">
               <Text bold>{`What if ${one.resourceName} (${dollars(one.currentMonthly)} a month now) were…`}</Text>
@@ -534,14 +551,14 @@ export function register(on: On, _context: FeatureContext) {
                   />
                 ))}
               </Box>
-              {choice ? (
+              {choice && amounts ? (
                 <Text color={choice.fits && choice.monthlySaving > 0 ? 'success' : 'warning'}>
                   {choice.label === 'SERVERLESS'
                     ? choice.monthlySaving > 0
-                      ? `As serverless: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(choice.monthlySaving)} less: it bills only while queries run.`
-                      : `As serverless: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(-choice.monthlySaving)} more: its queries keep it busy most of the time.`
+                      ? `As serverless: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} less: it bills only while queries run.`
+                      : `As serverless: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} more: its queries keep it busy most of the time.`
                     : choice.fits
-                      ? `At ${choice.label}: ${dollars(choice.monthlyCost)} a month instead of ${dollars(one.currentMonthly)}, ${dollars(choice.monthlySaving)} less. Its ${choice.cores} cores cover the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use).`
+                      ? `At ${choice.label}: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} less. Its ${choice.cores} cores cover the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use).`
                       : `At ${choice.label}: ${dollars(choice.monthlyCost)} a month, but its ${choice.cores} cores are short of the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use): queries would queue.`}
                 </Text>
               ) : (

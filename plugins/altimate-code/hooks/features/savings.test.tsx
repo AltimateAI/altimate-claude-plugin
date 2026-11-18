@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SIGNUP_URL, apiSize, dollars, explain, mentions } from './savings'
+import { SIGNUP_URL, apiSize, compared, dollars, explain, mentions } from './savings'
 
 const ROOT = '/repo'
 
@@ -415,6 +415,16 @@ test('dollars are whole from $100 and to the cent below it', () => {
   expect(dollars(35142.9)).toBe('$35,143')
 })
 
+test('a comparison states the gap between the amounts it shows', () => {
+  // Rounded one by one, $125.50 vs $19.05 read "$126 … $19.05, $106 less".
+  expect(compared(125.5, 19.05)).toEqual({ was: '$125.50', now: '$19.05', gap: '$106.45' })
+  expect(compared(178.4, 0.78)).toEqual({ was: '$178.40', now: '$0.78', gap: '$177.62' })
+  // Both from $100: whole dollars, the gap between the whole amounts shown.
+  expect(compared(300.4, 120.6)).toEqual({ was: '$300', now: '$121', gap: '$179' })
+  expect(compared(118.047, 300)).toEqual({ was: '$118', now: '$300', gap: '$182' })
+  expect(compared(1_234.6, 1_000.2)).toEqual({ was: '$1,235', now: '$1,000', gap: '$235' })
+})
+
 const BAND = { plugin: 'altimate-code', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } } as any
 
 test('Draft the fix puts a request for the change in the prompt box, and sends nothing itself', async ($, on) => {
@@ -523,10 +533,10 @@ test('pressing a what-if size shows what the warehouse would cost there and whet
   expect(((await ui.find({ key: 'whatif-0-0' })) as any)?.props.label).toBe('SERVERLESS $17.24')
   await ui.press({ key: 'whatif-0-1' })
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /^At X-SMALL: \$59\.02 a month instead of \$118, \$59\.02 less\. Its 16 cores cover the 7 its queries need \(twice what 99% of them use\)\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^At X-SMALL: \$59\.02 a month instead of \$118\.05, \$59\.03 less\. Its 16 cores cover the 7 its queries need \(twice what 99% of them use\)\.$/ })).toBeDefined()
   await ui.press({ key: 'whatif-0-0' })
   await clock.settle()
-  expect(await ui.find({ type: 'Text', text: /^As serverless: \$17\.24 a month instead of \$118/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^As serverless: \$17\.24 a month instead of \$118\.05, \$100\.81 less: it bills only while queries run\.$/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -556,7 +566,7 @@ test('a flagged warehouse is remembered, and a later run that finds it resized s
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. \$118 a month then, \$59\.01 now: \$59\.01 a month saved\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. \$118\.03 a month then, \$59\.01 now: \$59\.02 a month saved\.$/ })).toBeDefined()
   await ui.unmount()
 })
 
