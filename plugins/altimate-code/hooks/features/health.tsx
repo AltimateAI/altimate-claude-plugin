@@ -561,6 +561,8 @@ async function loop($: EngineInterface, mine: number) {
         const matched = new Set(run.insights.flatMap(i => [i.file, i.properties]).filter(Boolean).map(real))
         // Not when there is no baseline yet: counting every model as edited would make the baseline empty, and every existing issue new.
         if (base.baseline !== null && base.touched.some(f => /\.ya?ml$/i.test(f) && !matched.has(real(f)))) for (const i of run.insights) edited.add(i.uniqueId)
+        // A model dropped from a schema file that still documents others shows its new issues with no properties file: they are not found by that file either.
+        if (base.baseline !== null && base.touched.some(f => /\.ya?ml$/i.test(f))) for (const i of run.insights) if (!i.properties && i.file) edited.add(i.uniqueId)
         const baseline = base.baseline ?? run.insights.filter(i => !edited.has(i.uniqueId)).map(pairKey)
         const issues = newIssues(run.insights, baseline, edited)
         return { ...base, baseline, issues, running: false, problem: null }

@@ -33,7 +33,7 @@ const OLD_FCT = insight('fct_orders', FCT, 'Missing tests')
 const NEW_STG = insight('stg_orders', STG, 'Hard coded references', 'stg_orders reads raw.orders directly', STG_YML)
 const NEW_FCT = insight('fct_orders', FCT, 'Model fanout', 'fct_orders has 4 direct children')
 // A model of a dependency package: it has no files in the project.
-const DEP = { ...insight('base', `${ROOT}/dbt_packages/dep/models/base.sql`, 'Missing tests'), uniqueId: 'model.dep.base', path: 'models/base.sql' }
+const DEP = { ...insight('base', '', 'Missing tests'), uniqueId: 'model.dep.base', path: 'models/base.sql' }
 
 type Options = {
   /** The tool's answer per run (the last repeats). */
@@ -203,6 +203,14 @@ test('a changed properties file checks the models it documents, and a dependency
   await $.tool.call(edit(STG_YML))
   await endTurn($, clock, 't1')
   expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('a model dropped from a schema file that still documents others is held for its new issues', async ($, on) => {
+  const dropped = insight('fct_orders', FCT, 'Missing documentation')
+  const { clock, toasts } = await start($, on, { runs: [[OLD_STG], [OLD_STG, dropped]] })
+  await $.tool.call(edit(STG_YML))
+  await endTurn($, clock, 't1')
+  expect(toasts).toEqual(['◆ 1 new health issue · fct_orders: missing documentation · /health'])
 })
 
 test('a model file Bash writes counts like one Claude edited; a command naming no model file starts no check', async ($, on) => {
