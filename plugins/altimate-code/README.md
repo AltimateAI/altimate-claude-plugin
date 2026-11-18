@@ -141,7 +141,7 @@ The plugin has five settings, shown when you enable it (`userConfig` in `.claude
 | Setting | Default | What it controls |
 | --- | --- | --- |
 | `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it waits for your approval (0 never waits; at least 0). Other warehouses are never held. |
-| `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. If the first check of a session lands after you changed a model, that model's existing issues count as new (the baseline then lacks them). |
+| `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. If the first check of a session lands after you changed a model, that model's existing issues count as new (the baseline then lacks them). The reverse also holds: a model you drop from a schema file before that first check lands has its new issues taken as existing, so a push is not held for them. |
 | `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. Empty uses the default checks. |
 | `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). |
 | `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. |
