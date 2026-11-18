@@ -121,7 +121,10 @@ function valueAt(lines: string[], at: number, keyIndent: number, rest: string): 
   let text = inlineValue(head)
   let last = at
   // A plain value runs on over the lines indented more than its key.
-  for (let i = at + 1; i < lines.length && lines[i]!.trim() !== '' && indentOf(lines[i]!) > keyIndent; i++) {
+  // A blank line inside it is a paragraph break, not its end: it goes on while the next text line is still indented.
+  for (let i = at + 1; i < lines.length; i++) {
+    if (lines[i]!.trim() === '') continue
+    if (indentOf(lines[i]!) <= keyIndent) break
     text += ' ' + inlineValue(lines[i]!)
     last = i
   }
@@ -246,7 +249,7 @@ export function modelPaths(projectYaml: string): string[] {
     if (rest.startsWith('[')) {
       for (const one of rest.replace(/^\[|\]$/g, '').split(',')) names.push(one.trim().replace(/^["']|["']$/g, ''))
     } else if (rest === '') {
-      for (let j = i + 1; j < lines.length && /^\s*-\s+/.test(lines[j]!); j++) names.push(lines[j]!.replace(/^\s*-\s+/, '').replace(/\s+#.*$/, '').trim().replace(/^["']|["']$/g, ''))
+      for (let j = i + 1; j < lines.length && (/^\s*(?:#.*)?$/.test(lines[j]!) || /^\s*-\s+/.test(lines[j]!)); j++) if (/^\s*-\s+/.test(lines[j]!)) names.push(lines[j]!.replace(/^\s*-\s+/, '').replace(/\s+#.*$/, '').trim().replace(/^["']|["']$/g, ''))
     }
     const kept = names.filter(Boolean)
     if (kept.length) return kept

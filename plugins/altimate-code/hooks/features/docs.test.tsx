@@ -575,3 +575,24 @@ test('a request the engine refused leaves the offers and clears nothing Apply as
   expect(await band.find({ type: 'Text', text: /can take this description/ })).toBeDefined()
   await band.unmount()
 })
+
+test('a model-paths list with comments and blank lines still names every folder', () => {
+  expect(modelPaths('name: shop\nmodel-paths:\n  # Models\n  - sql\n\n  # more\n  - "other" # kept\ntest-paths: ["t"]\n')).toEqual(['sql', 'other'])
+})
+
+test('a plain description with a blank line in it is read to its last paragraph, and stops at the next key', () => {
+  const yaml = `models:
+  - name: orders
+    columns:
+      - name: id
+        description: First paragraph
+
+          Second paragraph
+      - name: status
+        description: Plain
+`
+  expect([...columnDescriptions(yaml)]).toEqual([
+    ['orders.id', 'First paragraph Second paragraph'],
+    ['orders.status', 'Plain'],
+  ])
+})
