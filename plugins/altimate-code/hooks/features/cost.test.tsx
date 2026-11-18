@@ -746,6 +746,46 @@ test('a /cd to another project drops the finished answer and the allowance', asy
   expect(again.deny).toContain('20.0 GiB')
 })
 
+test('a dbt run that is let through drops the estimates kept from before it', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER, customers: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  options.holdFor = 'orders'
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  options.hold = undefined
+  // Another command's run is let through, and is still running (not yet after-phase) when orders is retried.
+  options.holdBash = { command: 'dbt run -s customers', until: new Promise<void>(() => {}) }
+  void $.tool.call(bash('dbt run -s customers'))
+  await clock.settle()
+  options.answers = { orders: OVER }
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(estimates.filter(e => e === 'orders').length).toBe(2)
+})
+
+test('a second model is not estimated while another estimate is still running in the project', async ($, on) => {
+  const options: Options = { answers: { a: UNDER, b: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s a'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  const second: any = await $.tool.call(bash('dbt run -s b'))
+  expect(second.deny).toContain('still being estimated')
+  expect(estimates).toEqual([])
+  release()
+  await clock.settle()
+  options.hold = undefined
+  expect(estimates).toEqual(['a'])
+})
+
 test('a lower bound already over the limit holds the command', async ($, on) => {
   const { clock } = await start($, on, { answers: { orders: { success: true, supported: true, adapter: 'bigquery', bytes: 20 * GIB, lowerBound: true, display: '20.0 GiB' } } })
   const result: any = await $.tool.call(bash('dbt run -s orders'))

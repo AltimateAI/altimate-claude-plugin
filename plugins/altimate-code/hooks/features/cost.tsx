@@ -172,6 +172,13 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
  * a gate that must hold the call when its own check fails catches that failure and returns `{ deny }`.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
+  const verdict = await gate($, e)
+  // A dbt run or build that is let through rebuilds relations while it runs: an estimate kept from before it is stale from here.
+  if (verdict === null && limitBytes > 0 && parseDbtCommand(e.command).some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) invalidate()
+  return verdict
+}
+
+async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
   // Before it runs, not only after: another call can ask while a long command is rewriting the project.
   // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
@@ -541,6 +548,8 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   if (!running) {
     // The wait is spent: nothing new starts. Each estimate may start the adapter (dbt deps), and two at once in one project collide.
     if (waitUntil - now <= 0) return 'pending'
+    // Nor while another is still running in this project, whichever command asked for it.
+    for (const other of inflight.values()) if (other.doneAt == null && other.generation === generation) return 'pending'
     const entry: { answer: Promise<Answer>; doneAt: number | null; generation: number } = {
       answer: estimate($, args, now + ESTIMATE_BUDGET_MS),
       doneAt: null,
