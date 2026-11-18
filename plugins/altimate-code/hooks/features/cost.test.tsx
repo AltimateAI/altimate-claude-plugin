@@ -720,6 +720,30 @@ test('a /cd to another project makes the no-dry-run verdict forgotten', async ($
   expect((await run()).deny).toContain('20.0 GiB')
 })
 
+test('a /cd to another project drops the finished answer and the allowance', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  options.hold = undefined
+  options.cwd = '/elsewhere/project-b'
+  options.answers = { orders: OVER }
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toContain('20.0 GiB')
+  expect(estimates).toEqual(['orders', 'orders'])
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  options.cwd = '/elsewhere/project-c'
+  const again: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(again.deny).toContain('20.0 GiB')
+})
+
 test('a lower bound already over the limit holds the command', async ($, on) => {
   const { clock } = await start($, on, { answers: { orders: { success: true, supported: true, adapter: 'bigquery', bytes: 20 * GIB, lowerBound: true, display: '20.0 GiB' } } })
   const result: any = await $.tool.call(bash('dbt run -s orders'))

@@ -51,8 +51,8 @@ const refused = new Map<string, number>()
 let generation = 0
 /** When the session found a warehouse with no dry run; null once forgotten. That finding is kept only so long, since the target can change. */
 let unsupportedSince: number | null = null
-/** The directory the session was in when it found that; a session now elsewhere (a /cd) asks again. */
-let unsupportedDir: string | null = null
+/** The directory the session was in at the last gate pass: estimates, a hold and an allowance belong to that project. */
+let seenDir: string | null = null
 const UNSUPPORTED_KEEP_MS = 10 * 60_000
 /** Commands that can rewrite a model, the project or its profile from the shell: an estimate made before one is not reused. */
 const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+((-[Cc]|--git-dir|--namespace|--work-tree)\s+\S+\s+|-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|worktree)|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
@@ -140,6 +140,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   refused.clear()
   generation++
   unsupportedSince = null
+  seenDir = null
   await update($, costAtom, () => ({ ...FRESH }))
   await setStatusPart($, 'cost', null)
   await $.command.register({ name: 'allow-scan', description: 'Let the dbt command held for its BigQuery scan size run once, when run again unchanged' })
@@ -175,6 +176,14 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   // Before it runs, not only after: another call can ask while a long command is rewriting the project.
   // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
   if (!refused.has(e.command)) await afterShellChange($, e.command)
+  // A session moved to another project (a /cd) keeps nothing the gate learned in the last one.
+  const dir = await $.session.cwd()
+  if (seenDir !== null && dir !== seenDir) {
+    invalidate()
+    await forgetUnsupported($)
+    await update($, costAtom, prev => (prev?.held || prev?.allowOnce ? { ...prev, held: null, allowOnce: false } : prev))
+  }
+  seenDir = dir
   const all = parseDbtCommand(e.command)
   const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
   if (invocations.length === 0) return null
@@ -184,7 +193,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   // A warehouse with no dry run was found out already: the command is never held, and nothing is asked again,
   // until an edit or a command that can move the target, or time, says it may have changed.
   if (state.unsupportedAdapter) {
-    if (unsupportedSince != null && (await $.clock.now()) - unsupportedSince < UNSUPPORTED_KEEP_MS && unsupportedDir === (await $.session.cwd())) return null
+    if (unsupportedSince != null && (await $.clock.now()) - unsupportedSince < UNSUPPORTED_KEEP_MS) return null
     await forgetUnsupported($)
     state.unsupportedAdapter = null
   }
@@ -215,7 +224,6 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     if (answer.kind === 'unsupported') {
       // Nothing can be held on this warehouse, so a hold from before the verdict goes with it.
       unsupportedSince = await $.clock.now()
-      unsupportedDir = await $.session.cwd()
       if (generation !== startedAt) break
       await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter, held: null, allowOnce: false }))
       await showStatus($, null)
