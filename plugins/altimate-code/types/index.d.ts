@@ -235,6 +235,8 @@ export type RunRecord = {
   commandLine: string
   /** `dbt retry` with the launcher, environment and folder flags the command had; what Re-run failed fills in. */
   retryLine: string
+  /** The folder run_results.json was read from, as the command named it; absent in a run stored before it was kept. */
+  folder?: string
   /** The dbt subcommand the artifact names (`build`, `run`…). */
   command: string
   elapsedSec: number | null

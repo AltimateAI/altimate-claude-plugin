@@ -177,6 +177,8 @@ const withoutState = (head: string) =>
   head
     .replace(/(^|\s)DBT_STATE=(?:"(?:[^"\\]|\\.)*"|'[^']*'|\\.|[^\s"'\\])*\s*/g, '$1')
     .replace(new RegExp(`(^|\\s)--state(?:=(?:${VALUE})|\\s+(?:${VALUE}))\\s*`, 'g'), '$1')
+/** `DBT_PROJECT_DIR=folder` in front of the command names the project like `--project-dir` does. */
+const PROJECT_DIR_ENV = /(?:^|\s)DBT_PROJECT_DIR=("[^"]+"|'[^']+'|[^\s"']+)/
 const PROJECT_DIR_FLAG = /(?:^|\s)--project-dir(?:=|\s+)("[^"]+"|'[^']+'|\S+)/
 
 /** One dbt invocation that may have written the results. */
@@ -207,7 +209,7 @@ export function resultsInvocations(command: string, root: string, cwd: string = 
     if (/(?:^|\s)[A-Za-z_]\w*=/.test(command.slice(0, one.start).split(/&&|\|\||[;\n|]/).pop()!)) continue
     // A URL with a password in it holds a credential whatever it is named.
     if (CREDENTIAL_URL.test(command.slice(one.start, one.end))) continue
-    const flagged = PROJECT_DIR_FLAG.exec(body)?.[1]?.replace(/^['"]|['"]$/g, '')
+    const flagged = (PROJECT_DIR_FLAG.exec(body)?.[1] ?? PROJECT_DIR_ENV.exec(command.slice(one.start, one.subcommandEnd - subcommand.length))?.[1])?.replace(/^['"]|['"]$/g, '')
     // A folder that cannot be told, or a target folder the shell expands, is not guessed: the run is not recorded
     // rather than recorded for another project or replayed from another folder.
     if (dir === null || one.dynamic || /[$`~*?[{]/.test(flagged ?? '')) continue
@@ -404,7 +406,7 @@ async function readRun(
   if (wrote < began - CLOCK_SLACK_MS) return null
   const written = writer(invocations, view.command)
   const run = written ? toRecord(view, written) : null
-  return run && written ? { run, order: all.lastIndexOf(written) } : null
+  return run && written ? { run: { ...run, folder: folderOf(written) }, order: all.lastIndexOf(written) } : null
 }
 
 /** Counts the clearings: a recording that began before one stores its run without a retry command. */
@@ -473,7 +475,6 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
     return null
   }
   const mine = [...new Set(invocations.map(folderOf))]
-  const explicitFolder = invocations.some(one => one.targetPath !== null)
   // Several invocations writing one artifact folder (`dbt build -s a && dbt build -s b`, a retry beside another command):
   // the file cannot say which one ran when a chain stops early, so nothing is recorded, whether the file can be read or not.
   const groups = mine.map(folder => invocations.filter(one => folderOf(one) === folder))
@@ -520,8 +521,8 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
     for (const run of runs) {
       // The same file as the last recording: nothing new was written.
       if (kept.find(one => one.project === run.project)?.id === run.id) continue
-      // An explicit artifact folder may be shared with another project: that project's last run is then no longer what the file holds.
-      if (explicitFolder) kept = kept.map(one => (one.project === run.project || !one.retryLine ? one : { ...one, retryLine: '' }))
+      // The file this run was read from replaces what another run (of another project, or a run of a folder spelled differently) left there: its retry would read this run.
+      if (run.folder) kept = kept.map(one => (one.folder === run.folder && one.id !== run.id && one.retryLine ? { ...one, retryLine: '' } : one))
       kept = withRun(kept, cleared === clearedAtStart ? run : { ...run, retryLine: '' })
       noted.push(summaryLine(run))
     }

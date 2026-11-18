@@ -683,13 +683,19 @@ test('one call that runs dbt twice in one project from two folders records nothi
   expect(stored.has('runs')).toBe(false)
 })
 
-test('a run with an explicit artifact folder takes the retry of another project away: that folder may be the same one', async ($, on) => {
+test('a run read from a folder takes the retry of another run read from the same folder away, however either named it', async ($, on) => {
   let reads = 0
   const { stored } = await start($, on, () => view(reads++ === 0 ? 'inv-a' : 'inv-b', [['model.shop.m', 'error', null]], 'build', AFTER, reads === 1 ? '/a' : '/b'))
-  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /a --target-path /shared', tool_use_id: 'one' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /a --target-path /b/target', tool_use_id: 'one' })
   expect(kept(stored).map(run => [run.id, !!run.retryLine])).toEqual([['inv-a', true]])
-  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /b --target-path /shared', tool_use_id: 'two' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir /b', tool_use_id: 'two' })
   expect(kept(stored).map(run => [run.id, !!run.retryLine])).toEqual([['inv-b', true], ['inv-a', false]])
+})
+
+test('DBT_PROJECT_DIR in front of the command names the project like --project-dir', () => {
+  const found = resultsInvocations('DBT_PROJECT_DIR=transform dbt build', ROOT)[0]!
+  expect(found.projectDir).toBe('/repo/transform')
+  expect(resultsInvocations('DBT_PROJECT_DIR=/x/y dbt build --project-dir /z', ROOT)[0]!.projectDir).toBe('/z')
 })
 
 test('a run kept later but finished earlier takes its place by completion time', () => {
