@@ -75,6 +75,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('tool.call', async (_: unknown, e: { tool: string; command?: string }) => {
     if (e.tool === 'Bash' && options.holdBash && options.holdBash.command === e.command) await options.holdBash.until
     if (e.tool === 'Bash') ran.push(String(e.command))
+    // A call takes time: the runs feature beside this one reads one dbt call ending at the very moment another began as an overlap.
+    await clock.advance(100)
     return { result: { text: 'ok', isError: false } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
