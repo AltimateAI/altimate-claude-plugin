@@ -112,7 +112,7 @@ test('a BigQuery table name in backticks inside single quotes is estimated; a ba
   expect(estimates).toEqual([q])
   expect(result.deny).toContain('20.0 GiB')
   const before = estimates.length
-  await $.tool.call(bash('dbt show --inline "select 1" --target `echo prod`'))
+  await $.tool.call(bash('dbt show --inline "select 1" --threads `echo 4`'))
   await $.tool.call(bash('dbt show --inline "select `echo 1`"'))
   await clock.settle()
   expect(estimates.length).toBe(before)
@@ -663,6 +663,41 @@ test('a read-only shell command keeps the answer waiting for the retry', async (
   expect(retry.deny).toBeUndefined()
   expect(estimates).toEqual(['orders'])
 })
+
+test('a cd keeps the answer waiting for the retry', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  release()
+  await clock.settle()
+  await $.tool.call(bash('cd models'))
+  options.hold = undefined
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(retry.deny).toBeUndefined()
+  expect(estimates).toEqual(['orders'])
+})
+
+for (const restore of [
+  'git -C /repo checkout .',
+  'git -c core.fsmonitor=false restore .',
+  'git --git-dir /x --work-tree /y reset --hard',
+]) {
+test(`${restore} makes the no-dry-run verdict forgotten`, async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  const run = () => $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  expect((await run()).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  await $.tool.call(bash(restore))
+  await clock.settle()
+  expect((await run()).deny).toContain('20.0 GiB')
+})
+}
 
 test('a warehouse found to have no dry run is asked about again after an edit, a profile change or ten minutes', async ($, on) => {
   const options: Options = { answers: { orders: NO_DRY_RUN } }

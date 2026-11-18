@@ -53,19 +53,38 @@ let generation = 0
 let unsupportedSince: number | null = null
 const UNSUPPORTED_KEEP_MS = 10 * 60_000
 /** Commands that can rewrite a model, the project or its profile from the shell: an estimate made before one is not reused. */
-const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+(-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|rm|mv|worktree)|cd|pushd|popd|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
+const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+((-[Cc]|--git-dir|--namespace|--work-tree)\s+\S+\s+|-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|worktree)|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
+/** Commands that can move the session to another project or target without rewriting a file. */
+const MOVES_DIRECTORY = /(^|[\s;&|(])(cd|pushd|popd)(\s|$)/
 /** The dbt subcommands that change nothing in the project. */
 const READS_ONLY = new Set(['run', 'build', 'show', 'compile', 'ls', 'list', 'debug', 'parse'])
 
-/** Whether the command can rewrite a model or the profile: any part of the line, with the dbt calls that only read set aside. */
-function mutates(command: string): boolean {
+/** The command with the dbt calls that only read, and the redirects that write nothing, set aside. */
+function withoutReads(command: string): { all: DbtInvocation[]; rest: string } {
   const all = parseDbtCommand(command)
-  if (all.some(i => i.subcommand !== null && !READS_ONLY.has(i.subcommand))) return true
   let rest = command
   for (const i of [...all].sort((a, b) => b.start - a.start)) rest = rest.slice(0, i.start) + ' ' + rest.slice(i.end)
   // A redirect to another stream or to /dev/null writes nothing in the project.
-  rest = rest.replace(/\d*>&\d+|\d*>>?\s*\/dev\/null/g, ' ')
+  return { all, rest: rest.replace(/\d*>&\d+|\d*>>?\s*\/dev\/null/g, ' ') }
+}
+
+/** Whether the command can rewrite a model or the profile: any part of the line, with the dbt calls that only read set aside. */
+function mutates(all: DbtInvocation[], rest: string): boolean {
+  if (all.some(i => i.subcommand !== null && !READS_ONLY.has(i.subcommand))) return true
   return MAY_CHANGE_PROJECT.test(rest)
+}
+
+/** What a shell command did to the project: a rewrite voids the estimates and the verdict; a directory change only the verdict. */
+async function afterShellChange($: EngineInterface, command: string) {
+  const { all, rest } = withoutReads(command)
+  if (mutates(all, rest)) {
+    invalidate()
+    // Any rewrite can bring back another target (a git restore does not name the profile).
+    await forgetUnsupported($)
+  } else if (MOVES_DIRECTORY.test(rest)) {
+    // A cd cannot rewrite a model, so an estimate that is still coming in stays good; only the target may differ.
+    await forgetUnsupported($)
+  }
 }
 
 /** An answer nobody took within this long is dropped: the model may have changed since. */
@@ -147,11 +166,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   if (limitBytes <= 0) return null
   // Before it runs, not only after: another call can ask while a long command is rewriting the project.
   // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
-  if (mutates(e.command) && !refused.has(e.command)) {
-    invalidate()
-    // Any rewrite can bring back another target (a git restore does not name the profile).
-    await forgetUnsupported($)
-  }
+  if (!refused.has(e.command)) await afterShellChange($, e.command)
   const all = parseDbtCommand(e.command)
   const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
   if (invocations.length === 0) return null
@@ -298,11 +313,7 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
   notes.delete(e.command)
   refused.delete(e.command)
   // A shell command can rewrite a model or the profile (a git restore, a sed): no earlier estimate is reused after one.
-  if (mutates(e.command)) {
-    invalidate()
-    // Any rewrite can bring back another target (a git restore does not name the profile).
-    await forgetUnsupported($)
-  }
+  await afterShellChange($, e.command)
   return lines
 }
 
@@ -369,7 +380,7 @@ function expands(command: string): boolean {
 function isPlainInvocation(command: string, invocation: DbtInvocation, all: DbtInvocation[]): boolean {
   // The shell expands `$` and backticks anywhere on the line (arguments, redirections, an earlier call) into
   // flags or environment this check can't see; a line with many calls is not worth reading call by call.
-  if (expands(command) || all.length > MAX_INVOCATIONS) return false
+  if (all.length > MAX_INVOCATIONS || expands(command)) return false
   if (!PLAIN_LAUNCHER.test(invocation.binary)) return false
   let before = command.slice(0, invocation.start)
   for (const earlier of all.filter(one => one.end <= invocation.start).reverse()) {
