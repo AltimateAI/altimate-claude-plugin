@@ -71,10 +71,11 @@ export function dollars(value: number): string {
 }
 
 /** Two monthly amounts and the gap between them, as a sentence that compares them shows them: all
- * three to the cent when either is under $100, so the gap it states is the gap between the amounts
- * it shows ("$19.05 instead of $125.50, $106.45 less", not "$19.05 instead of $126, $106 less"). */
+ * three to the cent when any of them is under $100, so the gap it states is the gap between the
+ * amounts it shows ("$19.05 instead of $125.50, $106.45 less", not "$19.05 instead of $126, $106
+ * less"), and a small gap between large amounts is not shown as $0. */
 export function compared(was: number, now: number): { was: string; now: string; gap: string } {
-  const cents = Math.abs(was) < 100 || Math.abs(now) < 100
+  const cents = Math.abs(was) < 100 || Math.abs(now) < 100 || Math.abs(was - now) < 100
   const round = (value: number) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
   return { was: money(was, cents), now: money(now, cents), gap: money(Math.abs(round(was) - round(now)), cents) }
 }
@@ -178,8 +179,8 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
         noun: 'Job',
         change: "run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster it uses now",
         defines: "the job's bundle resource, Terraform databricks_job, or JSON",
-        // `jobs reset` overwrites every setting; `update` replaces only the top-level fields it names.
-        otherwise: `write the JSON for \`databricks jobs update --json\` (job_id ${id}, and new_settings with the whole tasks list, since it replaces each field it names)`,
+        // `jobs reset` overwrites every setting; `update` changes only the settings it is given.
+        otherwise: `write the JSON for \`databricks jobs update --json\` (job_id ${id}, and new_settings with the tasks' new cluster)`,
       }
     default:
       return { noun: 'Resource', change: 'make the change the evidence points at', defines: 'its definition', otherwise: 'describe the change' }

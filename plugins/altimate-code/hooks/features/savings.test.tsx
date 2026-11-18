@@ -423,6 +423,8 @@ test('a comparison states the gap between the amounts it shows', () => {
   expect(compared(300.4, 120.6)).toEqual({ was: '$300', now: '$121', gap: '$179' })
   expect(compared(118.047, 300)).toEqual({ was: '$118', now: '$300', gap: '$182' })
   expect(compared(1_234.6, 1_000.2)).toEqual({ was: '$1,235', now: '$1,000', gap: '$235' })
+  // A gap under $100 between large amounts stays to the cent rather than reading $0.
+  expect(compared(300.4, 300.2)).toEqual({ was: '$300.40', now: '$300.20', gap: '$0.20' })
 })
 
 const BAND = { plugin: 'altimate-code', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false } } as any
@@ -629,7 +631,7 @@ test('idle clusters and jobs on all-purpose compute get their own evidence and f
   await clock.settle()
   expect(fills[0]).toContain('Job nightly_orders (id 9001)')
   expect(fills[0]).toContain('give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id')
-  expect(fills[0]).toContain('`databricks jobs update --json` (job_id 9001, and new_settings with the whole tasks list')
+  expect(fills[0]).toContain("`databricks jobs update --json` (job_id 9001, and new_settings with the tasks' new cluster)")
   expect(fills[0]).not.toContain('jobs reset')
   expect(fills[1]).toContain('Cluster shared-analytics (id 0101-abc)')
   expect(fills[1]).toContain('set autotermination_minutes to 15, or terminate it if nobody needs it')
