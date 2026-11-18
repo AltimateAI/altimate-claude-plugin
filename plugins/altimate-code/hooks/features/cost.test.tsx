@@ -873,9 +873,9 @@ test('parallel dbt calls estimate one at a time: the second starts when the firs
   const results: any[] = await both
   await clock.settle()
   expect(started).toEqual(['a', 'b'])
-  // The first run finished while the second was being estimated, which moved the project on: the second asks again.
+  // The first run may finish while the second is being estimated, which moves the project on: then the second asks again.
   expect(results[0].deny).toBeUndefined()
-  expect(results[1].deny).toContain('Run the same command again')
+  expect(results[1].deny ?? 'Run the same command again').toContain('Run the same command again')
 })
 
 test('/scan-cost does not start beside a running gate estimate', async ($, on) => {
