@@ -314,6 +314,18 @@ test('a folder lookup that fails is no known project either: a verdict of the pr
   expect((await pending).deny).toContain('could not be read in time')
 })
 
+test('a folder lookup that fails before any folder was seen refuses the scan too, and starts no estimate', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, started } = await start($, on, options)
+  options.cwdFails = true
+  // A fresh session: no folder has been read yet.
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  for (let i = 0; i < 10; i++) await clock.advance(100)
+  expect((await pending).deny).toContain('could not be read in time')
+  expect(started).toEqual([])
+})
+
 test('a lookup lost in one pass does not refuse another pass whose own lookups all answered', async ($, on) => {
   let release: () => void = () => {}
   const options: Options = { answers: { slow: UNDER }, holds: { slow: new Promise<void>(resolve => (release = resolve)) } }
