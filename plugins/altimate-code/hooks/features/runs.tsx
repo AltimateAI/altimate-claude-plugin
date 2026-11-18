@@ -364,7 +364,11 @@ const hostBackgrounded = (result: ToolCallResult | undefined) => {
   const inner = (result as { result?: { backgroundTaskId?: unknown } } | undefined)?.result
   return inner?.backgroundTaskId !== undefined || (result as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId !== undefined
 }
-/** The artifact folder a call writes to, as one string: where dbt puts run_results.json. */
+/**
+ * The artifact folder a call writes to, as one string: where dbt puts run_results.json. Documented limits: a `target-path`
+ * set only in dbt_project.yml or the profile is not seen (two projects sharing one folder through it are not told apart),
+ * and a dbt command run by a process outside the session cannot be seen at all.
+ */
 const folderOf = (one: Invocation) =>
   normalize(one.targetPath === null ? `${one.projectDir}/target` : one.targetPath.startsWith('/') ? one.targetPath : `${one.projectDir}/${one.targetPath}`)
 const startKey = (e: BashCall) => e.tool_use_id
