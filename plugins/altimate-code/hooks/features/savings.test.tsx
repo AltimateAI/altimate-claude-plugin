@@ -779,3 +779,16 @@ test('an altimate-code too old to have `tool run` says to update, not "failed"',
   const usage = 'altimate-code [project]            start altimate-code tui\n\nCommands:\n  altimate-code completion           generate shell completion script\n  altimate-code mcp                  manage MCP servers'
   expect(explain(usage)).toEqual({ text: 'This altimate-code has no Databricks savings check.', recovery: 'Update altimate-code (`altimate upgrade`), then run /savings again.' })
 })
+
+test('a finding in a workspace with no SQL warehouse still counts that workspace', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses.forEach((one: any) => (one.workspace_id = '111'))
+  answer.metadata.report.findings[0].workspace_id = '222'
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: / in 2 workspaces · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Classic \(workspace 222\) · / })).toBeDefined()
+  await ui.unmount()
+})

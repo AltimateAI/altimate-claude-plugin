@@ -217,7 +217,8 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const report = metadata?.report
   if (!metadata?.success || !report || !Array.isArray(report.findings) || !metadata.window) return null
   const days = report.lookback_days || windowDays(metadata.window)
-  const workspaces = new Set((metadata.warehouses ?? []).map(one => one.workspace_id).filter(Boolean)).size
+  // Clusters and jobs can sit in a workspace with no SQL warehouse: count the findings' workspaces too.
+  const workspaces = new Set([...(metadata.warehouses ?? []), ...report.findings].map(one => one.workspace_id).filter(Boolean)).size
   return {
     connection: metadata.warehouse ?? null,
     ranOn: metadata.ran_on ?? null,
