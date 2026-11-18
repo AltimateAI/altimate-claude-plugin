@@ -831,6 +831,24 @@ test('a run let through while an estimate is still running: the retry does not t
   expect(estimates).toEqual(['orders', 'orders'])
 })
 
+test('a voided running estimate is not reused and holds the next one back until it settles', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock, estimates } = await start($, on, options)
+  let release!: () => void
+  options.hold = new Promise<void>(resolve => (release = resolve))
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  expect(((await $.tool.call(bash('dbt run -s customers --target prod'))) as any).deny).toBeUndefined()
+  const again = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await again) as any).deny).toContain('still being estimated')
+  expect(estimates).toEqual([])
+  release()
+  await clock.settle()
+  expect(estimates).toEqual(['orders'])
+})
+
 test('a /cd takes the old project\'s hold off the status line and forgets its last estimate', async ($, on) => {
   const options: Options = { answers: { orders: OVER } }
   const { clock, statuses } = await start($, on, options)

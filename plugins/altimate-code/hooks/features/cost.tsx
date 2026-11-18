@@ -357,7 +357,11 @@ function dropFinished() {
   for (const [key, entry] of inflight) {
     if (entry.doneAt != null) inflight.delete(key)
     // A pass already waiting on it takes its answer; a later pass does not, since a run began after it started.
-    else entry.voided = true
+    else {
+      entry.voided = true
+      late.add(entry.settled)
+      void entry.settled.then(() => late.delete(entry.settled))
+    }
   }
 }
 
@@ -575,7 +579,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
     }
     // Another pass may have started this same estimate while this waited.
     const started = inflight.get(key)
-    if (started && started.doneAt == null) running = started
+    if (started && started.doneAt == null && !started.voided) running = started
   }
   if (!running) {
     const answer = estimate($, args, now + ESTIMATE_BUDGET_MS)
