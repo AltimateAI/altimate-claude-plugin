@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { MIN_ALTIMATE_CODE } from './altimate-cli'
 import { DOWN, UP, embedded } from './impact-report.test'
+import { nothingToReport } from './inert-features'
 
 const ROOT = '/repo'
 const MANIFEST = `${ROOT}/target/manifest.json`
@@ -140,6 +141,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.turns', () => ({ value: options.turns?.() ?? 1 }))
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const argv = [...e.argv]
+    const inert = nothingToReport(argv)
+    if (inert) return { value: inert }
     runs.push(argv)
     const ok = (stdout = '') => ({ value: { exitCode: 0, stdout, stderr: '' } })
     const [bin] = argv
