@@ -525,6 +525,12 @@ test('a secret is redacted whole, quotes and escapes in its value included; a --
   expect(resultsInvocations('dbt "build" -s orders', ROOT)).toEqual([])
 })
 
+test('Re-run failed keeps the target however the flag is written: -t prod, -tprod, --target=prod', () => {
+  for (const flag of ['-t prod', '-tprod', '--target=prod', '--target prod']) {
+    expect(resultsInvocations(`dbt build ${flag}`, ROOT)[0]!.retryLine).toBe(`cd /repo && dbt retry ${flag}`)
+  }
+})
+
 test('Re-run failed keeps --defer-state: dbt retry takes it from the command, not from the run it retries', () => {
   expect(resultsInvocations('dbt build --defer --defer-state /artifacts/prod', ROOT)[0]!.retryLine).toBe('cd /repo && dbt retry --defer-state /artifacts/prod')
 })
