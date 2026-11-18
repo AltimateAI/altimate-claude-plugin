@@ -174,7 +174,7 @@ const holdsSecret = (value: string) => {
 // A double-quoted value is read as the shell reads it, so `"{\"password\": \"x\"}"` is tested as `{"password": "x"}`.
 const varsHoldSecret = (body: string) =>
   [...body.replace(/\\\r?\n\s*/g, ' ').matchAll(VARS_VALUE)].some(match => holdsSecret(match[1]!.startsWith('"') ? match[1]!.replace(/\\(.)/g, '$1') : match[1]!))
-/** A password in the URL's user part, or a secret-named query parameter (`?access_token=`, `&api_key=`): the URL holds a credential whatever it is named. */
+/** A password in the URL's user part: the URL holds a credential whatever it is named. */
 const CREDENTIAL_URL = /:\/\/[^\s/:@"']*:[^\s@"']+@/
 /** A URL's query parameters are judged like `--vars` keys (`authorization` is secret, `unique_key` and `author` are not), plus the signature spellings of signed URLs. */
 const queryHoldsSecret = (text: string) =>
