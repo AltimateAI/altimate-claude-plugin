@@ -212,21 +212,19 @@ test('a session folder that could not be read is no project the gate knows: an e
   expect(result.deny).toBeDefined()
 })
 
-test('a session folder that stays unreadable is never the same project twice: no verdict is carried from one command to the next', async ($, on) => {
+test('a session folder that cannot be read is an unknown project: no verdict is reused for it, and no estimate starts', async ($, on) => {
   const options: Options = { answers: { orders: NO_DRY_RUN } }
   const { clock, started } = await start($, on, options)
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeUndefined()
+  options.answers = { orders: OVER }
   options.holdCwd = new Promise<void>(() => {})
-  const run = async () => {
+  for (let again = 0; again < 2; again++) {
     const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
     for (let i = 0; i < 70; i++) await clock.advance(100)
-    return pending
+    // Refused, though the earlier answer was "no dry run here"; and nothing asks the adapter, which could start dbt in a project one is already running in.
+    expect((await pending).deny).toContain('could not be read in time')
   }
-  await run()
-  options.answers = { orders: OVER }
-  const second = await run()
-  // Each command asks for its own estimate: the earlier "no dry run here" is not taken for this project.
-  expect(started.filter(key => key === 'orders').length).toBeGreaterThanOrEqual(2)
-  expect(second.deny).toBeDefined()
+  expect(started).toEqual(['orders'])
 })
 
 test('commands that scan nothing are not looked at', async ($, on) => {
