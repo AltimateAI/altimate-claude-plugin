@@ -256,7 +256,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
-    if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    if (command !== 'tool' || tool === 'docs_share_comments') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     calls.push(`cli:${tool}`)
     toolArgs.push(String(e.argv[5]))
     if (tool === 'dbt_docs_coverage') {
