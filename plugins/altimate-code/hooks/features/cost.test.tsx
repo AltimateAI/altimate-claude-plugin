@@ -875,7 +875,7 @@ test('parallel dbt calls estimate one at a time: the second starts when the firs
   expect(started).toEqual(['a', 'b'])
   // The first run may finish while the second is being estimated, which moves the project on: then the second asks again.
   expect(results[0].deny).toBeUndefined()
-  expect(results[1].deny ?? 'Run the same command again').toContain('Run the same command again')
+  expect(results[1].deny === undefined || results[1].deny.includes('Run the same command again')).toBe(true)
 })
 
 test('/scan-cost does not start beside a running gate estimate', async ($, on) => {

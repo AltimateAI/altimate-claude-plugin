@@ -123,7 +123,8 @@ export function register(on: On, context: FeatureContext) {
       return { text: last ? `Last estimate: ${last.target} would scan ${last.display}. Run /scan-cost <model> for another.` : 'Run /scan-cost <model> to estimate the scan of a model.' }
     }
     const began = await $.clock.now()
-    const started = await startWhenIdle($, { model: target }, began + ESTIMATE_BUDGET_MS, began + ESTIMATE_BUDGET_MS, () => undefined, one => one)
+    // The wait is short (the user is looking at the screen); the estimate's own budget starts when the wait ends, at the latest.
+    const started = await startWhenIdle($, { model: target }, began + GATE_WAIT_MS, () => undefined, one => one)
     if (!started) return { text: 'No estimate: another estimate is still running in this project. Try again in a moment.' }
     const answer = await started.answer
     if (answer.kind === 'bytes') {
@@ -373,7 +374,6 @@ async function startWhenIdle<T>(
   $: EngineInterface,
   args: { model?: string; sql?: string },
   waitUntil: number,
-  budgetUntil: number,
   reuse: () => T | undefined,
   begin: (started: { answer: Promise<Answer>; settled: Promise<undefined> }) => T,
 ): Promise<T | null> {
@@ -381,7 +381,7 @@ async function startWhenIdle<T>(
     const left = waitUntil - (await $.clock.now())
     if (left <= 0 || !(await within($, left, Promise.all([...active]).then(() => true)))) return null
   }
-  return reuse() ?? begin(startEstimate($, args, budgetUntil))
+  return reuse() ?? begin(startEstimate($, args, waitUntil + ESTIMATE_BUDGET_MS))
 }
 
 /** Drops the answers already in; an estimate still running, which a parallel call may be waiting on, is left to finish. */
@@ -597,7 +597,6 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
       $,
       args,
       waitUntil,
-      now + ESTIMATE_BUDGET_MS,
       () => {
         const other = inflight.get(key)
         return other && other.doneAt == null && !other.voided ? other : undefined
