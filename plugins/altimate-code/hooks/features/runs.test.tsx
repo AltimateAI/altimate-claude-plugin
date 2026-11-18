@@ -563,8 +563,8 @@ test('a recording still reading its artifact when a build is backgrounded stores
 test('two spellings of one project folder overlap: /repo and /repo/models share one target', async ($, on) => {
   const { stored } = await start($, on, () => view('inv-x', undefined, 'build', AFTER))
   const both: any[] = await Promise.all([
-    $.tool.call({ tool: 'Bash', command: 'dbt build', tool_use_id: 'one' }),
-    $.tool.call({ tool: 'Bash', command: 'cd models && dbt build', tool_use_id: 'two' }),
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s a', tool_use_id: 'one' }),
+    $.tool.call({ tool: 'Bash', command: 'dbt build -s a --project-dir models', tool_use_id: 'two' }),
   ])
   expect(stored.has('runs')).toBe(false)
   expect(both.map(one => own(one.context))).toEqual([[NOT_RECORDED], [NOT_RECORDED]])
@@ -592,7 +592,7 @@ test('a call whose folder cannot be told still counts as a dbt call that overlap
   const { stored, cli } = await start($, on, () => view('inv-x', undefined, 'build', AFTER))
   const both: any[] = await Promise.all([
     $.tool.call({ tool: 'Bash', command: 'dbt build -s known', tool_use_id: 'one' }),
-    $.tool.call({ tool: 'Bash', command: 'cd "$P" && dbt build --project-dir $X', tool_use_id: 'two' }),
+    $.tool.call({ tool: 'Bash', command: 'dbt build --project-dir $X', tool_use_id: 'two' }),
   ])
   expect(stored.has('runs')).toBe(false)
   expect(cli).toEqual([])
