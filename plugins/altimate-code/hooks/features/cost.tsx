@@ -51,6 +51,8 @@ const refused = new Map<string, number>()
 let generation = 0
 /** When the session found a warehouse with no dry run; null once forgotten. That finding is kept only so long, since the target can change. */
 let unsupportedSince: number | null = null
+/** The directory the session was in when it found that; a session now elsewhere (a /cd) asks again. */
+let unsupportedDir: string | null = null
 const UNSUPPORTED_KEEP_MS = 10 * 60_000
 /** Commands that can rewrite a model, the project or its profile from the shell: an estimate made before one is not reused. */
 const MAY_CHANGE_PROJECT = /(^|[\s;&|(])(git\s+((-[Cc]|--git-dir|--namespace|--work-tree)\s+\S+\s+|-\S+\s+)*(checkout|restore|reset|stash|apply|clean|switch|merge|rebase|pull|cherry-pick|revert|am|worktree)|sed|awk|perl|python3?|node|bun|patch|mv|cp|rm|tee|touch|make|sh|bash|dd|ed|ex)(\s|$)|>/
@@ -182,7 +184,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   // A warehouse with no dry run was found out already: the command is never held, and nothing is asked again,
   // until an edit or a command that can move the target, or time, says it may have changed.
   if (state.unsupportedAdapter) {
-    if (unsupportedSince != null && (await $.clock.now()) - unsupportedSince < UNSUPPORTED_KEEP_MS) return null
+    if (unsupportedSince != null && (await $.clock.now()) - unsupportedSince < UNSUPPORTED_KEEP_MS && unsupportedDir === (await $.session.cwd())) return null
     await forgetUnsupported($)
     state.unsupportedAdapter = null
   }
@@ -213,6 +215,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     if (answer.kind === 'unsupported') {
       // Nothing can be held on this warehouse, so a hold from before the verdict goes with it.
       unsupportedSince = await $.clock.now()
+      unsupportedDir = await $.session.cwd()
       if (generation !== startedAt) break
       await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter, held: null, allowOnce: false }))
       await showStatus($, null)
@@ -497,7 +500,13 @@ async function estimate($: EngineInterface, args: { model?: string; sql?: string
     const data = run.metadata as { supported?: unknown; adapter?: unknown; bytes?: unknown; maxBytes?: unknown; lowerBound?: unknown; display?: unknown; error?: unknown } | null
     if (data?.supported === false) return { kind: 'unsupported', adapter: typeof data.adapter === 'string' ? data.adapter : 'this warehouse' }
     // A dry run that can undercount (a zero, a script) gives no upper bound to hold a command on.
-    if (data?.supported === true && data.lowerBound === true) return { kind: 'none', reason: 'the dry run gave only a lower bound, not a cap' }
+    if (data?.supported === true && data.lowerBound === true) {
+      // A floor already over the limit is enough to hold; a floor under it says nothing about the cap.
+      if (typeof data.bytes === 'number' && Number.isFinite(data.bytes) && limitBytes > 0 && data.bytes > limitBytes) {
+        return { kind: 'bytes', bytes: data.bytes, maxBytes: data.bytes, display: typeof data.display === 'string' ? data.display : formatBytes(data.bytes) }
+      }
+      return { kind: 'none', reason: 'the dry run gave only a lower bound, not a cap' }
+    }
     if (data?.supported === true && typeof data.bytes === 'number' && Number.isFinite(data.bytes)) {
       // The tool's upper bound when it gives one: the display is rounded, and the limit is a hard one.
       const maxBytes = typeof data.maxBytes === 'number' && Number.isFinite(data.maxBytes) && data.maxBytes >= data.bytes ? data.maxBytes : data.bytes

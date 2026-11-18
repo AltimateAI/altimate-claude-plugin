@@ -14,6 +14,8 @@ type Options = {
   hold?: Promise<void>
   /** With `hold`: only the estimate of this model or SQL waits. */
   holdFor?: string
+  /** The session's directory; changed mid-test to stand for a /cd. */
+  cwd?: string
   /** Drawing the status line throws. */
   statusFails?: boolean
   /** The Bash tool runs this command only once this resolves. */
@@ -32,6 +34,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
+  on('session.cwd', () => ({ value: options.cwd ?? ROOT }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.status', (_: unknown, e: { text?: string }) => {
     if (options.statusFails) throw new Error('no status line')
@@ -704,6 +707,24 @@ test('a dbt run that has finished drops the estimates made before it', async ($,
   await clock.settle()
   expect(retry.deny).toContain('20.0 GiB')
   expect(estimates.filter(e => e === 'orders').length).toBe(2)
+})
+
+test('a /cd to another project makes the no-dry-run verdict forgotten', async ($, on) => {
+  const options: Options = { answers: { orders: NO_DRY_RUN } }
+  const { clock } = await start($, on, options)
+  const run = () => $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  expect((await run()).deny).toBeUndefined()
+  options.answers = { orders: OVER }
+  options.cwd = '/elsewhere/bigquery-project'
+  await clock.settle()
+  expect((await run()).deny).toContain('20.0 GiB')
+})
+
+test('a lower bound already over the limit holds the command', async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: { success: true, supported: true, adapter: 'bigquery', bytes: 20 * GIB, lowerBound: true, display: '20.0 GiB' } } })
+  const result: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(result.deny).toContain('20.0 GiB')
 })
 
 test('a lower-bound-only estimate holds nothing and keeps an existing hold', async ($, on) => {
