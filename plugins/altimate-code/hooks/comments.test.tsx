@@ -686,3 +686,18 @@ test('a read inside a dbt project nested in the loaded one loads the nested proj
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop'])
 })
+
+test('a folder without a project of its own is looked up again from another project: reading back and forth keeps each model’s project', async ($, on) => {
+  const child = '/repo/child'
+  const files = { [FILE]: SQL, [`${child}/models/orders.sql`]: SQL, [`${child}/analyses/a.sql`]: SQL }
+  const { clock, cli } = await start($, on, { otherProject: child, files })
+  const read = async (file_path: string) => {
+    await $.tool.call({ tool: 'Read', file_path })
+    for (let i = 0; i < 3; i++) await clock.settle()
+  }
+  await read(`${child}/models/orders.sql`)
+  await read(`${child}/analyses/a.sql`)
+  await read(FILE)
+  await read(`${child}/analyses/a.sql`)
+  expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop', 'jaffle_shop', 'other_shop'])
+})

@@ -78,7 +78,7 @@ const LIST_LAG_MS = 330_000
 const resolvedAt = new Map<string, number>()
 // Folders already searched for a dbt project in vain.
 const searched = new Set<string>()
-// Folders inside the loaded project known to hold no project of their own.
+// Folders known to hold no project of their own, each with the loaded project it was looked at from.
 const within = new Set<string>()
 
 /** The `commentsPollSeconds` (never under 30 s) and `commentsInContext` settings. */
@@ -330,13 +330,13 @@ async function attach($: EngineInterface, dir: string) {
   const known = (await get($)).root
   // A folder inside the project already loaded belongs to it; one outside may belong to another project.
   const inside = known && (slashes(dir) === slashes(known) || slashes(dir).startsWith(`${slashes(known).replace(/\/+$/, '')}/`))
-  if (inside && (slashes(dir) === slashes(known!) || within.has(dir))) return
+  if (inside && (slashes(dir) === slashes(known!) || within.has(`${known}\n${dir}`))) return
   // A file of an installed package belongs to that package's own project, not to the one being worked on.
   if (searched.has(dir) || /[\\/](dbt_packages|dbt_modules|node_modules)[\\/]/.test(dir)) return
   // Inside the loaded project, only a project nested below it can claim the folder.
   const found = await projectOf($, dir, inside ? known! : undefined)
   if (inside && !found && mine === generation) {
-    within.add(dir)
+    within.add(`${known}\n${dir}`)
     return
   }
   // The lookup may span a session's end: its answer is not applied to the next one.
