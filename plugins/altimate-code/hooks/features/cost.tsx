@@ -44,7 +44,7 @@ let limitBytes = DEFAULT_MAX_SCAN_BYTES
 /** The lines to show under an estimated command's Bash row, by command; each gate pass replaces the last. Taken by bashAfter. */
 const notes = new Map<string, string[]>()
 /** Estimates still running past the gate's wait, by what they ask about; the next gate pass for the same target takes the answer. */
-const inflight = new Map<string, { answer: Promise<Answer>; settled: Promise<undefined>; doneAt: number | null; generation: number; dir: string | null; voided?: boolean }>()
+const inflight = new Map<string, { answer: Promise<Answer>; settled: Promise<undefined>; doneAt: number | null; generation: number; dir: string | null }>()
 /** Every estimate whose process is still running (gate or /scan-cost), whether or not an edit has voided its answer: one runs per project at a time. */
 const active = new Map<Promise<undefined>, string | null>()
 /** Commands the gate refused while their estimate was running, and when it last did: they have not run, so a retry changes nothing. */
@@ -269,8 +269,7 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
 
   if (generation !== startedAt) {
     // Nothing is cleared here: the change already cleared what was older, and a newer pass's estimates are its own.
-    notes.delete(e.command)
-    return { deny: 'The project changed while the scan was being estimated. Run the same command again.' }
+    return changedDeny(e.command)
   }
 
   // A finished command's answers are taken: a later one asks again. A pending one keeps them for its retry.
@@ -302,18 +301,25 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
     const worst = over.reduce((a, b) => (b.bytes > a.bytes ? b : a))
     // The allowance is spent in one step, and only by the command that was held for it.
     let granted = false
-    await update($, costAtom, prev => {
-      const current = prev ?? FRESH
-      granted = current.allowOnce && current.held?.command === e.command
-      return granted
-        ? { ...current, allowOnce: false, held: null }
-        : { ...current, allowOnce: false, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
-    })
+    try {
+      await update($, costAtom, prev => {
+        const current = prev ?? FRESH
+        granted = current.allowOnce && current.held?.command === e.command
+        return granted
+          ? { ...current, allowOnce: false, held: null }
+          : { ...current, allowOnce: false, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+      })
+    } catch {
+      // A hold that cannot be recorded must not become a pass: a gate that throws lets the call run.
+      notes.delete(e.command)
+      return { deny: `${worst.display} would be scanned, over the ${formatBytes(limitBytes)} limit, and the hold could not be recorded. Run the same command again.` }
+    }
     if (granted) {
       for (const one of over) lines.push(`cost · ${one.label} would scan ${one.display}, over the ${formatBytes(limitBytes)} limit: allowed once`)
       keepNotes(e.command, lines)
       // The hold is spent: the status line stops showing it.
       await showLastEstimate($)
+      if (generation !== startedAt) return changedDeny(e.command)
       return null
     }
     notes.delete(e.command)
@@ -336,8 +342,15 @@ async function gate($: EngineInterface, e: BashCall): Promise<{ deny: string } |
     await update($, costAtom, prev => (prev?.held || prev?.allowOnce ? { ...prev, held: null, allowOnce: false } : prev))
     await showLastEstimate($)
   }
+  // An edit during the awaits above makes the estimate void: nothing is allowed on it.
+  if (generation !== startedAt) return changedDeny(e.command)
   keepNotes(e.command, lines)
   return null
+}
+
+function changedDeny(command: string) {
+  notes.delete(command)
+  return { deny: 'The project changed while the scan was being estimated. Run the same command again.' }
 }
 
 /** Notes kept per command: a line of many dbt calls would otherwise put one note each into Claude's context. */
@@ -399,15 +412,14 @@ async function startWhenIdle<T>(
   return reuse() ?? begin(startEstimate($, args, waitUntil + ESTIMATE_BUDGET_MS, dir))
 }
 
-/** Drops the answers already in; an estimate still running, which a parallel call may be waiting on, is left to finish. */
+/**
+ * A run or build about to start voids every answer: the finished ones are dropped, and the generation moves, so a pass that
+ * already took an answer (or waits on a running estimate) is refused rather than served, and asks again. An estimate still
+ * running is left to finish: its process counts toward the one-per-project queue.
+ */
 function dropFinished() {
-  // A pass that already took an answer (or is about to) must not act on it once a run has begun: it is refused and asks again.
   generation++
-  for (const [key, entry] of inflight) {
-    if (entry.doneAt != null) inflight.delete(key)
-    // A pass already waiting on it takes its answer; a later pass does not, since a run began after it started.
-    else entry.voided = true
-  }
+  for (const [key, entry] of inflight) if (entry.doneAt != null) inflight.delete(key)
 }
 
 function invalidate() {
@@ -603,7 +615,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const here = (await $.session.cwd().catch(() => seenDir)) ?? null
   let running = inflight.get(key)
   // An answer made in another project is of that project's models, not this one's.
-  if (running?.voided || (running && running.dir !== here)) running = undefined
+  if (running && (running.generation !== generation || running.dir !== here)) running = undefined
   // A command whose retries keep coming keeps what it waited for however long the others took: a later answer expiring an earlier one would never let it finish.
   const retrying = refusedAt != null && now - refusedAt <= ANSWER_KEEP_MS
   if (running?.doneAt != null && !retrying && now - running.doneAt > ANSWER_KEEP_MS) running = undefined
@@ -618,10 +630,10 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
       waitUntil,
       () => {
         const other = inflight.get(key)
-        return other && other.doneAt == null && !other.voided ? other : undefined
+        return other && other.doneAt == null && other.generation === generation ? other : undefined
       },
       started => {
-        const made = { answer: started.answer, settled: started.settled, doneAt: null as number | null, generation, dir: started.dir, voided: false }
+        const made = { answer: started.answer, settled: started.settled, doneAt: null as number | null, generation, dir: started.dir }
         void made.answer.then(async () => void (made.doneAt = await $.clock.now())).catch(() => {})
         inflight.set(key, made)
         return made
@@ -634,7 +646,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) return 'pending'
   // The project may have changed while it ran (an edit, a /cd, or a dbt run let through meanwhile): that answer is of the old one, and the next pass asks again.
-  if (running.voided || running.generation !== generation || running.dir !== ((await $.session.cwd().catch(() => seenDir)) ?? null)) {
+  if (running.generation !== generation || running.dir !== ((await $.session.cwd().catch(() => seenDir)) ?? null)) {
     if (inflight.get(key) === running) inflight.delete(key)
     return 'pending'
   }

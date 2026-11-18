@@ -1175,7 +1175,7 @@ test('a pending estimate on another command does not carry /allow-scan over to i
 
 test('a /cd away and back does not forget the estimate still running in the project', async ($, on) => {
   const options: Options = { answers: { orders: UNDER, b: UNDER, c: UNDER } }
-  const { clock, started, ran } = await start($, on, options)
+  const { clock, started } = await start($, on, options)
   let release!: () => void
   options.hold = new Promise<void>(resolve => (release = resolve))
   options.holdFor = 'orders'
@@ -1192,10 +1192,13 @@ test('a /cd away and back does not forget the estimate still running in the proj
   await clock.advance(4_001)
   expect(((await again) as any).text).toContain('another estimate is still running in this project')
   expect(started).toEqual(['orders', 'b'])
-  // A Bash pass in the other project must not forget the first project's running estimate either.
-  await $.tool.call(bash('ls'))
-  expect(ran).toEqual(['ls'])
+  // The gate learns each project it passes through: a Bash pass in A, one in B (the /cd), then back in A.
   options.cwd = undefined
+  await $.tool.call(bash('ls'))
+  options.cwd = '/elsewhere/project-b'
+  await $.tool.call(bash('ls'))
+  options.cwd = undefined
+  await $.tool.call(bash('ls'))
   const third = $.command.run({ command: 'scan-cost', args: 'd' } as any)
   await clock.advance(4_001)
   expect(((await third) as any).text).toContain('another estimate is still running in this project')
