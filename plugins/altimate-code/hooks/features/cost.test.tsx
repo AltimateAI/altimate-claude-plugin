@@ -24,6 +24,8 @@ type Options = {
   holdCwd?: Promise<void>
   /** Set after start: only this lookup of the session's directory (counted from 1, after it is set) is never answered. */
   stallNth?: { n: number; seen: number }
+  /** Set after start: every lookup of the session's directory takes this long to answer. */
+  cwdDelay?: number
   /** Drawing the status line throws. */
   statusFails?: boolean
   /** The Bash tool runs this command only once this resolves. */
@@ -44,8 +46,9 @@ async function start($: any, on: any, options: Options = {}) {
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
-  on('session.cwd', async () => {
+  on('session.cwd', async ($$: any) => {
     await options.holdCwd
+    if (options.cwdDelay) await new Promise<void>(resolve => setTimeout(resolve, options.cwdDelay))
     if (options.stallNth && ++options.stallNth.seen === options.stallNth.n) await new Promise<void>(() => {})
     return { value: options.cwd ?? ROOT }
   })
@@ -238,7 +241,8 @@ for (const n of [2, 3, 4, 5, 6]) {
     options.stallNth = { n, seen: 0 }
     const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
     for (let i = 0; i < 70; i++) await clock.advance(100)
-    expect(((await pending) as any).deny).toBeDefined()
+    // Said as an unreadable folder, whichever lookup it was: not as an estimate still running.
+    expect(((await pending) as any).deny).toContain('could not be read in time')
   })
 }
 
@@ -261,7 +265,81 @@ test('a lookup lost on the first of many models refuses at once: the later model
   const pending = $.tool.call(bash(line)) as Promise<any>
   for (let i = 0; i < 70; i++) await clock.advance(100)
   expect(((await pending) as any).deny).toBeDefined()
-  expect(started.length).toBeLessThan(3)
+  expect(started).toEqual([])
+})
+
+test('a folder that cannot be read is not a change of project: the allowance of the project the session is in survives a stalled pass', async ($, on) => {
+  const options: Options = { answers: { orders: OVER } }
+  const { clock, ran } = await start($, on, options)
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('over the')
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  // Any Bash call whose lookup stalls: not a dbt one even.
+  options.stallNth = { n: 1, seen: 0 }
+  const stalled = $.tool.call(bash('git status')) as Promise<any>
+  for (let i = 0; i < 10; i++) await clock.advance(100)
+  expect((await stalled).deny).toBeUndefined()
+  options.stallNth = undefined
+  // The hold and its allowance are still the session's: the held command runs once.
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeUndefined()
+  expect(ran).toContain('dbt run -s orders')
+})
+
+test('a stalled pass is not remembered as a project: the next pass, that reads the folder, finds the project it left', async ($, on) => {
+  const options: Options = { answers: { orders: OVER } }
+  const { clock, ran } = await start($, on, options)
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('over the')
+  for (let again = 0; again < 2; again++) {
+    options.stallNth = { n: 1, seen: 0 }
+    const stalled = $.tool.call(bash('git status')) as Promise<any>
+    for (let i = 0; i < 10; i++) await clock.advance(100)
+    await stalled
+  }
+  options.stallNth = undefined
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeUndefined()
+  expect(ran).toContain('dbt run -s orders')
+})
+
+test('a lookup lost in one pass does not refuse another pass whose own lookups all answered', async ($, on) => {
+  let release: () => void = () => {}
+  const options: Options = { answers: { slow: UNDER }, holds: { slow: new Promise<void>(resolve => (release = resolve)) } }
+  const { clock } = await start($, on, options)
+  const other = $.tool.call(bash('dbt run -s slow')) as Promise<any>
+  await clock.advance(10)
+  options.stallNth = { n: 1, seen: 0 }
+  const stalled = $.tool.call(bash('git status')) as Promise<any>
+  await clock.advance(200)
+  await stalled
+  release()
+  await clock.advance(100)
+  expect((await other).deny).toBeUndefined()
+})
+
+test('the folder lookups of one command share one 80 ms budget: answers that each come in time but add up past it refuse the pass', async ($, on) => {
+  const options: Options = { answers: { first: UNDER, second: UNDER } }
+  const { started } = await start($, on, options)
+  options.cwdDelay = 50
+  const pending = $.tool.call(bash('dbt run -s first && dbt run -s second')) as Promise<any>
+  // Real time, as the lookups' delays are: the fake clock is not moved, so only the budget can end the pass.
+  expect((await pending).deny).toContain('could not be read in time')
+  expect(started).toEqual([])
+})
+
+test('a folder that cannot be read is said so, not reported as an estimate still running', async ($, on) => {
+  const options: Options = { answers: { orders: UNDER } }
+  const { clock } = await start($, on, options)
+  options.stallNth = { n: 3, seen: 0 }
+  const pending = $.tool.call(bash('dbt run -s orders')) as Promise<any>
+  for (let i = 0; i < 70; i++) await clock.advance(100)
+  const deny = (await pending).deny
+  expect(deny).toContain('could not be read in time')
+  expect(deny).not.toContain('still being estimated')
+  options.stallNth = { n: 1, seen: 0 }
+  const run = $.command.run({ command: 'scan-cost', args: 'orders' } as any) as Promise<any>
+  for (let i = 0; i < 10; i++) await clock.advance(100)
+  const text = (await run).text
+  expect(text).toContain('could not be read in time')
+  expect(text).not.toContain('another estimate')
 })
 
 test('commands that scan nothing are not looked at', async ($, on) => {
