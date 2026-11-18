@@ -146,7 +146,7 @@ const SECRET_PART = /secret|token|passw|pwd|credential|passphrase|authoriz|autho
 /** A key run together from `api`, `private`... and `key` (`apikey`, `privatekey`). */
 const KEY_COMPOUND = /(?:api|private|access|secret|encryption|signing|ssh|master|auth)keys?$/
 /** `key: value` pairs of a flow-style `--vars` value (JSON or YAML); a nested mapping's own pairs are found in turn. */
-const VARS_PAIR = /["']?([\w.-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s{[][^,}\s]*)/g
+const VARS_PAIR = /["']?([\w.-]+)["']?\s*:\s*("(?:[^"\\]|\\.)*"|'[^']*'|[^,}\s{[][^,}]*)/g
 /** A key whose value is a mapping or a list: the key alone says whether the whole subtree is secret. */
 const VARS_PARENT = /["']?([\w.-]+)["']?\s*:\s*[{[]/g
 /**
@@ -164,7 +164,7 @@ const keyIsSecret = (key: string) => {
   return SECRET_PART.test(joined) || words.includes('auth') || words.includes('oauth') || last === 'pass' || ((last === 'key' || last === 'keys') && !KEY_KINDS.has(words[words.length - 2] ?? '')) || KEY_COMPOUND.test(joined)
 }
 /** A key that names a secret, unless its value is a number, a boolean or null: `token_limit: 3` holds none. */
-const pairHoldsSecret = (key: string, value: string) => keyIsSecret(key) && !/^(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null|~)$/i.test(value)
+const pairHoldsSecret = (key: string, value: string) => keyIsSecret(key) && !/^(?:-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null|~)$/i.test(value.trim())
 /** Whether a `--vars` value names a secret. A value that is no `key: value` mapping is tested as a whole text. */
 const holdsSecret = (value: string) => {
   const pairs = [...value.matchAll(VARS_PAIR)]

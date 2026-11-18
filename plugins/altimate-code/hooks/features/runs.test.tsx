@@ -617,6 +617,11 @@ test('a dbt call backgrounded in front of another command stays in flight like o
   expect(stored.has('runs')).toBe(false)
 })
 
+test('an unquoted multi-word value under a secret key is a secret, whatever it starts with', async ($, on) => {
+  expect(resultsInvocations(`dbt build --vars '{db_password: 123 correct horse battery staple}'`, ROOT)).toEqual([])
+  expect(resultsInvocations(`dbt build --vars '{token_limit: 3 , country: US}'`, ROOT)).toHaveLength(1)
+})
+
 test('an authorization key in --vars is a secret', async ($, on) => {
   expect(resultsInvocations(`dbt build --vars '{"authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])
   expect(resultsInvocations(`dbt build --vars '{"Authorization": "Bearer s3cret"}'`, ROOT)).toEqual([])
