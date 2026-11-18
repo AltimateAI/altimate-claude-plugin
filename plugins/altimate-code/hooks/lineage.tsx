@@ -271,9 +271,10 @@ function sqlFilesIn(command: string, cwd: string): string[] {
   })
 }
 
-// Where a shell command reads from: the session folder, moved by each `cd` in the command.
-const CD = /(?:^|[;&|(\n]\s*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
-function commandDir(command: string, cwd: string): string {
+// Where a shell command reads from: the session folder, moved by each `cd` in the command. Blanks after a
+// separator stop at any line break, which starts a line itself, so a long run of blank lines is read once, not once per line.
+const CD = /(?:^|[;&|(\n\r\u2028\u2029][^\S\n\r\u2028\u2029]*)cd\s+("[^"]+"|'[^']+'|[^\s;&|)]+)/gm
+export function commandDir(command: string, cwd: string): string {
   let dir = cwd
   for (const match of command.matchAll(CD)) {
     const target = match[1]!.replace(/^['"]|['"]$/g, '')

@@ -223,13 +223,54 @@ export interface RunsState {}
 // Defer and target: the target and defer state dbt commands run with.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface DeferState {}
+export interface DeferState {
+  /** The dbt project the session works in; null when there is none (nothing is rewritten). */
+  projectDir: string | null
+  /** The project's Power User setting turns defer on and gives a usable state directory. */
+  enabled: boolean
+  favorState: boolean
+  mode: 'local' | 'remote' | 'none'
+  /** The directory passed as `--state`; null when there is none to use. */
+  stateDir: string | null
+  /** Why defer is configured but cannot be applied. */
+  reason: string | null
+  /** /defer on or off for this session; null follows the project's setting. */
+  override: boolean | null
+  /** The profile's default target and its output names. */
+  defaultTarget: string | null
+  targets: string[]
+  /** /target for this session; null leaves the command's own or the profile's default. */
+  target: string | null
+  /** When reading the setting failed (engine clock, ms); null when it was read. */
+  failedAt: number | null
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Raw SQL to model: the SQL being turned into a dbt model.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface ToModelState {}
+/** How a table of the SQL matched a model or source: every part the same, the same but for case, fewer parts written, or none. */
+export type RelationMatch = 'exact' | 'case_insensitive' | 'partial' | 'none'
+
+export interface ToModelState {
+  /** The model to write. */
+  name: string
+  /** Where the SQL came from: a file path, or "selection". */
+  source: string
+  /** The dialect the tool read the SQL with; null when it did not say. */
+  dialect: string | null
+  /** The folder the project keeps its models in, relative to the session's root, or whole when the project lies outside it; unset when neither the SQL's folder nor the session's root is in a dbt project. */
+  modelsDir?: string
+  /** One row per table, unmatched and partial first. */
+  rows: {
+    raw: string
+    replaceWith: string
+    match: RelationMatch
+    candidates: { replaceWith: string; kind: string; name: string; relationName: string; match: RelationMatch }[]
+  }[]
+  /** The SQL, kept so the prompt can quote it. */
+  sql: string
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Team comments: the shared docs' comments on the project's models.
@@ -279,13 +320,72 @@ export interface SqlGraphView {
 // Docs coverage and propagation: what the project documents.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface DocsState {}
+/** A downstream column that can take a description: the traced column reaches it unchanged (Original) or only renamed (Alias). */
+export interface DocsCandidate {
+  model: string
+  /** The model's unique_id: names repeat across packages and versions. */
+  id?: string
+  column: string
+  lens: 'Original' | 'Alias'
+}
+
+/** A description Claude wrote, and the downstream columns that can take it. */
+export interface DocsGroup {
+  model: string
+  column: string
+  description: string
+  manifest: string
+  /** The YAML file the description was written in. */
+  file: string
+  candidates: DocsCandidate[]
+}
+
+/** The documentation coverage of the model whose SQL Claude last edited. */
+export interface DocsCoverageView {
+  model: string
+  percent: number
+  documented: number
+  total: number
+  /** Output columns without a description. */
+  missing: string[]
+  hasDescription: boolean
+}
+
+export interface DocsState {
+  /** Written descriptions with candidates, oldest first. */
+  groups: DocsGroup[]
+  /** Candidates the person unticked in the pane, keyed `manifest|model.column>unique_id.column`. */
+  skipped: string[]
+  coverage: DocsCoverageView | null
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Profile CTEs: each CTE's row count and timing.
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
-export interface CteProfileState {}
+export type CteTier = 'hot' | 'warm' | 'cool'
+
+export interface CteRow {
+  name: string
+  line: number
+  /** Offset of the WITH keyword the CTE belongs to: CTEs of one WITH clause build on each other. */
+  clause: number
+  status: 'pending' | 'running' | 'done' | 'failed'
+  /** Wall time of the count query, which holds every earlier CTE of its clause (a warehouse may skip those the CTE does not use). */
+  queryMs?: number
+  rows?: number
+  /** Time this CTE adds over the one before it. */
+  marginalMs?: number
+  tier?: CteTier
+  error?: string
+}
+
+export interface CteProfileState {
+  model: string
+  status: 'listing' | 'running' | 'stopping' | 'done' | 'stopped' | 'failed'
+  rows: CteRow[]
+  message?: string
+}
 
 declare module 'claude-code' {
   interface PluginState {
