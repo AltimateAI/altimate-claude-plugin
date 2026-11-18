@@ -194,5 +194,8 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
   if (result.exitCode === 0 && (!data || typeof data !== 'object' || typeof data.status !== 'string')) {
     return { metadata: null as any, text: 'the answer could not be read', ok: false }
   }
-  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? '', ok: result.exitCode === 0 && data?.status !== 'error' }
+  // A CLI that printed something other than its answer object (its usage, from an altimate-code too old to
+  // have the command) hands that output back as `raw`, so the caller can say what went wrong.
+  const raw = data ? undefined : `${result.stdout ?? ''}\n${result.stderr ?? ''}`.trim().slice(0, 4000)
+  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? '', ok: result.exitCode === 0 && data?.status !== 'error', raw }
 }

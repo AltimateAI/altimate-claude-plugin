@@ -774,3 +774,8 @@ test('a failed run also comes as a notice, for a terminal too narrow for the pan
   await clock.settle()
   expect(toasts.at(-1)).toMatch(/^Databricks savings check: A query was refused: \[TABLE_OR_VIEW_NOT_FOUND\].* ask a workspace admin for SELECT/)
 })
+
+test('an altimate-code too old to have `tool run` says to update, not "failed"', () => {
+  const usage = 'altimate-code [project]            start altimate-code tui\n\nCommands:\n  altimate-code completion           generate shell completion script\n  altimate-code mcp                  manage MCP servers'
+  expect(explain(usage)).toEqual({ text: 'This altimate-code has no Databricks savings check.', recovery: 'Update altimate-code (`altimate upgrade`), then run /savings again.' })
+})

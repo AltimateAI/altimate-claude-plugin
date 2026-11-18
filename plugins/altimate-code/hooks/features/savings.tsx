@@ -293,7 +293,9 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
 
 /** The refusal in the person's terms, with the step that fixes it. */
 export function explain(error: string): { text: string; recovery: string } {
-  if (/^Unknown tool: finops_databricks_savings/.test(error) || /has no Databricks savings rules/.test(error)) {
+  // An altimate-code without `tool run` prints its usage (its commands) instead of an answer.
+  const tooOld = /\bCommands:/.test(error) && /altimate(-code)? /.test(error)
+  if (tooOld || /^Unknown tool: finops_databricks_savings/.test(error) || /has no Databricks savings rules/.test(error)) {
     return { text: 'This altimate-code has no Databricks savings check.', recovery: 'Update altimate-code (`altimate upgrade`), then run /savings again.' }
   }
   if (/requires a configured warehouse|not supported by any of your configured warehouses/.test(error)) {
@@ -354,7 +356,7 @@ async function runCheck($: EngineInterface, connection: string | null) {
     const metadata = result.metadata as ToolMetadata | null
     const view = toView(metadata)
     if (!view) {
-      const error = (result.metadata as ToolMetadata | null)?.error ?? result.text
+      const error = (result.metadata as ToolMetadata | null)?.error ?? (result.text || ('raw' in result ? result.raw : '') || '')
       const why = explain(error || 'no answer')
       await update($, messageAtom, () => why)
       $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
