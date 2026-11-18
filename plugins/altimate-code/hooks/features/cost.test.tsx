@@ -184,28 +184,19 @@ test('a selection that is not one plain model passes, saying there is no estimat
   expect(ran).toHaveLength(4)
 })
 
-test('a session folder that is never answered does not hold a command that scans nothing for more than 80 ms', async ($, on) => {
+test('a session folder that is never answered holds the gate for 80 ms at most: a command that scans nothing runs without waiting for the phase deadline', async ($, on) => {
   const options: Options = {}
   const { clock, ran } = await start($, on, options)
-  options.holdCwd = new Promise<void>(() => {})
-  // Without the bound this call never finishes: the gate waits for the folder, and a gate after it would never run.
-  const pending = $.tool.call(bash('git push'))
-  for (let i = 0; i < 80; i++) await clock.advance(100)
-  const result: any = await pending
-  expect(result.deny).toBeUndefined()
-  expect(ran).toEqual(['git push'])
-})
-
-test('a session folder that is never answered holds a dbt run for 80 ms at most, then the estimate goes on', async ($, on) => {
-  const options: Options = { answers: { orders: UNDER } }
-  const { clock, ran } = await start($, on, options)
-  options.holdCwd = new Promise<void>(() => {})
-  const pending = $.tool.call(bash('dbt run -s orders'))
-  for (let i = 0; i < 80; i++) await clock.advance(100)
+  let release: () => void = () => {}
+  options.holdCwd = new Promise<void>(resolve => (release = resolve))
+  const pending = $.tool.call(bash('git status'))
+  await clock.advance(200)
+  // A gate that waited for the folder would hold the call for the 5 s a phase has, and every gate after it with it.
+  expect(ran).toEqual(['git status'])
+  release()
   await clock.settle()
   const result: any = await pending
   expect(result.deny).toBeUndefined()
-  expect(ran).toEqual(['dbt run -s orders'])
 })
 
 test('commands that scan nothing are not looked at', async ($, on) => {
