@@ -856,7 +856,7 @@ test('a voided running estimate is not reused and holds the next one back until 
   await clock.advance(500)
   expect(started).toEqual(['orders'])
   await clock.advance(4_001)
-  expect(((await first) as any).deny).toContain('still being estimated')
+  expect(((await first) as any).deny).toContain('The project changed while the scan was being estimated')
   expect(((await again) as any).deny).toContain('still being estimated')
   expect(started).toEqual(['orders'])
   finish()
@@ -1274,7 +1274,7 @@ test('a dbt run let through while the gate waits on its estimate voids that answ
   await clock.advance(10)
   release()
   await clock.advance(10)
-  expect(((await first) as any).deny).toContain('still being estimated')
+  expect(((await first) as any).deny).toContain('The project changed while the scan was being estimated')
   finish()
   await rebuild
   expect(ran).toEqual(['dbt run -s customers --target prod'])

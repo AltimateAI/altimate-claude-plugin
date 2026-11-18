@@ -401,6 +401,8 @@ async function startWhenIdle<T>(
 
 /** Drops the answers already in; an estimate still running, which a parallel call may be waiting on, is left to finish. */
 function dropFinished() {
+  // A pass that already took an answer (or is about to) must not act on it once a run has begun: it is refused and asks again.
+  generation++
   for (const [key, entry] of inflight) {
     if (entry.doneAt != null) inflight.delete(key)
     // A pass already waiting on it takes its answer; a later pass does not, since a run began after it started.
