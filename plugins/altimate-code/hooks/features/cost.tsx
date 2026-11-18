@@ -176,7 +176,7 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   const verdict = await gate($, e)
   // A dbt run or build that is let through rebuilds relations while it runs: an estimate kept from before it is stale from here.
-  if (verdict === null && limitBytes > 0 && parseDbtCommand(e.command).some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) invalidate()
+  if (verdict === null && limitBytes > 0 && parseDbtCommand(e.command).some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) dropFinished()
   return verdict
 }
 
@@ -351,6 +351,11 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
   // An edit can change what a model scans, or the target it runs on: no estimate made before it is reused.
   invalidate()
   await forgetUnsupported($)
+}
+
+/** Drops the answers already in; an estimate still running, which a parallel call may be waiting on, is left to finish. */
+function dropFinished() {
+  for (const [key, entry] of inflight) if (entry.doneAt != null) inflight.delete(key)
 }
 
 function invalidate() {
