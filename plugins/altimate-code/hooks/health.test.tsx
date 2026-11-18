@@ -48,6 +48,8 @@ type Options = {
   holdStat?: Promise<void>
   /** Called with the number of each folder lookup (from 1). */
   onStat?: (n: number) => Promise<void> | void
+  /** Called at each project lookup; a promise it returns holds the lookup. */
+  onExists?: () => Promise<void> | void
 }
 
 async function start($: any, on: any, options: Options, session: { isInteractive?: boolean } = {}) {
@@ -74,7 +76,10 @@ async function start($: any, on: any, options: Options, session: { isInteractive
     return <Box key="engine" />
   })
   const projects = options.projects ?? [ROOT]
-  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: projects.some(p => e.path === `${p}/dbt_project.yml`) }))
+  on('fs.exists', async (_: unknown, e: { path: string }) => {
+    await options.onExists?.()
+    return { value: projects.some(p => e.path === `${p}/dbt_project.yml`) }
+  })
   let statHeld = false
   let stats = 0
   on('fs.stat', async (_: unknown, e: { path: string }) => {
@@ -423,6 +428,19 @@ test('with the push gate on, a push before the baseline lands, with no model cha
   await start($, on, { runs: [[OLD_STG]], hold: { at: 0, until: never } })
   const allowed: any = await $.tool.call(command('git push'))
   expect(allowed?.deny).toBeUndefined()
+})
+
+test('with the push gate on, a push whose folder lookups outlast the gate is held, not let through', { options: { healthBlocksPush: true } }, async ($, on) => {
+  let slow = false
+  const never = new Promise<void>(() => {})
+  const { clock } = await start($, on, { runs: [[]], onExists: () => (slow ? never : undefined) })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  slow = true
+  const pending = $.tool.call(command("sed -i 's/a/b/' fresh/models/x.sql && git push"))
+  await clock.advance(GATE_WAIT_MS + 100)
+  const denied: any = await pending
+  expect(denied?.deny).toContain('could not be read in time')
 })
 
 test('with the push gate on, a command that edits a model and pushes is held: the edit is not checked before it runs', { options: { healthBlocksPush: true } }, async ($, on) => {

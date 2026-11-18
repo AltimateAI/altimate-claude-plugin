@@ -692,15 +692,22 @@ export function pushRefusal(blocks: unknown, command: string, issues: readonly H
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) return null
+  // The whole decision, folder lookups included, is bounded inside the chain's deadline: past it the gate is given up on and the push runs.
+  const decided = await within($, GATE_WAIT_MS, decide($, e))
+  return decided === null ? hold('the check of the changes could not be read in time.') : decided === 'run' ? null : decided
+}
+
+const hold = (why: string) => ({
+  deny: `git push is held: ${why}\nRun /${COMMAND} to check again; only the user can turn off "Project health blocks git push" in the plugin's settings.`,
+})
+
+async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string } | 'run'> {
   const startedAt = await $.clock.now()
-  const hold = (why: string) => ({
-    deny: `git push is held: ${why}\nRun /${COMMAND} to check again; only the user can turn off "Project health blocks git push" in the plugin's settings.`,
-  })
   // An edit in the same command would run before any check of it.
   const root = await $.session.root().catch(() => '')
   for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${root}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
   // With nothing changed this session there is nothing to wait for or hold.
-  if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return null
+  if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return 'run'
   // The wait is what is left of the gate's budget: the work above counts against the chain's deadline too.
   if ((await wantsCheck($, true)) || running?.generation === generation) {
     const left = GATE_WAIT_MS - ((await $.clock.now()) - startedAt)
@@ -710,7 +717,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   // A check that failed or did not finish leaves the changes unchecked: a gate that fails open is no gate.
   if (state && enabled && (state.running || state.pending.length > 0 || state.baseline === null))
     return hold(`the check of the models changed this session ${state.running ? 'did not finish in time' : `could not run (${state.problem ?? 'no answer'})`}.`)
-  return pushRefusal(options.healthBlocksPush, e.command, state?.issues ?? [])
+  return pushRefusal(options.healthBlocksPush, e.command, state?.issues ?? []) ?? 'run'
 }
 
 /** A model file Bash writes (a `sed -i`, a redirect, a `git checkout -- file`) is checked like one Claude edited. */
