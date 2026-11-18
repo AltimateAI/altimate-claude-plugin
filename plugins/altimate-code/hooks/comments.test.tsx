@@ -466,6 +466,23 @@ test('a partial list, however old, does not free a post that may have landed', a
   await ui.unmount()
 })
 
+test('a list asked for before the cache could have caught up does not free the lock when its answer arrives later', async ($, on) => {
+  let release!: () => void
+  const { clock, cli } = await start($, on, { timeoutPost: true, holdLists: { 2: new Promise<void>(resolve => (release = resolve)) } })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.press({ key: '7:11-resolve' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  await clock.advance(295_000)
+  await ui.press({ key: 'refresh' })
+  await clock.advance(40_000)
+  release()
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeUndefined()
+  expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(1)
+  await ui.unmount()
+})
+
 test('a reply is not confirmed by a message that was already in the thread before it was sent', async ($, on) => {
   const thread = { ...RAW, messages: [{ id: 101, author: 'Grace Hopper', text: 'Yes' }] }
   const { clock } = await start($, on, { timeoutPost: true, threads: [thread] })

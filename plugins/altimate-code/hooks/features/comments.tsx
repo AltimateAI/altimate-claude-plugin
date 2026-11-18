@@ -421,7 +421,9 @@ async function fetchThreads($: EngineInterface) {
   if (before.needs || !before.project) return
   await change($, current => ({ ...current, loading: true }))
   try {
-    const out = await runTool($, TOOL, { action: 'list', project: before.project }, { cliOnly: true, until: (await $.clock.now()) + LIST_TIMEOUT_MS })
+    // The cache's age is judged at the moment the list was asked for, not when a slow answer arrives.
+    const askedAt = await $.clock.now()
+    const out = await runTool($, TOOL, { action: 'list', project: before.project }, { cliOnly: true, until: askedAt + LIST_TIMEOUT_MS })
     const listed = out.metadata as Listed
     // An answer from an earlier session, or one asked for before a post changed the docs, is not shown: a fresh list follows.
     if (mine !== generation || wrote !== writes) return
@@ -466,7 +468,7 @@ async function fetchThreads($: EngineInterface) {
         // A thread missing from a partial list may only be one the list did not reach.
         (pending.action === 'resolve' ? there === undefined && !partial : there?.messages.some(message => !pending.before.has(message.id) && sameText(message.text, pending.text)) === true)
       // An old enough list frees the lock only when it is a whole list of the post's own project.
-      const freed = pending !== null && (seen || (now - pending.at >= LIST_LAG_MS && !partial && current.root === pending.root))
+      const freed = pending !== null && (seen || (askedAt - pending.at >= LIST_LAG_MS && !partial && current.root === pending.root))
       if (freed) uncertain = null
       return {
         ...current,
