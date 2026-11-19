@@ -240,6 +240,9 @@ export function unknownReach(answer: ColumnAnswer | null): string | null {
   return `not traced: ${count(n, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
 }
 
+/** The band's words for a column the task added: the manifest from before the task cannot trace it. */
+const ADDED_NOTE = 'new in this task: its reach is unknown, not zero (the manifest from before the task lacks it)'
+
 /** The band's view of a finished task. */
 export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report: string | null): TaskSummaryView {
   const unresolved = new Set<string>()
@@ -253,7 +256,8 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
         const reach = one.down && !one.unknown ? reachOf(one.down) : null
         for (const entry of one.down?.unresolved ?? []) unresolved.add(one.down!.nodes[entry.model]?.id ?? one.down!.nodes[entry.model]?.name ?? String(entry.model))
         if (reach?.truncated) truncated = true
-        return { name: one.column!, reach, failed: one.failed, ...(one.unknown && { note: one.unknown }) }
+        const note = one.unknown ?? (one.unchecked && one.column && change.columns.some(col => col.name === one.column && col.before === null) ? ADDED_NOTE : undefined)
+        return { name: one.column!, reach, failed: one.failed, ...(note && { note }) }
       })
     return { name: change.model, modelLevel, columns }
   })
@@ -565,7 +569,7 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
     impact: impactWords(change.model, column?.name ?? null, trace, lookup),
     upstream: column ? (trace?.stale ? [[STALE]] : upstreamWords(change.model, column.name, up)) : [],
     up: sectionOf(up, !up && !!column, !!trace?.stale),
-    down: sectionOf(down, !down && !!column, !!trace?.stale),
+    down: trace?.unknown ? { hops: [], truncated: false, error: `The reach is unknown: ${trace.unknown.replace(/^not traced: /, '')}.` } : sectionOf(down, !down && !!column, !!trace?.stale),
     edges,
     mayCarry: mayCarryGroups(down),
     upMayCarry: mayCarryGroups(up, true),

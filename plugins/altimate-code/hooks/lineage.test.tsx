@@ -278,7 +278,7 @@ test('reading a model points the pane at it: the manifest graph, then its column
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /GRAPH · manifest/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 test ·/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
   await ui.unmount()
 })
@@ -778,7 +778,7 @@ test('a manifest over 4 MiB is read through altimate-code: the graph comes from 
   expect(calls).toEqual(['tool:Read', 'cli:dbt_lineage:graph'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /GRAPH · altimate-code/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 test ·/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
   await ui.unmount()
 

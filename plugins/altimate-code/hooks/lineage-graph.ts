@@ -308,12 +308,27 @@ export function countText(certain: number, maybe: number, incomplete: boolean, n
   return maybe ? `${known} (${certain ? `${maybe} more` : maybe} may)` : known
 }
 
-/** The tests that check one column of the model itself: a test of another model that shares the column's name is not counted. */
-export function testsOnColumn(graph: LineageGraph, id: string, column: string): number {
-  return downstreamOf(graph, id).testIds.filter(test => {
-    const node = graph.nodes[test]
-    return node?.testColumn === column && (!node.testOn || node.testOn === id)
+/**
+ * The tests that check one column of the model itself: a test of another model that shares the column's name
+ * is not counted. A test dbt does not attach to a model (attached_node, dbt 1.5+) counts when the model is its
+ * only parent. Null when the graph does not say which column its tests check (one altimate-code built from a
+ * large manifest): then only the model's count can be given.
+ */
+export function testsOnColumn(graph: LineageGraph, id: string, column: string): number | null {
+  const tests = downstreamOf(graph, id).testIds.map(test => [test, graph.nodes[test]] as const)
+  if (tests.some(([, node]) => node?.testColumn === undefined)) return null
+  return tests.filter(([test, node]) => {
+    if (node?.testColumn !== column) return false
+    if (node.testOn) return node.testOn === id
+    const parents = graph.parents[test] ?? []
+    return parents.length > 0 && parents.every(parent => parent === id)
   }).length
+}
+
+/** The pane's test count: the tests on the column in focus when the graph says which column each checks, else the model's. */
+export function testCountText(graph: LineageGraph, model: string, column: string | null, modelTests: number): string {
+  const onColumn = column ? testsOnColumn(graph, model, column) : null
+  return onColumn === null ? plural(modelTests, 'test') : `${plural(onColumn, 'test')} on ${column}`
 }
 
 export type ImpactCounts = { direct: number; transitive: number; tests: number; exposures: string[]; severity: Severity }
@@ -724,6 +739,8 @@ export function subgraph(graph: LineageGraph, id: string): LineageGraph {
       // Tests stay as ids so downstream counts them; they are never drawn.
       if (!isTest(graph.nodes[other], other)) return false
       nodes[other] ??= graph.nodes[other] ?? { ...nodeOf(other, null), type: 'test' }
+      // A test's own parents, all of them: which model it checks is read from them when dbt does not say.
+      parents[other] ??= graph.parents[other] ?? []
       return true
     })
   }

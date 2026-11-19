@@ -26,7 +26,7 @@ import {
   findModelOrColumn,
   graphFromSql,
   impactOf,
-  testsOnColumn,
+  testCountText,
   modelLineageOf,
   parseDbtLineage,
   plural,
@@ -1605,7 +1605,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
 
         <Box flexDirection="column">
           <Text dimColor>
-            {counts.direct} direct · {counts.transitive}{graph.truncated ? '+' : ''} transitive · {column ? `${testsOnColumn(graph, focus.model, column)} tests on ${column}` : `${counts.tests} tests`} ·{' '}
+            {counts.direct} direct · {counts.transitive}{graph.truncated ? '+' : ''} transitive · {testCountText(graph, focus.model, column, counts.tests)} ·{' '}
             <Text color={SEVERITY_COLOR[counts.severity]}>{counts.severity}</Text>
           </Text>
         </Box>

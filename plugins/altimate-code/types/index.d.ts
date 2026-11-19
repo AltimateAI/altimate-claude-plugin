@@ -668,6 +668,8 @@ declare module 'claude-code' {
       lineageMessage: string | null
       /** The shown model's SQL file changed after the manifest was written, said so; null when it didn't. */
       lineageStale: string | null
+      /** Why the pane waits undrawn on a narrow terminal, and the width it needs; null when it does not. */
+      lineageNarrow: { text: string; floor: number | null } | null
       lineageLoading: boolean
       /** Compile-and-validate's answer for the last model Claude edited. */
       dbtCheck: CheckView | null

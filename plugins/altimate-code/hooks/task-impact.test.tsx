@@ -714,7 +714,7 @@ test('a renamed column is never shown as reaching 0 columns in 0 models: the old
   const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
   expect(line).not.toMatch(/reaches 0 columns in 0 models/)
   expect(line).toContain('amount  reaches 2 columns in 2 models')
-  expect(line).toContain('total  could not be traced')
+  expect(line).toContain('total  new in this task: its reach is unknown')
 })
 
 test('a column the queried manifest does not know is not shown as 0, even when the engine answers with an empty reach for it', async ($, on) => {
@@ -862,5 +862,7 @@ test('a column whose downstream models have no compiled SQL is not shown as reac
   expect(report.focuses[0].reach).toBeNull()
   expect(JSON.stringify(report.focuses[0].impact)).toContain('The reach of')
   expect(JSON.stringify(report.focuses[0].impact)).toContain('no compiled SQL')
+  // The downstream section carries the reason, so the page never says no model carries the value.
+  expect(report.focuses[0].down).toEqual({ hops: [], truncated: false, error: 'The reach is unknown: 2 downstream models have no compiled SQL (run `dbt compile`).' })
   await band.unmount()
 })
