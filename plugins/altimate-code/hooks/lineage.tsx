@@ -913,7 +913,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   let reach: ColumnReachView | null = null
   const answered: { column: string; answer: ColumnAnswer }[] = []
   const traced: string[] = []
-  // Touched columns whose check failed or ran out of time: what they reach is unknown.
+  // Touched columns whose check failed, ran out of time or never reached them: what they reach is unknown.
   // Columns beyond the cap are never traced either.
   const unchecked: string[] = everyTouched.slice(MAX_EDIT_COLUMNS)
   if (touched.length > 0) {
@@ -1011,7 +1011,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   lines.push(
     `- ${quoted(node.name)} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'downstream model')} in all (${counts.direct} direct, ${counts.transitive} transitive), ${plural(counts.tests, 'test')}${counts.exposures.length ? ` and ${plural(counts.exposures.length, 'exposure')} (${listed(counts.exposures)})` : ''}.`,
   )
-  if (unchecked.length) lines.push(`- columns not checked (over the limit or no answer in time): ${listed(unchecked)}; what they reach is unknown`)
+  if (unchecked.length) lines.push(`- columns not checked (over the limit, no answer in time, or not in the manifest: \`dbt compile\` adds a new one): ${listed(unchecked)}; what they reach is unknown`)
   if (stale) lines.push('- the manifest is older than this file (it changed after the last `dbt compile`), so the lineage above may be out of date; `dbt compile` gives a current answer')
   const close = 'Keep these consumers working, or tell the user which of them this edit changes.'
   const body = lines.join('\n')

@@ -1,5 +1,6 @@
 // The plugin's one status line, built from parts: the integrations part first, then each feature's, in
-// the features' order, then the altimate-code version notice, which is long, so it never hides the others. Each part is set by its owner; setting one draws the whole line again.
+// the features' order, then the altimate-code version notice, which is long, so it never hides the others.
+// Each part is set by its owner; setting one draws the whole line again.
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 

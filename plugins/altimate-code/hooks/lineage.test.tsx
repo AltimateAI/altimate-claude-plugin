@@ -945,7 +945,7 @@ test('a touched column whose check fails keeps the combined count a lower bound'
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
   expect(notes[0]).toContain('fct_orders.revenue is read by at least 2 models')
-  expect(edit.context?.[0]).toContain('columns not checked (over the limit or no answer in time): order_id')
+  expect(edit.context?.[0]).toContain('columns not checked (over the limit, no answer in time, or not in the manifest: `dbt compile` adds a new one): order_id')
 })
 
 test('a new unchecked column in the same turn still reaches Claude', async ($, on) => {
@@ -954,7 +954,7 @@ test('a new unchecked column in the same turn still reaches Claude', async ($, o
   const second: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
   expect(first.context?.[0]).toContain('fct_orders.revenue')
-  expect(second.context?.[0]).toContain('columns not checked (over the limit or no answer in time): order_id')
+  expect(second.context?.[0]).toContain('columns not checked (over the limit, no answer in time, or not in the manifest: `dbt compile` adds a new one): order_id')
 })
 
 test('columns beyond the cap are named as unchecked and make the count a lower bound', async ($, on) => {
@@ -968,7 +968,7 @@ test('columns beyond the cap are named as unchecked and make the count a lower b
   await clock.settle()
   expect(calls.filter(call => call.startsWith('cli:impact_analysis'))).toHaveLength(3)
   expect(notes[0]).toContain('is read by at least 2 models')
-  expect(edit.context?.[0]).toMatch(/columns not checked \(over the limit or no answer in time\): \w+;/)
+  expect(edit.context?.[0]).toMatch(/columns not checked \(over the limit, no answer in time, or not in the manifest: `dbt compile` adds a new one\): \w+;/)
 })
 
 test('/lineage takes a unique_id or a path whole, and only a trailing column off a model name', async ($, on) => {
@@ -1075,7 +1075,7 @@ test('a cut-off impact_analysis leaves its column not checked, and the note stil
   const { clock } = await start($, on, { mcp: false, cliCutOff: tool => tool === 'impact_analysis' })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
   await clock.settle()
-  expect(result.context?.[0]).toContain('columns not checked (over the limit or no answer in time): revenue; what they reach is unknown')
+  expect(result.context?.[0]).toContain('columns not checked (over the limit, no answer in time, or not in the manifest: `dbt compile` adds a new one): revenue; what they reach is unknown')
 })
 
 test('a cut-off plain dbt_lineage shows a failure in the pane, naming the tool once', async ($, on) => {

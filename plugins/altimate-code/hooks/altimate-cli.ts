@@ -31,7 +31,7 @@ export async function runAltimate($: EngineInterface, args: string[], timeoutMs 
 
 const SEMVER = /(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/
 
-/** The version a `--version` answer names ("0.12.11", "altimate-code 0.12.11", "v0.13.0-beta.2"), or null; the last one when it names several. */
+/** The version a `--version` output names ("0.12.11", "altimate-code 0.12.11", "v0.13.0-beta.2"), or null; the last one when it names several. Read stdout first: stderr carries runtime notes. */
 export function parseVersion(text: string): string | null {
   // The last one printed: a wrapper may name its own runtime (node v22.1.0) before the CLI's version.
   const found = [...text.matchAll(new RegExp(SEMVER.source, 'g'))].pop()
@@ -83,7 +83,7 @@ export async function altimateCodeNotice($: EngineInterface): Promise<string | n
         if (!MISSING_BINARY.test(String(error))) return null
         continue
       }
-      const version = answer.exitCode === 0 ? parseVersion(`${answer.stdout ?? ''}\n${answer.stderr ?? ''}`) : null
+      const version = answer.exitCode === 0 ? (parseVersion(answer.stdout ?? '') ?? parseVersion(answer.stderr ?? '')) : null
       if (!version || isPreviewBuild(version) || compareVersions(version, MIN_ALTIMATE_CODE) >= 0) return null
       const where = await $.process.run(['which', bin], { timeoutMs: 5_000 }).then(one => one.stdout.trim().split('\n')[0] ?? '').catch(() => '')
       return `${bin} ${version} found${where ? ` at ${where}` : ''}; this plugin needs ≥ ${MIN_ALTIMATE_CODE}: ${INSTALL}`
