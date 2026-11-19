@@ -36,11 +36,12 @@ export function nodeOf(id: string, node: any): GraphNode {
     materialized: node?.config?.materialized ?? null,
     relation: relationOf(node),
     columns,
-    ...(isTestType(type) ? { testColumn: testColumnOf(node), testOn: typeof node?.attached_node === 'string' ? node.attached_node : null } : {}),
+    ...(TEST_TYPES.has(type) ? { testColumn: testColumnOf(node), testOn: typeof node?.attached_node === 'string' ? node.attached_node : null } : {}),
   }
 }
 
-const isTestType = (type: string) => type === 'test' || type === 'unit_test'
+/** The node types that are tests: counted downstream, never drawn. */
+const TEST_TYPES = new Set(['test', 'unit_test'])
 
 /** The column a data test checks: dbt writes it under test_metadata.kwargs (generic tests) or as column_name. */
 function testColumnOf(node: any): string | null {
@@ -246,7 +247,7 @@ export function findModel(graph: LineageGraph, wanted: string): string | null {
 }
 
 /** dbt's data tests and unit tests: counted downstream, never drawn. */
-export const isTest = (node: GraphNode | undefined, id: string) => ['test', 'unit_test'].includes(node?.type ?? id.split('.')[0] ?? '')
+export const isTest = (node: GraphNode | undefined, id: string) => TEST_TYPES.has(node?.type ?? id.split('.')[0] ?? '')
 
 /** Direct parents, each with its own parents: the two levels the pane draws upstream. */
 export function upstreamOf(graph: LineageGraph, id: string): { node: GraphNode; parents: GraphNode[] }[] {

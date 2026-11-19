@@ -231,12 +231,14 @@ export type ColumnTrace = {
 export function unknownReach(answer: ColumnAnswer | null): string | null {
   if (!answer) return null
   const r = reachOf(answer)
-  // Models read in full that the value was not traced to stay "may change" beside a real 0; only unread models make it unknown.
-  if (r.columns > 0 || r.models > 0 || r.unresolved === 0) return null
+  // Models read in full that the value was not traced to stay "may change" beside a real 0; only unread models make it
+  // unknown, counted from the engine's counts or its list, whichever names more.
+  const unread = Math.max(r.unresolved, answer.unresolved?.length ?? 0)
+  if (r.columns > 0 || r.models > 0 || unread === 0) return null
   const missing = (answer.unresolved ?? []).filter(one => /no compiled sql/i.test(String(one?.reason ?? ''))).length
   if (missing > 0) return `not traced: ${count(missing, 'downstream model')} ${missing === 1 ? 'has' : 'have'} no compiled SQL (run \`dbt compile\`)`
   const why = (answer.unresolved ?? []).map(one => String(one?.reason ?? '')).find(Boolean)
-  return `not traced: ${count(r.unresolved, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
+  return `not traced: ${count(unread, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
 }
 
 /** The band's words for a column the task added: the manifest from before the task cannot trace it. */

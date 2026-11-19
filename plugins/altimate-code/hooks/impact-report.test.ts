@@ -561,4 +561,7 @@ test('models read in full that the value was not traced to keep the reach at 0 w
   expect(unknownReach(notTraced)).toBeNull()
   const unread = { ...notTraced, unresolved: [{ model: 1, reason: 'the SQL could not be parsed', code: 'unresolved' }] } as any
   expect(unknownReach(unread)).toBe('not traced: 1 downstream model could not be read (the SQL could not be parsed)')
+  // Counts that say none were unread while the list names one: the list wins, so no false 0.
+  const countsSayNone = { ...unread, counts: { ...unread.counts, unresolved_models: 0 } }
+  expect(unknownReach(countsSayNone)).toBe('not traced: 1 downstream model could not be read (the SQL could not be parsed)')
 })
