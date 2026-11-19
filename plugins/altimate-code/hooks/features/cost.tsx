@@ -1,9 +1,11 @@
-// Cost check: BigQuery scans over the limit are held until allowed.
+// Cost check: dbt scans over the limit are held until allowed.
 //
 // Before a `dbt run`, `dbt build` or `dbt show` Claude runs, the gate asks altimate-code's
-// dbt_cost_estimate (a BigQuery dry run) what the query would scan. Over `maxScanBytes` the command is
-// refused with the estimate until the user runs /allow-scan, which lets that same command through once.
-// Other warehouses have no dry run: the first answer says so, and nothing is estimated or held after that.
+// dbt_cost_estimate what the query would scan: a dry run on BigQuery, the planner's EXPLAIN estimate on
+// Snowflake and Databricks. Over `maxScanBytes` the command is refused with the estimate until the user runs
+// /allow-scan, which lets that same command through once. A query with no estimate (a Databricks table without
+// statistics, an EXPLAIN that failed) runs, with a line saying why. Other warehouses have no estimate: the first
+// answer says so, and nothing is estimated or held after that.
 // Only what names its query is estimated: `dbt show --inline <sql>` and a single plain model name
 // (`-s orders`); any other selection, and any command that sets its own target, defer state, vars or
 // project, runs as it is, with one line saying so under the Bash row.
@@ -34,6 +36,10 @@ const PLAIN_MODEL = /^[A-Za-z_][A-Za-z0-9_]*$/
 const UNKNOWN_TOOL = /Unknown tool/i
 /** The altimate-code that has dbt_cost_estimate; changing it is the one edit a release needs. */
 const NEEDED_VERSION = 'a newer altimate-code (the release with dbt_cost_estimate)'
+/** The altimate-code whose dbt_cost_estimate reads Snowflake's and Databricks' EXPLAIN. */
+const NEEDED_PLANNER_VERSION = 'a newer altimate-code (the release with Snowflake and Databricks estimates)'
+/** The warehouses whose estimate is the planner's (EXPLAIN), by adapter type: how the estimate is named to the user. */
+const PLANNER_NAMES: Record<string, string> = { snowflake: 'Snowflake', databricks: 'Databricks' }
 
 const costAtom = atom({ plugin: 'altimate-code', key: 'cost' } as const, null as CostState | null)
 
@@ -144,7 +150,7 @@ export function register(on: On, context: FeatureContext) {
     })
     if (!held) return { text: 'Nothing is held: no dbt command is waiting on its scan size.' }
     if (!allowed) return { text: 'The held command changed meanwhile: run /allow-scan again to allow the one now held.' }
-    return { text: `Allowed: ${held.target} (≈ ${held.display}) runs once when Claude runs the same command again; after that it is held again.` }
+    return { text: `Allowed: ${held.target} (≈ ${held.display}${held.planner ? `, ${held.planner} plan estimate` : ''}) runs once when Claude runs the same command again; after that it is held again.` }
   })
 
   on('command.run', { command: 'scan-cost' }, async ($, e) => {
@@ -163,9 +169,9 @@ export function register(on: On, context: FeatureContext) {
     if (answer.kind === 'bytes') {
       await forgetUnsupported($)
       await rememberEstimate($, target, answer.bytes, answer.display)
-      return { text: `${target} would scan ${answer.display}${verdict(answer.maxBytes)}` }
+      return { text: `${target} would scan ${answer.display}${basisOf(answer)}${verdict(answer.maxBytes)}` }
     }
-    return { text: answer.kind === 'unsupported' ? `No estimate: ${answer.adapter} has no dry run (only BigQuery has).` : `No estimate: ${answer.reason}` }
+    return { text: answer.kind === 'unsupported' ? `No estimate: ${unsupportedWhy(answer.adapter)}.` : `No estimate: ${answer.reason}` }
   })
 }
 
@@ -180,8 +186,8 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   active.clear()
   await update($, costAtom, () => ({ ...FRESH }))
   await setStatusPart($, 'cost', null)
-  await $.command.register({ name: 'allow-scan', description: 'Let the dbt command held for its BigQuery scan size run once, when run again unchanged' })
-  await $.command.register({ name: 'scan-cost', description: 'Estimate the BigQuery scan of a dbt model before running it', argumentHint: '<model>' })
+  await $.command.register({ name: 'allow-scan', description: 'Let the dbt command held for its scan size run once, when run again unchanged' })
+  await $.command.register({ name: 'scan-cost', description: 'Estimate the scan of a dbt model before running it (BigQuery, Snowflake, Databricks)', argumentHint: '<model>' })
 }
 
 /** Also called for a subagent's turns, which carry `e.agentId`. */
@@ -196,7 +202,7 @@ export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {}
 export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderElement | null> {
   const held = (await read($, costAtom))?.held
   if (!held) return null
-  return <ui.Text color="warning">{`⛔ held: ${held.target} would scan ${held.display} (limit ${formatBytes(limitBytes)}) · /allow-scan`}</ui.Text>
+  return <ui.Text color="warning">{`⛔ held: ${held.target} would scan ${held.display}${basisOf(held)} (limit ${formatBytes(limitBytes)}) · /allow-scan`}</ui.Text>
 }
 
 /** The command to run in place of `e.command`; null keeps it. */
@@ -228,7 +234,7 @@ async function leaveProject($: EngineInterface) {
 }
 
 /** Per command: the over-limit answer a pass has in hand but has not yet recorded as the hold. */
-const overNow = new Map<string, { label: string; bytes: number; display: string }>()
+const overNow = new Map<string, { label: string; bytes: number; display: string; planner?: string }>()
 
 async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
@@ -264,7 +270,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
 
   const lines: string[] = []
   let estimated = false
-  const over: { label: string; bytes: number; point: number; display: string }[] = []
+  const over: { label: string; bytes: number; point: number; display: string; planner?: string }[] = []
   // One wait for the whole command, however many queries it names.
   const waitUntil = (await $.clock.now()) + GATE_WAIT_MS
   const pending: string[] = []
@@ -279,7 +285,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
         await update($, costAtom, prev => {
           const current = prev ?? FRESH
           const same = current.held?.command === e.command
-          return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+          return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display, ...(worst.planner && { planner: worst.planner }) } }
         })
       } catch {
         // The refusal stands whether or not the hold could be recorded: a gate that throws lets the call run.
@@ -309,9 +315,9 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
       // The answer in hand is still the project's: one over the limit is kept, so the refusal holds the command.
       if (answer !== 'pending' && answer.kind === 'bytes' && answer.maxBytes > limitBytes) {
         // Noted before any await, as on the normal path: a parallel pass for this command whose own estimate fails must still see it.
-        mine.note = { label, bytes: answer.maxBytes, display: answer.display }
-        overNow.set(e.command, mine.note as { label: string; bytes: number; display: string })
-        over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
+        mine.note = { label, bytes: answer.maxBytes, display: answer.display, planner: answer.planner }
+        overNow.set(e.command, mine.note as { label: string; bytes: number; display: string; planner?: string })
+        over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display, planner: answer.planner })
       }
       return unreadable()
     }
@@ -331,7 +337,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
       if (generation !== startedAt) break
       await update($, costAtom, prev => ({ ...(prev ?? FRESH), unsupportedAdapter: answer.adapter, held: null, allowOnce: false }))
       await showStatus($, null)
-      lines.push(`cost · no estimate on ${answer.adapter}: only BigQuery has a dry run`)
+      lines.push(`cost · no estimate on ${answer.adapter}: ${unsupportedWhy(answer.adapter)}`)
       over.length = 0
       pending.length = 0
       break
@@ -344,12 +350,12 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     estimated = true
     // Noted before any await: a parallel pass for this command whose own estimate fails must still see it.
     if (answer.maxBytes > limitBytes) {
-      mine.note = { label, bytes: answer.maxBytes, display: answer.display }
-      overNow.set(e.command, mine.note as { label: string; bytes: number; display: string })
+      mine.note = { label, bytes: answer.maxBytes, display: answer.display, planner: answer.planner }
+      overNow.set(e.command, mine.note as { label: string; bytes: number; display: string; planner?: string })
     }
     await rememberEstimate($, label, answer.bytes, answer.display)
-    if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}`)
-    else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
+    if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}${basisOf(answer)}`)
+    else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display, planner: answer.planner })
   }
 
   if (generation !== startedAt) {
@@ -370,9 +376,9 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // The hold is read now, not from the state taken before the estimates: a parallel call may have recorded it meanwhile.
   // Or from an over-limit answer a parallel pass for the same command has in hand and has not recorded yet.
   const stored = over.length === 0 && failed ? (await read($, costAtom))?.held : null
-  const heldNow = stored && stored.command === e.command ? { label: stored.target, bytes: stored.bytes, display: stored.display } : overNow.get(e.command)
+  const heldNow = stored && stored.command === e.command ? { label: stored.target, bytes: stored.bytes, display: stored.display, planner: stored.planner } : overNow.get(e.command)
   if (over.length === 0 && failed && heldNow && heldNow.bytes > limitBytes) {
-    over.push({ label: heldNow.label, bytes: heldNow.bytes, point: heldNow.bytes, display: heldNow.display })
+    over.push({ label: heldNow.label, bytes: heldNow.bytes, point: heldNow.bytes, display: heldNow.display, planner: heldNow.planner })
   }
 
   if (over.length > 0) {
@@ -385,15 +391,15 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
         granted = current.allowOnce && current.held?.command === e.command
         return granted
           ? { ...current, allowOnce: false, held: null }
-          : { ...current, allowOnce: false, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+          : { ...current, allowOnce: false, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display, ...(worst.planner && { planner: worst.planner }) } }
       })
     } catch {
       // A hold that cannot be recorded must not become a pass: a gate that throws lets the call run.
       notes.delete(e.command)
-      return { deny: `${worst.display} would be scanned, over the ${formatBytes(limitBytes)} limit, and the hold could not be recorded. Run the same command again.` }
+      return { deny: `${worst.display} would be scanned${basisOf(worst)}, over the ${formatBytes(limitBytes)} limit, and the hold could not be recorded. Run the same command again.` }
     }
     if (granted) {
-      for (const one of over) lines.push(`cost · ${one.label} would scan ${one.display}, over the ${formatBytes(limitBytes)} limit: allowed once`)
+      for (const one of over) lines.push(`cost · ${one.label} would scan ${one.display}${basisOf(one)}, over the ${formatBytes(limitBytes)} limit: allowed once`)
       keepNotes(e.command, lines)
       // The hold is spent: the status line stops showing it.
       await showLastEstimate($)
@@ -411,7 +417,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
           ? `just over ${formatBytes(limitBytes)}`
           : `≈ ${worst.display}`
     return {
-      deny: `${scanned} would be scanned, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
+      deny: `${scanned} would be scanned${basisOf(worst)}, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
     }
   }
   // A command that was estimated and is under the limit ends an earlier hold, and its allowance. One that
@@ -657,14 +663,28 @@ function shellWords(text: string): string[] {
   return words
 }
 
-type Answer = { kind: 'bytes'; bytes: number; maxBytes: number; display: string } | { kind: 'unsupported'; adapter: string } | { kind: 'none'; reason: string }
+/** `planner` names the warehouse when the estimate is its planner's (an EXPLAIN), not a dry run. */
+type Answer = { kind: 'bytes'; bytes: number; maxBytes: number; display: string; planner?: string } | { kind: 'unsupported'; adapter: string } | { kind: 'none'; reason: string }
+
+/** How the estimate was made, as a tail for the number: nothing for a dry run, the planner's name for an EXPLAIN. */
+function basisOf(answer: { planner?: string }): string {
+  return answer.planner ? ` (${answer.planner} plan estimate)` : ''
+}
+
+/** Why a warehouse has no estimate: an altimate-code too old for its planner, or one altimate-code cannot estimate. */
+function unsupportedWhy(adapter: string): string {
+  const planner = PLANNER_NAMES[adapter]
+  return planner
+    ? `this altimate-code estimates BigQuery only; ${planner} needs ${NEEDED_PLANNER_VERSION}`
+    : 'scans are estimated on BigQuery, Snowflake and Databricks only'
+}
 
 /** Asks altimate-code for the scan of a model or SQL; never throws: a failure is `none` with why. */
 async function estimate($: EngineInterface, args: { model?: string; sql?: string }, until: number): Promise<Answer> {
   try {
     const run = await runTool($, 'dbt_cost_estimate', args, { write: true, until })
     if (!run.ok && UNKNOWN_TOOL.test(run.text)) return { kind: 'none', reason: `this altimate-code has no cost estimate: it needs ${NEEDED_VERSION}` }
-    const data = run.metadata as { supported?: unknown; adapter?: unknown; bytes?: unknown; maxBytes?: unknown; lowerBound?: unknown; display?: unknown; error?: unknown } | null
+    const data = run.metadata as { supported?: unknown; adapter?: unknown; source?: unknown; bytes?: unknown; maxBytes?: unknown; lowerBound?: unknown; display?: unknown; error?: unknown } | null
     if (data?.supported === false) return { kind: 'unsupported', adapter: typeof data.adapter === 'string' ? data.adapter : 'this warehouse' }
     // A dry run that can undercount (a zero, a script) gives no upper bound to hold a command on.
     if (data?.supported === true && data.lowerBound === true) {
@@ -677,7 +697,9 @@ async function estimate($: EngineInterface, args: { model?: string; sql?: string
     if (data?.supported === true && typeof data.bytes === 'number' && Number.isFinite(data.bytes)) {
       // The tool's upper bound when it gives one: the display is rounded, and the limit is a hard one.
       const maxBytes = typeof data.maxBytes === 'number' && Number.isFinite(data.maxBytes) && data.maxBytes >= data.bytes ? data.maxBytes : data.bytes
-      return { kind: 'bytes', bytes: data.bytes, maxBytes, display: typeof data.display === 'string' ? data.display : formatBytes(data.bytes) }
+      // The planner's estimate (Snowflake, Databricks) has no rounding bound: the limit is held against the estimate itself.
+      const planner = data.source === 'explain' ? (typeof data.adapter === 'string' ? (PLANNER_NAMES[data.adapter] ?? data.adapter) : 'the warehouse') : undefined
+      return { kind: 'bytes', bytes: data.bytes, maxBytes, display: typeof data.display === 'string' ? data.display : formatBytes(data.bytes), ...(planner && { planner }) }
     }
     const why = typeof data?.error === 'string' ? data.error : run.text.trim().split('\n')[0] || 'altimate-code gave no estimate'
     return { kind: 'none', reason: why }
