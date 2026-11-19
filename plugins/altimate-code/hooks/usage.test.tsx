@@ -29,6 +29,10 @@ type Options = {
   platform?: string
   /** `$.ui.open` fails. */
   openFails?: boolean
+  /** Every read of the install id from the store waits for this. */
+  holdStore?: Promise<void>
+  /** The team comments the CLI lists. */
+  comments?: unknown[]
 }
 
 /** A dbt project, the CLI answering every other feature with nothing to report, and each usage event recorded. */
@@ -39,7 +43,10 @@ async function start($: any, on: any, options: Options = {}) {
   const events: string[][] = []
   const toasts: string[] = []
   const logs: { text: string; to?: string }[] = []
-  on('store.get', (_: unknown, e: { key: string }) => ({ value: store.get(e.key) }))
+  on('store.get', async (_: unknown, e: { key: string }) => {
+    if (e.key === 'usage.installId') await options.holdStore
+    return { value: store.get(e.key) }
+  })
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
     store.set(e.key, JSON.parse(JSON.stringify(e.value)))
     return { value: undefined }
@@ -91,6 +98,10 @@ async function start($: any, on: any, options: Options = {}) {
       events.push(argv)
       return { value: options.event ? await options.event(argv) : { exitCode: 0, stdout: '', stderr: '' } }
     }
+    if (argv[3] === 'dbt_map_relations')
+      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { mappings: [{ raw: 'raw.orders', replaceWith: "{{ source('raw', 'orders') }}", match: 'exact' }] } }), stderr: '' } }
+    if (argv[3] === 'docs_share_comments' && options.comments)
+      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, threads: options.comments } }), stderr: '' } }
     const inert = nothingToReport(argv)
     if (inert) return { value: inert }
     return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
@@ -165,7 +176,7 @@ test('each panel and command sends one plugin_feature_used with its name when op
     ['sql-graph', MODEL, 'sql_graph'],
     ['health', '', 'health'],
     ['runs', '', 'runs'],
-    ['to-model', `models/${MODEL}.sql`, 'to_model'],
+    ['to-model', `fct_new models/${MODEL}.sql`, 'to_model'],
   ]
   for (const [command, args, feature] of commands) {
     const before = usage().length
@@ -184,6 +195,7 @@ test('a panel that cannot open sends failed, not opened', async ($, on) => {
     ['runs', '', 'runs'],
     ['sql-graph', MODEL, 'sql_graph'],
     ['profile-ctes', MODEL, 'profile_ctes'],
+    ['to-model', `fct_new models/${MODEL}.sql`, 'to_model'],
   ] as const) {
     const before = usage().length
     await run($, clock, command, args)
@@ -197,7 +209,7 @@ test('no event carries a project, model or column name, SQL or a path: only the 
     ['lineage', `${MODEL}.secret_column`],
     ['dbt-show', 'select secret_column from raw.orders'],
     ['sql-graph', MODEL],
-    ['to-model', `models/${MODEL}.sql`],
+    ['to-model', `fct_new models/${MODEL}.sql`],
     ['health', ''],
   ])
     await run($, clock, command!, args)
@@ -270,4 +282,52 @@ test('an event never holds a hook: a CLI that never answers leaves the session s
   const answer: any = await run($, clock, 'runs')
   expect(answer.text).toBe('The dbt runs are open.')
   expect(usage().map(argv => argv[3])).toEqual(['plugin_session_start', 'plugin_feature_used'])
+})
+
+test('a command that stops before its panel opens (a bad argument) sends nothing: only a panel that opens, or fails to, is counted', async ($, on) => {
+  const { clock, usage } = await start($, on)
+  const before = usage().length
+  await run($, clock, 'to-model', 'not-a-name!')
+  await run($, clock, 'sql-graph', '')
+  await run($, clock, 'profile-ctes', '')
+  expect(usage().slice(before)).toEqual([])
+})
+
+test('events sent together on a first run share one install id: the second waits for the first one to be made', async ($, on) => {
+  let release!: () => void
+  const holdStore = new Promise<void>(resolve => (release = resolve))
+  const store = new Map<string, unknown>()
+  const { clock, usage, flag } = await start($, on, { store, holdStore })
+  // The session start's event is still waiting on the store; a command sends another meanwhile.
+  await run($, clock, 'runs')
+  release()
+  await clock.settle()
+  const ids = usage().map(argv => flag(argv, '--install-id'))
+  expect(usage().map(argv => argv[3])).toEqual(['plugin_session_start', 'plugin_feature_used'])
+  expect(new Set(ids).size).toBe(1)
+  expect(store.get('usage.installId')).toBe(ids[0])
+})
+
+test("the comments band's Open button sends comments opened, as /comments does", async ($, on) => {
+  const thread = {
+    share_id: 7,
+    share_name: 'Finance review',
+    group_id: 11,
+    file_path: `models/${MODEL}.sql`,
+    highlight: 'secret_column',
+    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } },
+    messages: [{ id: 100, author: 'Ada', text: 'Is this net of refunds?' }],
+  }
+  const { clock, usage, flag } = await start($, on, { comments: [thread] })
+  const band = await $.ui.mount({
+    plugin: 'altimate-code',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+    surface: 'terminal',
+  } as any)
+  const before = usage().length
+  await band.press({ key: 'comments-open' })
+  await clock.settle()
+  await band.unmount()
+  expect(usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')])).toEqual([['comments', 'opened']])
 })

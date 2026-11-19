@@ -249,7 +249,21 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
         💬 {current.threads.length} open team comment{current.threads.length === 1 ? '' : 's'}
         {current.project ? ` on ${current.project}` : ''}{' '}
       </Text>
-      <Button key="comments-open" label="Open" onPress={() => later($, () => $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }))} />
+      <Button
+        key="comments-open"
+        label="Open"
+        onPress={() =>
+          later($, () =>
+            $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }).then(
+              () => featureUsed($, 'comments', 'opened'),
+              (error: unknown) => {
+                featureUsed($, 'comments', 'failed')
+                throw error
+              },
+            ),
+          )
+        }
+      />
     </Box>
   )
 }

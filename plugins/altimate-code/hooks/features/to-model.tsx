@@ -186,7 +186,6 @@ function summary(rows: RelationRow[]): string {
 /** Adds this feature's own hooks. */
 export function register(on: On, context: FeatureContext) {
   on('command.run', { command: COMMAND }, async ($, e) => {
-    featureUsed($, 'to_model', 'opened')
     const parsed = parseArgs(e.args)
     if ('error' in parsed) return { text: parsed.error }
     const got = await sqlOf($, parsed.path)
@@ -218,8 +217,10 @@ export function register(on: On, context: FeatureContext) {
     await update($, stateAtom, () => view)
     try {
       await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true })
+      featureUsed($, 'to_model', 'opened')
     } catch {
       // No surface to draw on: the prompt below still carries the whole mapping.
+      featureUsed($, 'to_model', 'failed')
     }
     // The host refuses a submit made inside a command's own hook, so it goes out right after this one returns.
     later($, () => $.prompt.submit({ text: buildPrompt(view) }))

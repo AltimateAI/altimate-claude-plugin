@@ -223,6 +223,8 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     // Only this pass's own note: a sibling pass for the same command may still be between noting and recording its answer.
     if (overNow.get(e.command) === mine.note) overNow.delete(e.command)
   })
+  // Every refusal is a hold: over the limit, an estimate still coming in, or a project that could not be read.
+  if (verdict) featureUsed($, 'cost_gate', 'held')
   // A dbt run or build that is let through rebuilds relations while it runs: an estimate kept from before it is stale from here.
   if (verdict === null && limitBytes > 0 && parseDbtCommand(e.command).some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) dropFinished()
   return verdict
@@ -410,7 +412,6 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
       return null
     }
     notes.delete(e.command)
-    featureUsed($, 'cost_gate', 'held')
     await showStatus($, `scan held ≈ ${worst.display}`)
     // The hold is decided on the upper bound, and the display is the rounded point estimate: either can read
     // as not over the limit when the scan is just past it.

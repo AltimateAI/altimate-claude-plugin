@@ -47,12 +47,24 @@ export async function usageOff($: EngineInterface): Promise<boolean> {
 }
 
 /** The anonymous install id: made on first run and kept in this plugin's store, so it stays the same across sessions. */
-export async function installId($: EngineInterface): Promise<string> {
+export function installId($: EngineInterface): Promise<string> {
+  // One lookup at a time: events sent together on a first run share the id the first one makes.
+  const pending = (idInFlight ??= readOrMakeId($).finally(() => {
+    idInFlight = null
+  }))
+  return pending
+}
+
+let idInFlight: Promise<string> | null = null
+
+async function readOrMakeId($: EngineInterface): Promise<string> {
   const kept = await $.store.get(INSTALL_ID_KEY)
   if (typeof kept === 'string' && UUID.test(kept)) return kept
-  const made = crypto.randomUUID().toLowerCase()
-  await $.store.set(INSTALL_ID_KEY, made)
-  return made
+  await $.store.set(INSTALL_ID_KEY, crypto.randomUUID().toLowerCase())
+  // Another session starting at the same moment may have written its own: the one the store kept is the one used.
+  const stored = await $.store.get(INSTALL_ID_KEY)
+  if (typeof stored === 'string' && UUID.test(stored)) return stored
+  throw new Error('the install id could not be kept')
 }
 
 let ownVersion: string | null = null

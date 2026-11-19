@@ -1719,3 +1719,15 @@ test('with ALTIMATE_TELEMETRY_DISABLED the gate holds and allows as before and s
   await clock.settle()
   expect(usage).toEqual([])
 })
+
+test('a command held while its estimate is still coming in is a hold too: one cost_gate held', async ($, on) => {
+  let release!: () => void
+  const { clock, usage } = await start($, on, { answers: { orders: OVER }, hold: new Promise<void>(resolve => (release = resolve)), env: {} })
+  const first = $.tool.call(bash('dbt run -s orders'))
+  await clock.advance(4_001)
+  expect(((await first) as any).deny).toContain('still being estimated')
+  await clock.settle()
+  expect(usage).toEqual([['cost_gate', 'held']])
+  release()
+  await clock.settle()
+})
