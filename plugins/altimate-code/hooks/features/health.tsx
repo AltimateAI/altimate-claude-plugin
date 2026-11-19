@@ -264,8 +264,9 @@ export function simpleCommands(line: string): string[][] {
   }
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!
-    if (c === '#' && !inWord) {
+    if (c === '#' && !inWord && !(line[i - 1] === '{' && line[i - 2] === '$')) {
       // An unquoted `#` at the start of a word is a comment to the end of the line: its quotes and commands are text.
+      // The `#` of `${#name}` (a length) is not one: `{` ends the word before it.
       const end = line.indexOf('\n', i)
       i = end < 0 ? line.length : end - 1
     } else if (c === "'") {
@@ -647,7 +648,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   enabled = false
   toldProblem = null
   known = []
-  shellBefore = null
+  shellBefore.clear()
   projects.clear()
   await update($, healthAtom, () => fresh())
   // The status line outlives a process: a part an earlier one left is cleared whether or not this one drew it.
@@ -703,9 +704,11 @@ export function pushRefusal(blocks: unknown, command: string, issues: readonly H
  * they have new health issues. A check that cannot run or does not finish holds it too.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
+  // A session outside a dbt project has no check to wait for and no folder to note.
+  if (!enabled) return null
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) {
     // Where the shell is before this command runs: its own `cd`s are read from there, and `bashAfter` sees the folder after them.
-    if (CHANGES_FOLDER.test(e.command)) shellBefore = { command: e.command, folder: await within($, GATE_WAIT_MS, shellFolder($)) }
+    if (CHANGES_FOLDER.test(e.command)) noteFolder(e, await within($, GATE_WAIT_MS, shellFolder($)))
     return null
   }
   // The whole decision, folder lookups included, is bounded inside the chain's deadline: past it the gate is given up on and the push runs.
@@ -721,7 +724,7 @@ async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string }
   const startedAt = await $.clock.now()
   // An edit in the same command would run before any check of it.
   const here = await shellFolder($)
-  if (CHANGES_FOLDER.test(e.command)) shellBefore = { command: e.command, folder: here }
+  if (CHANGES_FOLDER.test(e.command)) noteFolder(e, here)
   for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${here}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
   // With nothing changed this session there is nothing to wait for or hold.
   if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return 'run'
@@ -737,8 +740,16 @@ async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string }
   return pushRefusal(options.healthBlocksPush, e.command, state?.issues ?? []) ?? 'run'
 }
 
-// The folder noted before a command with its own `cd` ran; `folder` is null when the lookup ran out of time.
-let shellBefore: { command: string; folder: string | null } | null = null
+// The folder noted before each command with its own `cd` ran, by call (by command when the call has no id); `folder` is null when the lookup ran out of time.
+// Calls can overlap (a subagent's), so one slot would lose a start folder.
+const shellBefore = new Map<string, string | null>()
+const callKey = (e: BashCall) => e.tool_use_id ?? e.command
+function noteFolder(e: BashCall, folder: string | null) {
+  shellBefore.delete(callKey(e))
+  shellBefore.set(callKey(e), folder)
+  // A call a later gate refused never reaches its after-phase: only the newest notes are kept.
+  for (const old of [...shellBefore.keys()].slice(0, -50)) shellBefore.delete(old)
+}
 const CHANGES_FOLDER = /\b(cd|pushd)\b/
 
 /** The folder the session's shell is in now; the session's root when the host does not say. */
@@ -748,13 +759,15 @@ async function shellFolder($: EngineInterface): Promise<string> {
 
 /** A model file Bash writes (a `sed -i`, a redirect, a `git checkout -- file`) is checked like one Claude edited. */
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
+  if (!enabled) return
   const root = await $.session.root().catch(() => '')
   // A relative name is relative to the folder the session's shell is in now: an earlier `cd` moved it.
   // A command with its own `cd` is read from the folder it started in, which the gate noted.
   // A note belongs to its own command; a command with a `cd` whose start is unknown is read from the session's root, where it began.
-  const noted = shellBefore?.command === e.command ? shellBefore : null
-  shellBefore = null
-  const here = noted ? (noted.folder ?? root) : CHANGES_FOLDER.test(e.command) ? root : await shellFolder($)
+  const noted = shellBefore.has(callKey(e))
+  const folder = shellBefore.get(callKey(e)) ?? null
+  shellBefore.delete(callKey(e))
+  const here = noted ? (folder ?? root) : CHANGES_FOLDER.test(e.command) ? root : await shellFolder($)
   for (const name of filesWrittenBy(e.command)) await markChanged($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${here}/${name}`, root)
 }
 

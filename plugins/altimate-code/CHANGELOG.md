@@ -2,6 +2,15 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.8.3] — 2026-11-19
+
+### Fixed
+- Project health: a Bash command with its own `cd` is read from the folder it started in even when another Bash call finishes meanwhile (a subagent's); the start folder is kept per call. `echo ${#arr[@]}; git push` is found as a push. A session outside a dbt project no longer looks up the shell folder or holds a push.
+- `/scan-cost` with no model keeps the planner label of the last Snowflake or Databricks estimate ("Snowflake plan estimate").
+
+### Added
+- The README explains `altimate-dbt`, the dbt command line that comes with altimate-code, what the agent uses it for, and that you do not need to run it.
+
 ## [1.8.1] — 2026-11-19
 
 ### Fixed
