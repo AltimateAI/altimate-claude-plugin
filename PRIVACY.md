@@ -1,7 +1,7 @@
 # Privacy Policy — Altimate Code plugin for Claude Code
 
 **Effective date:** November 2, 2026
-**Last revised:** November 17, 2026
+**Last revised:** November 19, 2026
 **Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) MCP server and CLI.
 
 This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai/privacy) and [Terms](https://www.altimate.ai/terms), which govern Altimate services generally. Where this document is silent, the master policy applies. Questions: **info@altimate.ai**.
@@ -16,11 +16,12 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
 - In a project linked to an Altimate workspace, the plugin copies the workspace's team skills into the project's `.claude/skills/` and refreshes them from Altimate in the background at session start and at most hourly. Their text loads into the Claude Code conversation like any project skill. `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns this off and removes the copies at the next session start.
+- The plugin counts its own use anonymously, through the altimate-code CLI's usage telemetry: one event at each session start (plugin and altimate-code versions, OS, a random install id) and one each time a panel or command opens or a gate holds or allows a command (its name and outcome). No project, model, column or file names, SQL or session text. `ALTIMATE_TELEMETRY_DISABLED=true` turns it off. See [Plugin usage events](#plugin-usage-events).
 - Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
 
-The plugin registers a local stdio MCP server through `.mcp.json`, provides routing skills and slash commands, and runs hooks: SessionStart prints a capability description and, with Stop, keeps the linked workspace's skills copied into the project (see below); in a linked project, the workspace-rules hooks (SessionStart, UserPromptSubmit and Stop) start the local altimate-code CLI (see [Workspace rules](#workspace-rules)); an opt-in PreToolUse guard checks Bash commands locally. The server reads configured connections and runs data tools under your local credentials. The plugin adds no analytics of its own; CLI telemetry is described below.
+The plugin registers a local stdio MCP server through `.mcp.json`, provides routing skills and slash commands, and runs hooks: SessionStart prints a capability description and, with Stop, keeps the linked workspace's skills copied into the project (see below); in a linked project, the workspace-rules hooks (SessionStart, UserPromptSubmit and Stop) start the local altimate-code CLI (see [Workspace rules](#workspace-rules)); an opt-in PreToolUse guard checks Bash commands locally. The server reads configured connections and runs data tools under your local credentials. The plugin opens no network connection of its own for analytics: its anonymous usage events go through the altimate-code CLI's telemetry (see [Plugin usage events](#plugin-usage-events)), which is described below.
 
 ## Data flows through MCP tools
 
@@ -105,7 +106,22 @@ To learn whether the report gets used, the plugin asks the local altimate-code C
 - `/lineage-report` was run;
 - the report was built, failed to build, or found no browser.
 
-Each event carries the step and the Claude Code session id (`claude:<id>`) only: no model, column, file or project names. It goes through Altimate's usage telemetry, described in [Usage telemetry](#usage-telemetry), and that section's opt-out turns it off. With an altimate-code that predates the command, nothing is sent.
+Each event carries the step and the Claude Code session id (`claude:<id>`) only: no model, column, file or project names. It goes through Altimate's usage telemetry, described in [Usage telemetry](#usage-telemetry), and that section's opt-out turns it off; with `ALTIMATE_TELEMETRY_DISABLED` set, the plugin does not start the CLI for it. With an altimate-code that predates the command, nothing is sent.
+
+## Plugin usage events
+
+To count installs, active use and which features are used, the plugin asks the local altimate-code CLI (`altimate-code tool report-event`) to send these events through Altimate's usage telemetry, described in [Usage telemetry](#usage-telemetry). The plugin itself contacts no server for them.
+
+| Event | When | Fields |
+|---|---|---|
+| `plugin_session_start` | Each time Claude Code starts a session with the plugin enabled | `plugin_version`; `altimate_code_version` (added by the CLI); `os`: `macos`, `linux`, `windows`, `wsl` or `unknown`; `install_id`; `session_id` (`claude:<id>`) |
+| `plugin_feature_used` | A panel or command opens: `/lineage` (`lineage`), `/dbt-show` (`dbt_show`), `/profile-ctes` (`profile_ctes`), `/scan-cost` (`scan_cost`), `/comments` (`comments`), `/sql-graph` (`sql_graph`), `/health` (`health`), `/runs` (`runs`), `/to-model` (`to_model`); the cost check holds a dbt command or `/allow-scan` allows it (`cost_gate`); with "Project health blocks git push" on, the push gate holds or lets through a `git push` (`health_push_gate`) | `feature` (the name in brackets); `outcome`: `opened`, `failed` (the panel could not open), `held` or `allowed`; `plugin_version`; `install_id`; `session_id` |
+
+- **`install_id`** is a random UUID the plugin makes the first time it sends an event and keeps in its own Claude Code plugin store (a JSON file under your Claude Code configuration directory), so it stays the same across sessions on this machine. It is not derived from your machine, account or project, and is not made while `ALTIMATE_TELEMETRY_DISABLED` is set. Removing the plugin's store data makes a new one.
+- Beside these fields, each event carries what every altimate-code telemetry event carries (the CLI version, its anonymous machine id, a per-launch id), as described in [Usage telemetry](#usage-telemetry).
+- No event contains project, model, column or file names, SQL, query results or session text. The CLI accepts each field only from a fixed list or pattern (a version, a UUID, one of the names above) and refuses anything else.
+- **Turning it off:** `ALTIMATE_TELEMETRY_DISABLED=true` (or `1`) in the environment Claude Code starts in: the plugin then starts no CLI for these events, or for the lineage report's, and makes no install id. The CLI also drops them under its own opt-out (`ALTIMATE_TELEMETRY_DISABLED`, or `telemetry.disabled` in its config), as for every other event.
+- The events are sent in the background and never delay a hook. An altimate-code that predates them refuses them, and nothing is sent or shown.
 
 ## Data flows when a task is delegated
 
@@ -156,6 +172,8 @@ The plugin and the altimate-code CLI are professional developer tools, not direc
 ## Changes to this policy
 
 We will update this document in this repository and revise the effective date when our practices change. Material changes to Altimate-wide practices are governed by the master [Privacy Policy](https://www.altimate.ai/privacy).
+
+**November 19, 2026:** added [Plugin usage events](#plugin-usage-events) (plugin 1.8.2): the anonymous session start and feature-used events, and the plugin's own check of the telemetry opt-out.
 
 **November 17, 2026:** added [dbt helpers](#dbt-helpers) (plugin 1.8.0): the dbt commands the plugin runs in a dbt project, and what it keeps of their results.
 

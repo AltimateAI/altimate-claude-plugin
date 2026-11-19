@@ -32,6 +32,8 @@ type Options = {
   statusFails?: boolean
   /** The Bash tool runs this command only once this resolves. */
   holdBash?: { command: string; until: Promise<void> }
+  /** The environment the plugin reads, which turns the usage events on (none set) or off; unset, they are not sent. */
+  env?: Record<string, string>
 }
 
 /** The session beneath the plugin, a CLI whose dbt_cost_estimate is scripted, and a Bash tool that records what ran. */
@@ -42,6 +44,13 @@ async function start($: any, on: any, options: Options = {}) {
   const started: string[] = []
   const ran: string[] = []
   const statuses: (string | undefined)[] = []
+  /** The usage events sent: feature and outcome. */
+  const usage: string[][] = []
+  if (options.env) {
+    mock.env(on, options.env)
+    mock.store(on)
+    on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
+  }
   on('command.register', (_: unknown, e: { name: string }) => ({ value: { command: e.name } }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('session.end', () => ({ sessionId: 'test' }))
@@ -67,8 +76,12 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('fs.exists', () => ({ value: false }))
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
-    const [, command, , tool] = e.argv
+    const [, command, sub, tool] = e.argv
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    if (sub === 'report-event') {
+      if (tool === 'plugin_feature_used') usage.push([e.argv[e.argv.indexOf('--feature') + 1]!, e.argv[e.argv.indexOf('--outcome') + 1]!])
+      return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    }
     // Another feature's tool (runs asks dbt_run_results) has nothing to report here, and is not an estimate.
     if (tool !== 'dbt_cost_estimate') return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { found: false } }), stderr: '' } }
     // The adapter starts the project's dbt: the call must carry write permission.
@@ -95,7 +108,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, estimates, ran, statuses, started }
+  return { clock, estimates, ran, statuses, started, usage }
 }
 
 const bq = (bytes: number, display: string, maxBytes = bytes) => ({ success: true, supported: true, adapter: 'bigquery', bytes, maxBytes, display })
@@ -1675,4 +1688,34 @@ test("on BigQuery, the band's held line is as before", async ($, on) => {
   await $.tool.call(bash('dbt run -s orders'))
   await clock.settle()
   expect(await bandShows($, '⛔ held: orders would scan 20.0 GiB (limit 10.0 GiB) · /allow-scan')).toBe(true)
+})
+
+test('a hold sends one cost_gate held usage event, /allow-scan one cost_gate allowed, and /scan-cost one scan_cost opened', async ($, on) => {
+  const { clock, usage } = await start($, on, { answers: { orders: OVER, small: UNDER }, env: {} })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  await clock.settle()
+  expect(usage).toEqual([['cost_gate', 'held']])
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  await clock.settle()
+  expect(usage).toEqual([['cost_gate', 'held'], ['cost_gate', 'allowed']])
+  // A command under the limit is no use of the gate.
+  await $.tool.call(bash('dbt run -s small'))
+  await $.command.run({ command: 'scan-cost', args: 'small' } as any)
+  await clock.settle()
+  expect(usage).toEqual([['cost_gate', 'held'], ['cost_gate', 'allowed'], ['scan_cost', 'opened']])
+})
+
+test('/allow-scan with nothing held sends no allowed event', async ($, on) => {
+  const { clock, usage } = await start($, on, { env: {} })
+  await $.command.run({ command: 'allow-scan', args: '' } as any)
+  await clock.settle()
+  expect(usage).toEqual([])
+})
+
+test('with ALTIMATE_TELEMETRY_DISABLED the gate holds and allows as before and sends nothing', async ($, on) => {
+  const { clock, usage } = await start($, on, { answers: { orders: OVER }, env: { ALTIMATE_TELEMETRY_DISABLED: 'true' } })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
+  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('runs once')
+  await clock.settle()
+  expect(usage).toEqual([])
 })

@@ -8,6 +8,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { RunRecord, RunRow, RunsState } from '../../types'
 import { runTool } from '../altimate-cli'
+import { featureUsed } from '../usage'
 import { parseDbtCommand, type DbtInvocation } from '../dbt-command'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -596,8 +597,10 @@ export function register(on: On, context: FeatureContext) {
       await load($, await $.session.root())
       await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
     } catch (error) {
+      featureUsed($, 'runs', 'failed')
       return { text: `Could not open the dbt runs: ${String(error)}` }
     }
+    featureUsed($, 'runs', 'opened')
     return { text: 'The dbt runs are open.' }
   })
 

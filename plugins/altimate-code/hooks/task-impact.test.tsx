@@ -222,6 +222,7 @@ test('a task start copies the manifest aside, never reading it', async ($, on) =
 })
 
 test("each session's manifest copies carry its id, so another session's task never replaces them; a task's end clears copies a day old", async ($, on) => {
+  mock.env(on, {})
   const { runs, turn, tools, clock } = await start($, on)
   await turn('t1', async () => {
     await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
@@ -596,6 +597,7 @@ test('when no browser opens, the band shows the report path as a link', async ($
 })
 
 test('each step of the report sends one usage event through the CLI, with the action and the session only', async ($, on) => {
+  mock.env(on, {})
   const { runs, turn, clock } = await start($, on, { uname: 'Linux', openers: { 'xdg-open': 3 } })
   await turn('t1', async () => {
     await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
@@ -615,6 +617,19 @@ test('each step of the report sends one usage event through the CLI, with the ac
     expect(argv[4]).toBe('--session')
     expect(argv[5]).toMatch(/^claude:[A-Za-z0-9_-]+$/)
   }
+})
+
+test('with ALTIMATE_TELEMETRY_DISABLED the report works as before and no usage event is sent: no CLI is started for one', async ($, on) => {
+  mock.env(on, { ALTIMATE_TELEMETRY_DISABLED: 'true' })
+  const { runs, turn, clock } = await start($, on, { uname: 'Linux', openers: { 'xdg-open': 3 } })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  await clock.settle()
+  await $.command.run({ command: 'lineage-report', args: '' } as any)
+  await clock.settle()
+  expect(runs.some(argv => argv.includes('xdg-open'))).toBe(true)
+  expect(runs.filter(argv => argv[2] === 'report-event')).toEqual([])
 })
 
 test('macOS opens with open; /lineage-report before any report says so', async ($, on) => {

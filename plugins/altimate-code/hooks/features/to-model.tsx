@@ -5,6 +5,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import { MISSING_BINARY, later, runTool } from '../altimate-cli'
+import { featureUsed } from '../usage'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { ToModelState } from '../../types'
 import { projectLayout } from '../lineage-graph'
@@ -185,6 +186,7 @@ function summary(rows: RelationRow[]): string {
 /** Adds this feature's own hooks. */
 export function register(on: On, context: FeatureContext) {
   on('command.run', { command: COMMAND }, async ($, e) => {
+    featureUsed($, 'to_model', 'opened')
     const parsed = parseArgs(e.args)
     if ('error' in parsed) return { text: parsed.error }
     const got = await sqlOf($, parsed.path)

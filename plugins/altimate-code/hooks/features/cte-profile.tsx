@@ -12,6 +12,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 import type { CteProfileState, CteRow, CteTier } from '../../types'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import { later, runTool } from '../altimate-cli'
+import { featureUsed } from '../usage'
 import { setStatusPart } from '../status-line'
 import type { BandUi, FeatureContext } from './index'
 
@@ -262,7 +263,10 @@ export function register(on: On, context: FeatureContext) {
   on('command.run', { command: COMMAND }, async ($, e) => {
     // Claimed before anything is awaited: two commands in a row cannot both start a run.
     if (active) {
-      await openPane($).catch(() => {})
+      await openPane($).then(
+        () => featureUsed($, 'profile_ctes', 'opened'),
+        () => featureUsed($, 'profile_ctes', 'failed'),
+      )
       return { text: 'A CTE profile is already running; the pane has a Stop button.' }
     }
     const model = modelFor(e.args)
@@ -274,9 +278,11 @@ export function register(on: On, context: FeatureContext) {
       await openPane($)
     } catch (error) {
       active = false
+      featureUsed($, 'profile_ctes', 'failed')
       await say($, `Could not open the pane: ${String(error)}`)
       return { text: `Could not open Profile CTEs: ${String(error)}` }
     }
+    featureUsed($, 'profile_ctes', 'opened')
     // The command answers now; the queries go on and the pane fills in.
     later($, () => profile($, model, generation))
     return { text: `Profiling the CTEs of ${model}: each one is a warehouse query, the pane shows them as they finish.` }

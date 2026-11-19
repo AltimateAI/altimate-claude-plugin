@@ -13,6 +13,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import { runTool, within } from '../altimate-cli'
+import { featureUsed } from '../usage'
 import { parseDbtCommand, type DbtInvocation } from '../dbt-command'
 import { setStatusPart } from '../status-line'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
@@ -150,10 +151,12 @@ export function register(on: On, context: FeatureContext) {
     })
     if (!held) return { text: 'Nothing is held: no dbt command is waiting on its scan size.' }
     if (!allowed) return { text: 'The held command changed meanwhile: run /allow-scan again to allow the one now held.' }
+    featureUsed($, 'cost_gate', 'allowed')
     return { text: `Allowed: ${held.target} (≈ ${held.display}${held.planner ? `, ${held.planner} plan estimate` : ''}) runs once when Claude runs the same command again; after that it is held again.` }
   })
 
   on('command.run', { command: 'scan-cost' }, async ($, e) => {
+    featureUsed($, 'scan_cost', 'opened')
     const target = e.args.trim()
     if (!target) {
       const last = (await read($, costAtom))?.lastEstimate
@@ -407,6 +410,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
       return null
     }
     notes.delete(e.command)
+    featureUsed($, 'cost_gate', 'held')
     await showStatus($, `scan held ≈ ${worst.display}`)
     // The hold is decided on the upper bound, and the display is the rounded point estimate: either can read
     // as not over the limit when the scan is just past it.

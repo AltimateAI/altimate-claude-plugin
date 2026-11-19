@@ -6,6 +6,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later } from './altimate-cli'
+import { featureUsed } from './usage'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
   cellText,
@@ -1778,8 +1779,10 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
     try {
       await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...request, focus: true, closeOnEscape: true })
     } catch (error) {
+      featureUsed($, 'dbt_show', 'failed')
       return { text: `Could not open the Query results pane: ${String(error)}` }
     }
+    featureUsed($, 'dbt_show', 'opened')
     if (!args) return { text: 'Query results are open. Run /dbt-show <model> or /dbt-show select … to query.' }
     const isSql = /\s/.test(args) || /^(select|with)\b/i.test(args)
     later($, () => runShow($, root, isSql ? null : args, isSql ? args : null, SHOW_LIMIT, asked))

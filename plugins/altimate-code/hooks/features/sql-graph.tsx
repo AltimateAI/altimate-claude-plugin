@@ -10,6 +10,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { SqlGraphState, SqlGraphView } from '../../types'
 import { later, runTool, within } from '../altimate-cli'
+import { featureUsed } from '../usage'
 import { projectLayout } from '../lineage-graph'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -204,8 +205,10 @@ export function register(on: On, context: FeatureContext) {
     try {
       await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
     } catch (error) {
+      featureUsed($, 'sql_graph', 'failed')
       return { text: plain(`Could not open the SQL graph: ${String(error)}`) }
     }
+    featureUsed($, 'sql_graph', 'opened')
     // One backend call and one warehouse metadata read, per command, never per edit.
     const landed = await within($, COMMAND_WAIT_MS, load($, model))
     if (landed === null) return { text: `The SQL graph for ${shownModel} is loading; the pane shows it when it is ready.` }

@@ -11,6 +11,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { CommentsState, CommentsThread } from '../../types'
 import { later, runTool } from '../altimate-cli'
+import { featureUsed } from '../usage'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -99,11 +100,13 @@ export function register(on: On, context: FeatureContext) {
   on('command.run', { command: COMMAND }, async $ => {
     try {
       await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true })
+      featureUsed($, 'comments', 'opened')
       // Running the command again is how a missing tool is looked for again, after an update.
       await change($, current => ({ ...current, needs: null, note: null }))
       later($, () => open($))
       return { text: 'Team comments opened in the side pane.' }
     } catch (error) {
+      featureUsed($, 'comments', 'failed')
       return { text: `Could not open team comments: ${String(error)}` }
     }
   })
