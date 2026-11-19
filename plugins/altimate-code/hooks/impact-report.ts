@@ -236,7 +236,8 @@ export function unknownReach(answer: ColumnAnswer | null): string | null {
   const unread = Math.max(r.unresolved, answer.unresolved?.length ?? 0)
   if (r.columns > 0 || r.models > 0 || unread === 0) return null
   const missing = (answer.unresolved ?? []).filter(one => /no compiled sql/i.test(String(one?.reason ?? ''))).length
-  if (missing > 0) return `not traced: ${count(missing, 'downstream model')} ${missing === 1 ? 'has' : 'have'} no compiled SQL (run \`dbt compile\`)`
+  if (missing > 0 && missing >= unread) return `not traced: ${count(missing, 'downstream model')} ${missing === 1 ? 'has' : 'have'} no compiled SQL (run \`dbt compile\`)`
+  if (missing > 0) return `not traced: ${count(unread, 'downstream model')} could not be read (${missing} with no compiled SQL: run \`dbt compile\`)`
   const why = (answer.unresolved ?? []).map(one => String(one?.reason ?? '')).find(Boolean)
   return `not traced: ${count(unread, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
 }

@@ -411,7 +411,8 @@ async function buildReport($: EngineInterface, done: Finished): Promise<{ path: 
   }
   if (missing.length > 0) return { error: `The manifest this task was read from is gone. Run \`dbt compile\` and ask again.` }
   const traces = await (done.full ??= traceFull($, done))
-  const allRead = traces.every(one => !one.column || (one.down && one.up))
+  // A column added in the task has no trace to ask again for: it is read as far as it can be.
+  const allRead = traces.every(one => !one.column || one.unchecked || (one.down && one.up))
   // A failed direction is asked again next time.
   if (!allRead) {
     done.full = null

@@ -890,3 +890,18 @@ test('with no manifest copied at the task start, a column added in the task is a
   })
   expect(directional(tools).some(one => one.column === 'total' && one.manifest_path === MANIFEST)).toBe(true)
 })
+
+test('a report on a task that added a column is built once: opening it again asks the CLI nothing more', async ($, on) => {
+  const { tools, turn, clock } = await start($, on, { openers: { 'xdg-open': 0 }, impact: args => (args.column === 'amount' ? { column_answer: SECOND_HOP } : PRE_TASK_ENGINE(args)) })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: STAGING, old_string: 'amount_cents / 100 as amount', new_string: 'amount_cents / 100 as total' })
+  })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  const asked = directional(tools).length
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  expect(directional(tools).length).toBe(asked)
+  await band.unmount()
+})

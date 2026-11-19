@@ -564,4 +564,7 @@ test('models read in full that the value was not traced to keep the reach at 0 w
   // Counts that say none were unread while the list names one: the list wins, so no false 0.
   const countsSayNone = { ...unread, counts: { ...unread.counts, unresolved_models: 0 } }
   expect(unknownReach(countsSayNone)).toBe('not traced: 1 downstream model could not be read (the SQL could not be parsed)')
+  // Unread for mixed reasons: every unread model is counted, the ones without compiled SQL named.
+  const mixed = { ...notTraced, unresolved: [{ model: 1, reason: 'no compiled SQL: run `dbt compile`', code: 'unresolved' }, { model: 2, reason: 'the SQL could not be parsed', code: 'unresolved' }] } as any
+  expect(unknownReach(mixed)).toBe('not traced: 2 downstream models could not be read (1 with no compiled SQL: run `dbt compile`)')
 })
