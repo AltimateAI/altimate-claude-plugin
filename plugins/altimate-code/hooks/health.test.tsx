@@ -254,6 +254,24 @@ test('a git push right after /clear, before the kept issues are back, is still h
   expect(calls).toHaveLength(2)
 })
 
+test('a git push that comes while the /clear restore is running waits for it and is held', { options: { healthBlocksPush: true } }, async ($, on) => {
+  let release!: () => void
+  const clear = playsClear($, on, { holdWriteOf: { key: 'health', until: new Promise<void>(resolve => (release = resolve)) } })
+  const { clock } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  // /health starts the restore, whose write of the kept state is held; the push and a second /health come meanwhile.
+  const asked = $.command.run({ command: 'health' } as any)
+  const pushed = $.tool.call(command('git push'))
+  const again = $.command.run({ command: 'health' } as any)
+  await clock.advance(10)
+  release()
+  const [first, denied, second]: any[] = await Promise.all([asked, pushed, again])
+  expect(denied?.deny).toContain('1 new project health issue')
+  for (const shown of [first, second]) expect(shown.text).toContain('1 new health issue · stg_orders')
+})
+
 test('a second /clear before the first one\'s state was restored keeps what the first carried', async ($, on) => {
   const clear = playsClear($, on)
   const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })

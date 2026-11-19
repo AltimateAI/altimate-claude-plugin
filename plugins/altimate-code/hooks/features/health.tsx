@@ -59,6 +59,8 @@ let inFlight: string[] = []
 let carried: HealthState | null = null
 /** A /clear whose conversation has not had clearStart yet. */
 let clearPending = false
+/** clearStart's restore while it runs. */
+let restoring: Promise<void> | null = null
 /** Which model each file belonged to in earlier checks: a deleted schema file or model no longer shows in the latest answer. */
 let known: HealthInsight[] = []
 /** Whether the status line carries the health part now. */
@@ -682,6 +684,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   enabled = false
   carried = null
   clearPending = false
+  restoring = null
   inFlight = []
   toldProblem = null
   known = []
@@ -712,9 +715,21 @@ async function enable($: EngineInterface) {
  * /clear still holds a push); with none kept, the baseline is taken as at a session's start.
  */
 export async function clearStart($: EngineInterface) {
-  // Once per /clear, whichever comes first: the session id's change, or a hook of the new conversation.
+  // Once per /clear, whichever comes first: the session id's change, or a hook of the new conversation. A caller
+  // that comes while it runs waits for it, so a push is never decided on the empty state.
+  if (restoring) return restoring
   if (!clearPending) return
   clearPending = false
+  const run = restore($)
+  restoring = run
+  try {
+    await run
+  } finally {
+    if (restoring === run) restoring = null
+  }
+}
+
+async function restore($: EngineInterface) {
   const kept = carried
   carried = null
   generation += 1

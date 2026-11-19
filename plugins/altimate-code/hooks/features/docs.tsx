@@ -517,6 +517,8 @@ const CHECK_WAIT_MS = 180_000
 const RECHECK_MS = 30_000
 
 async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]> {
+  // Taken before the first wait: an edit that comes later, or a session's end, makes this one's coverage old.
+  const mine = ++coverageSeq
   const project = await projectOf($, file.path)
   if (!project) return []
   const model = normal(file.path).split('/').pop()!.replace(/\.sql$/i, '')
@@ -525,7 +527,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   // dbt wrote the manifest before this edit: its compiled SQL is the model as it was, not as it is now.
   const edited = await $.fs.stat(file.path).catch(() => null)
   const stale = !!edited && manifest.mtimeMs < edited.mtimeMs
-  const mine = ++coverageSeq
+  if (mine !== coverageSeq) return []
   const asked = stale ? { file: normal(file.path), model, project } : null
   waiting = asked
   // Asked for before the check starts (the dbt helpers run after this feature in the edit phase), so it is not missed.
