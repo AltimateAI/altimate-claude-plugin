@@ -30,6 +30,8 @@ type Options = {
   openFails?: boolean
   /** `$.ui.open` answers that no surface could show the pane. */
   notPlaced?: boolean
+  /** The dbt runs list cannot be read. */
+  runsUnreadable?: boolean
   /** Every read of the install id from the store waits for this. */
   holdStore?: Promise<void>
   /** The team comments the CLI lists. */
@@ -47,6 +49,7 @@ async function start($: any, on: any, options: Options = {}) {
   const logs: { text: string; to?: string }[] = []
   on('store.get', async (_: unknown, e: { key: string }) => {
     if (e.key === 'usage.installId') await options.holdStore
+    if (e.key === 'runs' && options.runsUnreadable) throw new Error('the runs could not be read')
     return { value: store.get(e.key) }
   })
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
@@ -115,6 +118,17 @@ async function start($: any, on: any, options: Options = {}) {
   const flag = (argv: string[], name: string) => argv[argv.indexOf(name) + 1]
   return { clock, store, events, usage, flag, toasts, logs, idWrites: () => idWrites }
 }
+
+/** Every panel: its command, arguments that open it, and its feature name. Both outcome tests walk this one list. */
+const PANELS = [
+  ['lineage', '', 'lineage'],
+  ['dbt-show', '', 'dbt_show'],
+  ['comments', '', 'comments'],
+  ['runs', '', 'runs'],
+  ['sql-graph', MODEL, 'sql_graph'],
+  ['profile-ctes', MODEL, 'profile_ctes'],
+  ['to-model', `fct_new models/${MODEL}.sql`, 'to_model'],
+] as const
 
 const run = async ($: any, clock: any, command: string, args = '') => {
   const answer = await $.command.run({ command, args } as any)
@@ -208,15 +222,7 @@ test('each panel and command sends one plugin_feature_used with its name when op
 
 test('a panel that cannot open sends failed, not opened', async ($, on) => {
   const { clock, usage, flag } = await start($, on, { openFails: true })
-  for (const [command, args, feature] of [
-    ['lineage', '', 'lineage'],
-    ['dbt-show', '', 'dbt_show'],
-    ['comments', '', 'comments'],
-    ['runs', '', 'runs'],
-    ['sql-graph', MODEL, 'sql_graph'],
-    ['profile-ctes', MODEL, 'profile_ctes'],
-    ['to-model', `fct_new models/${MODEL}.sql`, 'to_model'],
-  ] as const) {
+  for (const [command, args, feature] of PANELS) {
     const before = usage().length
     await run($, clock, command, args)
     expect(usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')])).toEqual([[feature, 'failed']])
@@ -356,15 +362,7 @@ test("the comments band's Open button sends comments opened, as /comments does",
 
 test('a pane Claude Code could not place (isPlaced: false) is counted as failed, not opened', async ($, on) => {
   const { clock, usage, flag } = await start($, on, { notPlaced: true })
-  for (const [command, args, feature] of [
-    ['lineage', '', 'lineage'],
-    ['dbt-show', '', 'dbt_show'],
-    ['comments', '', 'comments'],
-    ['runs', '', 'runs'],
-    ['sql-graph', MODEL, 'sql_graph'],
-    ['profile-ctes', MODEL, 'profile_ctes'],
-    ['to-model', `fct_new models/${MODEL}.sql`, 'to_model'],
-  ] as const) {
+  for (const [command, args, feature] of PANELS) {
     const before = usage().length
     await run($, clock, command, args)
     expect({ command, sent: usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')]) }).toEqual({ command, sent: [[feature, 'failed']] })
@@ -393,4 +391,12 @@ test("the comments band's Open button on a pane that cannot open sends comments 
   await clock.settle()
   await band.unmount()
   expect(usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')])).toEqual([['comments', 'failed']])
+})
+
+test('/runs whose list cannot be read answers that it could not open, and sends runs failed', async ($, on) => {
+  const { clock, usage, flag } = await start($, on, { runsUnreadable: true })
+  const before = usage().length
+  const answer: any = await run($, clock, 'runs')
+  expect(answer.text).toStartWith('Could not open the dbt runs')
+  expect(usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')])).toEqual([['runs', 'failed']])
 })
