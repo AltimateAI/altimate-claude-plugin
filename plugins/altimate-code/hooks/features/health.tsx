@@ -748,15 +748,15 @@ async function restore($: EngineInterface) {
 }
 
 /** The state a /clear carries, with the changes a conversation recorded on top of it. */
-function mergeKept(kept: HealthState, later: HealthState): HealthState {
+function mergeKept(kept: HealthState, recorded: HealthState): HealthState {
   return {
     ...kept,
-    baseline: kept.baseline ?? later.baseline,
+    baseline: kept.baseline ?? recorded.baseline,
     running: false,
-    pending: [...new Set([...kept.pending, ...later.pending])],
-    touched: [...new Set([...kept.touched, ...later.touched])],
+    pending: [...new Set([...kept.pending, ...recorded.pending])],
+    touched: [...new Set([...kept.touched, ...recorded.touched])],
     // A new change asks for a check again after a failed one, as markChanged does.
-    ...(later.pending.length ? { problem: null } : {}),
+    ...(recorded.pending.length ? { problem: null } : {}),
   }
 }
 

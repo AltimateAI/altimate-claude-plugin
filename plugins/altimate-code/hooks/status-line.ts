@@ -41,9 +41,14 @@ export async function setStatusPart($: EngineInterface, id: StatusPartId, text: 
   $.ui.status(statusLineOf(drawnParts))
 }
 
-/** At a /clear: keeps the parts drawn now, which a part set before restoreStatusParts must not replace. */
+// The parts that describe the machine rather than the conversation: they hold after a /clear. A feature's part
+// comes from its session state, which a /clear empties; the feature draws it again when it has it back.
+const KEPT_ACROSS_CLEAR: readonly StatusPartId[] = ['integrations', 'altimateCode']
+
+/** At a /clear: keeps the machine's parts drawn now, which a part set before restoreStatusParts must not replace. */
 export function keepStatusParts() {
-  beforeClear = { ...(beforeClear ?? {}), ...drawnParts }
+  const kept = Object.fromEntries(KEPT_ACROSS_CLEAR.filter(id => drawnParts[id]).map(id => [id, drawnParts[id]!]))
+  beforeClear = { ...(beforeClear ?? {}), ...kept }
 }
 
 /** After a /clear: the parts drawn before it, under any the new conversation has set already. */
