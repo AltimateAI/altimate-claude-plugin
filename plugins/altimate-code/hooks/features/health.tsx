@@ -61,8 +61,18 @@ let carried: HealthState | null = null
 let clearPending = false
 /** clearStart's restore while it runs. */
 let restoring: Promise<void> | null = null
-/** The dbt_health CLI call running now, settled either way; the next waits for it. */
-let cliCall: Promise<void> | null = null
+/** The last health CLI call queued, settled either way: the next one starts after it. */
+let cliQueue: Promise<void> = Promise.resolve()
+
+/** Runs `job` after every one queued before it; its place is taken at once, before anything is awaited. */
+function oneAtATime<T>(job: () => Promise<T>): Promise<T> {
+  const run = cliQueue.then(job, job)
+  cliQueue = run.then(
+    () => {},
+    () => {},
+  )
+  return run
+}
 /** Which model each file belonged to in earlier checks: a deleted schema file or model no longer shows in the latest answer. */
 let known: HealthInsight[] = []
 /** Whether the status line carries the health part now. */
@@ -513,22 +523,12 @@ async function check($: EngineInterface): Promise<HealthRun> {
   let result: Awaited<ReturnType<typeof runTool>>
   try {
     const until = (await $.clock.now()) + CHECK_MS
-    // One CLI call at a time, across a /clear or a new session too: a call whose loop was cut short still runs, and
-    // the next one would share its artifact folder, so it waits for it.
-    const before = cliCall
-    if (before) await within($, Math.max(0, until - (await $.clock.now())), before)
-    const env = await checkEnv($)
-    const call = runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until, ...(env && { env }) })
-    const settled = call.then(
-      () => {},
-      () => {},
-    )
-    cliCall = settled
-    try {
-      result = await call
-    } finally {
-      if (cliCall === settled) cliCall = null
-    }
+    // One CLI call at a time, its folder's preparation included, across a /clear or a new session too: a call whose
+    // loop was cut short still runs, and the next one would share its artifact folder, so it takes its turn after it.
+    result = await oneAtATime(async () => {
+      const env = await checkEnv($)
+      return runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until, ...(env && { env }) })
+    })
   } catch (error) {
     // Only a binary that is not there: one that is there and refused to start keeps its own words.
     if (NOT_FOUND.test(String(error))) return { problem: NO_CLI }

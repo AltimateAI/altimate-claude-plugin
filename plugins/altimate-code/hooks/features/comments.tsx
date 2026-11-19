@@ -194,6 +194,12 @@ export function register(on: On, context: FeatureContext) {
   })
 }
 
+/** What a conversation keeps of its own, reset when one starts (a session's start, or a /clear's end). */
+function newConversation() {
+  firstWaitSpent = false
+  pendingFor = null
+}
+
 /** After the session started: the command, a first load, and the poll. */
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
   await $.command.register({ name: COMMAND, description: 'Open comment threads from your team’s shared dbt docs; reply or resolve' })
@@ -201,8 +207,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   poll = null
   loadAgain = false
   generation++
-  firstWaitSpent = false
-  pendingFor = null
+  newConversation()
   uncertain = null
   resolvedAt.clear()
   // Work still running when an earlier session ended can never finish, so it must not block this one.
@@ -243,8 +248,7 @@ export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   if (e.reason === 'clear') {
     // The next conversation starts with empty state: its first read of a model waits for its list, as a session's
     // first read does, even when it comes before clearStart.
-    firstWaitSpent = false
-    pendingFor = null
+    newConversation()
     return
   }
   poll?.cancel()

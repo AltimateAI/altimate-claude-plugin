@@ -74,6 +74,7 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   const calls: { tool: string; args: Record<string, unknown>; argv: readonly string[]; env?: Record<string, string> }[] = []
   const toasts: string[] = []
   const statuses: string[] = []
+  const concurrent = { now: 0, most: 0 }
   /** The usage events sent: feature and outcome. */
   const usage: string[][] = []
   if (options.env) {
@@ -139,7 +140,10 @@ async function start($: any, on: any, options: Options, session: { isInteractive
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     const index = run++
     calls.push({ tool, args, argv: e.argv, env: (e as { init?: { env?: Record<string, string> } }).init?.env })
+    // How many tool calls run at once: a held one counts until it is released.
+    concurrent.most = Math.max(concurrent.most, ++concurrent.now)
     if (options.hold?.at === index) await options.hold.until
+    concurrent.now--
     const answer = options.runs[Math.min(index, options.runs.length - 1)]!
     if ('missing' in answer) return { deny: 'spawn ENOENT' }
     if ('refused' in answer) return { deny: 'failed to spawn: operation not permitted' }
@@ -150,7 +154,7 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: session.isInteractive ?? true })
   await clock.settle()
-  return { clock, calls, toasts, statuses, usage }
+  return { clock, calls, toasts, statuses, usage, concurrent }
 }
 
 async function endTurn($: any, clock: any, id: string) {
@@ -336,6 +340,23 @@ test('the next conversation\'s check waits for a CLI call the /clear cut short, 
   release()
   await clock.settle()
   expect(calls).toHaveLength(3)
+})
+
+test('two /clears while a cut-short CLI call runs still start their checks one after another', async ($, on) => {
+  const clear = playsClear($, on)
+  let release!: () => void
+  const { clock, calls, concurrent } = await start($, on, { runs: [[OLD_STG], [OLD_STG], [OLD_STG, NEW_STG]], hold: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  await clock.settle()
+  await $.tool.call(edit(STG))
+  await clear()
+  await clock.settle()
+  release()
+  await clock.settle()
+  expect(calls.length).toBeGreaterThanOrEqual(3)
+  expect(concurrent.most).toBe(1)
 })
 
 test('a second /clear before the first one\'s state was restored keeps what the first carried', async ($, on) => {
