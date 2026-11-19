@@ -12,6 +12,7 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runTool, textOf, within } from './altimate-cli'
+import { openTracked } from './usage'
 import { featuresSessionEnd, featuresTurnComplete, featuresTurnStart } from './features'
 import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
@@ -794,10 +795,12 @@ export async function narrowBand($: EngineInterface, ui: { Text: any }, viewport
   return <ui.Text key="lineage-narrow" color="warning">{narrow.text}</ui.Text>
 }
 
+/** The pane a person opens (/lineage, the summary's Open lineage): counted as a use of it, unlike the pane following Claude. */
 export async function openPane($: EngineInterface) {
   paneOpened = true
   await update($, narrowAtom, () => null)
-  await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), focus: true, closeOnEscape: true })
+  const request = await paneRequest($, PANE, PANE_SIZES)
+  await openTracked($, 'lineage', () => $.ui.open({ id: PANE, title: PANE_TITLE, ...request, focus: true, closeOnEscape: true }))
 }
 
 /** The text an edit replaces and the text it writes: Edit's strings, MultiEdit's pairs, or a Write's whole file. */

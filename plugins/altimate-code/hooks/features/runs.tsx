@@ -8,6 +8,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { RunRecord, RunRow, RunsState } from '../../types'
 import { runTool } from '../altimate-cli'
+import { openTracked } from '../usage'
 import { parseDbtCommand, type DbtInvocation } from '../dbt-command'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -593,8 +594,11 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
 export function register(on: On, context: FeatureContext) {
   on('command.run', { command: COMMAND }, async $ => {
     try {
-      await load($, await $.session.root())
-      await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
+      // A list that cannot be read is a pane that could not open: counted as failed too.
+      await openTracked($, 'runs', async () => {
+        await load($, await $.session.root())
+        return $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
+      })
     } catch (error) {
       return { text: `Could not open the dbt runs: ${String(error)}` }
     }

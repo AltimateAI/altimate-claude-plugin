@@ -13,6 +13,15 @@ All notable changes to this plugin will be documented in this file.
 - `--defer --state …`, `--favor-state` and `--target …` that `/defer` and `/target` add to Claude's dbt commands are no longer invisible: Claude's result says what the command ran as, and a line above the prompt shows it until the next prompt.
 - **Resolve** on a thread the lagging comment list still shows after it was resolved elsewhere is done (the thread is hidden) instead of answering "not an open thread"; a reply to such a thread says it is no longer open and reads the list again.
 
+## [1.8.2] — 2026-11-19
+
+### Added
+- Anonymous usage events, sent through altimate-code's usage telemetry (`altimate-code tool report-event`); the plugin opens no network connection of its own for them. `plugin_session_start` at each session start carries the plugin version, the altimate-code version (added by the CLI), the OS (`macos`, `linux`, `windows`, `wsl` or `unknown`) and an install id: a random UUID made on first use and kept in the plugin's Claude Code store, so it stays the same across sessions on the machine. `plugin_feature_used` carries the feature and its outcome when `/lineage`, `/dbt-show`, `/profile-ctes`, `/scan-cost`, `/comments`, `/sql-graph`, `/health`, `/runs` or `/to-model` opens (`opened`, or `failed` when its pane could not open), when the cost check holds a dbt command (`held`) or `/allow-scan` allows it (`allowed`), and, with "Project health blocks git push" on, when the push gate holds or lets through a `git push`. No session id, project, model, column or file names, SQL or session text: the CLI takes each field only from a fixed list or pattern, and sends these events without the account, machine id or project its other events carry. A panel counts when a person opens it (its command, or the band's Open lineage or Open); `failed` when it could not open or be shown. Every event and field is listed in PRIVACY.md.
+- The events need an altimate-code with the `plugin_session_start` and `plugin_feature_used` actions; an older one refuses them and nothing is sent or shown. They run in the background and never delay a hook.
+
+### Changed
+- With `ALTIMATE_TELEMETRY_DISABLED` (or `OPENCODE_DISABLE_TELEMETRY`) set to `true` or `1`, the plugin no longer starts the CLI for any usage event (the lineage report's included) and makes no install id. The CLI's own opt-out (that variable, or `telemetry.disabled` in its config) still drops them too.
+
 ## [1.8.1] — 2026-11-19
 
 ### Fixed

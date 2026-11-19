@@ -14,6 +14,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 
 import type { HealthInsight, HealthState } from '../../types'
 import { NOT_FOUND, later, runTool, within } from '../altimate-cli'
+import { featureUsed } from '../usage'
 import { setStatusPart } from '../status-line'
 import { HEALTH_SCRATCH, SCRATCH_TARGET, targetPath } from '../dbt-mods-core'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
@@ -654,6 +655,7 @@ async function wantsCheck($: EngineInterface, retry = false): Promise<boolean> {
 export function register(on: On, context: FeatureContext) {
   options = context.options
   on('command.run', { command: COMMAND }, async $ => {
+    featureUsed($, 'health', 'opened')
     const state = await read($, healthAtom)
     if (!state || !enabled) return { text: 'Project health checks dbt projects: this session has none open yet.' }
     // Asking again retries a first check that failed, and checks changes not yet checked.
@@ -779,7 +781,9 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   }
   // The whole decision, folder lookups included, is bounded inside the chain's deadline: past it the gate is given up on and the push runs.
   const decided = await within($, GATE_WAIT_MS, decide($, e))
-  return decided === null ? hold('the check of the changes could not be read in time.') : decided === 'run' ? null : decided
+  const verdict = decided === null ? hold('the check of the changes could not be read in time.') : decided === 'run' ? null : decided
+  featureUsed($, 'health_push_gate', verdict ? 'held' : 'allowed')
+  return verdict
 }
 
 const hold = (why: string) => ({
