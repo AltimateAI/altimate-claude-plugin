@@ -30,8 +30,8 @@
     },
     "maxScanBytes": {
       "type": "number",
-      "title": "Largest BigQuery scan without asking (not used yet)",
-      "description": "Not used yet: the BigQuery scan check isn't in this version, so no run is held. When it ships, a dbt run, build or show that BigQuery estimates would scan more bytes than this waits for your approval (0 never waits; other warehouses are never held).",
+      "title": "Largest dbt scan without asking",
+      "description": "A dbt run, build or show estimated to scan more bytes than this is held until you approve it with /allow-scan; 0 never holds. BigQuery's estimate is its dry run; Snowflake's and Databricks' is the query planner's (EXPLAIN), which can differ from what the run scans. A query with no estimate, and other warehouses, are never held. Optional; default: 10737418240 (10 GiB).",
       "default": 10737418240,
       "min": 0
     },

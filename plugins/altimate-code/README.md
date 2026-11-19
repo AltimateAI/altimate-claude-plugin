@@ -153,12 +153,12 @@ Compile and validate runs a query on your warehouse after every model edit (`dbt
 
 ## Settings
 
-The plugin has six settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). `dbt_mods` is used by the dbt helpers, and `healthBlocksPush` and `healthConfigPath` by the project health check. `maxScanBytes` and the comments settings are not used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each controls.
+The plugin has six settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). `dbt_mods` is used by the dbt helpers, and `healthBlocksPush` and `healthConfigPath` by the project health check. `maxScanBytes` is used by the scan check (BigQuery, Snowflake, Databricks). The comments settings are not used yet: the feature that reads them is not in this version, so changing one changes nothing. The table says what each controls.
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
 | `dbt_mods` | on | Turns all of the dbt helpers (above) off when false. |
-| `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it waits for your approval (0 never waits; at least 0). Other warehouses are never held. |
+| `maxScanBytes` | 10 GiB | A dbt run, build or show estimated to scan more bytes than this is held until you approve it with `/allow-scan` (0 never holds; at least 0). On BigQuery the estimate is a dry run; on Snowflake and Databricks it is the query planner's (`EXPLAIN`): Snowflake's bytes after pruning, an upper bound, and Databricks' table sizes, which a run usually reads less of. A query with no estimate (a Databricks table without statistics) runs, with a note saying why; other warehouses are never held. |
 | `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. If the first check of a session lands after you changed a model, that model's existing issues count as new (the baseline then lacks them). The reverse also holds: a model you drop from a schema file before that first check lands has its new issues taken as existing, so a push is not held for them. |
 | `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. Empty uses the default checks. |
 | `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). |
