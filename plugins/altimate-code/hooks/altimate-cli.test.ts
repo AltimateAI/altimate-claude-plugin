@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { compareVersions, parseVersion, runTool, within } from './altimate-cli'
+import { compareVersions, isPreviewBuild, parseVersion, runTool, within } from './altimate-cli'
 
 /** A stand-in for `$` whose CLI answers every call and whose MCP connection attempts go through `connect`. */
 function standIn(connect: () => unknown, now = 0) {
@@ -108,4 +108,11 @@ test('versions are read from what --version prints and compared as semver', () =
   expect(compareVersions('0.12.12-beta.1', '0.12.11')).toBe(1)
   expect(compareVersions('0.12.11-beta.2', '0.12.11-beta.10')).toBe(-1)
   expect(compareVersions('0.12.11-beta', '0.12.11-beta.1')).toBe(-1)
+})
+
+test('the last version printed is read, and a preview build is no release to compare with', () => {
+  expect(parseVersion('Using node v22.1.0\n0.12.9\n')).toBe('0.12.9')
+  expect(isPreviewBuild('0.0.0-main-202611191200')).toBe(true)
+  expect(isPreviewBuild('0.0.0--202611190701')).toBe(true)
+  expect(isPreviewBuild('0.12.9')).toBe(false)
 })

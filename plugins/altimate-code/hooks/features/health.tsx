@@ -13,7 +13,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { HealthInsight, HealthState } from '../../types'
-import { MISSING_BINARY, later, runTool, within } from '../altimate-cli'
+import { later, runTool, within } from '../altimate-cli'
 import { setStatusPart } from '../status-line'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -480,7 +480,8 @@ async function check($: EngineInterface): Promise<HealthRun> {
     const until = (await $.clock.now()) + CHECK_MS
     result = await runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until })
   } catch (error) {
-    if (MISSING_BINARY.test(String(error))) return { problem: NO_CLI }
+    // Only a binary that is not there: one that is there and refused to start keeps its own words.
+    if (/ENOENT|not found|no such file/i.test(String(error))) return { problem: NO_CLI }
     return { problem: `Project health could not run: ${String(error).split('\n')[0]}` }
   }
   // A refusal or failure comes back as success false with an empty list: only success true is an answer.

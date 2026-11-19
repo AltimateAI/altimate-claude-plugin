@@ -220,17 +220,18 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
     }
     for (const col of change.columns) {
       jobs.push(async () => {
-        // A column the SQL from before the task lacks is no column of the task's copy of the manifest: asking
-        // for it would read as nothing downstream, so only the model's own count is asked. Without a copy the
-        // project's manifest as it is now is read, which may know it.
-        const added = col.before === null && !!done.manifests[change.root]
-        const meta = await ask($, done, change, added ? null : col.name, 'downstream')
-        const answer = added ? null : answerOf(meta)
+        // Every changed column is asked by name: the SQL from before the task may not name a column the manifest
+        // has (a `select *` spelled out, a cast given its name). The manifest says whether it has it.
+        const meta = await ask($, done, change, col.name, 'downstream')
+        const answer = answerOf(meta)
         // An answer that never reached the column (no hop 0) traced nothing: it could not be traced.
         const down = answer && answer.columns.some(one => one.hop === 0) ? answer : null
+        const lacks = typeof (meta as any)?.column_answer_error === 'string' || (!!answer && !down)
+        // Only a column the SQL from before the task did not name, which the manifest lacks too, is called new.
+        const unchecked = col.before === null && !!meta && lacks
         // An altimate-code from before the column answer gives neither the answer nor its error.
-        const stale = !added && !answer && !!meta && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
-        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked: added, ...unknownOf(down), consumers: consumersOf(meta) }
+        const stale = !answer && !!meta && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
+        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
       })
     }
   }

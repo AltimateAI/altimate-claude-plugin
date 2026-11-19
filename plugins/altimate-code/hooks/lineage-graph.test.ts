@@ -457,4 +457,6 @@ test('a column typed in another case counts the tests on that column', () => {
   const m = 'model.shop.orders'
   const graph = buildGraph({ nodes: { [m]: { resource_type: 'model', name: 'orders' }, 'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: 'revenue', attached_node: m, depends_on: { nodes: [m] } } } })
   expect(testsOnColumn(graph, m, 'REVENUE')).toBe(1)
+  const quoted = buildGraph({ nodes: { [m]: { resource_type: 'model', name: 'orders' }, 'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: '"Revenue"', attached_node: m, depends_on: { nodes: [m] } } } })
+  expect(testsOnColumn(quoted, m, 'revenue')).toBe(1)
 })

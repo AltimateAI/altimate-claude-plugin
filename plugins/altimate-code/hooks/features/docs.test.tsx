@@ -342,7 +342,7 @@ test('a reach without ratings, as an older altimate-code sends, is said once and
   const result: any = await $.tool.call(EDIT)
   await clock.settle()
   expect(result.context).toHaveLength(1)
-  expect(result.context[0]).toContain('needs altimate-code 0.12.11 or newer')
+  expect(result.context[0]).toContain('so no description can be offered to copy: npm i -g @altimateai/altimate-code')
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' } as any)
   expect(await band.find({ type: 'Text', text: /can take this description/ })).toBeUndefined()
   await band.unmount()

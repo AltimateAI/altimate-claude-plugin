@@ -309,6 +309,9 @@ export function countText(certain: number, maybe: number, incomplete: boolean, n
   return maybe ? `${known} (${certain ? `${maybe} more` : maybe} may)` : known
 }
 
+/** A column name as dbt and warehouses compare it: one layer of quotes off, case folded. */
+const bareName = (name: string | null | undefined) => (name ?? '').trim().replace(/^(["`\[])(.*)["`\]]$/, '$2').toLowerCase()
+
 /**
  * The tests that check one column of the model itself: a test of another model that shares the column's name
  * is not counted. A test dbt does not attach to a model (attached_node, dbt 1.5+) counts when the model is its
@@ -319,8 +322,8 @@ export function testsOnColumn(graph: LineageGraph, id: string, column: string): 
   const tests = downstreamOf(graph, id).testIds.map(test => [test, graph.nodes[test]] as const)
   if (tests.some(([, node]) => node?.testColumn === undefined)) return null
   return tests.filter(([test, node]) => {
-    // dbt and warehouses fold unquoted names: REVENUE typed is the yml's revenue.
-    if (node?.testColumn?.toLowerCase() !== column.toLowerCase()) return false
+    // dbt and warehouses fold unquoted names: REVENUE typed is the yml's revenue, and "amount" is amount.
+    if (bareName(node?.testColumn) !== bareName(column)) return false
     if (node.testOn) return node.testOn === id
     const parents = graph.parents[test] ?? []
     return parents.length > 0 && parents.every(parent => parent === id)

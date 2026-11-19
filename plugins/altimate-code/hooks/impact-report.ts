@@ -217,7 +217,7 @@ export type ColumnTrace = {
   failed: boolean
   /** The altimate-code answered without a column answer: one from before it. */
   stale?: boolean
-  /** The column is not in the manifest the answer read (added in the task): nothing was traced, so no count is given. */
+  /** The SQL from before the task did not name the column and the manifest it was asked of lacks it: likely added in the task, so no count is given. */
   unchecked?: boolean
   /** Why the reach is unknown though the column was found: the answer reached nothing, and models it reads were not read. */
   unknown?: string
@@ -231,9 +231,11 @@ export type ColumnTrace = {
 export function unknownReach(answer: ColumnAnswer | null): string | null {
   if (!answer) return null
   const r = reachOf(answer)
-  // Models read in full that the value was not traced to stay "may change" beside a real 0; only unread models make it
-  // unknown, counted from the engine's counts or its list, whichever names more.
-  const unread = Math.max(r.unresolved, answer.unresolved?.length ?? 0)
+  // Models read in full that the value was not traced to stay "may change" beside a real 0; only models not read, or
+  // read only in part, make it unknown: counted from the engine's counts, its unread list or its may-carry reasons,
+  // whichever names more.
+  const partly = Array.isArray(answer.may_carry) ? answer.may_carry.filter(one => PARTLY_READ.has(String((one as any)?.reason ?? ''))).length : 0
+  const unread = Math.max(r.unresolved, answer.unresolved?.length ?? 0, partly)
   if (r.columns > 0 || r.models > 0 || unread === 0) return null
   const missing = (answer.unresolved ?? []).filter(one => /no compiled sql/i.test(String(one?.reason ?? ''))).length
   if (missing > 0 && missing >= unread) return `not traced: ${count(missing, 'downstream model')} ${missing === 1 ? 'has' : 'have'} no compiled SQL (run \`dbt compile\`)`
@@ -242,8 +244,11 @@ export function unknownReach(answer: ColumnAnswer | null): string | null {
   return `not traced: ${count(unread, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
 }
 
-/** The band's words for a column the task added: the manifest from before the task cannot trace it. */
-const ADDED_NOTE = 'new in this task: its reach is unknown, not zero (the manifest from before the task lacks it)'
+/** The may-carry reasons for a model whose SQL was not read in full: its reach from the column is not known. */
+const PARTLY_READ = new Set(['unresolved', 'read_in_part', 'read_columns_unknown', 'unclear_sql', 'capped'])
+
+/** The band's words for a column the SQL from before the task did not name and its manifest lacks: likely added in the task. */
+const ADDED_NOTE = 'not in the manifest from before the task (new in it?): its reach is unknown, not zero'
 
 /** The band's view of a finished task. */
 export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report: string | null): TaskSummaryView {
@@ -258,7 +263,7 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
         const reach = one.down && !one.unknown ? reachOf(one.down) : null
         for (const entry of one.down?.unresolved ?? []) unresolved.add(one.down!.nodes[entry.model]?.id ?? one.down!.nodes[entry.model]?.name ?? String(entry.model))
         if (reach?.truncated) truncated = true
-        const note = one.unknown ?? (one.unchecked && one.column && change.columns.some(col => col.name === one.column && col.before === null) ? ADDED_NOTE : undefined)
+        const note = one.unknown ?? (one.unchecked ? ADDED_NOTE : undefined)
         return { name: one.column!, reach, failed: one.failed, ...(note && { note }) }
       })
     return { name: change.model, modelLevel, columns }
@@ -440,7 +445,7 @@ export function impactWords(model: string, column: string | null, trace: ColumnT
     return [[...downstream, ...(level > 0 ? ["No output column changed (a filter or a join, say), so this can't say which of them are affected."] : [])]]
   }
   if (down && trace?.unknown) return [[...downstream, 'The reach of ', { code: column }, ` is unknown: ${trace.unknown.replace(/^not traced: /, '')}.`]]
-  if (!down) return [[...downstream, ...(trace?.unchecked ? ['The column ', { code: column }, " is new in this task, so the manifest from before it can't trace it: its reach is unknown, not zero."] : trace?.stale ? [STALE] : ['The column ', { code: column }, ' could not be traced.'])]]
+  if (!down) return [[...downstream, ...(trace?.unchecked ? ['The column ', { code: column }, " is not in the manifest from before the task (it may be new in the task), so its reach is unknown, not zero."] : trace?.stale ? [STALE] : ['The column ', { code: column }, ' could not be traced.'])]]
   const r = reachOf(down)
   const lines: Words[] = []
   const value = [...new Set(down.columns.filter(one => one.hop > 0).map(one => one.model))].map(index => down.nodes[index]).filter(Boolean)

@@ -45,7 +45,7 @@ const DEP = { ...insight('base', '', 'Missing tests'), uniqueId: 'model.dep.base
 
 type Options = {
   /** The tool's answer per run (the last repeats). */
-  runs: (ReturnType<typeof insight>[] | { fail: string } | { stale: string } | { truncated: true } | { missing: true })[]
+  runs: (ReturnType<typeof insight>[] | { fail: string } | { stale: string } | { truncated: true } | { missing: true } | { refused: true })[]
   /** Holds the run with this index (from 0) until released. */
   hold?: { at: number; until: Promise<void> }
   /** Folders that hold a dbt_project.yml (default: the repo). */
@@ -128,6 +128,7 @@ async function start($: any, on: any, options: Options, session: { isInteractive
     if (options.hold?.at === index) await options.hold.until
     const answer = options.runs[Math.min(index, options.runs.length - 1)]!
     if ('missing' in answer) return { deny: 'spawn ENOENT' }
+    if ('refused' in answer) return { deny: 'failed to spawn: operation not permitted' }
     const metadata =
       'fail' in answer ? { success: false, insights: [] } : 'truncated' in answer ? { success: true, insights: [], truncated: true, total: 9999 } : 'stale' in answer ? { success: true, insights: [OLD_STG], stale_manifest: { message: answer.stale } } : { success: true, insights: answer }
     const output = 'fail' in answer ? answer.fail : ''
@@ -346,6 +347,12 @@ test('no altimate-code on PATH toasts nothing at session start or at a turn; /he
   expect(toasts).toEqual([])
   const shown: any = await $.command.run({ command: 'health' } as any)
   expect(String(shown?.text)).toBe('Project health needs the altimate-code CLI on your PATH: npm i -g @altimateai/altimate-code')
+})
+
+test('an altimate-code that is there but refused to start is not called missing: its own words are told', async ($, on) => {
+  const { toasts } = await start($, on, { runs: [{ refused: true }] })
+  expect(toasts.join('\n')).toContain('Project health could not run')
+  expect(toasts.join('\n')).not.toContain('on your PATH')
 })
 
 test('/health shows the issues Claude introduced, and retries a first check that failed', async ($, on) => {

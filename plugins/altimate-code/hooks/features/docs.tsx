@@ -462,7 +462,7 @@ async function schemaEdited($: EngineInterface, file: EditedFile, created: boole
     if (found.candidates.length > candidates.length) lines.push(`◆ docs · ${plural(found.candidates.length - candidates.length, 'more downstream column')} of ${JSON.stringify(`${one.model}.${one.column}`)} ${found.candidates.length - candidates.length === 1 ? 'is' : 'are'} not offered`)
     if (unrated && !saidOldReach) {
       saidOldReach = true
-      lines.push('◆ docs · this altimate-code does not rate how each downstream column comes from the traced one (needs altimate-code 0.12.11 or newer), so no description can be offered to copy')
+      lines.push('◆ docs · this altimate-code does not rate how each downstream column comes from the traced one, so no description can be offered to copy: npm i -g @altimateai/altimate-code')
     }
     if (!candidates.length) continue
     groups.push({ model: one.model, column: one.column, description: one.description, manifest: project.manifest, file: tidy(file.path), candidates })

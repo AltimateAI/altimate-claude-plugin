@@ -697,7 +697,7 @@ const NOT_IN_MANIFEST = (column: string) => ({
 const PRE_TASK_ENGINE = (args: Record<string, any>) => (args.column === 'amount' ? {} : args.column ? { column_answer: NOT_IN_MANIFEST(args.column) } : {})
 const SECOND_HOP = { ...DOWN, focus: { model: 'model.shop.stg_payments', column: 'amount' }, counts: { columns: 2, models: 2, hops: 1, ends: 2, may_carry_models: 0, model_level: 2 }, columns: [DOWN.columns[0]!, DOWN.columns[1]!, DOWN.columns[2]!], nodes: DOWN.nodes.slice(0, 3), edges: [], unresolved: [], may_carry: [], flags: [] }
 
-test('a renamed column is never shown as reaching 0 columns in 0 models: the old name is traced in the pre-task manifest, the new one is not asked as a column', async ($, on) => {
+test('a renamed column is never shown as reaching 0 columns in 0 models: the old name is traced in the pre-task manifest, and the new one, which it lacks, is said to be unknown', async ($, on) => {
   const { tools, turn, logs } = await start($, on, {
     impact: args => (args.column === 'amount' ? { column_answer: SECOND_HOP } : PRE_TASK_ENGINE(args)),
   })
@@ -707,14 +707,13 @@ test('a renamed column is never shown as reaching 0 columns in 0 models: the old
   expect(directional(tools).map(one => [one.column ?? null, one.manifest_path])).toEqual(
     expect.arrayContaining([
       ['amount', frozen()],
-      [null, frozen()],
+      ['total', frozen()],
     ]),
   )
-  expect(directional(tools).some(one => one.column === 'total')).toBe(false)
   const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
   expect(line).not.toMatch(/reaches 0 columns in 0 models/)
   expect(line).toContain('amount  reaches 2 columns in 2 models')
-  expect(line).toContain('total  new in this task: its reach is unknown')
+  expect(line).toContain('total  not in the manifest from before the task (new in it?): its reach is unknown, not zero')
 })
 
 test('a column the queried manifest does not know is not shown as 0, even when the engine answers with an empty reach for it', async ($, on) => {
@@ -731,7 +730,7 @@ test('a column the queried manifest does not know is not shown as 0, even when t
   await clock.settle()
   const impact = JSON.stringify(embedded(writes.get(REPORT)!).focuses[0].impact)
   expect(impact).toContain('could not be traced')
-  expect(impact).not.toContain('new in this task')
+  expect(impact).not.toContain('not in the manifest from before the task')
   await band.unmount()
 })
 
@@ -904,4 +903,19 @@ test('a report on a task that added a column is built once: opening it again ask
   await clock.settle()
   expect(directional(tools).length).toBe(asked)
   await band.unmount()
+})
+
+test('a column the SQL from before the task did not name but the manifest has (a select * spelled out) is traced by name, with its real reach', async ($, on) => {
+  const { tools, turn, logs } = await start($, on, { impact: args => (args.column === 'amount' ? { column_answer: SECOND_HOP } : {}) })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: STAGING, content: 'select *\nfrom {{ source("raw", "payments") }}\n' })
+  })
+  const before = directional(tools).length
+  await turn('t2', async () => {
+    await $.tool.call({ tool: 'Write', file_path: STAGING, content: 'select\n  payment_id,\n  amount_cents / 100 as amount\nfrom {{ source("raw", "payments") }}\n' })
+  })
+  expect(directional(tools).slice(before).some(one => one.column === 'amount')).toBe(true)
+  const line = logs.filter(one => one.startsWith('◆ Lineage after this task')).pop()!
+  expect(line).toContain('amount  reaches 2 columns in 2 models')
+  expect(line).not.toMatch(/not in the manifest from before the task/)
 })

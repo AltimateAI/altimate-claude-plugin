@@ -5,6 +5,7 @@ import { expect, mock, test as kitTest } from 'claude-code/testing'
 const test = (name: string, body: Parameters<typeof kitTest>[1]) => kitTest(name, { options: { dbt_mods: false } }, body as any)
 
 import { register } from './integrations'
+import { STATUS_ORDER } from './status-line'
 
 const PANE = {
   plugin: 'altimate-code',
@@ -716,6 +717,15 @@ test('with nobody at the prompt the version is not checked', async ($, on) => {
   const { runs, drawn } = await startWithVersion($, on, versionOnly('0.12.8'), false)
   expect(runs.filter(argv => argv[1] === '--version')).toEqual([])
   expect(drawn.filter(Boolean).join('\n')).not.toContain('npm i -g')
+})
+
+test('a preview build of altimate-code leaves the status line alone', async ($, on) => {
+  const { drawn } = await startWithVersion($, on, versionOnly('0.0.0-main-202611191200'))
+  expect(drawn.filter(Boolean).join('\n')).not.toContain('npm i -g')
+})
+
+test('the version notice comes after every other part, so it never hides them', () => {
+  expect(STATUS_ORDER.at(-1)).toBe('altimateCode')
 })
 
 test('a version answer nobody can read leaves the status line alone', async ($, on) => {

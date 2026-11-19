@@ -567,4 +567,7 @@ test('models read in full that the value was not traced to keep the reach at 0 w
   // Unread for mixed reasons: every unread model is counted, the ones without compiled SQL named.
   const mixed = { ...notTraced, unresolved: [{ model: 1, reason: 'no compiled SQL: run `dbt compile`', code: 'unresolved' }, { model: 2, reason: 'the SQL could not be parsed', code: 'unresolved' }] } as any
   expect(unknownReach(mixed)).toBe('not traced: 2 downstream models could not be read (1 with no compiled SQL: run `dbt compile`)')
+  // A model read only in part may carry it for certain reasons the check could not see: the reach is unknown too.
+  const partly = { ...notTraced, may_carry: [{ id: 'model.p.b', name: 'b', reason: 'read_in_part' }] } as any
+  expect(unknownReach(partly)).toBe('not traced: 1 downstream model could not be read')
 })

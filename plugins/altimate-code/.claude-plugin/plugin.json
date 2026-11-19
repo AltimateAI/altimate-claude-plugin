@@ -38,7 +38,7 @@
     "healthBlocksPush": {
       "type": "boolean",
       "title": "Project health blocks git push",
-      "description": "On refuses a git push while the project health check finds new issues in the models you changed this session; off only shows them. Optional; default: off.",
+      "description": "On refuses a git push while the project health check finds new issues in the models you changed this session, and while the check cannot run or has not finished; off only shows them. Optional; default: off.",
       "default": false
     },
     "healthConfigPath": {
