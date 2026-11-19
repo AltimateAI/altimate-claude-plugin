@@ -64,6 +64,8 @@ type Options = {
   onCall?: () => void
   /** Called at each project lookup; a promise it returns holds the lookup. */
   onExists?: () => Promise<void> | void
+  /** The environment the plugin reads, which turns the usage events on (none set) or off; unset, they are not sent. */
+  env?: Record<string, string>
 }
 
 async function start($: any, on: any, options: Options, session: { isInteractive?: boolean } = {}) {
@@ -71,6 +73,13 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   const calls: { tool: string; args: Record<string, unknown>; argv: readonly string[] }[] = []
   const toasts: string[] = []
   const statuses: string[] = []
+  /** The usage events sent: feature and outcome. */
+  const usage: string[][] = []
+  if (options.env) {
+    mock.env(on, options.env)
+    mock.store(on)
+    on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
+  }
   on('command.register', () => ({ value: { command: 'health' } }))
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
   on('session.end', () => ({ sessionId: 'test' }))
@@ -120,8 +129,12 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   })
   let run = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
-    const [, command, , tool = ''] = e.argv
+    const [, command, sub, tool = ''] = e.argv
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    if (sub === 'report-event') {
+      if (tool === 'plugin_feature_used') usage.push([e.argv[e.argv.indexOf('--feature') + 1]!, e.argv[e.argv.indexOf('--outcome') + 1]!])
+      return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     const index = run++
     calls.push({ tool, args, argv: e.argv })
@@ -136,7 +149,7 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: session.isInteractive ?? true })
   await clock.settle()
-  return { clock, calls, toasts, statuses }
+  return { clock, calls, toasts, statuses, usage }
 }
 
 async function endTurn($: any, clock: any, id: string) {
@@ -861,4 +874,42 @@ test('the band line and the report', () => {
 
 test('the push gate waits for less than the tool chain gives a phase, so a held push is never given up on', () => {
   expect(GATE_WAIT_MS).toBeLessThan(PHASE_TIMEOUT_MS)
+})
+
+test('with the push gate on, a held push sends one health_push_gate held usage event, and /health one opened', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const { clock, usage } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG]], env: {} })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(((await $.tool.call(command('git push'))) as any)?.deny).toContain('1 new project health issue')
+  await clock.settle()
+  expect(usage).toEqual([['health_push_gate', 'held']])
+  await $.command.run({ command: 'health', args: '' } as any)
+  await clock.settle()
+  expect(usage).toEqual([['health_push_gate', 'held'], ['health', 'opened']])
+})
+
+test('with the push gate on, a push it lets through sends one health_push_gate allowed; a command that is no push sends nothing', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const { clock, usage } = await start($, on, { runs: [[OLD_STG]], env: {} })
+  await $.tool.call(command('git status'))
+  expect(((await $.tool.call(command('git push'))) as any)?.deny).toBeUndefined()
+  await clock.settle()
+  expect(usage).toEqual([['health_push_gate', 'allowed']])
+})
+
+test('with the push gate off, a push is no use of the gate: no usage event', async ($, on) => {
+  const { clock, usage } = await start($, on, { runs: [[OLD_STG]], env: {} })
+  await $.tool.call(command('git push'))
+  await $.tool.call(command('git status'))
+  await clock.settle()
+  expect(usage).toEqual([])
+})
+
+test('with ALTIMATE_TELEMETRY_DISABLED the push gate holds as before and sends nothing', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const { clock, usage } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG]], env: { ALTIMATE_TELEMETRY_DISABLED: '1' } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(((await $.tool.call(command('git push'))) as any)?.deny).toContain('1 new project health issue')
+  await $.command.run({ command: 'health', args: '' } as any)
+  await clock.settle()
+  expect(usage).toEqual([])
 })

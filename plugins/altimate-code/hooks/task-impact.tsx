@@ -6,6 +6,7 @@ import type { EngineInterface, On, RenderElement } from 'claude-code'
 
 import type { PlanImpactView, TaskSummaryView } from '../types'
 import { later, runAltimate, runTool, within } from './altimate-cli'
+import { usageOff } from './usage'
 import {
   answerOf,
   changedColumns,
@@ -313,11 +314,12 @@ export type ReportAction = 'summary_shown' | 'open_pressed' | 'command_run' | 'b
 
 /**
  * One usage event about the report, through altimate-code's telemetry (`tool report-event`), in the
- * background. It carries the action and this session's id only, and the CLI drops it under the telemetry
- * opt-out; an altimate-code without the command refuses it, and nothing else happens.
+ * background. It carries the action and this session's id only. Under the telemetry opt-out no CLI is
+ * started, and the CLI drops it under its own; an altimate-code without the command refuses it, and nothing else happens.
  */
 export function reportEvent($: EngineInterface, action: ReportAction) {
   later($, async () => {
+    if (await usageOff($)) return
     const id = await $.session.id()
     await runAltimate($, ['tool', 'report-event', action, '--session', `claude:${id}`], 15_000).catch(() => null)
   })
