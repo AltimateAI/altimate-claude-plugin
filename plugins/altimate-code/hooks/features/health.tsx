@@ -507,7 +507,7 @@ async function drawStatus($: EngineInterface, issues: readonly HealthInsight[]) 
 /**
  * Tells a problem once, until a different one comes. A missing altimate-code, or one without the tool, is not
  * told: the checks run by themselves (session start, each turn), so only /health, which asks for the answer,
- * says it (the status line already names a missing or old CLI).
+ * says it (the status line names a missing or old altimate-code, though not a missing tool).
  */
 function tell($: EngineInterface, problem: string) {
   if (problem === toldProblem || problem === NEEDS_CLI || problem === NO_CLI) return

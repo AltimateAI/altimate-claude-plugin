@@ -39,7 +39,7 @@ import {
   upstreamArt,
   warehouseEdges,
 } from './lineage-graph'
-import { answerOf, carriersOf, type ColumnAnswer, mayCarryGroups, reachOf } from './impact-report'
+import { answerOf, carriersOf, type ColumnAnswer, mayCarryGroups, reachOf, unknownReach } from './impact-report'
 import { taskBeforeTool, taskTurnComplete, taskTurnStart } from './task-impact'
 
 const PANE = 'altimate-lineage'
@@ -933,7 +933,11 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
     )
     // The column answer, as the end-of-task summary reads it, so Claude and the person see one set of
     // numbers; the older column reach only from an altimate-code that sends no column answer.
-    const answers = results.map(result => (result?.ok ? answerOf(result.metadata) : null))
+    // An answer that never reached the column (no hop 0) traced nothing: the column is unchecked, as at a task's end.
+    const answers = results.map(result => {
+      const answer = result?.ok ? answerOf(result.metadata) : null
+      return answer && answer.columns.some(one => one.hop === 0) ? answer : null
+    })
     if (answers.some(Boolean)) {
       answers.forEach((one, i) => {
         ;(one ? traced : unchecked).push(touched[i]!)
@@ -954,7 +958,8 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   const maybe = reach ? reach.uncertain.length + reach.untraced.length : 0
   const incomplete = !!reach && (reach.truncated || unchecked.length > 0)
   const unsettled = reach ? maybe + (reach.truncated ? 1 : 0) + unchecked.length : 0
-  const carried = answered.map(one => ({ ...one, reach: reachOf(one.answer), carriers: carriersOf(one.answer) }))
+  // Unread downstream models (no compiled SQL) leave the reach unknown, never a confident zero.
+  const carried = answered.map(one => ({ ...one, reach: reachOf(one.answer), unknown: unknownReach(one.answer), carriers: carriersOf(one.answer) }))
   // Dashboards on models that may read the column are listed too, and said to be a maybe.
   const maybeDashboards = reach ? reach.uncertainExposures : []
   const dashboards = reach
@@ -968,7 +973,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
       (maybeDashboards.length ? `; ${plural(maybeDashboards.length, 'dashboard')} may read it` : '') +
       (reach.exposuresError && !reach.exposures.length ? '; its dashboards could not be read' : '')
     : carried.length
-      ? carried.map(one => `${node.name}.${one.column} reaches ${plural(one.reach.columns, 'column')} in ${plural(one.reach.models, 'model')}, ${one.reach.mayCarry} may carry it`).join('; ')
+      ? carried.map(one => (one.unknown ? `${node.name}.${one.column} ${one.unknown}` : `${node.name}.${one.column} reaches ${plural(one.reach.columns, 'column')} in ${plural(one.reach.models, 'model')}, ${one.reach.mayCarry} may carry it`)).join('; ')
       : `${target} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'model')}${dashboards.length ? ` and ${plural(dashboards.length, 'dashboard')}` : ''}`
   const toastText = `◆ impact-first · ${toast}${dashboards.length ? ` · ${dashboards.slice(0, 3).join(' · ')}` : ''}${stale ? ' · the manifest is older than this file' : ''}`.replace(CONTROL, ' ').slice(0, 300)
 
@@ -987,6 +992,10 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   }
   for (const one of carried) {
     const r = one.reach
+    if (one.unknown) {
+      lines.push(`- ${quoted(one.column)}: ${one.unknown}`)
+      continue
+    }
     const named = one.carriers.map(model => `${quoted(model.name)} (${listed(model.columns, 8)})`)
     lines.push(`- ${quoted(one.column)}: its value reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'downstream model')} (${plural(r.ends, 'end column')})${named.length ? `: ${capped(named, 15)}` : ''}`)
     const exposures = [...new Set(one.carriers.flatMap(model => model.exposures))]

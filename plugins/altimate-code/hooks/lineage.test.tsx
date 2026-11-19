@@ -382,6 +382,44 @@ test('with a column answer, the note Claude gets has the numbers the end-of-task
   expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue reaches 3 columns in 2 models, 4 may carry it · exec_revenue')
 })
 
+// What altimate-code 0.12.11 answers for a manifest from `dbt parse`: the column found, its two readers unread.
+const PARSE_ONLY_NOTE_ANSWER = {
+  version: 1,
+  focus: { model: 'model.shop.fct_orders', column: 'revenue' },
+  direction: 'downstream',
+  counts: { columns: 0, models: 0, hops: 0, contracts: 0, ends: 0, may_carry_models: 2, not_traced_models: 0, model_level: 2 },
+  nodes: [{ id: 'model.shop.fct_orders', name: 'fct_orders' }, { id: 'model.shop.a', name: 'a' }, { id: 'model.shop.b', name: 'b' }],
+  columns: [{ model: 0, column: 'revenue', hop: 0, end: false, how: null, how_from: null }],
+  edges: [],
+  unresolved: [
+    { model: 1, reason: 'no compiled SQL: run `dbt compile`', code: 'unresolved' },
+    { model: 2, reason: 'no compiled SQL: run `dbt compile`', code: 'unresolved' },
+  ],
+  may_carry: [
+    { id: 'model.shop.a', name: 'a', reason: 'unresolved' },
+    { id: 'model.shop.b', name: 'b', reason: 'unresolved' },
+  ],
+  flags: [],
+}
+
+test('an edit whose readers have no compiled SQL never notes that it reaches 0, to Claude or the person', async ($, on) => {
+  const { clock, notes } = await start($, on, { reach: { ...REACH, column_answer: PARSE_ONLY_NOTE_ANSWER } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  const note = result.context?.[0] as string
+  expect(note).toContain('- revenue: not traced: 2 downstream models have no compiled SQL (run `dbt compile`)')
+  expect(note).not.toMatch(/reaches 0/)
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue not traced: 2 downstream models have no compiled SQL (run `dbt compile`)')
+})
+
+test('an edit whose answer never reaches the column is unchecked, never a reach of 0', async ($, on) => {
+  const { clock, notes } = await start($, on, { reach: { ...REACH, column_answer: { ...PARSE_ONLY_NOTE_ANSWER, columns: [], unresolved: [], may_carry: [], counts: { ...PARSE_ONLY_NOTE_ANSWER.counts, may_carry_models: 0 } } } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  expect(String(result.context?.[0] ?? '')).not.toMatch(/reaches 0/)
+  expect(notes.join('\n')).not.toMatch(/reaches 0/)
+})
+
 test('a may_carry that is not a list gives a note without reasons, and nothing throws', async ($, on) => {
   const { clock } = await start($, on, { reach: { ...REACH, column_answer: { ...NOTE_ANSWER, may_carry: { rpt_broken: 'unresolved' } } } })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
