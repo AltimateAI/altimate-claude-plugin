@@ -150,7 +150,7 @@ export function register(on: On, context: FeatureContext) {
     })
     if (!held) return { text: 'Nothing is held: no dbt command is waiting on its scan size.' }
     if (!allowed) return { text: 'The held command changed meanwhile: run /allow-scan again to allow the one now held.' }
-    return { text: `Allowed: ${held.target} (≈ ${held.display}) runs once when Claude runs the same command again; after that it is held again.` }
+    return { text: `Allowed: ${held.target} (≈ ${held.display}${held.planner ? `, ${held.planner} plan estimate` : ''}) runs once when Claude runs the same command again; after that it is held again.` }
   })
 
   on('command.run', { command: 'scan-cost' }, async ($, e) => {
@@ -202,7 +202,7 @@ export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {}
 export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderElement | null> {
   const held = (await read($, costAtom))?.held
   if (!held) return null
-  return <ui.Text color="warning">{`⛔ held: ${held.target} would scan ${held.display} (limit ${formatBytes(limitBytes)}) · /allow-scan`}</ui.Text>
+  return <ui.Text color="warning">{`⛔ held: ${held.target} would scan ${held.display}${basisOf(held)} (limit ${formatBytes(limitBytes)}) · /allow-scan`}</ui.Text>
 }
 
 /** The command to run in place of `e.command`; null keeps it. */
@@ -234,7 +234,7 @@ async function leaveProject($: EngineInterface) {
 }
 
 /** Per command: the over-limit answer a pass has in hand but has not yet recorded as the hold. */
-const overNow = new Map<string, { label: string; bytes: number; display: string; basis?: string }>()
+const overNow = new Map<string, { label: string; bytes: number; display: string; planner?: string }>()
 
 async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): Promise<{ deny: string } | null> {
   if (limitBytes <= 0) return null
@@ -270,7 +270,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
 
   const lines: string[] = []
   let estimated = false
-  const over: { label: string; bytes: number; point: number; display: string; basis?: string }[] = []
+  const over: { label: string; bytes: number; point: number; display: string; planner?: string }[] = []
   // One wait for the whole command, however many queries it names.
   const waitUntil = (await $.clock.now()) + GATE_WAIT_MS
   const pending: string[] = []
@@ -285,7 +285,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
         await update($, costAtom, prev => {
           const current = prev ?? FRESH
           const same = current.held?.command === e.command
-          return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+          return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display, ...(worst.planner && { planner: worst.planner }) } }
         })
       } catch {
         // The refusal stands whether or not the hold could be recorded: a gate that throws lets the call run.
@@ -315,9 +315,9 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
       // The answer in hand is still the project's: one over the limit is kept, so the refusal holds the command.
       if (answer !== 'pending' && answer.kind === 'bytes' && answer.maxBytes > limitBytes) {
         // Noted before any await, as on the normal path: a parallel pass for this command whose own estimate fails must still see it.
-        mine.note = { label, bytes: answer.maxBytes, display: answer.display, basis: basisOf(answer) }
-        overNow.set(e.command, mine.note as { label: string; bytes: number; display: string; basis?: string })
-        over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display, basis: basisOf(answer) })
+        mine.note = { label, bytes: answer.maxBytes, display: answer.display, planner: answer.planner }
+        overNow.set(e.command, mine.note as { label: string; bytes: number; display: string; planner?: string })
+        over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display, planner: answer.planner })
       }
       return unreadable()
     }
@@ -350,12 +350,12 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     estimated = true
     // Noted before any await: a parallel pass for this command whose own estimate fails must still see it.
     if (answer.maxBytes > limitBytes) {
-      mine.note = { label, bytes: answer.maxBytes, display: answer.display, basis: basisOf(answer) }
-      overNow.set(e.command, mine.note as { label: string; bytes: number; display: string; basis?: string })
+      mine.note = { label, bytes: answer.maxBytes, display: answer.display, planner: answer.planner }
+      overNow.set(e.command, mine.note as { label: string; bytes: number; display: string; planner?: string })
     }
     await rememberEstimate($, label, answer.bytes, answer.display)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}${basisOf(answer)}`)
-    else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display, basis: basisOf(answer) })
+    else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display, planner: answer.planner })
   }
 
   if (generation !== startedAt) {
@@ -376,9 +376,9 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // The hold is read now, not from the state taken before the estimates: a parallel call may have recorded it meanwhile.
   // Or from an over-limit answer a parallel pass for the same command has in hand and has not recorded yet.
   const stored = over.length === 0 && failed ? (await read($, costAtom))?.held : null
-  const heldNow = stored && stored.command === e.command ? { label: stored.target, bytes: stored.bytes, display: stored.display } : overNow.get(e.command)
+  const heldNow = stored && stored.command === e.command ? { label: stored.target, bytes: stored.bytes, display: stored.display, planner: stored.planner } : overNow.get(e.command)
   if (over.length === 0 && failed && heldNow && heldNow.bytes > limitBytes) {
-    over.push({ label: heldNow.label, bytes: heldNow.bytes, point: heldNow.bytes, display: heldNow.display, basis: 'basis' in heldNow ? heldNow.basis : undefined })
+    over.push({ label: heldNow.label, bytes: heldNow.bytes, point: heldNow.bytes, display: heldNow.display, planner: heldNow.planner })
   }
 
   if (over.length > 0) {
@@ -391,7 +391,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
         granted = current.allowOnce && current.held?.command === e.command
         return granted
           ? { ...current, allowOnce: false, held: null }
-          : { ...current, allowOnce: false, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+          : { ...current, allowOnce: false, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display, ...(worst.planner && { planner: worst.planner }) } }
       })
     } catch {
       // A hold that cannot be recorded must not become a pass: a gate that throws lets the call run.
@@ -399,7 +399,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
       return { deny: `${worst.display} would be scanned, over the ${formatBytes(limitBytes)} limit, and the hold could not be recorded. Run the same command again.` }
     }
     if (granted) {
-      for (const one of over) lines.push(`cost · ${one.label} would scan ${one.display}${one.basis ?? ''}, over the ${formatBytes(limitBytes)} limit: allowed once`)
+      for (const one of over) lines.push(`cost · ${one.label} would scan ${one.display}${basisOf(one)}, over the ${formatBytes(limitBytes)} limit: allowed once`)
       keepNotes(e.command, lines)
       // The hold is spent: the status line stops showing it.
       await showLastEstimate($)
@@ -417,7 +417,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
           ? `just over ${formatBytes(limitBytes)}`
           : `≈ ${worst.display}`
     return {
-      deny: `${scanned} would be scanned${worst.basis ?? ''}, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
+      deny: `${scanned} would be scanned${basisOf(worst)}, over the ${formatBytes(limitBytes)} limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`,
     }
   }
   // A command that was estimated and is under the limit ends an earlier hold, and its allowance. One that

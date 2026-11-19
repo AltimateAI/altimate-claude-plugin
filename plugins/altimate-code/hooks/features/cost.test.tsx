@@ -1574,7 +1574,7 @@ for (const [adapter, name] of [
 test('on Snowflake, a held command is allowed once by /allow-scan, and its note says the estimate is the plan\'s', async ($, on) => {
   const { clock, ran } = await start($, on, { answers: { orders: planned('snowflake', 20 * GIB, '20.0 GiB') } })
   expect(((await $.tool.call(bash('dbt build -s orders'))) as any).deny).toBeDefined()
-  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('orders (≈ 20.0 GiB)')
+  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('orders (≈ 20.0 GiB, Snowflake plan estimate)')
   const allowed: any = await $.tool.call(bash('dbt build -s orders'))
   await clock.settle()
 
@@ -1625,4 +1625,17 @@ test('a BigQuery dry run is shown as before, with no estimate source', async ($,
   const result: any = await $.tool.call(bash('dbt run -s orders'))
   await clock.settle()
   expect(result.context).toEqual(['cost · orders would scan 2.0 GiB'])
+})
+
+test('on Snowflake, a hold kept while the estimate fails on the retry still names the plan estimate, and so does /allow-scan', async ($, on) => {
+  const { clock, ran } = await start($, on, {
+    sequence: { orders: [planned('snowflake', 20 * GIB, '20.0 GiB'), { success: false, adapter: 'snowflake', source: 'explain', error: 'EXPLAIN failed' }] },
+  })
+  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('(Snowflake plan estimate)')
+  const retry: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+
+  expect(ran).toEqual([])
+  expect(retry.deny).toBe('≈ 20.0 GiB would be scanned (Snowflake plan estimate), over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.')
+  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('orders (≈ 20.0 GiB, Snowflake plan estimate)')
 })
