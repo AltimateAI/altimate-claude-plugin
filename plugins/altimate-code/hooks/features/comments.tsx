@@ -219,12 +219,12 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
 
 /**
  * After a /clear: the new conversation's `$.state` is empty, so the project is found and its threads are
- * loaded again now, and its first read of a model waits for them as a session's first does. The poll and a
+ * loaded again now (sessionEnd has reset the first-read wait, so its first read of a model waits for them). The poll and a
  * post's lock carry on (sessionEnd keeps them: they describe the shared docs, not the conversation).
  */
 export async function clearStart($: EngineInterface) {
-  firstWaitSpent = false
-  pendingFor = null
+  // A read in the new conversation that came first has found its project already: that one stays.
+  if ((await get($)).root) return
   searched.clear()
   within.clear()
   const cwd = (await $.session.cwd().catch(() => null)) ?? (await $.session.root().catch(() => null))

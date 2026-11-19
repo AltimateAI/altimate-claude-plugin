@@ -322,6 +322,22 @@ test('a git push after a second /clear that came while the first restore was wri
   expect(shown.text).toContain('1 new health issue · stg_orders')
 })
 
+test('the next conversation\'s check waits for a CLI call the /clear cut short, so the two never share the artifact folder', async ($, on) => {
+  const clear = playsClear($, on)
+  let release!: () => void
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG], [OLD_STG], [OLD_STG, NEW_STG]], hold: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  await clear()
+  await clock.settle()
+  // The cut-short call is still running: the restored conversation's check has not started.
+  expect(calls).toHaveLength(2)
+  release()
+  await clock.settle()
+  expect(calls).toHaveLength(3)
+})
+
 test('a second /clear before the first one\'s state was restored keeps what the first carried', async ($, on) => {
   const clear = playsClear($, on)
   const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })

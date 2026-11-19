@@ -61,6 +61,8 @@ let carried: HealthState | null = null
 let clearPending = false
 /** clearStart's restore while it runs. */
 let restoring: Promise<void> | null = null
+/** The dbt_health CLI call running now, settled either way; the next waits for it. */
+let cliCall: Promise<void> | null = null
 /** Which model each file belonged to in earlier checks: a deleted schema file or model no longer shows in the latest answer. */
 let known: HealthInsight[] = []
 /** Whether the status line carries the health part now. */
@@ -511,8 +513,22 @@ async function check($: EngineInterface): Promise<HealthRun> {
   let result: Awaited<ReturnType<typeof runTool>>
   try {
     const until = (await $.clock.now()) + CHECK_MS
+    // One CLI call at a time, across a /clear or a new session too: a call whose loop was cut short still runs, and
+    // the next one would share its artifact folder, so it waits for it.
+    const before = cliCall
+    if (before) await within($, Math.max(0, until - (await $.clock.now())), before)
     const env = await checkEnv($)
-    result = await runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until, ...(env && { env }) })
+    const call = runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until, ...(env && { env }) })
+    const settled = call.then(
+      () => {},
+      () => {},
+    )
+    cliCall = settled
+    try {
+      result = await call
+    } finally {
+      if (cliCall === settled) cliCall = null
+    }
   } catch (error) {
     // Only a binary that is not there: one that is there and refused to start keeps its own words.
     if (NOT_FOUND.test(String(error))) return { problem: NO_CLI }

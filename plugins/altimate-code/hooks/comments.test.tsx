@@ -876,3 +876,18 @@ test('a read right after /clear, before the new conversation\'s comments are loa
   newId()
   expect(result.context?.[0]).toContain('Grace Hopper: No, gross.')
 })
+
+test('a read of another project right after /clear, before the new conversation\'s comments are loaded, keeps that project', async ($, on) => {
+  let newId!: () => void
+  const clear = playsClear($, on, { idLagsUntil: new Promise<void>(resolve => (newId = resolve)) })
+  const other = '/other'
+  const { clock, cli } = await start($, on, { otherProject: other, files: { [FILE]: SQL, [`${other}/models/orders.sql`]: SQL } })
+  await clear()
+  await $.tool.call({ tool: 'Read', file_path: `${other}/models/orders.sql` })
+  newId()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Team comments · other_shop/ })).toBeDefined()
+  await ui.unmount()
+  expect(cli.filter(c => c.args.action === 'list').at(-1)?.args.project).toBe('other_shop')
+})
