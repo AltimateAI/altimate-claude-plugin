@@ -12,7 +12,9 @@ import type {
   WarehouseView,
 } from '../types'
 import { later, parseJson, runTool, textOf, within } from './altimate-cli'
+import { openTracked } from './usage'
 import { featuresSessionEnd, featuresTurnComplete, featuresTurnStart } from './features'
+import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
@@ -25,6 +27,7 @@ import {
   findModelOrColumn,
   graphFromSql,
   impactOf,
+  testCountText,
   modelLineageOf,
   parseDbtLineage,
   plural,
@@ -37,7 +40,7 @@ import {
   upstreamArt,
   warehouseEdges,
 } from './lineage-graph'
-import { answerOf, carriersOf, type ColumnAnswer, mayCarryGroups, reachOf } from './impact-report'
+import { answerOf, carriersOf, type ColumnAnswer, mayCarryGroups, reachOf, unknownReach } from './impact-report'
 import { taskBeforeTool, taskTurnComplete, taskTurnStart } from './task-impact'
 
 const PANE = 'altimate-lineage'
@@ -65,6 +68,8 @@ const REACH_RESERVE_MS = 2_500
 const focusAtom = atom({ plugin: 'altimate-code', key: 'lineageFocus' } as const, null, { shape: 'lineage-focus-1' })
 const graphAtom = atom({ plugin: 'altimate-code', key: 'lineageGraph' } as const, null, { shape: 'lineage-graph-1' })
 const columnsAtom = atom({ plugin: 'altimate-code', key: 'lineageColumns' } as const, null, { shape: 'lineage-columns-1' })
+// Why the pane waits undrawn (a terminal narrower than Claude Code draws it in): the band above the prompt says it until the pane opens or /lineage is used.
+const narrowAtom = atom({ plugin: 'altimate-code', key: 'lineageNarrow' } as const, null as { text: string; floor: number | null } | null)
 const columnAtom = atom({ plugin: 'altimate-code', key: 'lineageColumn' } as const, null as string | null)
 const reachAtom = atom({ plugin: 'altimate-code', key: 'lineageReach' } as const, null, { shape: 'lineage-reach-1' })
 const warehouseAtom = atom({ plugin: 'altimate-code', key: 'lineageWarehouse' } as const, null, { shape: 'lineage-warehouse-1' })
@@ -90,6 +95,8 @@ const toolsCache = new Map<string, { graph: LineageGraph; id: string; columns: C
 let paneOpened = false
 // The narrow-terminal hint, once a conversation.
 let narrowHintShown = false
+// The `show_edit_impact` setting: off by default, the per-edit impact note goes to Claude and the debug log only.
+let showEditImpact = false
 /** The latest follow: an older one still reading its manifest must not write over it. */
 // Follows run concurrently. Each takes a number when it starts; one that finds its model claims the
 // pane unless a newer one already has. A follow that fails claims nothing, so it cancels nobody.
@@ -129,9 +136,9 @@ const MIN_GRAPH_COLUMNS = 48
 // the rows a very wide layer draws.
 const BOX_CAP = 4
 const UNFOLDED = 40
-// Room for the boxes: about five layers wide when docked, four boxes high when inline. A request the
-// surface caps (a dock takes at most 45% of the terminal) and a size the person set wins.
-const PANE_SIZE = { columns: 110, rows: 34 }
+// Rows asked for when the pane sits above the prompt (about four boxes high). Docked, its width is the
+// widest dock, which the surface caps at 45% of the terminal; a size the person set wins.
+const PANE_SIZES: PaneSpec = { rows: 34 }
 // The engine's label for a column it could not classify, which is every column read from a CTE or a
 // qualified table, so all of a dbt model's. It says nothing about the column, so the pane leaves it out.
 const NOT_SURE = 'Not sure'
@@ -618,10 +625,12 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     await update($, columnAtom, prev => (superseded() ? prev : column ?? null))
     await update($, reachAtom, prev => (superseded() ? prev : null))
   }
-  if (input.open || (!paneOpened && input.auto)) {
+  // While the pane waits on a narrow terminal each follow asks again: it may have been widened.
+  if (input.open || (!paneOpened && input.auto) || (input.auto && (await read($, narrowAtom)))) {
     paneOpened = true
-    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
+    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
     if (opened && opened.isPlaced === false && !input.open) await narrowHint($, opened.reason)
+    else if (opened) await update($, narrowAtom, () => null)
   }
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
@@ -766,17 +775,32 @@ async function recheckStale($: EngineInterface) {
 async function narrowHint($: EngineInterface, reason: string) {
   $.ui.log(`lineage-pane · waits: ${reason}`, { to: 'debug' })
   // Only a terminal too narrow: a run with no surface to draw on has no one to tell.
-  if (narrowHintShown || !/column/i.test(reason)) return
-  narrowHintShown = true
+  if (!/column/i.test(reason)) return
   // "unasked below 144 columns (100 now): …"
   const floor = /below (\d+) columns/.exec(reason)?.[1]
+  const now = /\((\d+) now\)/.exec(reason)?.[1]
+  // The band stays until the pane can open, so the reason is not lost with the toast.
+  const text = `◆ lineage · the pane needs ${floor ? `${floor} columns` : 'a wider terminal'}${now ? ` (${now} now)` : ''}: make the text smaller (Cmd -) or type /lineage`
+  await update($, narrowAtom, () => ({ text, floor: floor ? Number(floor) : null }))
+  if (narrowHintShown) return
+  narrowHintShown = true
   // The action first: Claude Code cuts a toast to one line of the narrow terminal it is for.
   $.ui.toast(`◆ lineage · /lineage opens the pane (it opens by itself ${floor ? `from ${floor} columns` : 'in a wider terminal'})`, { timeoutMs: 10000 })
 }
 
+/** The band line that keeps the narrow-terminal reason on screen; null once the terminal is wide enough or the pane was opened. */
+export async function narrowBand($: EngineInterface, ui: { Text: any }, viewportColumns?: number) {
+  const narrow = await read($, narrowAtom)
+  if (!narrow || (narrow.floor !== null && typeof viewportColumns === 'number' && viewportColumns >= narrow.floor)) return null
+  return <ui.Text key="lineage-narrow" color="warning">{narrow.text}</ui.Text>
+}
+
+/** The pane a person opens (/lineage, the summary's Open lineage): counted as a use of it, unlike the pane following Claude. */
 export async function openPane($: EngineInterface) {
   paneOpened = true
-  await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
+  await update($, narrowAtom, () => null)
+  const request = await paneRequest($, PANE, PANE_SIZES)
+  await openTracked($, 'lineage', () => $.ui.open({ id: PANE, title: PANE_TITLE, ...request, focus: true, closeOnEscape: true }))
 }
 
 /** The text an edit replaces and the text it writes: Edit's strings, MultiEdit's pairs, or a Write's whole file. */
@@ -892,7 +916,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   let reach: ColumnReachView | null = null
   const answered: { column: string; answer: ColumnAnswer }[] = []
   const traced: string[] = []
-  // Touched columns whose check failed or ran out of time: what they reach is unknown.
+  // Touched columns whose check failed, ran out of time or never reached them: what they reach is unknown.
   // Columns beyond the cap are never traced either.
   const unchecked: string[] = everyTouched.slice(MAX_EDIT_COLUMNS)
   if (touched.length > 0) {
@@ -914,9 +938,12 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
     // numbers; the older column reach only from an altimate-code that sends no column answer.
     const answers = results.map(result => (result?.ok ? answerOf(result.metadata) : null))
     if (answers.some(Boolean)) {
+      // An answer that never reached the column (no hop 0) traced nothing: the column is unchecked, as at a task's
+      // end, and the older reach on the same result is not read in its place.
       answers.forEach((one, i) => {
-        ;(one ? traced : unchecked).push(touched[i]!)
-        if (one) answered.push({ column: touched[i]!, answer: one })
+        const reached = !!one && one.columns.some(col => col.hop === 0)
+        ;(reached ? traced : unchecked).push(touched[i]!)
+        if (reached) answered.push({ column: touched[i]!, answer: one! })
       })
     } else {
       const reaches = results.map((result, i) => (result?.ok ? reachFromMetadata(result.metadata, node.name, touched[i]!) : null))
@@ -933,7 +960,8 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   const maybe = reach ? reach.uncertain.length + reach.untraced.length : 0
   const incomplete = !!reach && (reach.truncated || unchecked.length > 0)
   const unsettled = reach ? maybe + (reach.truncated ? 1 : 0) + unchecked.length : 0
-  const carried = answered.map(one => ({ ...one, reach: reachOf(one.answer), carriers: carriersOf(one.answer) }))
+  // Unread downstream models (no compiled SQL) leave the reach unknown, never a confident zero.
+  const carried = answered.map(one => ({ ...one, reach: reachOf(one.answer), unknown: unknownReach(one.answer), carriers: carriersOf(one.answer) }))
   // Dashboards on models that may read the column are listed too, and said to be a maybe.
   const maybeDashboards = reach ? reach.uncertainExposures : []
   const dashboards = reach
@@ -947,7 +975,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
       (maybeDashboards.length ? `; ${plural(maybeDashboards.length, 'dashboard')} may read it` : '') +
       (reach.exposuresError && !reach.exposures.length ? '; its dashboards could not be read' : '')
     : carried.length
-      ? carried.map(one => `${node.name}.${one.column} reaches ${plural(one.reach.columns, 'column')} in ${plural(one.reach.models, 'model')}, ${one.reach.mayCarry} may carry it`).join('; ')
+      ? carried.map(one => (one.unknown ? `${node.name}.${one.column} ${one.unknown}` : `${node.name}.${one.column} reaches ${plural(one.reach.columns, 'column')} in ${plural(one.reach.models, 'model')}, ${one.reach.mayCarry} may carry it`)).join('; ')
       : `${target} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'model')}${dashboards.length ? ` and ${plural(dashboards.length, 'dashboard')}` : ''}`
   const toastText = `◆ impact-first · ${toast}${dashboards.length ? ` · ${dashboards.slice(0, 3).join(' · ')}` : ''}${stale ? ' · the manifest is older than this file' : ''}`.replace(CONTROL, ' ').slice(0, 300)
 
@@ -966,6 +994,10 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   }
   for (const one of carried) {
     const r = one.reach
+    if (one.unknown) {
+      lines.push(`- ${quoted(one.column)}: ${one.unknown}`)
+      continue
+    }
     const named = one.carriers.map(model => `${quoted(model.name)} (${listed(model.columns, 8)})`)
     lines.push(`- ${quoted(one.column)}: its value reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'downstream model')} (${plural(r.ends, 'end column')})${named.length ? `: ${capped(named, 15)}` : ''}`)
     const exposures = [...new Set(one.carriers.flatMap(model => model.exposures))]
@@ -982,7 +1014,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   lines.push(
     `- ${quoted(node.name)} feeds ${graph.truncated ? 'at least ' : ''}${plural(downstream, 'downstream model')} in all (${counts.direct} direct, ${counts.transitive} transitive), ${plural(counts.tests, 'test')}${counts.exposures.length ? ` and ${plural(counts.exposures.length, 'exposure')} (${listed(counts.exposures)})` : ''}.`,
   )
-  if (unchecked.length) lines.push(`- columns not checked (over the limit or no answer in time): ${listed(unchecked)}; what they reach is unknown`)
+  if (unchecked.length) lines.push(`- columns not checked (over the limit, no answer in time, or not in the manifest: \`dbt compile\` adds a new one): ${listed(unchecked)}; what they reach is unknown`)
   if (stale) lines.push('- the manifest is older than this file (it changed after the last `dbt compile`), so the lineage above may be out of date; `dbt compile` gives a current answer')
   const close = 'Keep these consumers working, or tell the user which of them this edit changes.'
   const body = lines.join('\n')
@@ -1076,9 +1108,11 @@ export async function startLineage($: EngineInterface) {
   // A new session opens the pane on its first follow again and owes Claude the context again.
   paneOpened = false
   narrowHintShown = false
+  await update($, narrowAtom, () => null)
   drawnCache = null
   contextGiven.clear()
   newConversation()
+  forgetPaneSizes()
   // A new conversation's answers start empty.
   await update($, answerAtom, () => [])
   await $.command.register({
@@ -1086,6 +1120,7 @@ export async function startLineage($: EngineInterface) {
     description: 'Show dbt lineage for a model beside the chat: upstream, downstream, columns and column reach',
     argumentHint: '<model>[.column]',
   })
+  await loadPaneSizesOnce($)
 }
 
 type Ui = { Box: any; Button: any; Text: any }
@@ -1116,11 +1151,13 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
 }
 
 /** The lineage hooks whose events no other part of the plugin hooks. */
-export function registerLineage(on: On) {
+export function registerLineage(on: On, options: Record<string, unknown> = {}) {
+  showEditImpact = options.show_edit_impact === true || options.show_edit_impact === 'true'
   // A new user turn gets the lineage note again (its context may have been compacted since), once.
   on('session.end', async ($, e, next) => {
     paneOpened = false
     narrowHintShown = false
+    await update($, narrowAtom, () => null)
     drawnCache = null
     contextGiven.clear()
     newConversation()
@@ -1190,6 +1227,7 @@ export function registerLineage(on: On) {
 
   on('command.run', { command: COMMAND }, async ($, e) => {
     const model = e.args.trim()
+    noteTerminal(e.presentation?.columns)
     const current = await read($, focusAtom)
     if (!model && !current) {
       await update($, messageAtom, () => 'Read or edit a dbt model, or run /lineage <model>[.column].')
@@ -1235,14 +1273,17 @@ export function registerLineage(on: On) {
     }
     const note = lookup ? await within($, HOLD_TOTAL_MS, lookup) : null
     // Out of time before even the model-level lookup finished: say so, rather than nothing.
-    // The person sees the end-of-task summary (task-impact.tsx), not a note per edit: what an edit reaches
+    // The person sees the end-of-task summary (task-impact.tsx), and a note per edit only with show_edit_impact: what an edit reaches
     // goes to the debug log, and the note itself to Claude's context below. A lookup that missed or failed
     // is still said, since the summary can't tell this edit went ahead unchecked.
     if (lookup && !note && !finished && progress.project) $.ui.toast('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it', { timeoutMs: 8000 })
     // It finished, but its answer could not be used: as worth telling.
     const lookupFailed = !!lookup && !note && finished && !!progress.failed
     if (lookupFailed) $.ui.toast('◆ impact-first · the lineage lookup failed; the edit went ahead without it', { timeoutMs: 8000 })
-    if (note) $.ui.log(note.toast, { to: 'debug' })
+    if (note) {
+      $.ui.log(note.toast, { to: 'debug' })
+      if (showEditImpact) $.ui.log(note.toast)
+    }
     const result = await next(e)
     // Any tool may have changed the shown model's file (Edit, a shell command): one stat says so.
     later($, () => recheckStale($))
@@ -1500,6 +1541,7 @@ export function registerLineage(on: On) {
       ) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, spec: PANE_SIZES, keyPrefix: 'lineage', terminal: paneTerminalColumns(e) }, work => later($, work))
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
@@ -1523,6 +1565,7 @@ export function registerLineage(on: On) {
             </Box>
           )}
           {columns?.note && <Text color="warning">⚠ {columns.note}</Text>}
+          {sizes}
         </Box>
 
         {view !== 'list' && foldedList('up')}
@@ -1572,7 +1615,7 @@ export function registerLineage(on: On) {
 
         <Box flexDirection="column">
           <Text dimColor>
-            {counts.direct} direct · {counts.transitive}{graph.truncated ? '+' : ''} transitive · {counts.tests} tests ·{' '}
+            {counts.direct} direct · {counts.transitive}{graph.truncated ? '+' : ''} transitive · {testCountText(graph, focus.model, column, counts.tests)} ·{' '}
             <Text color={SEVERITY_COLOR[counts.severity]}>{counts.severity}</Text>
           </Text>
         </Box>

@@ -250,6 +250,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('tool.call', () => ({ result: { ok: true } }))
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
+  // The session start's own version check (for the status line) is not the savings check's.
+  versionRuns.length = 0
   return { clock, runs, versionRuns, toasts, fills, store }
 }
 

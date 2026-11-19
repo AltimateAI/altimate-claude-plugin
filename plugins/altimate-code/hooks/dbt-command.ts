@@ -74,6 +74,25 @@ export type DbtInvocation = {
   end: number
   /** Offset just past the subcommand (past `binary` when there is none): where flags can be inserted. */
   subcommandEnd: number
+  /**
+   * The dbt executable as written, then every argument, quotes and escapes decoded, redirections left out
+   * (`['.venv/bin/dbt', 'show', '-s', 'orders']`). The launcher's own words (`uv run`) are in `binary`, not here.
+   */
+  argv: string[]
+  /**
+   * `NAME=value` for each variable set for it in the same command: the assignments in front of it (also
+   * after `env`) and those of an `export` earlier in the line; a later one of the same name wins. Values are
+   * as written, so a consumer that keeps them hashes them.
+   */
+  env: string[]
+  /**
+   * The `cd` commands that ran before it in the line, in order: the folder each names, or null when it is
+   * not known (a value that holds an expansion, `cd -`, no argument, an option). A `cd` is read wherever it
+   * stands in the line, so a consumer treats a line with a subshell or a `||` as the plain order written.
+   */
+  cds: (string | null)[]
+  /** A comment follows the invocation's start in the line (`dbt show -s a # preview`). */
+  commented: boolean
 }
 
 type Word = {
@@ -192,7 +211,7 @@ function braceEnd(line: string, at: number): number {
 const startsVariable = (next: string | undefined) => next !== undefined && /[A-Za-z0-9_@*#?!$-]/.test(next)
 
 /** The words and operators of a command line, with their offsets; null when a quote or substitution is not closed. */
-function lex(line: string): Token[] | null {
+function lex(line: string, comments?: number[]): Token[] | null {
   const tokens: Token[] = []
   let i = 0
   let text = ''
@@ -222,6 +241,7 @@ function lex(line: string): Token[] | null {
       continue
     }
     if (c === '#' && start < 0) {
+      comments?.push(i)
       while (i < line.length && line[i] !== '\n') i++
       continue
     }
@@ -463,6 +483,9 @@ const DBT_SUBCOMMANDS = new Set([
   'test',
 ])
 
+/** Whether `word` is one of dbt's own subcommands (`run`, `show`…), as against the first other word `subcommand` falls back to. */
+export const isDbtSubcommand = (word: string | null): boolean => word !== null && DBT_SUBCOMMANDS.has(word)
+
 const isDbt = (word: string) => word.split('/').pop() === 'dbt'
 
 /** Whether `word` is a NAME=value assignment: a quoted part may only come after the `=`. */
@@ -478,14 +501,19 @@ type Found = { invocation: DbtInvocation; at: number }
 
 function scan(line: string): Found[] {
   if (typeof line !== 'string' || !/\bdbt\b/.test(line)) return []
-  const tokens = lex(line)
+  const comments: number[] = []
+  const tokens = lex(line, comments)
   const notCommand = tokens && readable(tokens)
   if (!tokens || !notCommand) return []
   const found: Found[] = []
   let simple: Token[] = []
+  // What the commands before this one set up: the variables an `export` made, and the `cd`s, in order.
+  const exported = new Map<string, string>()
+  const cds: (string | null)[] = []
   const finish = () => {
-    const read = readSimple(simple)
-    if (read) found.push({ invocation: read.invocation, at: read.at })
+    const read = readSimple(simple, exported)
+    if (read) found.push({ invocation: { ...read.invocation, cds: [...cds], commented: comments.some(at => at > read.invocation.start) }, at: read.at })
+    else noteSetup(commandWords(simple), exported, cds)
     simple = []
   }
   for (let k = 0; k < tokens.length; k++) {
@@ -657,8 +685,8 @@ function readable(tokens: Token[]): Set<number> | null {
   return !open.length && !waiting && !pattern && caseHead === 'none' ? notCommand : null
 }
 
-function readSimple(tokens: Token[]): Found | null {
-  // Drop redirections and their targets: what is left is the command's words.
+/** A simple command's words: its redirections and their targets dropped. */
+function commandWords(tokens: Token[]): Word[] {
   const words: Word[] = []
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!
@@ -669,7 +697,31 @@ function readSimple(tokens: Token[]): Found | null {
     }
     words.push(token)
   }
+  return words
+}
+
+/** Notes what a command that is no dbt invocation sets up for the ones after it: an `export`'s variables, a `cd`'s folder. */
+function noteSetup(words: Word[], exported: Map<string, string>, cds: (string | null)[]) {
+  const first = words[0]
+  if (!first || first.quotedAt >= 0) return
+  if (first.text === 'export') {
+    // The assignments right after `export`; an option or anything else ends them.
+    for (const word of words.slice(1)) {
+      if (!isAssignment(word)) break
+      exported.set(word.text.slice(0, word.text.indexOf('=')), word.text)
+    }
+  } else if (first.text === 'cd') {
+    const target = words[1]
+    // `cd` alone, `cd -`, an option, a value the shell expands or more than one argument leave the folder unknown.
+    cds.push(words.length === 2 && target && !target.dynamic && !target.text.startsWith('-') ? target.text : null)
+  }
+}
+
+function readSimple(tokens: Token[], exported: Map<string, string>): Found | null {
+  const words = commandWords(tokens)
   if (words.length === 0) return null
+  // The variables set for the command: the ones an earlier `export` made, then its own.
+  const env = new Map(exported)
   // The first of the assignments right in front of the launcher; prefix words reset it.
   let firstAssignment: number | null = null
   let i = 0
@@ -697,6 +749,7 @@ function readSimple(tokens: Token[]): Found | null {
       if (name === 'DBT_TARGET') envTarget = assigned
       if (name === 'DBT_TARGET_PATH') envTargetPath = assigned
       if (word.dynamic) assignmentDynamic = true
+      env.set(name, word.text)
       firstAssignment ??= i
       optionsOpen = false
       continue
@@ -849,6 +902,10 @@ function readSimple(tokens: Token[]): Found | null {
       start,
       end,
       subcommandEnd,
+      argv: words.slice(binaryEnd).map(one => one.text),
+      env: [...env.values()],
+      cds: [],
+      commented: false,
     },
   }
 }

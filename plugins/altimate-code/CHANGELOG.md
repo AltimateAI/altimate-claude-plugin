@@ -2,7 +2,7 @@
 
 All notable changes to this plugin will be documented in this file.
 
-## [1.8.0] — 2026-11-17
+## [1.9.0] — 2026-11-19
 
 ### Added
 - `/savings [connection]`: a Databricks savings check beside the chat, over altimate-code's `finops_databricks_savings` tool (four checks: Migrate Classic/Pro to Serverless, Over-Sized Warehouse, Idle Cluster Detection, Job Running on All-Purpose Compute). It runs with your own Databricks connection, in altimate-code's assessment mode (telemetry off and no other contact with Altimate or GitHub: the warehouse is the only host reached; needs an altimate-code release with `ALTIMATE_ASSESSMENT_MODE`) and outside the tool daemon, and shows each finding with its evidence and a monthly range at list price, each resource counted once. Needs an altimate-code release with that tool; with an older one the pane says to update.
@@ -10,10 +10,52 @@ All notable changes to this plugin will be documented in this file.
 - Draft the fix: a finding's change goes into the prompt box for Claude to draft against the repository; nothing is sent until you press Enter.
 - What if: each flagged warehouse's cost as serverless and at every smaller size, and whether its cores still fit its queries.
 - Saved since: a flagged warehouse's size and cost are kept on this machine, and a later run that finds it resized says what it cost a month then and now.
+- `/savings` sends no plugin usage event: neither the command nor its pane is counted, and its queries and results never go to Altimate.
 - A line above the prompt when the session edits Databricks bundle or Terraform files or runs a `databricks` compute command: the flagged resource's saving, or a once-a-session offer of `/savings`.
 - One connection checks every workspace the account's system tables show; the pane counts them and names each finding's workspace.
 - `/savings` asks `altimate --version` first and does not start an altimate-code older than 0.12.12, or a source build, for the check: before assessment mode, its `tool run` would send the one-time telemetry opt-out event.
 - `runTool` takes an environment and `noDaemon` for one CLI run, and hands back a CLI's raw output when it is not an answer (an altimate-code too old for the tool gets "update").
+
+## [1.8.2] — 2026-11-19
+
+### Added
+- Anonymous usage events, sent through altimate-code's usage telemetry (`altimate-code tool report-event`); the plugin opens no network connection of its own for them. `plugin_session_start` at each session start carries the plugin version, the altimate-code version (added by the CLI), the OS (`macos`, `linux`, `windows`, `wsl` or `unknown`) and an install id: a random UUID made on first use and kept in the plugin's Claude Code store, so it stays the same across sessions on the machine. `plugin_feature_used` carries the feature and its outcome when `/lineage`, `/dbt-show`, `/profile-ctes`, `/scan-cost`, `/comments`, `/sql-graph`, `/health`, `/runs` or `/to-model` opens (`opened`, or `failed` when its pane could not open), when the cost check holds a dbt command (`held`) or `/allow-scan` allows it (`allowed`), and, with "Project health blocks git push" on, when the push gate holds or lets through a `git push`. No session id, project, model, column or file names, SQL or session text: the CLI takes each field only from a fixed list or pattern, and sends these events without the account, machine id or project its other events carry. A panel counts when a person opens it (its command, or the band's Open lineage or Open); `failed` when it could not open or be shown. Every event and field is listed in PRIVACY.md.
+- The events need an altimate-code with the `plugin_session_start` and `plugin_feature_used` actions; an older one refuses them and nothing is sent or shown. They run in the background and never delay a hook.
+
+### Changed
+- With `ALTIMATE_TELEMETRY_DISABLED` (or `OPENCODE_DISABLE_TELEMETRY`) set to `true` or `1`, the plugin no longer starts the CLI for any usage event (the lineage report's included) and makes no install id. The CLI's own opt-out (that variable, or `telemetry.disabled` in its config) still drops them too.
+
+## [1.8.1] — 2026-11-19
+
+### Fixed
+- The end-of-task column summary no longer says a changed column "reaches 0 columns in 0 models" when nothing was traced. When the models that read the column have no compiled SQL (a manifest from `dbt parse`), the band says "not traced: N downstream models have no compiled SQL (run `dbt compile`)". The report says the same in its downstream section, and `/lineage-report <model>.<column>` on a column the manifest does not reach is a plain error. The per-edit impact note (to Claude, and to you with `show_edit_impact`) follows the same rules. Models read in full that the value was not traced to still show as "may change" beside a reach of 0. Every changed column is asked of the manifest by name; one the SQL from before the task did not name and the manifest lacks (likely added) is said to have an unknown reach. The old name of a rename is still traced. A model read only in part counts as unread. A column found with nothing downstream still says it reaches 0.
+- A missing altimate-code, or one without the `dbt_health` tool, no longer pops a toast at session start or after a turn; `/health` says it, naming the tool and the install command instead of a version.
+- The settings say what each option does and that it is optional, with its default. The BigQuery scan limit and the team comments options no longer say they are unused.
+- With a column in focus, the lineage pane counts only the tests on that column of the model ("3 tests on amount"); with none, or when the graph does not say which column each test checks (a manifest over 4 MiB), the tests downstream as before.
+- Install and update instructions in the commands and skills give one method: `npm i -g @altimateai/altimate-code`.
+
+### Added
+- At session start, an altimate-code older than the plugin needs (or none on PATH) keeps a part at the end of the status line (a preview build, 0.0.0-…, says nothing) with its version, the binary and where it is, and `npm i -g @altimateai/altimate-code`.
+- When the terminal is too narrow for the lineage pane, a line above the prompt says so, with the width it needs, until the pane can open or `/lineage` is used.
+- `show_edit_impact` (off by default): also shows the per-edit impact note Claude gets in the transcript.
+
+## [1.8.0] — 2026-11-17
+
+### Added
+- dbt helpers from dbt Power User, in the Claude Code session. Each runs the project's own dbt (its `.venv/bin/dbt` when there is one) and calls no model:
+  - **Compile and validate.** After Claude edits or writes a model, the plugin runs it with `dbt show` (one row) against the warehouse. dbt's error, or the columns `schema.yml` documents that the query no longer returns and those it returns undocumented, go to Claude with the edit's result and to a line above the prompt; the **dbt check** pane shows every column, or dbt's whole error. The check says when the columns could not be compared, and runs again when the model or its schema file changes outside Claude's edits.
+  - **Explain and Fix.** A failed `dbt run`, `test`, `build`, `seed`, `snapshot` or `retry` puts the failed nodes, read from the `run_results.json` the command wrote together with the errors dbt printed, above the prompt with **Explain** and **Fix with Altimate Code** (`/altimate-code:altimate`).
+  - **Query results pane.** Rows from Claude's `dbt show`, `/dbt-show <model>` and `/dbt-show select …` open as a table beside the chat, with **Re-run** (Claude's own command with the same flags and folder, unless it depended on its shell; or your query), **Bookmark**, **Clear history** and a history kept across sessions on this machine. It opens at the widest dock, and **Min / Default / Max** resize it (the lineage pane has them too); the choice is kept across sessions.
+  - **Model context.** When Claude reads a model, its materialization, columns (types, descriptions, tests), parents, children and depth upstream and downstream, from `target/manifest.json`, go with the file, once a turn.
+  - **Environment doctor.** At session start the plugin checks dbt, Python, the profile's adapter, installed packages and whether the manifest is older than the project's files, and offers **Run dbt parse** (or **Run dbt deps**). `/dbt-doctor` runs the checks with the warehouse connection test.
+- Compile and validate runs one `dbt show` per edit (with `dbt ls`, which runs no query, first when the manifest does not name the model). It skips a model whose path holds a space, says "dbt could not be run here" when dbt cannot be started, and asks Claude to fix the model only for errors that are the model's own.
+- Secret values from the `profiles.yml` a dbt command reads (the one its `--profiles-dir` or `DBT_PROFILES_DIR` names, else the one in the folder it ran in, the project's, or `~/.dbt`'s: the string fields of its outputs, and the env vars it names with their defaults) are removed from dbt's messages (errors, logs, the doctor's details, the failure band, Explain and Fix, and the error text kept in the query history) that the helpers show, save or send, and dbt's errors about a `profiles.yml` it cannot read, validate or render are replaced with a fixed message. Identifiers such as schema, database, dataset, project, catalog, warehouse, role and user are not treated as secrets, nor are values under 6 characters or the `type`, `threads`, `method` and `port` fields; query results and manifest facts are shown as they are. The plugin reads those values locally, keeps them in memory only, and never logs, stores or sends them. Redaction is best effort, not a guarantee about every text dbt prints: it matches those values as written, JSON-escaped and in Python's string and byte forms, including values set for the command (`NAME=value dbt …`, `env`, `export`); it cannot catch a value dbt or an adapter prints in another form (encoded, transformed or split), or one the profile builds other than through `env_var`. Other dbt errors (a missing target or profile name, a model's own missing `env_var`) are kept, since they carry no secret. A dbt command Claude runs itself shows its output to Claude unchanged. The fixed message is "profiles.yml could not be parsed; run `dbt debug` yourself to see the error"; it replaces the error on every surface: the compile-and-validate note, the check pane, the band, Explain and Fix, `/dbt-show` and its saved history, and the doctor.
+- Saved queries cut long cells and drop rows to stay within 32 KiB each (a query whose SQL alone is larger is kept whole, within the history's 2 MiB total); bookmarks are capped at 50.
+- Artifacts are read from the `target-path` of `dbt_project.yml`; `DBT_TARGET_PATH`, `--target-path` and a Jinja `target-path` are not followed.
+- The `dbt_mods` option turns the dbt helpers off.
+
+### Privacy
+- README and PRIVACY say that opening a dbt folder runs the project's `.venv` dbt `--version` and its Python at session start, and that bookmarked queries keep their rows after **Clear history** in Claude Code's plugin store.
 
 ## [1.7.0] — 2026-11-17
 

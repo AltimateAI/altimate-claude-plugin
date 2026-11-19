@@ -11,9 +11,11 @@ export const MIN_ALTIMATE_CODE = '0.12.11'
 // older npm installs only have `altimate-code`.
 const CLI_NAMES = ['altimate', 'altimate-code'] as const
 
-// A command that cannot start rejects; only that moves on to the next name, so a timeout never
-// reruns a command that may have taken effect.
-export const MISSING_BINARY = /ENOENT|not found|no such file|(cannot|could not|failed to) (start|spawn|run)/i
+/** A binary that is not there at all. */
+export const NOT_FOUND = /ENOENT|not found|no such file/i
+// A command that cannot start (not there, or refused) rejects; only that moves on to the next name, so a
+// timeout never reruns a command that may have taken effect.
+export const MISSING_BINARY = new RegExp(`${NOT_FOUND.source}|(cannot|could not|failed to) (start|spawn|run)`, 'i')
 
 /**
  * Runs the altimate CLI under the first name that is installed; 90 s unless the caller says otherwise.
@@ -30,6 +32,71 @@ export async function runAltimate($: EngineInterface, args: string[], timeoutMs 
     }
   }
   throw lastError ?? new Error('altimate CLI not found')
+}
+
+const SEMVER = /(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/
+
+/** The version a `--version` output names ("0.12.11", "altimate-code 0.12.11", "v0.13.0-beta.2"), or null; the last one when it names several. Read stdout first: stderr carries runtime notes. */
+export function parseVersion(text: string): string | null {
+  // The last one printed: a wrapper may name its own runtime (node v22.1.0) before the CLI's version.
+  const found = [...text.matchAll(new RegExp(SEMVER.source, 'g'))].pop()
+  return found ? found[0] : null
+}
+
+/** A build from source or a branch (0.0.0-main-202611191200, 0.0.0--202611190701): no release to compare with. */
+export const isPreviewBuild = (version: string) => /^0\.0\.0-/.test(version)
+
+/** Orders two versions as semver does: a prerelease is older than its release, and prerelease parts compare one by one. */
+export function compareVersions(a: string, b: string): number {
+  const split = (version: string) => {
+    const [, major, minor, patch, pre] = SEMVER.exec(version) ?? []
+    return { core: [Number(major), Number(minor), Number(patch)], pre: pre ? pre.split('.') : [] }
+  }
+  const left = split(a)
+  const right = split(b)
+  for (let i = 0; i < 3; i++) if (left.core[i] !== right.core[i]) return left.core[i]! < right.core[i]! ? -1 : 1
+  if (!left.pre.length || !right.pre.length) return left.pre.length === right.pre.length ? 0 : left.pre.length ? -1 : 1
+  for (let i = 0; i < Math.max(left.pre.length, right.pre.length); i++) {
+    const x = left.pre[i]
+    const y = right.pre[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    if (x === y) continue
+    const numbers = /^\d+$/.test(x) && /^\d+$/.test(y)
+    // A number is older than a word; two numbers compare as numbers.
+    if (/^\d+$/.test(x) !== /^\d+$/.test(y)) return /^\d+$/.test(x) ? -1 : 1
+    return (numbers ? Number(x) < Number(y) : x < y) ? -1 : 1
+  }
+  return 0
+}
+
+const INSTALL = 'npm i -g @altimateai/altimate-code'
+
+/**
+ * What to tell the person about the altimate-code on PATH, or null when it is current, a preview build, or
+ * cannot be told: the line names the version, the binary that runs and where it is, and the install command.
+ * The binary is the one runAltimate runs: the first name that starts, so one that starts and fails is not passed over.
+ * It never throws.
+ */
+export async function altimateCodeNotice($: EngineInterface): Promise<string | null> {
+  try {
+    for (const bin of CLI_NAMES) {
+      let answer: { exitCode?: number; stdout?: string; stderr?: string }
+      try {
+        answer = await $.process.run([bin, '--version'], { timeoutMs: 10_000 })
+      } catch (error) {
+        if (!MISSING_BINARY.test(String(error))) return null
+        continue
+      }
+      const version = answer.exitCode === 0 ? (parseVersion(answer.stdout ?? '') ?? parseVersion(answer.stderr ?? '')) : null
+      if (!version || isPreviewBuild(version) || compareVersions(version, MIN_ALTIMATE_CODE) >= 0) return null
+      const where = await $.process.run(['which', bin], { timeoutMs: 5_000 }).then(one => one.stdout.trim().split('\n')[0] ?? '').catch(() => '')
+      return `${bin} ${version} found${where ? ` at ${where}` : ''}; this plugin needs ≥ ${MIN_ALTIMATE_CODE}: ${INSTALL}`
+    }
+    return `altimate-code is not installed; this plugin needs ≥ ${MIN_ALTIMATE_CODE}: ${INSTALL}`
+  } catch {
+    return null
+  }
 }
 
 // The CLI pretty-prints its JSON, so read the whole text first, then fall back

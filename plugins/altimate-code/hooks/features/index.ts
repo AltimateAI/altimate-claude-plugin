@@ -1,13 +1,27 @@
 // The dbt Power User features, each in its own file here, and the one place that calls them, in a
-// fixed order: runs, defer, toModel, comments, cost, health, sqlGraph, docs, cteProfile, savings.
+// fixed order: runs, defer, toModel, comments, cost, health, sqlGraph, docs, cteProfile, savings. The dbt
+// helpers (hooks/dbt-mods.tsx: compile and validate, Explain and Fix, the Query results pane, model
+// context, the doctor) are called last, in the same phases and band; they have no status-line part.
 //
 // A plugin hooks each shared event once (a second hook on an event without a matcher is refused), and
 // the engine refuses `$` handed to anything but a function it can name, so this file calls every
 // feature's functions by name instead of looping over a list. A feature fills in its own file only.
-// A function that throws, at once or as a rejection, is logged and skipped: one feature's failure never stops another or the call.
-import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
+// A function that throws, at once or as a rejection, is logged and skipped: one feature's failure never stops another or the call. A `register` failure is silent (`$` is not available at load).
+import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallInput, ToolCallResult } from 'claude-code'
 
 import type { BashCall, EditedFile, FileCall } from '../tool-chain'
+import {
+  CHECK_HOLD_MS as dbtModsCheckHoldMs,
+  bandDbtMods,
+  dbtModsBashAfter,
+  dbtModsCallStart,
+  dbtModsEditAfter,
+  dbtModsReadOrEditAfter,
+  endDbtMods,
+  newTurnDbtMods,
+  registerDbtMods,
+  sessionStartDbtMods,
+} from '../dbt-mods'
 import {
   register as runsRegister,
   sessionStart as runsSessionStart,
@@ -18,6 +32,7 @@ import {
   bashRewrite as runsBashRewrite,
   bashGate as runsBashGate,
   bashAfter as runsBashAfter,
+  bashDropped as runsBashDropped,
   editAfter as runsEditAfter,
   readOrEditAfter as runsReadOrEditAfter,
   editReadsBefore as runsEditReadsBefore,
@@ -212,6 +227,9 @@ export function registerFeatures(on: On, context: FeatureContext) {
   try {
     savingsRegister(on, context)
   } catch {}
+  try {
+    registerDbtMods(on, context)
+  } catch {}
 }
 
 export async function featuresSessionStart($: EngineInterface, e: Args<'session.start'>) {
@@ -225,6 +243,7 @@ export async function featuresSessionStart($: EngineInterface, e: Args<'session.
   await attempt($, 'docs', 'sessionStart', () => docsSessionStart($, e))
   await attempt($, 'cteProfile', 'sessionStart', () => cteProfileSessionStart($, e))
   await attempt($, 'savings', 'sessionStart', () => savingsSessionStart($, e))
+  await attempt($, 'dbtMods', 'sessionStart', () => sessionStartDbtMods($, e))
 }
 
 export async function featuresTurnStart($: EngineInterface, e: Args<'turn.start'>) {
@@ -238,6 +257,7 @@ export async function featuresTurnStart($: EngineInterface, e: Args<'turn.start'
   await attempt($, 'docs', 'turnStart', () => docsTurnStart($, e))
   await attempt($, 'cteProfile', 'turnStart', () => cteProfileTurnStart($, e))
   await attempt($, 'savings', 'turnStart', () => savingsTurnStart($, e))
+  await attempt($, 'dbtMods', 'turnStart', () => newTurnDbtMods(e))
 }
 
 export async function featuresTurnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {
@@ -264,6 +284,7 @@ export async function featuresSessionEnd($: EngineInterface, e: Args<'session.en
   await attempt($, 'docs', 'sessionEnd', () => docsSessionEnd($, e))
   await attempt($, 'cteProfile', 'sessionEnd', () => cteProfileSessionEnd($, e))
   await attempt($, 'savings', 'sessionEnd', () => savingsSessionEnd($, e))
+  await attempt($, 'dbtMods', 'sessionEnd', () => endDbtMods($))
 }
 
 /** Each feature's band line, in order, with its id; a feature with nothing to say is left out. */
@@ -282,6 +303,7 @@ export async function featureBandLines($: EngineInterface, ui: BandUi): Promise<
   add('docs', await attempt($, 'docs', 'bandLine', () => docsBandLine($, ui)))
   add('cteProfile', await attempt($, 'cteProfile', 'bandLine', () => cteProfileBandLine($, ui)))
   add('savings', await attempt($, 'savings', 'bandLine', () => savingsBandLine($, ui)))
+  add('dbtMods', await attempt($, 'dbtMods', 'bandLine', () => bandDbtMods($, ui)))
   return lines
 }
 
@@ -323,6 +345,19 @@ export async function featuresBashGate($: EngineInterface, e: BashCall): Promise
   return gate
 }
 
+/**
+ * Before a call runs, after the rewrites and the gate: what a feature needs to know of the call as it was
+ * then (the conversation it is in, the folder a command starts in). It cannot refuse or change the call.
+ */
+export async function featuresCallStart($: EngineInterface, e: ToolCallInput): Promise<void> {
+  await attempt($, 'dbtMods', 'callStart', () => dbtModsCallStart($, e))
+}
+
+/** A Bash call that a gate refused, or whose result is a refusal, never reaches bashAfter: the features that kept it let go. */
+export async function featuresBashDropped($: EngineInterface, e: BashCall): Promise<void> {
+  await attempt($, 'runs', 'bashDropped', () => runsBashDropped($, e))
+}
+
 /** The context lines every feature adds after a Bash call ran. */
 export async function featuresBashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<string[]> {
   const lines: string[] = []
@@ -336,8 +371,15 @@ export async function featuresBashAfter($: EngineInterface, e: BashCall, result:
   addLines(lines, await attempt($, 'docs', 'bashAfter', () => docsBashAfter($, e, result)))
   addLines(lines, await attempt($, 'cteProfile', 'bashAfter', () => cteProfileBashAfter($, e, result)))
   addLines(lines, await attempt($, 'savings', 'bashAfter', () => savingsBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'dbtMods', 'bashAfter', () => dbtModsBashAfter($, e, result)))
   return lines
 }
+
+/**
+ * How long the edit phase may take: the dbt helpers hold an edit's result for up to their check's wait
+ * (dbt-mods.tsx), so the phase's deadline allows that and a little more.
+ */
+export const EDIT_AFTER_TIMEOUT_MS = dbtModsCheckHoldMs + 5_000
 
 /** Whether any feature's `editAfter` needs the file's text from before the edit. */
 export const EDIT_READS_BEFORE: boolean = runsEditReadsBefore || deferEditReadsBefore || toModelEditReadsBefore || commentsEditReadsBefore || costEditReadsBefore || healthEditReadsBefore || sqlGraphEditReadsBefore || docsEditReadsBefore || cteProfileEditReadsBefore || savingsEditReadsBefore
@@ -355,6 +397,7 @@ export async function featuresEditAfter($: EngineInterface, e: FileCall, result:
   addLines(lines, await attempt($, 'docs', 'editAfter', () => docsEditAfter($, e, result, docsEditReadsBefore ? file : { path: file.path, before: null })))
   addLines(lines, await attempt($, 'cteProfile', 'editAfter', () => cteProfileEditAfter($, e, result, cteProfileEditReadsBefore ? file : { path: file.path, before: null })))
   addLines(lines, await attempt($, 'savings', 'editAfter', () => savingsEditAfter($, e, result, savingsEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'dbtMods', 'editAfter', () => dbtModsEditAfter($, e, result, file)))
   return lines
 }
 
@@ -371,6 +414,7 @@ export async function featuresReadOrEditAfter($: EngineInterface, e: FileCall, r
   addLines(lines, await attempt($, 'docs', 'readOrEditAfter', () => docsReadOrEditAfter($, e, result, file)))
   addLines(lines, await attempt($, 'cteProfile', 'readOrEditAfter', () => cteProfileReadOrEditAfter($, e, result, file)))
   addLines(lines, await attempt($, 'savings', 'readOrEditAfter', () => savingsReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'dbtMods', 'readOrEditAfter', () => dbtModsReadOrEditAfter($, e, result, file)))
   return lines
 }
 

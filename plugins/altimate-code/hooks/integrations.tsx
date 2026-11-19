@@ -2,13 +2,14 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { Busy, Expanded, Form, IntegrationsStatus, Provider, ProviderId, WorkspaceChoice } from '../types'
-import { MISSING_BINARY, later, parseJson, runAltimate } from './altimate-cli'
+import { MISSING_BINARY, altimateCodeNotice, later, parseJson, runAltimate } from './altimate-cli'
 import { featureBandLines, featuresSessionStart, registerFeatures } from './features'
-import { registerLineage, startLineage } from './lineage'
+import { narrowBand, registerLineage, startLineage } from './lineage'
 import { startReviewNotices } from './review-notices'
 import { clearStatusParts, setStatusPart } from './status-line'
 import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 import { installToolChain } from './tool-chain'
+import { sessionStarted } from './usage'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -571,6 +572,8 @@ export const register: Register = (on, options) => {
       name: COMMAND,
       description: 'One-click GitHub, Jira and Linear integrations for your Altimate workspace',
     })
+    // One anonymous usage event per session start, in the background.
+    sessionStarted($)
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
     await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))
@@ -578,6 +581,11 @@ export const register: Register = (on, options) => {
     await clearStatusParts($).catch(error => $.ui.log(`status line · could not clear: ${String(error)}`))
     // Each feature's own start (its commands); one failing is logged and the rest go on.
     await featuresSessionStart($, e)
+    // An old or missing altimate-code stays on the status line; the check runs in the background.
+    if (e.isInteractive) later($, async () => {
+      const notice = await altimateCodeNotice($)
+      if (notice) await setStatusPart($, 'altimateCode', notice)
+    })
     // A press that was running when an earlier session ended can never finish, so it must not block this one.
     await update($, busy, () => null)
     // A `-p` run or the SDK has nobody to show the band to, so it does not scan the machine.
@@ -605,12 +613,16 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey) return next(e)
     const ui = $.ui.resolve(e)
     const lineage = await taskBand($, ui)
+    // The dbt helpers' lines are one of the features' lines (features/index.ts), under the lineage one.
     const extra = await featureBandLines($, ui)
+    // The lineage pane waiting on a narrow terminal keeps its reason here until it can open.
+    const narrow = await narrowBand($, ui, (e as { viewport?: { columns: number } }).viewport?.columns)
     const tail =
-      extra.length === 0 ? (
+      extra.length === 0 && !narrow ? (
         lineage
       ) : (
         <ui.Box flexDirection="column">
+          {narrow}
           {lineage}
           {extra.map(one => (
             <ui.Box key={`feature-${one.id}`}>{one.line}</ui.Box>
@@ -827,7 +839,7 @@ export const register: Register = (on, options) => {
     )
   })
 
-  registerLineage(on)
+  registerLineage(on, options as Record<string, unknown>)
   registerTaskImpact(on)
 
   // The features after the lineage half; their Bash and file-edit handlers run through one ordered

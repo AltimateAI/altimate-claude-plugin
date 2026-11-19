@@ -222,6 +222,8 @@ test('the override decides, and the status text shows target and defer', () => {
 })
 
 const ROOT = '/repo'
+/** The session's folder, answered by the fake host. */
+let cwd = ROOT
 
 /** A dbt project at /repo whose defer setting the CLI reports as `answer`; Bash commands are recorded. */
 function start($: any, on: any, answer: Record<string, unknown>, fail: { times: number } = { times: 0 }, projects: string[] = [ROOT]) {
@@ -232,6 +234,8 @@ function start($: any, on: any, answer: Record<string, unknown>, fail: { times: 
   on('command.register', (_: unknown, e: any) => ({ value: { command: e.name } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
+  cwd = ROOT
+  on('session.cwd', () => ({ value: cwd }))
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: projects.some(dir => e.path === `${dir}/dbt_project.yml`) }))
   on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
     if (!e.argv.includes('dbt_defer_state')) return { value: { exitCode: 0, stdout: '{}', stderr: '' } }
@@ -265,8 +269,6 @@ test('through the plugin, Claude’s dbt commands run with --defer --state when 
 
 test('a dbt project below the project, even under dbt_packages, keeps its own settings; the shell folder from an earlier cd counts', async ($, on) => {
   const seen = start($, on, DEFER, { times: 0 }, [ROOT, `${ROOT}/dbt_packages/pkg`, `${ROOT}/nested`])
-  let cwd = ROOT
-  on('session.cwd', () => ({ value: cwd }))
   on('fs.list', (_: unknown, e: { path: string }) => ({ value: e.path === ROOT ? [{ name: 'nested', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }, { name: 'dbt_packages', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }] : e.path === `${ROOT}/dbt_packages` ? [{ name: 'pkg', kind: 'dir' as const, size: 0, mtimeMs: 0, isLink: false }] : [] }))
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await $.tool.call({ tool: 'Bash', command: 'cd nested && dbt build' })
