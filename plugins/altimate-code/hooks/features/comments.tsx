@@ -11,7 +11,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { CommentsState, CommentsThread } from '../../types'
 import { later, runTool } from '../altimate-cli'
-import { featureUsed } from '../usage'
+import { openTracked } from '../usage'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -99,14 +99,12 @@ export function register(on: On, context: FeatureContext) {
 
   on('command.run', { command: COMMAND }, async $ => {
     try {
-      await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true })
-      featureUsed($, 'comments', 'opened')
+      await openCommentsPane($)
       // Running the command again is how a missing tool is looked for again, after an update.
       await change($, current => ({ ...current, needs: null, note: null }))
       later($, () => open($))
       return { text: 'Team comments opened in the side pane.' }
     } catch (error) {
-      featureUsed($, 'comments', 'failed')
       return { text: `Could not open team comments: ${String(error)}` }
     }
   })
@@ -249,21 +247,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
         💬 {current.threads.length} open team comment{current.threads.length === 1 ? '' : 's'}
         {current.project ? ` on ${current.project}` : ''}{' '}
       </Text>
-      <Button
-        key="comments-open"
-        label="Open"
-        onPress={() =>
-          later($, () =>
-            $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }).then(
-              () => featureUsed($, 'comments', 'opened'),
-              (error: unknown) => {
-                featureUsed($, 'comments', 'failed')
-                throw error
-              },
-            ),
-          )
-        }
-      />
+      <Button key="comments-open" label="Open" onPress={() => later($, () => openCommentsPane($))} />
     </Box>
   )
 }
@@ -394,6 +378,11 @@ async function attach($: EngineInterface, dir: string) {
 /** A `-p` run or the SDK has nobody at a pane: it loads once and does not poll. */
 function startPoll($: EngineInterface) {
   if (interactive && poll === null) poll = $.clock.every(pollSeconds * 1000, () => later($, () => load($)))
+}
+
+/** The pane a person opens (/comments, the band's Open), counted as a use of it. */
+function openCommentsPane($: EngineInterface) {
+  return openTracked($, 'comments', () => $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }))
 }
 
 async function open($: EngineInterface) {

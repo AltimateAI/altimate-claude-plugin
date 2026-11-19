@@ -632,6 +632,24 @@ test('with ALTIMATE_TELEMETRY_DISABLED the report works as before and no usage e
   expect(runs.filter(argv => argv[2] === 'report-event')).toEqual([])
 })
 
+test("the summary's Open lineage button is a person opening the lineage pane: one plugin_feature_used lineage opened", async ($, on) => {
+  mock.env(on, {})
+  mock.store(on)
+  const { runs, turn, clock } = await start($, on, { uname: 'Linux', openers: { 'xdg-open': 3 } })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  await clock.settle()
+  const used = () => runs.filter(argv => argv[3] === 'plugin_feature_used').map(argv => [argv[argv.indexOf('--feature') + 1], argv[argv.indexOf('--outcome') + 1]])
+  // The pane following the edit Claude made is not a person opening it.
+  expect(used()).toEqual([])
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-open' })
+  await clock.settle()
+  await band.unmount()
+  expect(used()).toEqual([['lineage', 'opened']])
+})
+
 test('macOS opens with open; /lineage-report before any report says so', async ($, on) => {
   const { runs, turn } = await start($, on, { uname: 'Darwin', openers: { open: 0 } })
   const none: any = await $.command.run({ command: 'lineage-report', args: '' } as any)

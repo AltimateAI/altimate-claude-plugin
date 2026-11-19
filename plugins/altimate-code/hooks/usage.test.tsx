@@ -9,7 +9,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 
 // What the CLI is allowed to receive: the flags of each action and the shape of each value.
 const ALLOWED: Record<string, RegExp> = {
-  '--session': /^claude:[A-Za-z0-9_-]{1,128}$/,
   '--plugin-version': /^(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?|unknown)$/,
   '--install-id': UUID,
   '--os': /^(macos|linux|windows|wsl|unknown)$/,
@@ -29,6 +28,8 @@ type Options = {
   platform?: string
   /** `$.ui.open` fails. */
   openFails?: boolean
+  /** `$.ui.open` answers that no surface could show the pane. */
+  notPlaced?: boolean
   /** Every read of the install id from the store waits for this. */
   holdStore?: Promise<void>
   /** The team comments the CLI lists. */
@@ -62,7 +63,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.end', () => ({ sessionId: 'test' }))
   on('ui.open', () => {
     if (options.openFails) throw new Error('no room for a pane')
-    return { value: {} }
+    return { value: options.notPlaced ? { isPlaced: false, reason: 'no surface can show a pane' } : {} }
   })
   on('ui.status', () => ({ value: undefined }))
   on('ui.toast', (_: unknown, e: { text: string }) => {
@@ -125,7 +126,9 @@ test('a first session start sends exactly one plugin_session_start with the plug
   expect(events).toHaveLength(1)
   const [argv] = events
   expect(argv!.slice(0, 4)).toEqual(['altimate', 'tool', 'report-event', 'plugin_session_start'])
-  expect(flag(argv!, '--session')).toBe(`claude:${SESSION}`)
+  // No session id: the event cannot be joined to the CLI's other events about this session.
+  expect(argv).not.toContain('--session')
+  expect(argv.join(' ')).not.toContain(SESSION)
   expect(flag(argv!, '--plugin-version')).toBe('1.8.2')
   expect(flag(argv!, '--os')).toBe('macos')
   expect(flag(argv!, '--install-id')).toMatch(UUID)
@@ -344,4 +347,21 @@ test("the comments band's Open button sends comments opened, as /comments does",
   await clock.settle()
   await band.unmount()
   expect(usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')])).toEqual([['comments', 'opened']])
+})
+
+test('a pane Claude Code could not place (isPlaced: false) is counted as failed, not opened', async ($, on) => {
+  const { clock, usage, flag } = await start($, on, { notPlaced: true })
+  for (const [command, args, feature] of [
+    ['lineage', '', 'lineage'],
+    ['dbt-show', '', 'dbt_show'],
+    ['comments', '', 'comments'],
+    ['runs', '', 'runs'],
+    ['sql-graph', MODEL, 'sql_graph'],
+    ['profile-ctes', MODEL, 'profile_ctes'],
+    ['to-model', `fct_new models/${MODEL}.sql`, 'to_model'],
+  ] as const) {
+    const before = usage().length
+    await run($, clock, command, args)
+    expect({ command, sent: usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')]) }).toEqual({ command, sent: [[feature, 'failed']] })
+  }
 })

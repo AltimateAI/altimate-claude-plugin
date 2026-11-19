@@ -5,7 +5,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import { MISSING_BINARY, later, runTool } from '../altimate-cli'
-import { featureUsed } from '../usage'
+import { openTracked } from '../usage'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { ToModelState } from '../../types'
 import { projectLayout } from '../lineage-graph'
@@ -216,11 +216,9 @@ export function register(on: On, context: FeatureContext) {
     const view: ToModelState = { name: parsed.name, source: got.source, dialect, rows: sortRows(rows), sql: got.sql, modelsDir }
     await update($, stateAtom, () => view)
     try {
-      await $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true })
-      featureUsed($, 'to_model', 'opened')
+      await openTracked($, 'to_model', () => $.ui.open({ id: PANE, title: PANE_TITLE, focus: true, closeOnEscape: true }))
     } catch {
       // No surface to draw on: the prompt below still carries the whole mapping.
-      featureUsed($, 'to_model', 'failed')
     }
     // The host refuses a submit made inside a command's own hook, so it goes out right after this one returns.
     later($, () => $.prompt.submit({ text: buildPrompt(view) }))

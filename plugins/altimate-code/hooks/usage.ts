@@ -1,8 +1,9 @@
 // Anonymous usage events, sent through altimate-code's own telemetry (`altimate tool report-event`): the
 // plugin opens no network connection of its own. A session start carries the plugin version, the OS and a
 // random install id kept in this plugin's Claude Code store (the CLI adds its own version); a feature
-// used carries which panel, command or gate, and its outcome. Nothing else: no project, model, column or
-// file names, SQL or session text. The CLI checks every value against a fixed list or pattern.
+// used carries which panel, command or gate, and its outcome. Nothing else: no session id, no project,
+// model, column or file names, SQL or session text. The CLI checks every value against a fixed list or
+// pattern, and sends these events without the identifiers its other events share (account, machine id).
 //
 // Every event runs in the background and is never awaited by a hook. With the telemetry opt-out set, no
 // CLI is started and no install id is made; the CLI also drops events under its own opt-out (its config).
@@ -85,9 +86,9 @@ async function pluginVersion($: EngineInterface): Promise<string> {
 
 async function send($: EngineInterface, action: 'plugin_session_start' | 'plugin_feature_used', fields: string[]) {
   if (await usageOff($)) return
-  const session = await $.session.id()
   const [version, install] = await Promise.all([pluginVersion($), installId($)])
-  const argv = ['tool', 'report-event', action, '--session', `claude:${session}`, '--plugin-version', version, '--install-id', install, ...fields]
+  // No session id: these events must not be joinable to anything else the CLI sends about the session.
+  const argv = ['tool', 'report-event', action, '--plugin-version', version, '--install-id', install, ...fields]
   // An older CLI answers with an error: it is not this plugin's to show.
   await runAltimate($, argv, EVENT_TIMEOUT_MS).catch(() => null)
 }
@@ -103,6 +104,22 @@ export function sessionStarted($: EngineInterface) {
       await send($, 'plugin_session_start', ['--os', platform && OS.has(platform) ? platform : 'unknown'])
     })
   } catch {}
+}
+
+/**
+ * Opens a panel a person asked for, and sends `opened`, or `failed` when it could not open or Claude Code
+ * could not place it (`isPlaced: false`). The open's own answer or error is passed on unchanged.
+ */
+export async function openTracked<T>($: EngineInterface, feature: Feature, open: () => Promise<T>): Promise<T> {
+  let opened: T
+  try {
+    opened = await open()
+  } catch (error) {
+    featureUsed($, feature, 'failed')
+    throw error
+  }
+  featureUsed($, feature, (opened as { isPlaced?: unknown } | null | undefined)?.isPlaced === false ? 'failed' : 'opened')
+  return opened
 }
 
 /** One `plugin_feature_used`, in the background. Never throws: a usage event never stops a hook. */
