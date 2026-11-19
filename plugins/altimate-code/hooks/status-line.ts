@@ -53,10 +53,12 @@ export function keepStatusParts() {
 
 /** After a /clear: the parts drawn before it, under any the new conversation has set already. */
 export async function restoreStatusParts($: EngineInterface) {
-  if (!beforeClear) return
-  // Read when the write applies, so a part removed while it waits stays removed; let go only once written.
-  await update($, parts, prev => ({ ...(beforeClear ?? {}), ...prev }))
-  beforeClear = null
+  const kept = beforeClear
+  if (!kept) return
+  // Read when the write applies, so a part removed while it waits stays removed; let go only once written, and only
+  // if no later /clear kept a snapshot of its own meanwhile.
+  await update($, parts, prev => ({ ...kept, ...prev }))
+  if (beforeClear === kept) beforeClear = null
   drawnParts = await read($, parts)
   $.ui.status(statusLineOf(drawnParts))
 }

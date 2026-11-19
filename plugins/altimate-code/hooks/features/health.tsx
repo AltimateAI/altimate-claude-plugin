@@ -717,15 +717,21 @@ async function enable($: EngineInterface) {
 export async function clearStart($: EngineInterface) {
   // Once per /clear, whichever comes first: the session id's change, or a hook of the new conversation. A caller
   // that comes while it runs waits for it, so a push is never decided on the empty state.
-  if (restoring) return restoring
-  if (!clearPending) return
-  clearPending = false
-  const run = restore($)
-  restoring = run
-  try {
-    await run
-  } finally {
-    if (restoring === run) restoring = null
+  // Another /clear may come while a restore runs: once it ends, the one that /clear asked for runs too.
+  for (;;) {
+    if (restoring) {
+      await restoring
+      continue
+    }
+    if (!clearPending) return
+    clearPending = false
+    const run = restore($)
+    restoring = run
+    try {
+      await run
+    } finally {
+      if (restoring === run) restoring = null
+    }
   }
 }
 
