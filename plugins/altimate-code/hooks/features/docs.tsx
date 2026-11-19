@@ -10,7 +10,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { DocsCandidate, DocsCoverageView, DocsGroup, DocsState } from '../../types'
 import { later, runTool, within } from '../altimate-cli'
-import { nextCheckOf } from '../dbt-mods'
+import { nextCheckOf, type CheckLanded } from '../dbt-mods'
 import { setStatusPart } from '../status-line'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -351,11 +351,11 @@ type ManifestModel = { resource_type?: string; package_name?: string; name?: str
  * versioned models its latest version stands for them. A model the manifest does not list, or a manifest
  * that cannot be read, gets the id dbt would give it, which finds nothing rather than another package's model.
  */
-async function modelRef($: EngineInterface, project: Project, model: string, byFile = false): Promise<string> {
+async function modelRef($: EngineInterface, project: Project, model: string, byFile = false, manifest = project.manifest): Promise<string> {
   if (!project.package) return model
   const built = `model.${project.package}.${model}`
   try {
-    const nodes = (JSON.parse((await $.fs.read(project.manifest)) ?? '') as { nodes?: Record<string, ManifestModel> }).nodes ?? {}
+    const nodes = (JSON.parse((await $.fs.read(manifest)) ?? '') as { nodes?: Record<string, ManifestModel> }).nodes ?? {}
     const own = Object.entries(nodes).filter(([, node]) => node?.resource_type === 'model' && node.package_name === project.package)
     const stem = (node: ManifestModel) => (node.original_file_path ?? '').replace(/\.sql$/i, '').split('/').pop()
     if (byFile) {
@@ -485,7 +485,7 @@ async function schemaEdited($: EngineInterface, file: EditedFile, created: boole
 
 /** The model's documentation coverage as `manifest` has it; a line for Claude when the tool is missing; null when it could not be read. */
 async function coverageOf($: EngineInterface, project: Project, model: string, manifest: string, until: number): Promise<{ view: DocsCoverageView; star: boolean } | { line: string } | null> {
-  const result = await runTool($, 'dbt_docs_coverage', { model: await modelRef($, project, model, true), manifest_path: manifest }, { until, cliOnly: true }).catch(() => null)
+  const result = await runTool($, 'dbt_docs_coverage', { model: await modelRef($, project, model, true, manifest), manifest_path: manifest }, { until, cliOnly: true }).catch(() => null)
   if (!result) return null
   const meta = result.metadata
   if (!result.ok || !meta || meta.success !== true) {
@@ -527,8 +527,8 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   waiting = asked
   // Asked for before the check starts (the dbt helpers run after this feature in the edit phase), so it is not missed.
   if (asked) {
-    const check = nextCheckOf(file.path)
-    later($, () => coverageAfterCheck($, asked, check))
+    const { landed, cancel } = nextCheckOf(file.path)
+    later($, () => coverageAfterCheck($, asked, landed, cancel))
   }
   const read = await coverageOf($, project, model, project.manifest, (await $.clock.now()) + ROUND_MS)
   if (!read) return []
@@ -548,10 +548,15 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
 }
 
 /** Once the edit's check ran its model, the coverage shown from before that edit is read again from the check's manifest. */
-async function coverageAfterCheck($: EngineInterface, asked: { file: string; model: string; project: Project }, check: Promise<{ manifest: string } | null>) {
+async function coverageAfterCheck($: EngineInterface, asked: { file: string; model: string; project: Project }, check: Promise<CheckLanded | null>, cancel: () => void) {
   const landed = await within($, CHECK_WAIT_MS, check)
-  if (!landed || waiting !== asked) return
+  // A wait that ran out leaves nothing behind.
+  if (!landed) return cancel()
+  if (waiting !== asked) return
   const read = await coverageOf($, asked.project, asked.model, landed.manifest, (await $.clock.now()) + RECHECK_MS)
+  // The plugin's next dbt run rewrites that manifest: an answer read from another run's is not this edit's.
+  const now = await $.fs.stat(landed.manifest).catch(() => null)
+  if (now?.mtimeMs !== landed.mtimeMs) return
   // A newer edit asks for its own coverage: this one is no longer shown.
   if (waiting !== asked || !read || 'line' in read) return
   waiting = null

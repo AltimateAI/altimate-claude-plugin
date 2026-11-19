@@ -546,7 +546,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   const status: CheckView['status'] = errors.length ? 'error' : reason ? 'partial' : drift.missing.length || drift.undocumented.length ? 'warn' : 'ok'
   const view: CheckView = { ...blank, model: named ?? model, schema: node ? schemaOf(node.node) : blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
   await setCheck($, view, newest)
-  if (current()) checkEnded(`${root}/${rel}`, view.ran && after ? { root, file: `${root}/${rel}`, manifest: `${scratch}/manifest.json` } : null)
+  if (current()) checkEnded(`${root}/${rel}`, mine, view.ran && after ? { root, file: `${root}/${rel}`, manifest: `${scratch}/manifest.json`, mtimeMs: after.mtimeMs } : null)
   // An edit of a schema file or macro that came while this ran checks it again now.
   if (forcedWhileBusy && current() && !rechecking) {
     const waiting = forcedWhileBusy
@@ -558,26 +558,41 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   return { view, note: checkNote(view), current, newest }
 }
 
-/** A check that ran its model: the model's file, and the manifest its dbt show wrote (in the plugin's own folder). */
-export type CheckLanded = { root: string; file: string; manifest: string }
-// Who waits for the next check of a file, by the file's normalized path.
-const landedWaiters = new Map<string, ((landed: CheckLanded | null) => void)[]>()
+/** A check that ran its model: the model's file, and the manifest its dbt show wrote (in the plugin's own folder) with its time. */
+export type CheckLanded = { root: string; file: string; manifest: string; mtimeMs: number }
+type Waiter = { after: number; resolve: (landed: CheckLanded | null) => void }
+// Who waits for a check of a file, by the file's normalized path, with the last check started when they asked.
+const landedWaiters = new Map<string, Waiter[]>()
 
 /**
- * Resolves when the newest check of `file` ends: with its manifest when it compiled and ran the model (that
- * manifest holds the model's SQL as it is now, where the project's own may hold it as it was at the last dbt
- * compile), else null. Never rejects; a caller bounds the wait itself.
+ * Resolves when the newest check of `file` that starts after this call ends: with its manifest when it compiled
+ * and ran the model (that manifest holds the model's SQL as it is now, where the project's own may hold it as it
+ * was at the last dbt compile), else null. A check already running when this is called is from before the edit,
+ * and does not answer it. Never rejects; `cancel` stops the wait (the caller's own deadline).
  */
-export function nextCheckOf(file: string): Promise<CheckLanded | null> {
+export function nextCheckOf(file: string): { landed: Promise<CheckLanded | null>; cancel: () => void } {
   const key = normalize(file)
-  return new Promise(resolve => landedWaiters.set(key, [...(landedWaiters.get(key) ?? []), resolve]))
+  let waiter!: Waiter
+  const landed = new Promise<CheckLanded | null>(resolve => (waiter = { after: seq, resolve }))
+  landedWaiters.set(key, [...(landedWaiters.get(key) ?? []), waiter])
+  const cancel = () => {
+    const left = (landedWaiters.get(key) ?? []).filter(one => one !== waiter)
+    if (left.length) landedWaiters.set(key, left)
+    else landedWaiters.delete(key)
+    waiter.resolve(null)
+  }
+  return { landed, cancel }
 }
 
-function checkEnded(file: string, landed: CheckLanded | null) {
+/** The check numbered `mine` of `file` ended: the waiters that asked before it started get its answer. */
+function checkEnded(file: string, mine: number, landed: CheckLanded | null) {
   const key = normalize(file)
   const waiting = landedWaiters.get(key) ?? []
-  landedWaiters.delete(key)
-  for (const resolve of waiting) resolve(landed)
+  const answered = waiting.filter(one => one.after < mine)
+  const left = waiting.filter(one => one.after >= mine)
+  if (left.length) landedWaiters.set(key, left)
+  else landedWaiters.delete(key)
+  for (const one of answered) one.resolve(landed)
 }
 
 async function setCheck($: EngineInterface, view: CheckView, current: () => boolean) {
@@ -1759,6 +1774,9 @@ export async function dbtModsReadOrEditAfter($: EngineInterface, e: { tool: stri
  */
 export async function endDbtMods($: EngineInterface) {
   generation++
+  // A check of the conversation that ended answers nobody in the next.
+  for (const waiting of landedWaiters.values()) for (const one of waiting) one.resolve(null)
+  landedWaiters.clear()
   forgetRedactions()
   slices.clear()
   parsed = null

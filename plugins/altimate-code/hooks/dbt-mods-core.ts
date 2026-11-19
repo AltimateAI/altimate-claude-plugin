@@ -250,8 +250,9 @@ const CONTEXT_FLAGS: Record<string, string> = { '--target': '--target', '-t': '-
 const SELECT_FLAGS: Record<string, string> = { '--select': '--select', '-s': '--select', '--models': '--select', '-m': '--select', '--exclude': '--exclude', '--selector': '--selector' }
 // Flags that change how dbt reports or how fast it runs, never what it runs.
 const DISPLAY_FLAGS = new Set(['--log-format', '--log-format-file', '--log-level', '--log-level-file', '--log-path', '--quiet', '-q', '--debug', '-d', '--no-print', '--print', '--use-colors', '--no-use-colors', '--printer-width', '--threads', '--no-version-check', '--version-check', '--write-json', '--no-write-json', '--send-anonymous-usage-stats', '--no-send-anonymous-usage-stats', '--log-cache-events', '--record-timing-info'])
-// Flags a re-run of Claude's dbt show replaces: the pane reads JSON, and keeps the limit itself.
-const OUTPUT_FLAGS = new Set(['--output', '-o', '--log-format', '--limit', '--log-level'])
+// Flags a re-run of Claude's dbt show replaces: the pane reads JSON, and keeps the limit itself. Its artifact
+// folder is the plugin's own (SCRATCH_TARGET), so a folder Claude named is dropped too.
+const OUTPUT_FLAGS = new Set(['--output', '-o', '--log-format', '--limit', '--log-level', '--target-path'])
 const BARE_OUTPUT_FLAGS = new Set(['--quiet', '-q'])
 
 /** The last value given to `--flag value` or `--flag=value` in an argv; null when none, or when it holds an expansion the shell would make. */
@@ -479,6 +480,8 @@ export function targetPath(yml: string): string {
  * model's compiled SQL (and replace run_results.json), so those runs go here and are read from here.
  */
 export const SCRATCH_TARGET = '.altimate-plugin'
+/** The health check's own folder inside SCRATCH_TARGET: its parse runs outside the plugin's dbt queue, so it never writes the manifest a check is reading. */
+export const HEALTH_SCRATCH = 'health'
 
 /**
  * The folders a project's files live in, from dbt_project.yml: its model, seed, snapshot, macro, test

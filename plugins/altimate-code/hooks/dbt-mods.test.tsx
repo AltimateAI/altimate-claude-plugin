@@ -3931,11 +3931,32 @@ test('the plugin\'s own dbt runs write their artifacts to its own folder: the pr
   expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toBeDefined()
 })
 
-test('the doctor\'s dbt parse, which the person asks for to refresh a stale manifest, still writes the project\'s own', async ($, on) => {
-  const { clock, runs, envs } = await start($, on)
-  await $.command.run({ command: 'dbt-doctor', args: '' })
+test('the doctor\'s Run dbt parse, which the person presses to refresh a stale manifest, writes the project\'s own manifest', async ($, on) => {
+  const { clock, runs, envs } = await start($, on, { interactive: true, now: 200_000, mtimes: { 'models/orders.sql': 5_000 } })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
   await clock.settle()
+  await band.unmount()
   const parse = runs.findIndex(argv => argv[0] === DBT && argv[1] === 'parse')
-  if (parse >= 0) expect(envs[parse]!.DBT_TARGET_PATH).toBeUndefined()
-  for (const [i, argv] of runs.entries()) if (argv[0] === DBT && (argv[1] === '--version' || argv[1] === 'debug')) expect(envs[i]!.DBT_TARGET_PATH).toBeUndefined()
+  expect(parse).toBeGreaterThanOrEqual(0)
+  expect(envs[parse]!.DBT_TARGET_PATH).toBeUndefined()
+})
+
+test('Re-run of Claude\'s dbt show drops the artifact folder Claude named: the replay writes to the plugin\'s own', async ($, on) => {
+  expect(replayArgv(['dbt', 'show', '-s', 'orders', '--target-path', 'target'], 5)).toEqual(['dbt', 'show', '-s', 'orders', '--limit', '5', '--output', 'json', '--log-format', 'json'])
+  expect(replayArgv(['dbt', 'show', '--target-path=target', '-s', 'orders'], 5)).toEqual(['dbt', 'show', '-s', 'orders', '--limit', '5', '--output', 'json', '--log-format', 'json'])
+  const { clock, runs, envs, setBash, files } = await start($, on)
+  const kept = files['target/manifest.json']
+  setBash({ stdout: showLog([{ order_id: 1 }], 'orders') })
+  await $.tool.call({ tool: 'Bash', command: 'dbt show -s orders --target-path target' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  await ui.press({ key: 'results-rerun' })
+  await clock.settle()
+  await ui.unmount()
+  const replay = runs.findIndex(argv => argv[0] === DBT && argv[1] === 'show')
+  expect(replay).toBeGreaterThanOrEqual(0)
+  expect(runs[replay]).not.toContain('--target-path')
+  expect(envs[replay]!.DBT_TARGET_PATH).toBe(`${ROOT}/target/.altimate-plugin`)
+  expect(files['target/manifest.json']).toBe(kept)
 })

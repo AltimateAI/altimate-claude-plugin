@@ -18,8 +18,10 @@ import type { BandUi, FeatureContext } from './index'
 const deferAtom = atom({ plugin: 'altimate-code', key: 'defer' } as const, null as DeferState | null)
 // What /defer and /target added to Claude's last dbt command, for the band, until the next prompt.
 const ranAtom = atom({ plugin: 'altimate-code', key: 'deferRan' } as const, null as string | null)
-// The flags added to each rewritten command, by the command as it ran (the after phase sees the rewrite), for its result.
-const addedTo = new Map<string, string[]>()
+// The flags added to each rewritten command, by the command as it ran (the after phase sees the rewrite), for its
+// result: one entry per call, oldest first, so two calls of the same command each get theirs.
+const addedTo = new Map<string, string[][]>()
+let addedCount = 0
 
 // The commands that take `--defer` in every dbt version this reads state for (older dbt refuses the option on
 // `ls`, `parse`, `seed`, `run-operation` and others, and `retry` reads the previous run's results from `--state`).
@@ -434,6 +436,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   generation++
   loading = null
   addedTo.clear()
+  addedCount = 0
   await update($, deferAtom, () => null)
   await update($, ranAtom, () => null)
   // Clearing the line is cosmetic: an engine that cannot draw it does not stop the session.
@@ -477,9 +480,13 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   if (!(await runsHere($, e.command, root, state.projectDir))) return null
   const { command, added } = rewriteDefer(e.command, effective(state), state.projectDir)
   if (command === e.command) return null
-  // Kept for the call's after phase, which tells Claude what ran; a call that never gets there leaves at most a few.
-  if (addedTo.size >= 20) addedTo.delete(addedTo.keys().next().value!)
-  addedTo.set(command, added)
+  // Kept for the call's after phase, which tells Claude what ran; calls that never get there leave at most a few.
+  if (addedCount >= 20) {
+    addedTo.clear()
+    addedCount = 0
+  }
+  addedTo.set(command, [...(addedTo.get(command) ?? []), added])
+  addedCount++
   return command
 }
 
@@ -496,9 +503,11 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
  * told in the result, and the person in the band, what really ran.
  */
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
-  const added = addedTo.get(e.command)
+  const queued = addedTo.get(e.command)
+  const added = queued?.shift()
   if (!added) return
-  addedTo.delete(e.command)
+  if (!queued!.length) addedTo.delete(e.command)
+  addedCount--
   const text = added.join('; ')
   await update($, ranAtom, () => text)
   return [`◆ dbt · this command ran as ${text}: /defer and /target added those flags (the command shown is as written), so its results are from that target and state`]

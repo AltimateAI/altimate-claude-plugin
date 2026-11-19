@@ -15,7 +15,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { HealthInsight, HealthState } from '../../types'
 import { NOT_FOUND, later, runTool, within } from '../altimate-cli'
 import { setStatusPart } from '../status-line'
-import { SCRATCH_TARGET, targetPath } from '../dbt-mods-core'
+import { HEALTH_SCRATCH, SCRATCH_TARGET, targetPath } from '../dbt-mods-core'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -488,7 +488,7 @@ async function checkEnv($: EngineInterface): Promise<Record<string, string> | un
   if (!project) return undefined
   const path = targetPath(await $.fs.read(`${project}/dbt_project.yml`).catch(() => ''))
   const target = path.startsWith('/') ? path : `${project}/${path}`
-  const scratch = `${target}/${SCRATCH_TARGET}`
+  const scratch = `${target}/${SCRATCH_TARGET}/${HEALTH_SCRATCH}`
   if (await $.fs.exists(`${target}/catalog.json`).catch(() => false)) {
     // Best effort: without the copy the check reads no catalog, as with a project that has none.
     await $.process.run(['mkdir', '-p', scratch], { timeoutMs: 10_000 }).catch(() => null)
@@ -714,7 +714,15 @@ export async function clearStart($: EngineInterface) {
     return
   }
   enabled = true
-  await update($, healthAtom, () => ({ ...kept, running: false }))
+  // Changes the new conversation recorded before this ran are added to the kept ones, not replaced by them.
+  await update($, healthAtom, prev => ({
+    ...kept,
+    running: false,
+    pending: [...new Set([...kept.pending, ...(prev?.pending ?? [])])],
+    touched: [...new Set([...kept.touched, ...(prev?.touched ?? [])])],
+    // A new change asks for a check again after a failed one, as markChanged does.
+    ...(prev?.pending.length ? { problem: null } : {}),
+  }))
   drawn = true
   await drawStatus($, kept.issues)
   if (await wantsCheck($)) later($, () => kick($))
@@ -735,7 +743,8 @@ export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   carried = state ? { ...state, pending: state.running ? [...new Set([...inFlight, ...state.pending])] : state.pending, running: false } : null
   generation += 1
   running = null
-  enabled = false
+  // Kept on through a /clear that carries the state: a change made before clearStart restores it is still recorded, and merged.
+  if (!carried) enabled = false
 }
 
 /** This feature's line in the band, under the lineage line; null when there is nothing to say. */

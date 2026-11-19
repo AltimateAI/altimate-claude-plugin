@@ -213,7 +213,20 @@ test('after /clear with no baseline yet (the first check failed), /health in the
 test('the check\'s parse writes to the plugin\'s own artifact folder, in a CLI process of its own: the project\'s manifest keeps its compiled SQL', async ($, on) => {
   const { calls } = await start($, on, { runs: [[OLD_STG]] })
   expect(calls).toHaveLength(1)
-  expect(calls[0]!.env).toEqual({ DBT_TARGET_PATH: `${ROOT}/target/.altimate-plugin`, ALTIMATE_TOOL_DAEMON: '0' })
+  expect(calls[0]!.env).toEqual({ DBT_TARGET_PATH: `${ROOT}/target/.altimate-plugin/health`, ALTIMATE_TOOL_DAEMON: '0' })
+})
+
+test('a change made right after /clear, before the kept state is put back, is merged into it and checked', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_FCT]] })
+  await clear()
+  // The new conversation's first edit lands before the kept state is restored.
+  await $.tool.call(edit(FCT))
+  await clock.settle()
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toContain('1 new health issue · fct_orders: model fanout')
 })
 
 test('two changed models give "2 new health issues" with the first model named', async ($, on) => {

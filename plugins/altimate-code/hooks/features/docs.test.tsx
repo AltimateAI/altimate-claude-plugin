@@ -213,7 +213,20 @@ type Options = {
   /** A model file written after the project's manifest: dbt has not run since the edit. */
   editNewer?: boolean
   /** The edit's check (the dbt helpers): what its dbt show previews, the manifest it writes, and the coverage read from that manifest. */
-  check?: { rows: Record<string, unknown>[]; node: string; manifest: Record<string, unknown>; coverage: Record<string, unknown> }
+  check?: {
+    rows: Record<string, unknown>[]
+    node: string
+    manifest: Record<string, unknown>
+    coverage: Record<string, unknown>
+    /** The coverage read from the check's manifest, by how many dbt shows had finished when it was read. */
+    coverageAfter?: (shows: number) => Record<string, unknown>
+    /** The first dbt show waits for this. */
+    holdFirst?: Promise<void>
+    /** The coverage read from the project's manifest for the second edit waits for this. */
+    holdSecondEdit?: Promise<void>
+    /** The check's manifest is rewritten (by another plugin run) while its coverage is read. */
+    rewrittenWhileRead?: boolean
+  }
 }
 
 /** A dbt project at /repo with the plugin's MCP server connected, and the session beneath the plugin. */
@@ -248,7 +261,8 @@ async function start($: any, on: any, options: Options = {}) {
     return { text: e.text }
   })
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: e.path === `${ROOT}/dbt_project.yml` || ((e.path === SCHEMA && !options.newFile) || e.path === DOWNSTREAM) || (!options.noManifest && e.path === MANIFEST_PATH) }))
-  on('fs.stat', (_: unknown, e: { path: string }) => ({ value: { kind: 'file', size: 100, mtimeMs: options.editNewer && e.path.endsWith('.sql') ? 2 : 1, isLink: false } }))
+  let checkManifestAt = 1
+  on('fs.stat', (_: unknown, e: { path: string }) => ({ value: { kind: 'file', size: 100, mtimeMs: options.editNewer && e.path.endsWith('.sql') ? 2 : e.path.includes('.altimate-plugin') ? checkManifestAt : 1, isLink: false } }))
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (e.path === `${ROOT}/dbt_project.yml`) return { value: "name: 'shop'\n" }
     if (e.path === MANIFEST_PATH && options.manifest) return { value: JSON.stringify({ nodes: options.manifest }) }
@@ -274,10 +288,18 @@ async function start($: any, on: any, options: Options = {}) {
     if (e.tool === 'impact_analysis') return { value: { content: [{ type: 'text', text: JSON.stringify({ ...(options.reach ?? REACH), report: 'Impact' }) }], isError: false } }
     return { value: { content: [], isError: true } }
   })
+  let shows = 0
+  let plainReads = 0
+  const previewOf = () => ({ data: { is_inline: false, node_name: options.check!.node, output_format: 'json', preview: JSON.stringify(options.check!.rows), unique_id: `model.shop.${options.check!.node}` }, info: { code: 'Q041', level: 'info', msg: '…' } })
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
     // The edit's check: dbt show previews the model as the edit left it.
     if (e.argv[0] === 'dbt' && command === 'show' && options.check) {
+      if (shows === 0 && options.check.holdFirst) {
+        shows++
+        return options.check.holdFirst.then(() => ({ value: { exitCode: 0, stdout: JSON.stringify(previewOf()), stderr: '' } }))
+      }
+      shows++
       const preview = { data: { is_inline: false, node_name: options.check.node, output_format: 'json', preview: JSON.stringify(options.check.rows), unique_id: `model.shop.${options.check.node}` }, info: { code: 'Q041', level: 'info', msg: '…' } }
       return { value: { exitCode: 0, stdout: JSON.stringify(preview), stderr: '' } }
     }
@@ -289,7 +311,13 @@ async function start($: any, on: any, options: Options = {}) {
     if (tool === 'dbt_docs_coverage') {
       if (options.coverageError) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: options.coverageError, metadata: { success: false } }), stderr: '' } }
       const fromCheck = options.check && String(e.argv[5]).includes('.altimate-plugin')
-      const body = options.coverage === null ? { status: 'error', output: 'Unknown tool: dbt_docs_coverage', metadata: {} } : { status: 'ok', output: 'coverage', metadata: fromCheck ? options.check!.coverage : options.coverage }
+      if (!fromCheck && options.check?.holdSecondEdit && ++plainReads === 2) {
+        const answer = { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'coverage', metadata: options.coverage }), stderr: '' } }
+        return options.check.holdSecondEdit.then(() => answer)
+      }
+      if (fromCheck && options.check!.rewrittenWhileRead) checkManifestAt++
+      const checked = fromCheck ? (options.check!.coverageAfter?.(shows) ?? options.check!.coverage) : null
+      const body = options.coverage === null ? { status: 'error', output: 'Unknown tool: dbt_docs_coverage', metadata: {} } : { status: 'ok', output: 'coverage', metadata: checked ?? options.coverage }
       return { value: { exitCode: options.coverage === null ? 1 : 0, stdout: JSON.stringify(body), stderr: '' } }
     }
     return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: options.reach ?? REACH }), stderr: '' } }
@@ -660,5 +688,47 @@ kitTest('a SQL edit dbt has not compiled yet: the coverage says it is from befor
   const ui = await $.ui.mount({ ...COVERAGE_PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /orders: 1 of 2 columns documented \(50%\) · no description: payments/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /2 of 2 columns documented/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+kitTest('the coverage of an edit is read only from its own check: a check still running from an earlier edit does not answer it', { options: { dbt_mods: true } }, async ($, on) => {
+  const node = { 'model.shop.orders': { resource_type: 'model', name: 'orders', package_name: 'shop', original_file_path: 'models/marts/orders.sql', columns: {} } }
+  const before = { success: true, model: 'orders', has_description: true, output_columns: ['order_id'], documented: ['order_id'], missing: [], percent: 100 }
+  let release!: () => void
+  const holdFirst = new Promise<void>(resolve => (release = resolve))
+  let releaseB!: () => void
+  const holdSecondEdit = new Promise<void>(resolve => (releaseB = resolve))
+  // The coverage read from the check's manifest says which dbt show it followed.
+  const coverageAfter = (shows: number) => ({ success: true, model: 'orders', has_description: true, output_columns: ['order_id', `col_${shows}`], documented: ['order_id'], missing: [`col_${shows}`], percent: 50 })
+  const { clock } = await start($, on, { editNewer: true, manifest: node, coverage: before, check: { rows: [{ order_id: 1 }], node: 'orders', manifest: node, coverage: before, coverageAfter, holdFirst, holdSecondEdit } })
+  const file = `${ROOT}/models/marts/orders.sql`
+  // Edit A's check is held; edit B comes while it runs, and A's check ends before B's own check has started.
+  const a = $.tool.call({ tool: 'Edit', file_path: file, old_string: 'a', new_string: 'b' })
+  await clock.advance(10)
+  const b = $.tool.call({ tool: 'Edit', file_path: file, old_string: 'b', new_string: 'c' })
+  await clock.advance(10)
+  release()
+  await a
+  await clock.advance(10)
+  releaseB()
+  await b
+  await clock.settle()
+  const ui = await $.ui.mount({ ...COVERAGE_PANE, surface: 'terminal' })
+  // B's coverage comes from the second show (B's own check), never the first (A's).
+  expect(await ui.find({ type: 'Text', text: /no description: col_2/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /col_1/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+kitTest('a check manifest another plugin run rewrote while its coverage was read is not used: the coverage stays marked as from before the edit', { options: { dbt_mods: true } }, async ($, on) => {
+  const node = { 'model.shop.orders': { resource_type: 'model', name: 'orders', package_name: 'shop', original_file_path: 'models/marts/orders.sql', columns: {} } }
+  const before = { success: true, model: 'orders', has_description: true, output_columns: ['order_id'], documented: ['order_id'], missing: [], percent: 100 }
+  const after = { success: true, model: 'orders', has_description: true, output_columns: ['order_id', 'payments'], documented: ['order_id'], missing: ['payments'], percent: 50 }
+  const { clock } = await start($, on, { editNewer: true, manifest: node, coverage: before, check: { rows: [{ order_id: 1 }], node: 'orders', manifest: node, coverage: after, rewrittenWhileRead: true } })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/marts/orders.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...COVERAGE_PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /from the manifest of before the last edit/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /no description: payments/ })).toBeUndefined()
   await ui.unmount()
 })
