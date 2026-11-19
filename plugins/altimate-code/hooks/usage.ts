@@ -28,8 +28,12 @@ export type Feature =
 export type Outcome = 'opened' | 'failed' | 'held' | 'allowed'
 
 const INSTALL_ID_KEY = 'usage.installId'
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const VERSION = /^\d{1,6}\.\d{1,6}\.\d{1,6}(?:-[0-9A-Za-z.-]{1,32})?$/
+// What the CLI accepts: a random (version 4) UUID, and a SemVer 2.0 version of up to 64 characters.
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const NUMBER = '(?:0|[1-9]\\d{0,5})'
+const PRERELEASE_PART = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)'
+const SEMVER = new RegExp(`^${NUMBER}\\.${NUMBER}\\.${NUMBER}(?:-${PRERELEASE_PART}(?:\\.${PRERELEASE_PART})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`)
+const isVersion = (text: string) => text.length <= 64 && SEMVER.test(text)
 const OS = new Set(['macos', 'linux', 'windows', 'wsl'])
 const EVENT_TIMEOUT_MS = 15_000
 
@@ -76,7 +80,7 @@ async function pluginVersion($: EngineInterface): Promise<string> {
     .read(`${$.plugin.root}/.claude-plugin/plugin.json`)
     .then(text => (JSON.parse(text) as { version?: unknown }).version)
     .catch(() => undefined)
-  return (ownVersion = typeof version === 'string' && VERSION.test(version) ? version : 'unknown')
+  return (ownVersion = typeof version === 'string' && isVersion(version) ? version : 'unknown')
 }
 
 async function send($: EngineInterface, action: 'plugin_session_start' | 'plugin_feature_used', fields: string[]) {

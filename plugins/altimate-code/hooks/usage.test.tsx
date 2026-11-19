@@ -5,12 +5,12 @@ import { nothingToReport } from './inert-features'
 const ROOT = '/work/acme_secret_project'
 const MODEL = 'fct_orders'
 const SESSION = 'a1b2c3d4-0000-4000-8000-000000000001'
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 // What the CLI is allowed to receive: the flags of each action and the shape of each value.
 const ALLOWED: Record<string, RegExp> = {
   '--session': /^claude:[A-Za-z0-9_-]{1,128}$/,
-  '--plugin-version': /^(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?|unknown)$/,
+  '--plugin-version': /^(\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?|unknown)$/,
   '--install-id': UUID,
   '--os': /^(macos|linux|windows|wsl|unknown)$/,
   '--feature': /^(lineage|dbt_show|profile_ctes|scan_cost|comments|sql_graph|health|runs|to_model|cost_gate|health_push_gate)$/,
@@ -145,19 +145,33 @@ test("the install id stays the same across sessions on the machine: the next ses
   expect([...store.keys()].filter(key => key === 'usage.installId')).toHaveLength(1)
 })
 
-test('an install id kept from an earlier run is sent as it is; one that is not a UUID is replaced', async ($, on) => {
+test('an install id kept from an earlier run is sent as it is', async ($, on) => {
   const kept = '0f3c2a1e-6b7d-4c8e-9f10-1a2b3c4d5e6f'
   const { usage, flag } = await start($, on, { store: new Map([['usage.installId', kept]]) })
   expect(flag(usage()[0]!, '--install-id')).toBe(kept)
 })
 
-test('a broken install id in the store is replaced with a fresh UUID', async ($, on) => {
-  const store = new Map<string, unknown>([['usage.installId', '/Users/someone/project']])
-  const { usage, flag } = await start($, on, { store })
-  const id = flag(usage()[0]!, '--install-id')
-  expect(id).toMatch(UUID)
-  expect(store.get('usage.installId')).toBe(id)
-})
+for (const broken of ['/Users/someone/project', '0f3c2a1e-6b7d-0c8e-9f10-1a2b3c4d5e6f', 42]) {
+  test(`an install id in the store that the CLI would refuse (${JSON.stringify(broken)}) is replaced with a fresh UUID`, async ($, on) => {
+    const store = new Map<string, unknown>([['usage.installId', broken]])
+    const { usage, flag } = await start($, on, { store })
+    const id = flag(usage()[0]!, '--install-id')
+    expect(id).toMatch(UUID)
+    expect(store.get('usage.installId')).toBe(id)
+  })
+}
+
+for (const [version, sent] of [
+  ['1.8.2+build.7', '1.8.2+build.7'],
+  ['1.8.2-rc.1', '1.8.2-rc.1'],
+  ['1.8.2-01', 'unknown'],
+  ['1.8.2-foo..bar', 'unknown'],
+] as const) {
+  test(`the manifest version ${version} is sent as ${sent}, as the CLI reads a version`, async ($, on) => {
+    const { usage, flag } = await start($, on, { version })
+    expect(flag(usage()[0]!, '--plugin-version')).toBe(sent)
+  })
+}
 
 test('the OS is sent as Claude Code names it, and anything else as unknown; an unreadable version as unknown', async ($, on) => {
   const { usage, flag } = await start($, on, { platform: 'wsl', version: 'not a version' })
