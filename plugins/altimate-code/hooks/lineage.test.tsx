@@ -413,11 +413,13 @@ test('an edit whose readers have no compiled SQL never notes that it reaches 0, 
 })
 
 test('an edit whose answer never reaches the column is unchecked, never a reach of 0', async ($, on) => {
-  const { clock, notes } = await start($, on, { reach: { ...REACH, column_answer: { ...PARSE_ONLY_NOTE_ANSWER, columns: [], unresolved: [], may_carry: [], counts: { ...PARSE_ONLY_NOTE_ANSWER.counts, may_carry_models: 0 } } } })
+  // The older reach on the same result, empty: it must not stand in for the column answer.
+  const { clock, notes } = await start($, on, { reach: { column_reach: { models: [], exposures: [] }, column_answer: { ...PARSE_ONLY_NOTE_ANSWER, columns: [], unresolved: [], may_carry: [], counts: { ...PARSE_ONLY_NOTE_ANSWER.counts, may_carry_models: 0 } } } })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
   await clock.settle()
-  expect(String(result.context?.[0] ?? '')).not.toMatch(/reaches 0/)
-  expect(notes.join('\n')).not.toMatch(/reaches 0/)
+  const said = `${String(result.context?.[0] ?? '')}\n${notes.join('\n')}`
+  expect(said).not.toMatch(/reaches 0|read by no model|read by 0/)
+  expect(said).toContain('fct_orders feeds')
 })
 
 test('a may_carry that is not a list gives a note without reasons, and nothing throws', async ($, on) => {

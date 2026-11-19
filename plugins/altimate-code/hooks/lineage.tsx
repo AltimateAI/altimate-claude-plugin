@@ -933,15 +933,14 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
     )
     // The column answer, as the end-of-task summary reads it, so Claude and the person see one set of
     // numbers; the older column reach only from an altimate-code that sends no column answer.
-    // An answer that never reached the column (no hop 0) traced nothing: the column is unchecked, as at a task's end.
-    const answers = results.map(result => {
-      const answer = result?.ok ? answerOf(result.metadata) : null
-      return answer && answer.columns.some(one => one.hop === 0) ? answer : null
-    })
+    const answers = results.map(result => (result?.ok ? answerOf(result.metadata) : null))
     if (answers.some(Boolean)) {
+      // An answer that never reached the column (no hop 0) traced nothing: the column is unchecked, as at a task's
+      // end, and the older reach on the same result is not read in its place.
       answers.forEach((one, i) => {
-        ;(one ? traced : unchecked).push(touched[i]!)
-        if (one) answered.push({ column: touched[i]!, answer: one })
+        const reached = !!one && one.columns.some(col => col.hop === 0)
+        ;(reached ? traced : unchecked).push(touched[i]!)
+        if (reached) answered.push({ column: touched[i]!, answer: one! })
       })
     } else {
       const reaches = results.map((result, i) => (result?.ok ? reachFromMetadata(result.metadata, node.name, touched[i]!) : null))
