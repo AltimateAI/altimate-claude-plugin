@@ -262,6 +262,8 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
       .map(one => {
         const reach = one.down && !one.unknown ? reachOf(one.down) : null
         for (const entry of one.down?.unresolved ?? []) unresolved.add(one.down!.nodes[entry.model]?.id ?? one.down!.nodes[entry.model]?.name ?? String(entry.model))
+        // A reach left unknown by models read only in part: those count as unread too, so the footer never says all were read.
+        if (one.unknown) for (const entry of Array.isArray(one.down?.may_carry) ? one.down!.may_carry : []) if (PARTLY_READ.has(String((entry as any)?.reason ?? ''))) unresolved.add(String((entry as any)?.id ?? (entry as any)?.name))
         if (reach?.truncated) truncated = true
         const note = one.unknown ?? (one.unchecked ? ADDED_NOTE : undefined)
         return { name: one.column!, reach, failed: one.failed, ...(note && { note }) }

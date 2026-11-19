@@ -571,3 +571,27 @@ test('models read in full that the value was not traced to keep the reach at 0 w
   const partly = { ...notTraced, may_carry: [{ id: 'model.p.b', name: 'b', reason: 'read_in_part' }] } as any
   expect(unknownReach(partly)).toBe('not traced: 1 downstream model could not be read')
 })
+
+test('a reach left unknown by a model read only in part keeps the footer a lower bound, never "every downstream model was read"', () => {
+  const focus = { model: 0, column: 'amount', hop: 0, end: false }
+  const partly = {
+    version: 1, focus: { model: 'model.p.stg', column: 'amount' }, direction: 'downstream',
+    nodes: [{ id: 'model.p.stg', name: 'stg' }, { id: 'model.p.b', name: 'b' }], columns: [focus], edges: [],
+    counts: { columns: 0, models: 0, ends: 0, hops: 0, may_carry_models: 1, model_level: 1 },
+    unresolved: [], may_carry: [{ id: 'model.p.b', name: 'b', reason: 'read_in_part' }],
+  } as any
+  const reached = {
+    version: 1, focus: { model: 'model.p.stg', column: 'total' }, direction: 'downstream',
+    nodes: [{ id: 'model.p.stg', name: 'stg' }, { id: 'model.p.c', name: 'c' }], columns: [{ model: 0, column: 'total', hop: 0, end: false }, { model: 1, column: 'total', hop: 1, end: true }], edges: [],
+    counts: { columns: 1, models: 1, ends: 1, hops: 1, may_carry_models: 0, model_level: 1 }, unresolved: [], may_carry: [],
+  } as any
+  const change = { model: 'stg', file: 'models/stg.sql', root: '/r', columns: [{ name: 'amount', before: 'a', after: 'b' }, { name: 'total', before: 'c', after: 'd' }], ended: '' } as any
+  const traces = [
+    { model: 'stg', column: 'amount', down: partly, up: null, modelLevel: 1, failed: false, unknown: unknownReach(partly)! },
+    { model: 'stg', column: 'total', down: reached, up: null, modelLevel: 1, failed: false },
+  ] as any
+  const lines = summaryLines(summaryOf([change], traces, null))
+  expect(lines).toContain('  amount  not traced: 1 downstream model could not be read')
+  expect(lines).toContain('⚠ Lower bound: 1 model could not be read')
+  expect(lines).not.toContain('✓ Every downstream model was read')
+})

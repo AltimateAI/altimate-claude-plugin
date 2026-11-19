@@ -11,9 +11,11 @@ export const MIN_ALTIMATE_CODE = '0.12.11'
 // older npm installs only have `altimate-code`.
 const CLI_NAMES = ['altimate', 'altimate-code'] as const
 
-// A command that cannot start rejects; only that moves on to the next name, so a timeout never
-// reruns a command that may have taken effect.
-export const MISSING_BINARY = /ENOENT|not found|no such file|(cannot|could not|failed to) (start|spawn|run)/i
+/** A binary that is not there at all. */
+export const NOT_FOUND = /ENOENT|not found|no such file/i
+// A command that cannot start (not there, or refused) rejects; only that moves on to the next name, so a
+// timeout never reruns a command that may have taken effect.
+export const MISSING_BINARY = new RegExp(`${NOT_FOUND.source}|(cannot|could not|failed to) (start|spawn|run)`, 'i')
 
 /** Runs the altimate CLI under the first name that is installed; 90 s unless the caller says otherwise. */
 export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 90_000) {
