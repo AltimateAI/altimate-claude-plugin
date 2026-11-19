@@ -1639,3 +1639,40 @@ test('on Snowflake, a hold kept while the estimate fails on the retry still name
   expect(retry.deny).toBe('≈ 20.0 GiB would be scanned (Snowflake plan estimate), over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.')
   expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('orders (≈ 20.0 GiB, Snowflake plan estimate)')
 })
+
+/** The band above the prompt, as health's tests mount it. */
+const BAND = {
+  plugin: 'altimate-code',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+} as const
+
+/** Whether the mounted band shows this exact line. */
+async function bandShows($: any, text: string): Promise<boolean> {
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  const found = await band.find({ type: 'Text', text })
+  await band.unmount()
+  return found !== undefined && found !== null
+}
+
+for (const [adapter, name] of [
+  ['snowflake', 'Snowflake'],
+  ['databricks', 'Databricks'],
+] as const) {
+  test(`on ${adapter}, the band's held line names the plan estimate, and still does once the retry's estimate fails`, async ($, on) => {
+    const { clock } = await start($, on, { sequence: { orders: [planned(adapter, 20 * GIB, '20.0 GiB'), { success: false, adapter, source: 'explain', error: 'EXPLAIN failed' }] } })
+    await $.tool.call(bash('dbt run -s orders'))
+    await clock.settle()
+    expect(await bandShows($, `⛔ held: orders would scan 20.0 GiB (${name} plan estimate) (limit 10.0 GiB) · /allow-scan`)).toBe(true)
+    await $.tool.call(bash('dbt run -s orders'))
+    await clock.settle()
+    expect(await bandShows($, `⛔ held: orders would scan 20.0 GiB (${name} plan estimate) (limit 10.0 GiB) · /allow-scan`)).toBe(true)
+  })
+}
+
+test("on BigQuery, the band's held line is as before", async ($, on) => {
+  const { clock } = await start($, on, { answers: { orders: OVER } })
+  await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(await bandShows($, '⛔ held: orders would scan 20.0 GiB (limit 10.0 GiB) · /allow-scan')).toBe(true)
+})

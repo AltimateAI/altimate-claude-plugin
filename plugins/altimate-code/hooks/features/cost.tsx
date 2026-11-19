@@ -396,7 +396,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
     } catch {
       // A hold that cannot be recorded must not become a pass: a gate that throws lets the call run.
       notes.delete(e.command)
-      return { deny: `${worst.display} would be scanned, over the ${formatBytes(limitBytes)} limit, and the hold could not be recorded. Run the same command again.` }
+      return { deny: `${worst.display} would be scanned${basisOf(worst)}, over the ${formatBytes(limitBytes)} limit, and the hold could not be recorded. Run the same command again.` }
     }
     if (granted) {
       for (const one of over) lines.push(`cost · ${one.label} would scan ${one.display}${basisOf(one)}, over the ${formatBytes(limitBytes)} limit: allowed once`)
