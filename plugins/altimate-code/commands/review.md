@@ -17,7 +17,7 @@ Run the `altimate-code review` CLI on the current dbt project and present the si
 
 ## Workflow
 
-1. **Verify altimate-code is on PATH.** There is no separate check: the resolver below runs first in the same Bash call as the review, before any `gh pr checkout`. If it exits 127 with `altimate-code CLI not found`, tell the user: `"altimate-code is not installed. Install with 'npm install -g altimate-code' (Node 20+) or 'curl -fsSL https://www.altimate.sh/install | bash', then run 'altimate' once to configure your provider and warehouse auth."` — then STOP.
+1. **Verify altimate-code is on PATH.** There is no separate check: the resolver below runs first in the same Bash call as the review, before any `gh pr checkout`. If it exits 127 with `altimate-code CLI not found`, tell the user: `"altimate-code is not installed. Install with 'npm i -g @altimateai/altimate-code' (Node 20+), then run 'altimate' once to configure your provider and warehouse auth."` — then STOP.
 
    The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Every review command below runs through `"$ALTIMATE_BIN"`, in the same Bash call as this resolver (shell state does not persist between calls). The lookup ignores aliases and shell functions, so a user alias such as `alias altimate-code=altimate` cannot be captured as the binary path:
 
@@ -65,7 +65,7 @@ Anything else (`--manifest`, `--cwd`) only if the user explicitly requested it o
 
 | Symptom | Message to user |
 |---|---|
-| `altimate-code CLI not found` (neither `altimate-code` nor `altimate` on PATH) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure auth." |
+| `altimate-code CLI not found` (neither `altimate-code` nor `altimate` on PATH) | "altimate-code is not installed. Install with `npm i -g @altimateai/altimate-code` (Node 20+), then run `altimate` once to configure auth." |
 | `Unauthorized: Incorrect auth token` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` (`altimate-code` on npm installs older than v0.7.1) to reconfigure, or re-run with `--no-ai`." |
 | `fatal: not a git repository` | "This directory isn't a git repo. `altimate-code review` needs git to compute the diff." |
 | No `dbt_project.yml` | "No dbt project detected at this path. Run from the directory with `dbt_project.yml`." |

@@ -30,13 +30,14 @@ Then restart Claude Code.
 
 ## Prerequisites
 
-The altimate-code CLI must be installed and configured on your PATH, version 0.12.11 or later. Older releases give no column answer, so the end-of-task summary and report can't say which columns a change reaches. Either install method works:
+The altimate-code CLI must be installed and configured on your PATH, version 0.12.11 or later. Older releases give no column answer, so the end-of-task summary and report can't say which columns a change reaches. Install it with npm:
 
 ```bash
-npm install -g altimate-code                       # requires Node 20+; exposes `altimate` and `altimate-code`
-curl -fsSL https://www.altimate.sh/install | bash  # standalone binary; exposes `altimate` and `altimate-code`
-altimate                                           # launch the TUI, then run /connect to configure your LLM provider
+npm i -g @altimateai/altimate-code   # requires Node 20+; exposes `altimate` and `altimate-code`
+altimate                             # launch the TUI, then run /connect to configure your LLM provider
 ```
+
+At session start the plugin checks the version on PATH. An older or missing altimate-code stays on the status line, with the binary, its path and this install command.
 
 The CLI mode invokes `altimate`, the CLI's canonical name, and falls back to `altimate-code` for npm installs older than v0.7.1, so standalone installs work without an alias.
 
@@ -114,7 +115,7 @@ The plugin's lineage pane follows the dbt model Claude reads or edits (by Read, 
 - **Warehouse lineage.** When a connected MCP server offers Altimate's `table_lineage` (Snowflake) or `databricks_table_lineage`, the pane adds what the warehouse's query history shows for the model's table. The plugin calls a tool of that name on whichever connected server offers it, itself and without a permission prompt, and sends it the model's `database.schema.table`. It does so only when you ask for the model (`/lineage`, a press in the pane, or `r`), never when the pane follows one of Claude's reads.
 - **Claude's own lineage calls.** A `dbt_lineage` result is drawn as a list of edges colored by how each column is derived; ctrl+o keeps the original output under it.
 
-`/lineage <model>[.column]` opens the pane on a model, at any width. When the pane follows Claude's reads on its own, Claude Code draws it only in a terminal at least 144 columns wide (110 once you have opened it yourself); in a narrower one it waits, and a toast says so once. Lineage calls go to the plugin's MCP server without a permission prompt, or to `altimate tool run` when the server is not available. A manifest over 4 MiB is read through altimate-code (`dbt_lineage` with `include_graph`). Run `dbt parse` or `dbt compile` first; column lineage and reach need compiled SQL. When the shown model's `.sql` file changed after the manifest was written, the pane and the edit note say so: run `dbt compile`, then `r`.
+`/lineage <model>[.column]` opens the pane on a model, at any width. When the pane follows Claude's reads on its own, Claude Code draws it only in a terminal at least 144 columns wide (110 once you have opened it yourself); in a narrower one it waits, and a toast and a line above the prompt say so until the pane can open. The remedy: make the text smaller (Cmd -) or type `/lineage`. The pane's line `N tests` counts the tests on the model and on the models downstream of it; with a column selected it counts only the tests on that column of the model (`3 tests on amount`), when the graph says which column each test checks (a manifest over 4 MiB, read through altimate-code, keeps the first count). Lineage calls go to the plugin's MCP server without a permission prompt, or to `altimate tool run` when the server is not available. A manifest over 4 MiB is read through altimate-code (`dbt_lineage` with `include_graph`). Run `dbt parse` or `dbt compile` first; column lineage and reach need compiled SQL. When the shown model's `.sql` file changed after the manifest was written, the pane and the edit note say so: run `dbt compile`, then `r`.
 
 ### Team rules
 
@@ -153,16 +154,17 @@ Compile and validate runs a query on your warehouse after every model edit (`dbt
 
 ## Settings
 
-The plugin has six settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). `dbt_mods` is used by the dbt helpers, and `healthBlocksPush` and `healthConfigPath` by the project health check. `maxScanBytes` and the comments settings are not used yet: the features that read them are not in this version, so changing one changes nothing. The table says what each controls.
+The plugin has seven settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). All are optional: Claude Code may report them as "not set", and each then takes the default below. `dbt_mods` is used by the dbt helpers, `maxScanBytes` by the BigQuery scan check, `healthBlocksPush` and `healthConfigPath` by the project health check, the two comments settings by team comments, and `show_edit_impact` by the per-edit impact note.
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
 | `dbt_mods` | on | Turns all of the dbt helpers (above) off when false. |
-| `maxScanBytes` | 10 GiB | The largest BigQuery scan a dbt run, build or show may make before it waits for your approval (0 never waits; at least 0). Other warehouses are never held. |
-| `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed. Off, the issues are only shown. If the first check of a session lands after you changed a model, that model's existing issues count as new (the baseline then lacks them). The reverse also holds: a model you drop from a schema file before that first check lands has its new issues taken as existing, so a push is not held for them. |
+| `maxScanBytes` | 10737418240 (10 GiB) | A dbt run, build or show that a BigQuery dry run estimates would scan more bytes than this is held until you approve it with `/allow-scan` (0 never holds; at least 0). Other warehouses are never held. |
+| `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed, and while the check cannot run (altimate-code missing, or without `dbt_health`) or has not finished. Off, the issues are only shown. If the first check of a session lands after you changed a model, that model's existing issues count as new (the baseline then lacks them). The reverse also holds: a model you drop from a schema file before that first check lands has its new issues taken as existing, so a push is not held for them. |
 | `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. Empty uses the default checks. |
-| `commentsPollSeconds` | 900 | How often the team's comments on shared docs are fetched again (at least 30). |
+| `commentsPollSeconds` | 900 | How often, in seconds, the team's comments on shared docs are fetched again in an interactive session (30 to 86400). |
 | `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. |
+| `show_edit_impact` | off | When on, the note on what a model edit reaches downstream is also shown in the transcript; off sends it to Claude and the debug log only. |
 
 ## Example prompts
 
@@ -187,7 +189,7 @@ Full details: **[PRIVACY.md](../../PRIVACY.md)** · Security policy and disclosu
 
 | Symptom | Fix |
 |---|---|
-| Neither `altimate-code` nor `altimate` on PATH | `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider. |
+| Neither `altimate-code` nor `altimate` on PATH | `npm i -g @altimateai/altimate-code` (Node 20+), then run `altimate` once to configure your provider. |
 | MCP tools missing from the session | Managed settings may disallow MCP servers, `altimate-code` may not be on PATH (curl and PowerShell installs older than v0.12.8 expose only `altimate`), or the build lacks `mcp serve`. Claude falls back to `altimate tool run`, so no action is required. |
 | `Unauthorized` / `No provider configured` | Run `altimate` (`altimate-code` on npm installs older than v0.7.1) to open the TUI and reconfigure your provider via `/connect`, or set the provider API key env var. |
 | Task hangs for several minutes | Open `altimate` (`altimate-code` on npm installs older than v0.7.1) to check for a pending prompt in the TUI, or re-run specifying a known-good model. |

@@ -1,7 +1,7 @@
 {
   "name": "altimate-code",
   "displayName": "Altimate Code",
-  "version": "1.8.0",
+  "version": "1.8.1",
   "description": "Gives Claude Code altimate-code's model-free data tools (column-level lineage, impact analysis, PII detection, data-diff, FinOps, query equivalence, dialect translation, warehouse queries) through its MCP server, or through `altimate tool run` when MCP servers are not allowed, with delegation to the altimate-code agent for long dbt jobs, access to a linked Altimate workspace's knowledge, and the workspace's team rules in each session.",
   "author": {
     "name": "AltimateAI",
@@ -25,40 +25,46 @@
     "dbt_mods": {
       "type": "boolean",
       "title": "dbt helpers",
-      "description": "Compile and validate each model Claude edits, Explain and Fix on a failed dbt run, the Query results pane, model context on read, and the dbt environment doctor at session start. They run the project's own dbt.",
+      "description": "Compile and validate each model Claude edits, Explain and Fix on a failed dbt run, the Query results pane, model context on read, and the dbt environment doctor at session start. They run the project's own dbt. Optional; default: on.",
       "default": true
     },
     "maxScanBytes": {
       "type": "number",
-      "title": "Largest BigQuery scan without asking (not used yet)",
-      "description": "Not used yet: the BigQuery scan check isn't in this version, so no run is held. When it ships, a dbt run, build or show that BigQuery estimates would scan more bytes than this waits for your approval (0 never waits; other warehouses are never held).",
+      "title": "Largest BigQuery scan without asking",
+      "description": "A dbt run, build or show that a BigQuery dry run estimates would scan more bytes than this is held until you approve it with /allow-scan; 0 never holds, and other warehouses are never held. Optional; default: 10737418240 (10 GiB).",
       "default": 10737418240,
       "min": 0
     },
     "healthBlocksPush": {
       "type": "boolean",
       "title": "Project health blocks git push",
-      "description": "On refuses a git push while the project health check finds new issues in the models you changed this session; off only shows them.",
+      "description": "On refuses a git push while the project health check finds new issues in the models you changed this session, and while the check cannot run or has not finished; off only shows them. Optional; default: off.",
       "default": false
     },
     "healthConfigPath": {
       "type": "string",
       "title": "Project health check config",
-      "description": "Path to a DataPilot health check config file, relative to the dbt project. Empty uses the default checks.",
+      "description": "Path to a DataPilot health check config file, relative to the dbt project. Optional; default: empty, which uses the default checks.",
       "default": ""
     },
     "commentsPollSeconds": {
       "type": "number",
       "title": "Team comments refresh (seconds)",
-      "description": "Not used yet: team comments aren't in this version. How often the team's comments on shared docs are fetched again.",
+      "description": "How often, in seconds, the team's comments on shared docs are fetched again in an interactive session (30 to 86400). Optional; default: 900.",
       "default": 900,
       "min": 30
     },
     "commentsInContext": {
       "type": "boolean",
       "title": "Team comments in Claude's context",
-      "description": "Not used yet: team comments aren't in this version. When on, the open comments on a model Claude reads or edits are added to its context. Off keeps them out of Claude's context.",
+      "description": "When on, the open team comments on a model Claude reads or edits are added to its context; off keeps them out of Claude's context. Optional; default: on.",
       "default": true
+    },
+    "show_edit_impact": {
+      "type": "boolean",
+      "title": "Show edit impact notes",
+      "description": "When on, the note on what a model edit reaches downstream (read by N models, dashboards) is also shown in the transcript; off sends it to Claude and the debug log only. Optional; default: off.",
+      "default": false
     }
   }
 }

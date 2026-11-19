@@ -10,6 +10,7 @@ import {
   answerOf,
   changedColumns,
   columnReportData,
+  type ColumnAnswer,
   type ColumnTrace,
   consumersOf,
   fingerprint,
@@ -22,6 +23,7 @@ import {
   reportHtml,
   summaryLines,
   summaryOf,
+  unknownReach,
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
@@ -201,6 +203,11 @@ async function ask($: EngineInterface, done: Finished, change: ModelChange, colu
   return result?.ok ? result.metadata : null
 }
 
+const unknownOf = (answer: ColumnAnswer | null) => {
+  const unknown = unknownReach(answer)
+  return unknown ? { unknown } : {}
+}
+
 /** What the band needs: each changed column's downstream answer, and the model-level count for a model with none. */
 async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrace[]> {
   const jobs: (() => Promise<ColumnTrace>)[] = []
@@ -213,11 +220,18 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
     }
     for (const col of change.columns) {
       jobs.push(async () => {
+        // Every changed column is asked by name: the SQL from before the task may not name a column the manifest
+        // has (a `select *` spelled out, a cast given its name). The manifest says whether it has it.
         const meta = await ask($, done, change, col.name, 'downstream')
-        const down = answerOf(meta)
+        const answer = answerOf(meta)
+        // An answer that never reached the column (no hop 0) traced nothing: it could not be traced.
+        const down = answer && answer.columns.some(one => one.hop === 0) ? answer : null
+        const lacks = typeof (meta as any)?.column_answer_error === 'string' || (!!answer && !down)
+        // Only a column the SQL from before the task did not name, which the manifest lacks too, is called new.
+        const unchecked = col.before === null && !!meta && lacks
         // An altimate-code from before the column answer gives neither the answer nor its error.
-        const stale = !!meta && !down && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
-        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, consumers: consumersOf(meta) }
+        const stale = !answer && !!meta && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
+        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
       })
     }
   }
@@ -228,7 +242,7 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
 async function traceFull($: EngineInterface, done: Finished): Promise<ColumnTrace[]> {
   const downs = await (done.downs ??= traceDown($, done))
   const jobs = downs.map(trace => async () => {
-    if (!trace.column) return trace
+    if (!trace.column || trace.unchecked) return trace
     const change = done.changes.find(one => one.model === trace.model)!
     return { ...trace, up: answerOf(await ask($, done, change, trace.column, 'upstream')) }
   })
@@ -398,7 +412,8 @@ async function buildReport($: EngineInterface, done: Finished): Promise<{ path: 
   }
   if (missing.length > 0) return { error: `The manifest this task was read from is gone. Run \`dbt compile\` and ask again.` }
   const traces = await (done.full ??= traceFull($, done))
-  const allRead = traces.every(one => !one.column || (one.down && one.up))
+  // A column added in the task has no trace to ask again for: it is read as far as it can be.
+  const allRead = traces.every(one => !one.column || one.unchecked || (one.down && one.up))
   // A failed direction is asked again next time.
   if (!allRead) {
     done.full = null
@@ -535,8 +550,10 @@ async function buildColumnReport($: EngineInterface, model: string, column: stri
   const downAnswer = answerOf(down.metadata)
   const upAnswer = answerOf(up.metadata)
   if (!downAnswer && !upAnswer) return { error: 'This altimate-code traces no single column. Update it to use /lineage-report <model>.<column>.' }
+  // An answer that never reached the column traced nothing: no report says it reaches 0.
+  if (downAnswer && !downAnswer.columns.some(one => one.hop === 0)) return { error: `${model} has no column ${column} in target/manifest.json. Run \`dbt parse\` or \`dbt compile\` if it was just added, then ask again.` }
   const name = typeof (down.metadata as any)?.model === 'string' ? String((down.metadata as any).model) : model
-  const trace: ColumnTrace = { model: name, column, down: downAnswer, up: upAnswer, modelLevel: modelLevelOf(down.metadata), failed: false, consumers: consumersOf(down.metadata) }
+  const trace: ColumnTrace = { model: name, column, down: downAnswer, up: upAnswer, modelLevel: modelLevelOf(down.metadata), failed: false, ...unknownOf(downAnswer), consumers: consumersOf(down.metadata) }
   const data = columnReportData(name, column, trace, { builtAt: stamp(await $.clock.now()), manifest: 'target/manifest.json as it is now' })
   const path = `${root}/${LINEAGE_DIR}/${COLUMN_REPORT}`
   try {

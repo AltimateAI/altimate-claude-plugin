@@ -13,7 +13,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { HealthInsight, HealthState } from '../../types'
-import { later, runTool, within } from '../altimate-cli'
+import { NOT_FOUND, later, runTool, within } from '../altimate-cli'
 import { setStatusPart } from '../status-line'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -31,7 +31,8 @@ export const GATE_WAIT_MS = 4_000
 const COMMAND_WAIT_MS = 3_000
 /** The most issues the push refusal and the report list. */
 const LISTED = 10
-const NEEDS_CLI = 'Project health needs an altimate-code build newer than 0.12.10 (one with the dbt_health tool)'
+const NEEDS_CLI = 'Project health needs an altimate-code release with the dbt_health tool: npm i -g @altimateai/altimate-code'
+const NO_CLI = 'Project health needs the altimate-code CLI on your PATH: npm i -g @altimateai/altimate-code'
 const ROOT_FILES = new Set(['dbt_project.yml', 'profiles.yml', 'packages.yml', 'dependencies.yml', 'selectors.yml'])
 const SKIPPED_DIRS = /(?:^|\/)(?:target|dbt_packages|dbt_modules|node_modules|\.git|\.github|logs)\//
 
@@ -479,6 +480,8 @@ async function check($: EngineInterface): Promise<HealthRun> {
     const until = (await $.clock.now()) + CHECK_MS
     result = await runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until })
   } catch (error) {
+    // Only a binary that is not there: one that is there and refused to start keeps its own words.
+    if (NOT_FOUND.test(String(error))) return { problem: NO_CLI }
     return { problem: `Project health could not run: ${String(error).split('\n')[0]}` }
   }
   // A refusal or failure comes back as success false with an empty list: only success true is an answer.
@@ -502,9 +505,13 @@ async function drawStatus($: EngineInterface, issues: readonly HealthInsight[]) 
   await setStatusPart($, 'health', n > 0 ? `${n} health issue${n === 1 ? '' : 's'}` : null)
 }
 
-/** Tells a problem once, until a different one comes. */
+/**
+ * Tells a problem once, until a different one comes. A missing altimate-code, or one without the tool, is not
+ * told: the checks run by themselves (session start, each turn), so only /health, which asks for the answer,
+ * says it (the status line names a missing or old altimate-code, though not a missing tool).
+ */
 function tell($: EngineInterface, problem: string) {
-  if (problem === toldProblem) return
+  if (problem === toldProblem || problem === NEEDS_CLI || problem === NO_CLI) return
   toldProblem = problem
   $.ui.toast(`◆ ${problem}`, { timeoutMs: 8000 })
 }
