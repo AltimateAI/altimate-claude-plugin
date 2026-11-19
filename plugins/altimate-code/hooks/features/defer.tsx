@@ -19,7 +19,7 @@ const deferAtom = atom({ plugin: 'altimate-code', key: 'defer' } as const, null 
 // What /defer and /target added to Claude's last dbt command, for the band, until the next prompt.
 const ranAtom = atom({ plugin: 'altimate-code', key: 'deferRan' } as const, null as string | null)
 // The flags added to each rewritten call, by the call's tool_use_id (the command as it ran when there is none), for its result.
-const addedTo = new Map<string, string[]>()
+const addedTo = new Map<string, { command: string; added: string[] }>()
 const callKey = (e: BashCall) => (typeof e.tool_use_id === 'string' && e.tool_use_id ? e.tool_use_id : `command:${e.command}`)
 
 // The commands that take `--defer` in every dbt version this reads state for (older dbt refuses the option on
@@ -480,7 +480,7 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   if (command === e.command) return null
   // Kept for the call's after phase, which tells Claude what ran (a refused call lets go in bashDropped); at most a few are held.
   if (addedTo.size >= 20) addedTo.delete(addedTo.keys().next().value!)
-  addedTo.set(callKey({ ...e, command }), added)
+  addedTo.set(callKey({ ...e, command }), { command, added })
   return command
 }
 
@@ -497,10 +497,12 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
  * told in the result, and the person in the band, what really ran.
  */
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
-  const added = addedTo.get(callKey(e))
-  if (!added) return
+  const kept = addedTo.get(callKey(e))
+  if (!kept) return
   addedTo.delete(callKey(e))
-  const text = added.join('; ')
+  // A rewrite the chain gave up on (its deadline passed) never ran: the command that ran says which did.
+  if (kept.command !== e.command) return
+  const text = kept.added.join('; ')
   await update($, ranAtom, () => text)
   return [`◆ dbt · this command ran as ${text}: /defer and /target added those flags (the command shown is as written), so its results are from that target and state`]
 }
