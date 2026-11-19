@@ -31,7 +31,7 @@ export type Outcome = 'opened' | 'failed' | 'held' | 'allowed'
 const INSTALL_ID_KEY = 'usage.installId'
 // What the CLI accepts: a random (version 4) UUID, and a SemVer 2.0 version of up to 64 characters.
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
-const NUMBER = '(?:0|[1-9]\\d{0,5})'
+const NUMBER = '(?:0|[1-9]\\d*)'
 const PRERELEASE_PART = '(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)'
 const SEMVER = new RegExp(`^${NUMBER}\\.${NUMBER}\\.${NUMBER}(?:-${PRERELEASE_PART}(?:\\.${PRERELEASE_PART})*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$`)
 const isVersion = (text: string) => text.length <= 64 && SEMVER.test(text)

@@ -41,6 +41,7 @@ async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
   mock.env(on, options.env ?? {})
   const store = options.store ?? new Map<string, unknown>()
+  let idWrites = 0
   const events: string[][] = []
   const toasts: string[] = []
   const logs: { text: string; to?: string }[] = []
@@ -49,6 +50,7 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: store.get(e.key) }
   })
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
+    if (e.key === 'usage.installId') idWrites++
     store.set(e.key, JSON.parse(JSON.stringify(e.value)))
     return { value: undefined }
   })
@@ -111,7 +113,7 @@ async function start($: any, on: any, options: Options = {}) {
   await clock.settle()
   const usage = () => events.filter(argv => argv[3]?.startsWith('plugin_'))
   const flag = (argv: string[], name: string) => argv[argv.indexOf(name) + 1]
-  return { clock, store, events, usage, flag, toasts, logs }
+  return { clock, store, events, usage, flag, toasts, logs, idWrites: () => idWrites }
 }
 
 const run = async ($: any, clock: any, command: string, args = '') => {
@@ -168,6 +170,7 @@ for (const [version, sent] of [
   ['1.8.2+build.7', '1.8.2+build.7'],
   ['1.8.2-rc.1', '1.8.2-rc.1'],
   ['1.8.2-01', 'unknown'],
+  ['20240101.0.0', '20240101.0.0'],
   ['1.8.2-foo..bar', 'unknown'],
 ] as const) {
   test(`the manifest version ${version} is sent as ${sent}, as the CLI reads a version`, async ($, on) => {
@@ -314,11 +317,13 @@ test('events sent together on a first run share one install id: the second waits
   let release!: () => void
   const holdStore = new Promise<void>(resolve => (release = resolve))
   const store = new Map<string, unknown>()
-  const { clock, usage, flag } = await start($, on, { store, holdStore })
+  const { clock, usage, flag, idWrites } = await start($, on, { store, holdStore })
   // The session start's event is still waiting on the store; a command sends another meanwhile.
   await run($, clock, 'runs')
   release()
   await clock.settle()
+  // The second event waited for the first one's id: one id was made and written, not two.
+  expect(idWrites()).toBe(1)
   const ids = usage().map(argv => flag(argv, '--install-id'))
   expect(usage().map(argv => argv[3])).toEqual(['plugin_session_start', 'plugin_feature_used'])
   expect(new Set(ids).size).toBe(1)
@@ -364,4 +369,28 @@ test('a pane Claude Code could not place (isPlaced: false) is counted as failed,
     await run($, clock, command, args)
     expect({ command, sent: usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')]) }).toEqual({ command, sent: [[feature, 'failed']] })
   }
+})
+
+test("the comments band's Open button on a pane that cannot open sends comments failed", async ($, on) => {
+  const thread = {
+    share_id: 7,
+    share_name: 'Finance review',
+    group_id: 11,
+    file_path: `models/${MODEL}.sql`,
+    highlight: 'secret_column',
+    range: { start: { line: 0, character: 0 }, end: { line: 0, character: 4 } },
+    messages: [{ id: 100, author: 'Ada', text: 'Is this net of refunds?' }],
+  }
+  const { clock, usage, flag } = await start($, on, { comments: [thread], openFails: true })
+  const band = await $.ui.mount({
+    plugin: 'altimate-code',
+    component: 'AbovePrompt',
+    props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+    surface: 'terminal',
+  } as any)
+  const before = usage().length
+  await band.press({ key: 'comments-open' })
+  await clock.settle()
+  await band.unmount()
+  expect(usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')])).toEqual([['comments', 'failed']])
 })
