@@ -240,7 +240,13 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   // /clear ends a session without starting another: the pane keeps its threads and drafts, so the poll goes on
   // and a post still running or unconfirmed keeps its lock (it describes the shared docs, not the conversation).
-  if (e.reason === 'clear') return
+  if (e.reason === 'clear') {
+    // The next conversation starts with empty state: its first read of a model waits for its list, as a session's
+    // first read does, even when it comes before clearStart.
+    firstWaitSpent = false
+    pendingFor = null
+    return
+  }
   poll?.cancel()
   poll = null
   generation++

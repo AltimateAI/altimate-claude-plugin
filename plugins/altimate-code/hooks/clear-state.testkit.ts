@@ -7,9 +7,9 @@ type Address = { plugin: string; key: string; id?: string }
 /**
  * Registers the state and session id hooks (before the test's first call on `$`); the function it returns plays
  * the /clear: the session's end, then the new id with its empty state. `holdWriteOf` holds the new conversation's
- * first write of one value until released.
+ * first write of one value until released; `idLagsUntil` keeps the old id readable until it settles.
  */
-export function playsClear($: any, on: any, options: { holdWriteOf?: { key: string; until: Promise<void> } } = {}): () => Promise<void> {
+export function playsClear($: any, on: any, options: { holdWriteOf?: { key: string; until: Promise<void> }; idLagsUntil?: Promise<void> } = {}): () => Promise<void> {
   let cleared = false
   let held = false
   const written = new Set<string>()
@@ -32,7 +32,10 @@ export function playsClear($: any, on: any, options: { holdWriteOf?: { key: stri
     return done
   })
   let clears = 0
-  on('session.id', () => ({ value: `session-${clears}` }))
+  // The engine's id read can lag the /clear: until `idLagsUntil` settles it still names the session that ended.
+  let lagging = !!options.idLagsUntil
+  options.idLagsUntil?.then(() => (lagging = false))
+  on('session.id', () => ({ value: `session-${lagging ? Math.max(0, clears - 1) : clears}` }))
   return async () => {
     await $.session.end({ reason: 'clear', sessionId: `session-${clears}` })
     clears++

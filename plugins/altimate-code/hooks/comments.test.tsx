@@ -852,3 +852,27 @@ test('after /clear the first read of a model waits for the new conversation\'s l
   const result: any = await reading
   expect(result.context?.[0]).toContain('line 3, model, on “sum(amount)”')
 })
+
+test('a read right after /clear, before the new conversation\'s comments are loaded, waits for them even when the last conversation spent its first-read wait', async ($, on) => {
+  let newId!: () => void
+  const clear = playsClear($, on, { idLagsUntil: new Promise<void>(resolve => (newId = resolve)) })
+  let first!: () => void
+  let second!: () => void
+  const holdLists = { 0: new Promise<void>(resolve => (first = resolve)), 1: new Promise<void>(resolve => (second = resolve)) }
+  const { clock } = await start($, on, { settle: false, holdLists })
+  // The last conversation's first read comes before its list: it spends its wait.
+  const early = $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.advance(FIRST_READ_WAIT_MS + 10)
+  await early
+  first()
+  await clock.settle()
+  await clear()
+  // No settling: the read comes before the session id watcher has seen the new id.
+  const reading = $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.advance(10)
+  second()
+  await clock.advance(10)
+  const result: any = await reading
+  newId()
+  expect(result.context?.[0]).toContain('Grace Hopper: No, gross.')
+})
