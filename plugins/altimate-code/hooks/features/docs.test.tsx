@@ -7,6 +7,7 @@ const test = (name: string, body: Parameters<typeof kitTest>[1]) => kitTest(name
 import { PHASE_TIMEOUT_MS } from '../tool-chain'
 import { ROUND_MS, applyPrompt, candidatesFrom, changedDescriptions, columnDescriptions, modelPaths, sentGroups } from './docs'
 import { nothingToReport } from '../inert-features'
+import { playsClear } from '../clear-state.testkit'
 
 const ROOT = '/repo'
 const MANIFEST_PATH = `${ROOT}/target/manifest.json`
@@ -252,7 +253,11 @@ async function start($: any, on: any, options: Options = {}) {
   on('ui.open', () => ({ value: {} }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.toast', () => ({ value: undefined }))
-  on('ui.status', () => ({ value: undefined }))
+  const statuses: (string | undefined)[] = []
+  on('ui.status', (_: unknown, e: { text?: string }) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
   on('ui.render', ($$: any, e: any) => {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
@@ -337,6 +342,7 @@ async function start($: any, on: any, options: Options = {}) {
     calls,
     toolArgs,
     submitted,
+    statuses,
     /** The next schema edit removes the description instead of writing it. */
     clear: () => {
       clearing = true
@@ -759,4 +765,15 @@ kitTest('an edit\'s first coverage read that comes back late does not replace th
   expect(await ui.find({ type: 'Text', text: /orders: 1 of 2 columns documented \(50%\) · no description: payments/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /1 of 1 columns documented/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test('/clear drops the "docs N to copy" status part with the offers it counted, which the new conversation does not have', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, statuses } = await start($, on)
+  await $.tool.call(EDIT)
+  await clock.settle()
+  expect(statuses.at(-1)).toContain('docs 2 to copy')
+  await clear()
+  await clock.settle()
+  expect(statuses.at(-1) ?? '').not.toContain('docs')
 })
