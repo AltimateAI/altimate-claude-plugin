@@ -638,7 +638,7 @@ export type SavingsView = {
   ranOn: string | null
   /** The days the check read (YYYY-MM-DD, UTC). */
   window: { start: string; end: string }
-  /** What was read; `workspaces` counts the Databricks workspaces the warehouses span. */
+  /** What was read; `workspaces` counts the Databricks workspaces the run read warehouses, clusters or jobs from. */
   checked: { warehouses: number; clusters: number; jobs: number; workspaces: number }
   /** Checks whose system tables the connection could not read. */
   skipped: string[]

@@ -961,3 +961,36 @@ test('a finding in a workspace with no SQL warehouse still counts that workspace
   await ui.unmount()
 })
 
+test('a workspace the CLI read with no SQL warehouse and nothing found is still counted', async ($, on) => {
+  // Every warehouse and finding is in one workspace; the CLI also read a second one's clusters and jobs.
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses.forEach((one: any) => (one.workspace_id = '111'))
+  answer.metadata.report.findings.forEach((one: any) => (one.workspace_id = '111'))
+  answer.metadata.clusters_checked = 2
+  answer.metadata.jobs_checked = 4
+  answer.metadata.workspaces_checked = 2
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^5 SQL warehouses, 2 all-purpose clusters and 4 jobs in 2 workspaces · / })).toBeDefined()
+  // With two workspaces read, each finding says which one it is in.
+  expect(await ui.find({ type: 'Text', text: /^Classic \(workspace 111\) · Migrate Classic\/Pro to Serverless · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Databricks checks, on 2 workspaces\./ })).toBeDefined()
+  await ui.unmount()
+})
+
+for (const counted of [undefined, 1, 0, -3, 1.5, 'two']) {
+  test(`with a CLI count of ${JSON.stringify(counted)}, the workspaces are at least those of the warehouses and findings`, async ($, on) => {
+    const answer = JSON.parse(JSON.stringify(ANSWER))
+    answer.metadata.warehouses.forEach((one: any) => (one.workspace_id = '111'))
+    answer.metadata.report.findings[0].workspace_id = '222'
+    answer.metadata.workspaces_checked = counted
+    const { clock } = await start($, on, { answer })
+    await savings($)
+    await clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: / in 2 workspaces · / })).toBeDefined()
+    await ui.unmount()
+  })
+}

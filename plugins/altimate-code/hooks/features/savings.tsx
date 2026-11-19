@@ -260,6 +260,8 @@ type ToolMetadata = {
   warehouses_checked?: number
   clusters_checked?: number
   jobs_checked?: number
+  /** Distinct workspaces among every warehouse, cluster and job the run read, findings or not. */
+  workspaces_checked?: number
   skipped?: { check: string; reason: string }[]
   limited?: string[]
   warehouses?: ToolWarehouse[]
@@ -278,8 +280,11 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const report = metadata?.report
   if (!metadata?.success || !report || !Array.isArray(report.findings) || !metadata.window) return null
   const days = report.lookback_days || windowDays(metadata.window)
-  // Clusters and jobs can sit in a workspace with no SQL warehouse: count the findings' workspaces too.
-  const workspaces = new Set([...(metadata.warehouses ?? []), ...report.findings].map(one => one.workspace_id).filter(Boolean)).size
+  // The CLI counts every workspace it read facts from; one without that count lists only the warehouses'
+  // and the findings' workspaces, which misses one with only clusters or jobs and nothing found.
+  const listed = new Set([...(metadata.warehouses ?? []), ...report.findings].map(one => one.workspace_id).filter(Boolean)).size
+  const counted = Number(metadata.workspaces_checked)
+  const workspaces = Number.isInteger(counted) && counted > 0 ? Math.max(counted, listed) : listed
   return {
     connection: metadata.warehouse ?? null,
     ranOn: metadata.ran_on ?? null,
