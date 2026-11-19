@@ -75,6 +75,10 @@ export type GraphNode = {
   relation: string | null
   /** Columns documented in the manifest. */
   columns: string[]
+  /** A test's column (test_metadata.kwargs.column_name or column_name); null when it has none or is not a test. */
+  testColumn?: string | null
+  /** The model a test is attached to (attached_node), when dbt names it. */
+  testOn?: string | null
 }
 
 export type LineageGraph = {
@@ -322,7 +326,8 @@ export type Reach = {
   truncated: boolean
 }
 
-export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean }
+/** `note` says why a found column has no reach to give (models it reads were not read), in place of one. */
+export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean; note?: string }
 
 /** What the band shows after a task that changed models. */
 export type TaskSummaryView = {
@@ -663,6 +668,8 @@ declare module 'claude-code' {
       lineageMessage: string | null
       /** The shown model's SQL file changed after the manifest was written, said so; null when it didn't. */
       lineageStale: string | null
+      /** Why the pane waits undrawn on a narrow terminal, and the width it needs; null when it does not. */
+      lineageNarrow: { text: string; floor: number | null } | null
       lineageLoading: boolean
       /** Compile-and-validate's answer for the last model Claude edited. */
       dbtCheck: CheckView | null

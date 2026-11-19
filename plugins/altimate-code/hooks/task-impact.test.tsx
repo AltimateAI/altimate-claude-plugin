@@ -683,3 +683,239 @@ test('/lineage-report takes a unique id as the model, the column after the last 
   expect(directional(tools).every(one => one.model === 'model.shop.fct_orders' && one.column === 'revenue')).toBe(true)
   expect(embedded(writes.get(COLUMN_REPORT)!).lookup).toEqual({ model: 'fct_orders', column: 'revenue' })
 })
+
+// What the engine answers for a column its manifest has no trace of: a well-formed answer that reaches nothing.
+const NOT_IN_MANIFEST = (column: string) => ({
+  version: 1,
+  focus: { model: 'model.shop.stg_payments', column },
+  direction: 'downstream',
+  counts: { columns: 0, models: 0, ends: 0, hops: 0, may_carry_models: 0, model_level: 2 },
+  nodes: [],
+  columns: [],
+})
+// The manifest from before the task knows `amount`, with two models reading it, and nothing called `total`.
+const PRE_TASK_ENGINE = (args: Record<string, any>) => (args.column === 'amount' ? {} : args.column ? { column_answer: NOT_IN_MANIFEST(args.column) } : {})
+const SECOND_HOP = { ...DOWN, focus: { model: 'model.shop.stg_payments', column: 'amount' }, counts: { columns: 2, models: 2, hops: 1, ends: 2, may_carry_models: 0, model_level: 2 }, columns: [DOWN.columns[0]!, DOWN.columns[1]!, DOWN.columns[2]!], nodes: DOWN.nodes.slice(0, 3), edges: [], unresolved: [], may_carry: [], flags: [] }
+
+test('a renamed column is never shown as reaching 0 columns in 0 models: the old name is traced in the pre-task manifest, and the new one, which it lacks, is said to be unknown', async ($, on) => {
+  const { tools, turn, logs } = await start($, on, {
+    impact: args => (args.column === 'amount' ? { column_answer: SECOND_HOP } : PRE_TASK_ENGINE(args)),
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: STAGING, old_string: 'amount_cents / 100 as amount', new_string: 'amount_cents / 100 as total' })
+  })
+  expect(directional(tools).map(one => [one.column ?? null, one.manifest_path])).toEqual(
+    expect.arrayContaining([
+      ['amount', frozen()],
+      ['total', frozen()],
+    ]),
+  )
+  const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
+  expect(line).not.toMatch(/reaches 0 columns in 0 models/)
+  expect(line).toContain('amount  reaches 2 columns in 2 models')
+  expect(line).toContain('total  not in the manifest from before the task (new in it?): its reach is unknown, not zero')
+})
+
+test('a column the queried manifest does not know is not shown as 0, even when the engine answers with an empty reach for it', async ($, on) => {
+  const { turn, logs, writes, clock } = await start($, on, { impact: args => (args.column ? { column_answer: NOT_IN_MANIFEST(args.column) } : {}) })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
+  expect(line).not.toMatch(/reaches 0 columns/)
+  expect(line).toContain('revenue  could not be traced')
+  // The column was there before the task: the report does not call it new.
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  const impact = JSON.stringify(embedded(writes.get(REPORT)!).focuses[0].impact)
+  expect(impact).toContain('could not be traced')
+  expect(impact).not.toContain('not in the manifest from before the task')
+  await band.unmount()
+})
+
+test('/lineage-report on a column the manifest answers without reaching is a plain error, never a report that it reaches 0', async ($, on) => {
+  const { runs, writes } = await start($, on, { openers: { 'xdg-open': 0 }, impact: args => (args.column ? { model: 'fct_orders', column_answer: NOT_IN_MANIFEST(args.column) } : {}) })
+  const shown: any = await $.command.run({ command: 'lineage-report', args: 'fct_orders.fresh' } as any)
+  expect(shown.text).toBe('fct_orders has no column fresh in target/manifest.json. Run `dbt parse` or `dbt compile` if it was just added, then ask again.')
+  expect(runs.some(argv => argv[0] === 'xdg-open')).toBe(false)
+  expect(writes.has(COLUMN_REPORT)).toBe(false)
+})
+
+test('a column found in the manifest with nothing downstream still says it reaches 0', async ($, on) => {
+  const own = { ...NOT_IN_MANIFEST('revenue'), counts: { columns: 0, models: 0, ends: 0, hops: 0, may_carry_models: 0, model_level: 0 }, columns: [DOWN.columns[0]!], nodes: [DOWN.nodes[0]!] }
+  const { turn, logs } = await start($, on, { impact: args => (args.column ? { column_answer: own } : {}) })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  expect(logs.find(one => one.startsWith('◆ Lineage after this task'))).toContain('revenue  reaches 0 columns in 0 models')
+})
+
+// Captured from altimate-code 0.12.11 for a model read by two models in a parse-only manifest (no compiled SQL).
+const PARSE_ONLY_ANSWER = {
+  "version": 1,
+  "focus": {
+    "model": "model.shop.stg_orders",
+    "column": "amount"
+  },
+  "direction": "downstream",
+  "inputs": {
+    "manifest": {
+      "generated_at": "2026-11-19T04:55:18.168655Z",
+      "older_than_sql": false
+    },
+    "sql": "compiled_code",
+    "catalog": null,
+    "engine": "altimate-core 0.9.0",
+    "workarounds": [
+      "relations keyed database.schema.name",
+      "ephemeral parents expanded",
+      "parent columns = documented + own lineage targets + SELECT list",
+      "aggregate FILTER clause dropped before analysis",
+      "WITH nested inside a CTE reported unresolved",
+      "reads with zero traced columns reported unresolved"
+    ]
+  },
+  "counts": {
+    "columns": 0,
+    "models": 0,
+    "hops": 0,
+    "contracts": 0,
+    "ends": 0,
+    "may_carry_models": 2,
+    "not_traced_models": 0,
+    "model_level": 2
+  },
+  "nodes": [
+    {
+      "id": "model.shop.stg_orders",
+      "name": "stg_orders",
+      "folder": "model",
+      "materialized": "view",
+      "contract": false,
+      "tests": 0,
+      "exposures": []
+    },
+    {
+      "id": "model.shop.order_report",
+      "name": "order_report",
+      "folder": "model",
+      "materialized": "view",
+      "contract": false,
+      "tests": 0,
+      "exposures": []
+    },
+    {
+      "id": "model.shop.order_totals",
+      "name": "order_totals",
+      "folder": "model",
+      "materialized": "view",
+      "contract": false,
+      "tests": 0,
+      "exposures": []
+    }
+  ],
+  "columns": [
+    {
+      "model": 0,
+      "column": "amount",
+      "hop": 0,
+      "end": false,
+      "how": null,
+      "how_from": null
+    }
+  ],
+  "edges": [],
+  "also_reads": [],
+  "unresolved": [
+    {
+      "model": 1,
+      "reason": "no compiled SQL: run `dbt compile`",
+      "code": "unresolved"
+    },
+    {
+      "model": 2,
+      "reason": "no compiled SQL: run `dbt compile`",
+      "code": "unresolved"
+    }
+  ],
+  "may_carry": [
+    {
+      "id": "model.shop.order_report",
+      "name": "order_report",
+      "reason": "unresolved"
+    },
+    {
+      "id": "model.shop.order_totals",
+      "name": "order_totals",
+      "reason": "unresolved"
+    }
+  ],
+  "flags": [],
+  "consumers": {
+    "declared": 0,
+    "exposures": []
+  },
+  "truncated": false,
+  "next": null
+}
+
+test('a column whose downstream models have no compiled SQL is not shown as reaching 0: the band, the log and the report say it is not traced', async ($, on) => {
+  const { turn, logs, writes, clock } = await start($, on, { impact: args => (args.column ? { column_answer: PARSE_ONLY_ANSWER } : {}) })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
+  expect(line).not.toMatch(/reaches 0/)
+  expect(line).toContain('revenue  not traced: 2 downstream models have no compiled SQL (run `dbt compile`)')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: '  revenue  not traced: 2 downstream models have no compiled SQL (run `dbt compile`)' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '  revenue  reaches 0 columns in 0 models (0 end columns) · 2 more may change' })).toBeUndefined()
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  const report = embedded(writes.get(REPORT)!)
+  expect(report.focuses[0].reach).toBeNull()
+  expect(JSON.stringify(report.focuses[0].impact)).toContain('The reach of')
+  expect(JSON.stringify(report.focuses[0].impact)).toContain('no compiled SQL')
+  // The downstream section carries the reason, so the page never says no model carries the value.
+  expect(report.focuses[0].down).toEqual({ hops: [], truncated: false, error: 'The reach is unknown: 2 downstream models have no compiled SQL (run `dbt compile`).' })
+  await band.unmount()
+})
+
+test('with no manifest copied at the task start, a column added in the task is asked of the project\'s manifest as it is now', async ($, on) => {
+  const { tools, turn } = await start($, on, { noManifest: true })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: STAGING, old_string: 'amount_cents / 100 as amount', new_string: 'amount_cents / 100 as total' })
+  })
+  expect(directional(tools).some(one => one.column === 'total' && one.manifest_path === MANIFEST)).toBe(true)
+})
+
+test('a report on a task that added a column is built once: opening it again asks the CLI nothing more', async ($, on) => {
+  const { tools, turn, clock } = await start($, on, { openers: { 'xdg-open': 0 }, impact: args => (args.column === 'amount' ? { column_answer: SECOND_HOP } : PRE_TASK_ENGINE(args)) })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: STAGING, old_string: 'amount_cents / 100 as amount', new_string: 'amount_cents / 100 as total' })
+  })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  const asked = directional(tools).length
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  expect(directional(tools).length).toBe(asked)
+  await band.unmount()
+})
+
+test('a column the SQL from before the task did not name but the manifest has (a select * spelled out) is traced by name, with its real reach', async ($, on) => {
+  const { tools, turn, logs } = await start($, on, { impact: args => (args.column === 'amount' ? { column_answer: SECOND_HOP } : {}) })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: STAGING, content: 'select *\nfrom {{ source("raw", "payments") }}\n' })
+  })
+  const before = directional(tools).length
+  await turn('t2', async () => {
+    await $.tool.call({ tool: 'Write', file_path: STAGING, content: 'select\n  payment_id,\n  amount_cents / 100 as amount\nfrom {{ source("raw", "payments") }}\n' })
+  })
+  expect(directional(tools).slice(before).some(one => one.column === 'amount')).toBe(true)
+  const line = logs.filter(one => one.startsWith('◆ Lineage after this task')).pop()!
+  expect(line).toContain('amount  reaches 2 columns in 2 models')
+  expect(line).not.toMatch(/not in the manifest from before the task/)
+})

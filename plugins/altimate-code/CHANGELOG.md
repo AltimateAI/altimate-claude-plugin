@@ -2,6 +2,20 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.8.1] — 2026-11-19
+
+### Fixed
+- The end-of-task column summary no longer says a changed column "reaches 0 columns in 0 models" when nothing was traced. When the models that read the column have no compiled SQL (a manifest from `dbt parse`), the band says "not traced: N downstream models have no compiled SQL (run `dbt compile`)". The report says the same in its downstream section, and `/lineage-report <model>.<column>` on a column the manifest does not reach is a plain error. The per-edit impact note (to Claude, and to you with `show_edit_impact`) follows the same rules. Models read in full that the value was not traced to still show as "may change" beside a reach of 0. Every changed column is asked of the manifest by name; one the SQL from before the task did not name and the manifest lacks (likely added) is said to have an unknown reach. The old name of a rename is still traced. A model read only in part counts as unread. A column found with nothing downstream still says it reaches 0.
+- A missing altimate-code, or one without the `dbt_health` tool, no longer pops a toast at session start or after a turn; `/health` says it, naming the tool and the install command instead of a version.
+- The settings say what each option does and that it is optional, with its default. The BigQuery scan limit and the team comments options no longer say they are unused.
+- With a column in focus, the lineage pane counts only the tests on that column of the model ("3 tests on amount"); with none, or when the graph does not say which column each test checks (a manifest over 4 MiB), the tests downstream as before.
+- Install and update instructions in the commands and skills give one method: `npm i -g @altimateai/altimate-code`.
+
+### Added
+- At session start, an altimate-code older than the plugin needs (or none on PATH) keeps a part at the end of the status line (a preview build, 0.0.0-…, says nothing) with its version, the binary and where it is, and `npm i -g @altimateai/altimate-code`.
+- When the terminal is too narrow for the lineage pane, a line above the prompt says so, with the width it needs, until the pane can open or `/lineage` is used.
+- `show_edit_impact` (off by default): also shows the per-edit impact note Claude gets in the transcript.
+
 ## [1.8.0] — 2026-11-17
 
 ### Added

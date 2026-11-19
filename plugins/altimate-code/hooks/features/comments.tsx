@@ -40,7 +40,7 @@ const LOCKED_NOTE = ' The thread stays locked until the list shows the post or a
 const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids', 'unknown_thread', 'incomplete_list'])
 const MIN_POLL_SECONDS = 30
 const MAX_POLL_SECONDS = 86_400
-const NEEDS_NEWER_CLI = 'Team comments need a newer altimate-code (this one has no docs_share_comments tool): npm install -g altimate-code@latest'
+const NEEDS_NEWER_CLI = 'Team comments need a newer altimate-code (this one has no docs_share_comments tool): npm i -g @altimateai/altimate-code'
 
 const INITIAL: CommentsState = { root: null, project: null, threads: [], loadedAt: null, loading: false, needs: null, error: null, partial: null, note: null, drafts: {}, posting: null }
 
@@ -489,7 +489,7 @@ async function fetchThreads($: EngineInterface) {
     await change($, current => ({
       ...current,
       loading: false,
-      error: missing ? 'Team comments need the altimate-code CLI: npm install -g altimate-code@latest' : `Could not load the comments: ${oneLine(String(error))}`,
+      error: missing ? 'Team comments need the altimate-code CLI: npm i -g @altimateai/altimate-code' : `Could not load the comments: ${oneLine(String(error))}`,
     }))
   }
 }

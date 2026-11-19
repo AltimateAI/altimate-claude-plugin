@@ -278,7 +278,7 @@ test('reading a model points the pane at it: the manifest graph, then its column
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /GRAPH · manifest/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 test ·/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
   await ui.unmount()
 })
@@ -380,6 +380,46 @@ test('with a column answer, the note Claude gets has the numbers the end-of-task
   // The older reach numbers are not given alongside.
   expect(note).not.toContain('read by 2 downstream models')
   expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue reaches 3 columns in 2 models, 4 may carry it · exec_revenue')
+})
+
+// What altimate-code 0.12.11 answers for a manifest from `dbt parse`: the column found, its two readers unread.
+const PARSE_ONLY_NOTE_ANSWER = {
+  version: 1,
+  focus: { model: 'model.shop.fct_orders', column: 'revenue' },
+  direction: 'downstream',
+  counts: { columns: 0, models: 0, hops: 0, contracts: 0, ends: 0, may_carry_models: 2, not_traced_models: 0, model_level: 2 },
+  nodes: [{ id: 'model.shop.fct_orders', name: 'fct_orders' }, { id: 'model.shop.a', name: 'a' }, { id: 'model.shop.b', name: 'b' }],
+  columns: [{ model: 0, column: 'revenue', hop: 0, end: false, how: null, how_from: null }],
+  edges: [],
+  unresolved: [
+    { model: 1, reason: 'no compiled SQL: run `dbt compile`', code: 'unresolved' },
+    { model: 2, reason: 'no compiled SQL: run `dbt compile`', code: 'unresolved' },
+  ],
+  may_carry: [
+    { id: 'model.shop.a', name: 'a', reason: 'unresolved' },
+    { id: 'model.shop.b', name: 'b', reason: 'unresolved' },
+  ],
+  flags: [],
+}
+
+test('an edit whose readers have no compiled SQL never notes that it reaches 0, to Claude or the person', async ($, on) => {
+  const { clock, notes } = await start($, on, { reach: { ...REACH, column_answer: PARSE_ONLY_NOTE_ANSWER } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  const note = result.context?.[0] as string
+  expect(note).toContain('- revenue: not traced: 2 downstream models have no compiled SQL (run `dbt compile`)')
+  expect(note).not.toMatch(/reaches 0/)
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue not traced: 2 downstream models have no compiled SQL (run `dbt compile`)')
+})
+
+test('an edit whose answer never reaches the column is unchecked, never a reach of 0', async ($, on) => {
+  // The older reach on the same result, empty: it must not stand in for the column answer.
+  const { clock, notes } = await start($, on, { reach: { column_reach: { models: [], exposures: [] }, column_answer: { ...PARSE_ONLY_NOTE_ANSWER, columns: [], unresolved: [], may_carry: [], counts: { ...PARSE_ONLY_NOTE_ANSWER.counts, may_carry_models: 0 } } } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'x as revenue', new_string: 'y as revenue' })
+  await clock.settle()
+  const said = `${String(result.context?.[0] ?? '')}\n${notes.join('\n')}`
+  expect(said).not.toMatch(/reaches 0|read by no model|read by 0/)
+  expect(said).toContain('fct_orders feeds')
 })
 
 test('a may_carry that is not a list gives a note without reasons, and nothing throws', async ($, on) => {
@@ -778,7 +818,7 @@ test('a manifest over 4 MiB is read through altimate-code: the graph comes from 
   expect(calls).toEqual(['tool:Read', 'cli:dbt_lineage:graph'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /GRAPH · altimate-code/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 tests/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 test ·/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
   await ui.unmount()
 
@@ -905,7 +945,7 @@ test('a touched column whose check fails keeps the combined count a lower bound'
   const edit: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
   expect(notes[0]).toContain('fct_orders.revenue is read by at least 2 models')
-  expect(edit.context?.[0]).toContain('columns not checked (over the limit or no answer in time): order_id')
+  expect(edit.context?.[0]).toContain('columns not checked (over the limit, no answer in time, or not in the manifest: `dbt compile` adds a new one): order_id')
 })
 
 test('a new unchecked column in the same turn still reaches Claude', async ($, on) => {
@@ -914,7 +954,7 @@ test('a new unchecked column in the same turn still reaches Claude', async ($, o
   const second: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'i.revenue, i.order_id', new_string: 'coalesce(i.revenue, 0) as revenue, i.order_id + 0 as order_id' })
   await clock.settle()
   expect(first.context?.[0]).toContain('fct_orders.revenue')
-  expect(second.context?.[0]).toContain('columns not checked (over the limit or no answer in time): order_id')
+  expect(second.context?.[0]).toContain('columns not checked (over the limit, no answer in time, or not in the manifest: `dbt compile` adds a new one): order_id')
 })
 
 test('columns beyond the cap are named as unchecked and make the count a lower bound', async ($, on) => {
@@ -928,7 +968,7 @@ test('columns beyond the cap are named as unchecked and make the count a lower b
   await clock.settle()
   expect(calls.filter(call => call.startsWith('cli:impact_analysis'))).toHaveLength(3)
   expect(notes[0]).toContain('is read by at least 2 models')
-  expect(edit.context?.[0]).toMatch(/columns not checked \(over the limit or no answer in time\): \w+;/)
+  expect(edit.context?.[0]).toMatch(/columns not checked \(over the limit, no answer in time, or not in the manifest: `dbt compile` adds a new one\): \w+;/)
 })
 
 test('/lineage takes a unique_id or a path whole, and only a trailing column off a model name', async ($, on) => {
@@ -1035,7 +1075,7 @@ test('a cut-off impact_analysis leaves its column not checked, and the note stil
   const { clock } = await start($, on, { mcp: false, cliCutOff: tool => tool === 'impact_analysis' })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
   await clock.settle()
-  expect(result.context?.[0]).toContain('columns not checked (over the limit or no answer in time): revenue; what they reach is unknown')
+  expect(result.context?.[0]).toContain('columns not checked (over the limit, no answer in time, or not in the manifest: `dbt compile` adds a new one): revenue; what they reach is unknown')
 })
 
 test('a cut-off plain dbt_lineage shows a failure in the pane, naming the tool once', async ($, on) => {
@@ -1792,4 +1832,79 @@ test('a very long run of blank lines before a command is read at once', () => {
   expect(commandDir(`${'\n'.repeat(64000)}dbt run -s orders`, '/repo')).toBe('/repo')
   for (const blank of ['\r', '\r\n', '\u2028', '\u2029']) expect(commandDir(`${blank.repeat(32000)}cd models`, '/repo')).toBe('/repo/models')
   expect(Date.now() - began).toBeLessThan(500)
+})
+
+const optionTest = (name: string, options: Record<string, unknown>, body: Parameters<typeof kitTest>[1]) => kitTest(name, { options: { dbt_mods: false, ...options } }, body as any)
+
+const NARROW_135 = 'unasked below 144 columns (135 now): placed when the person opens it, or when the terminal is widened to 144 columns'
+
+test('a pane left undrawn keeps its reason on the band until /lineage opens it', async ($, on) => {
+  const { clock } = await start($, on, { narrow: NARROW_135 })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const text = /the pane needs 144 columns \(135 now\): make the text smaller \(Cmd -\) or type \/lineage/
+  // Still there well after the toast is gone.
+  await clock.advance(60_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text })).toBeDefined()
+  await band.unmount()
+  await $.command.run({ command: 'lineage', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 135 } } as any)
+  await clock.settle()
+  const after = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await after.find({ type: 'Text', text })).toBeUndefined()
+  await after.unmount()
+})
+
+test('the narrow-terminal band clears once the terminal is wide enough', async ($, on) => {
+  const { clock } = await start($, on, { narrow: NARROW_135 })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const wide = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 150, rows: 40 } } as any)
+  expect(await wide.find({ type: 'Text', text: /the pane needs/ })).toBeUndefined()
+  await wide.unmount()
+  const narrow = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 135, rows: 40 } } as any)
+  expect(await narrow.find({ type: 'Text', text: /the pane needs 144 columns/ })).toBeDefined()
+  await narrow.unmount()
+})
+
+const withTests = {
+  ...MANIFEST,
+  nodes: {
+    ...MANIFEST.nodes,
+    'test.shop.not_null_fct_orders_revenue': { resource_type: 'test', name: 'not_null_fct_orders_revenue', column_name: 'revenue', depends_on: { nodes: ['model.shop.fct_orders'] } },
+    'test.shop.unique_fct_orders_revenue': { resource_type: 'test', name: 'unique_fct_orders_revenue', test_metadata: { kwargs: { column_name: 'revenue' } }, depends_on: { nodes: ['model.shop.fct_orders'] } },
+  },
+}
+
+test('with a column in focus the pane counts only that column\'s tests; without one, the model\'s', async ($, on) => {
+  const { clock } = await start($, on, { manifest: withTests })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 3 tests ·/ })).toBeDefined()
+  await ui.unmount()
+  await $.command.run({ command: 'lineage', args: 'fct_orders.revenue', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
+  await clock.settle()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /2 tests on revenue ·/ })).toBeDefined()
+  await ui.unmount()
+})
+
+const EDIT = { tool: 'Edit' as const, file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' }
+const NOTE = '◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue'
+
+test('the per-edit impact note stays off the transcript unless show_edit_impact is set', async ($, on) => {
+  const { clock, logs, debug } = await start($, on)
+  await $.tool.call(EDIT)
+  await clock.settle()
+  expect(debug).toContain(NOTE)
+  expect(logs).not.toContain(NOTE)
+})
+
+optionTest('show_edit_impact also shows the per-edit impact note to the person', { show_edit_impact: true }, async ($, on) => {
+  const { clock, logs, debug } = await start($, on)
+  await $.tool.call(EDIT)
+  await clock.settle()
+  expect(debug).toContain(NOTE)
+  expect(logs).toContain(NOTE)
 })

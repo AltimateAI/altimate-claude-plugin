@@ -11,6 +11,8 @@ import {
   graphFromSql,
   projectLayout,
   impactOf,
+  testCountText,
+  testsOnColumn,
   parseDbtLineage,
   reachFromMetadata,
   type Segment,
@@ -410,4 +412,51 @@ test('projectLayout reads block lists with comments, blank lines and CRLF', () =
 test('graphFromSql reads materialized from the config dbt renders, not a commented-out one', () => {
   const graph = graphFromSql('shop', [{ path: 'models/a.sql', text: "{# {{ config(materialized='view') }} #}\n{{ config(materialized='table') }} select 1", kind: 'model' }])
   expect(graph.nodes['model.shop.a']!.materialized).toBe('table')
+})
+
+test('the followed model\'s subgraph keeps each test\'s column', () => {
+  const m = 'model.shop.orders'
+  const graph = buildGraph({
+    nodes: {
+      [m]: { resource_type: 'model', name: 'orders' },
+      'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: 'amount', depends_on: { nodes: [m] } },
+    },
+  })
+  expect(testsOnColumn(subgraph(graph, m), m, 'amount')).toBe(1)
+})
+
+test('a test dbt does not attach to a model counts for a column only when that model is its one parent', () => {
+  const a = 'model.shop.a'
+  const b = 'model.shop.b'
+  const graph = buildGraph({
+    nodes: {
+      [a]: { resource_type: 'model', name: 'a' },
+      [b]: { resource_type: 'model', name: 'b', depends_on: { nodes: [a] } },
+      'test.shop.a_amount': { resource_type: 'test', name: 'a_amount', column_name: 'amount', depends_on: { nodes: [a] } },
+      'test.shop.b_amount': { resource_type: 'test', name: 'b_amount', column_name: 'amount', depends_on: { nodes: [b] } },
+    },
+  })
+  expect(testsOnColumn(graph, a, 'amount')).toBe(1)
+  expect(testsOnColumn(graph, b, 'amount')).toBe(1)
+})
+
+test('a graph that does not say which column its tests check gives no column count, and the pane keeps the model\'s', () => {
+  const m = 'model.shop.orders'
+  // The shape altimate-code's dbt_lineage graph has: test nodes with no test column.
+  const graph = {
+    nodes: { [m]: { id: m, name: 'orders', type: 'model', path: null, materialized: null, relation: null, columns: [] }, 'test.shop.nn': { id: 'test.shop.nn', name: 'nn', type: 'test', path: null, materialized: null, relation: null, columns: [] } },
+    parents: { 'test.shop.nn': [m] },
+    children: { [m]: ['test.shop.nn'] },
+  } as any
+  expect(testsOnColumn(graph, m, 'amount')).toBeNull()
+  expect(testCountText(graph, m, 'amount', 1)).toBe('1 test')
+  expect(testCountText(buildGraph({ nodes: { [m]: { resource_type: 'model', name: 'orders' }, 'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: 'amount', depends_on: { nodes: [m] } } } }), m, 'amount', 1)).toBe('1 test on amount')
+})
+
+test('a column typed in another case counts the tests on that column', () => {
+  const m = 'model.shop.orders'
+  const graph = buildGraph({ nodes: { [m]: { resource_type: 'model', name: 'orders' }, 'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: 'revenue', attached_node: m, depends_on: { nodes: [m] } } } })
+  expect(testsOnColumn(graph, m, 'REVENUE')).toBe(1)
+  const quoted = buildGraph({ nodes: { [m]: { resource_type: 'model', name: 'orders' }, 'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: '"Revenue"', attached_node: m, depends_on: { nodes: [m] } } } })
+  expect(testsOnColumn(quoted, m, 'revenue')).toBe(1)
 })

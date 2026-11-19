@@ -14,11 +14,11 @@ const COMMAND = 'to-model'
 const PANE = 'altimate-to-model'
 const PANE_TITLE = 'Raw SQL to dbt model'
 const TOOL = 'dbt_map_relations'
-const UPGRADE = `/${COMMAND} needs a newer altimate-code (npm install -g altimate-code@latest): its ${TOOL} tool is missing.`
+const UPGRADE = `/${COMMAND} needs a newer altimate-code (npm i -g @altimateai/altimate-code): its ${TOOL} tool is missing.`
 const USAGE = 'Usage: /to-model <model_name> [path/to/query.sql], or select the SQL first and run /to-model <model_name>.'
 // A model name is a dbt identifier: it becomes a file name and a ref() target.
 const MODEL_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
-const NO_CLI = `/${COMMAND} needs the altimate-code CLI on your PATH (npm install -g altimate-code).`
+const NO_CLI = `/${COMMAND} needs the altimate-code CLI on your PATH (npm i -g @altimateai/altimate-code).`
 const UNREADABLE = `/${COMMAND} could not read altimate-code's answer: update the plugin and altimate-code to matching versions.`
 
 type MatchKind = RelationRow['match']
