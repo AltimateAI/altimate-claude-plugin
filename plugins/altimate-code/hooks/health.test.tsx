@@ -284,6 +284,24 @@ test('a git push whose /clear restore does not finish within the gate\'s wait is
   expect(denied?.deny).toContain('git push is held')
 })
 
+test('a /clear that comes while the previous one\'s restore is still writing keeps the state, and the push stays held', { options: { healthBlocksPush: true } }, async ($, on) => {
+  let release!: () => void
+  const clear = playsClear($, on, { holdWriteOf: { key: 'health', until: new Promise<void>(resolve => (release = resolve)) } })
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  const asked = $.command.run({ command: 'health' } as any)
+  await clock.advance(10)
+  await clear()
+  release()
+  await asked
+  await clock.settle()
+  expect(calls).toHaveLength(2)
+  const denied: any = await $.tool.call(command('git push'))
+  expect(denied?.deny).toContain('1 new project health issue')
+})
+
 test('a second /clear before the first one\'s state was restored keeps what the first carried', async ($, on) => {
   const clear = playsClear($, on)
   const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })

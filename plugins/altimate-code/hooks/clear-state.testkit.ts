@@ -20,13 +20,16 @@ export function playsClear($: any, on: any, options: { holdWriteOf?: { key: stri
     return cleared && !written.has(name(e)) && stored.value ? { ...stored, value: { ...stored.value, value: undefined } } : stored
   })
   on('state.set', async (_: unknown, e: Address, next: (e: Address) => Promise<unknown>) => {
-    if (cleared) written.add(name(e))
+    const asked = clears
     // The new conversation's first write of that value waits, so a test can act while it is under way.
     if (cleared && !held && options.holdWriteOf?.key === e.key) {
       held = true
       await options.holdWriteOf.until
     }
-    return next(e)
+    const done = await next(e)
+    // Read as written only once it is, and only in the conversation it was written in.
+    if (cleared && asked === clears) written.add(name(e))
+    return done
   })
   let clears = 0
   on('session.id', () => ({ value: `session-${clears}` }))

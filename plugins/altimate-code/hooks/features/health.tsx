@@ -730,8 +730,8 @@ export async function clearStart($: EngineInterface) {
 }
 
 async function restore($: EngineInterface) {
+  // The snapshot is let go only once it is written: a /clear while the write is under way carries it on.
   const kept = carried
-  carried = null
   generation += 1
   running = null
   if (!kept) {
@@ -742,6 +742,7 @@ async function restore($: EngineInterface) {
   enabled = true
   // Changes the new conversation recorded before this ran are added to the kept ones, not replaced by them.
   await update($, healthAtom, prev => (prev ? mergeKept(kept, prev) : { ...kept, running: false }))
+  if (carried === kept) carried = null
   drawn = true
   await drawStatus($, kept.issues)
   if (await wantsCheck($)) later($, () => kick($))
@@ -775,7 +776,8 @@ export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   const state = e.reason === 'clear' && enabled ? await read($, healthAtom).catch(() => null) : null
   const now = state ? { ...state, pending: state.running ? [...new Set([...inFlight, ...state.pending])] : state.pending, running: false } : null
   // A second /clear before the first was restored: what that one carried and what this conversation recorded are both kept.
-  carried = e.reason !== 'clear' ? null : carried && now ? mergeKept(carried, now) : (now ?? carried)
+  // A fresh object either way, so a restore still writing the earlier snapshot does not let this one go.
+  carried = e.reason !== 'clear' ? null : carried ? (now ? mergeKept(carried, now) : { ...carried }) : now
   clearPending = e.reason === 'clear'
   generation += 1
   running = null
