@@ -16,6 +16,10 @@ import type { DeferState } from '../../types'
 import type { BandUi, FeatureContext } from './index'
 
 const deferAtom = atom({ plugin: 'altimate-code', key: 'defer' } as const, null as DeferState | null)
+// What /defer and /target added to Claude's last dbt command, for the band, until the next prompt.
+const ranAtom = atom({ plugin: 'altimate-code', key: 'deferRan' } as const, null as string | null)
+// The flags added to each rewritten command, by the command as it ran (the after phase sees the rewrite), for its result.
+const addedTo = new Map<string, string[]>()
 
 // The commands that take `--defer` in every dbt version this reads state for (older dbt refuses the option on
 // `ls`, `parse`, `seed`, `run-operation` and others, and `retry` reads the previous run's results from `--state`).
@@ -45,8 +49,17 @@ export type RewriteOptions = {
  * when nothing needs to change. An invocation with a word the parser cannot read (`$FLAGS`, `~/x`, a glob) is left as written.
  */
 export function rewriteDeferCommand(command: string, options: RewriteOptions): string {
+  return rewriteDefer(command, options).command
+}
+
+/**
+ * rewriteDeferCommand's command, with the flags it added to each dbt invocation, first invocation first, as the
+ * person reads them: the state folder named relative to `base` when it is inside it.
+ */
+export function rewriteDefer(command: string, options: RewriteOptions, base?: string): { command: string; added: string[] } {
   const { stateDir, favorState = false, target } = options
-  if (!stateDir && !target) return command
+  const added: string[] = []
+  if (!stateDir && !target) return { command, added }
   let out = command
   // DBT_STATE or DBT_TARGET exported in the line is the user's own choice: none of its dbt commands gets the flag
   // (a line with an `export` and the variable anywhere in it counts, whatever the quoting).
@@ -68,8 +81,17 @@ export function rewriteDeferCommand(command: string, options: RewriteOptions): s
     if (target && !NO_TARGET.has(one.subcommand) && one.target === null && !exportedTarget && !/\bDBT_TARGET=/.test(ownText)) flags.push('--target', quote(target))
     if (flags.length === 0) continue
     out = `${out.slice(0, one.subcommandEnd)} ${flags.join(' ')}${out.slice(one.subcommandEnd)}`
+    const shown = flags.map(flag => (stateDir && flag === quote(stateDir) ? quote(relativeTo(base, stateDir)) : flag))
+    added.unshift(`dbt ${one.subcommand} ${shown.join(' ')}`)
   }
-  return out
+  return { command: out, added }
+}
+
+/** `path` relative to `base` when it is inside it, else as it is. */
+function relativeTo(base: string | undefined, path: string): string {
+  if (!base) return path
+  const root = base.replace(/[\\/]+$/, '')
+  return path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path
 }
 
 type DeferAnswer = {
@@ -411,13 +433,18 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   // A new session starts from the project's own settings, not from the last one's overrides.
   generation++
   loading = null
+  addedTo.clear()
   await update($, deferAtom, () => null)
+  await update($, ranAtom, () => null)
   // Clearing the line is cosmetic: an engine that cannot draw it does not stop the session.
   await setStatusPart($, 'defer', null).catch(() => {})
 }
 
 /** Also called for a subagent's turns, which carry `e.agentId`. */
-export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
+export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {
+  // A new prompt: the band's line was about the last one's commands. A subagent's turn is part of the prompt's.
+  if (!(e as { agentId?: string }).agentId && (await read($, ranAtom))) await update($, ranAtom, () => null)
+}
 
 /** After the turn's answer; `out` is what the turn ended with. Also called for a subagent's turns (`e.agentId`). */
 export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {}
@@ -426,7 +453,16 @@ export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {}
 
 /** This feature's line in the band, under the lineage line; null when there is nothing to say. */
 export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderElement | null> {
-  return null
+  const ran = await read($, ranAtom)
+  if (!ran) return null
+  const { Text } = ui
+  return (
+    <Text>
+      <Text dimColor>↪ ran as </Text>
+      <Text>{ran}</Text>
+      <Text dimColor> · /defer, /target</Text>
+    </Text>
+  )
 }
 
 /** The command to run in place of `e.command`; null keeps it. */
@@ -439,8 +475,12 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
   const root = (await $.session.cwd().catch(() => null)) ?? (await $.session.root().catch(() => null))
   if (!root) return null
   if (!(await runsHere($, e.command, root, state.projectDir))) return null
-  const command = rewriteDeferCommand(e.command, effective(state))
-  return command === e.command ? null : command
+  const { command, added } = rewriteDefer(e.command, effective(state), state.projectDir)
+  if (command === e.command) return null
+  // Kept for the call's after phase, which tells Claude what ran; a call that never gets there leaves at most a few.
+  if (addedTo.size >= 20) addedTo.delete(addedTo.keys().next().value!)
+  addedTo.set(command, added)
+  return command
 }
 
 /**
@@ -451,7 +491,18 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   return null
 }
 
-export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {}
+/**
+ * The flags the plugin added to a dbt command: the transcript shows the command as Claude wrote it, so Claude is
+ * told in the result, and the person in the band, what really ran.
+ */
+export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
+  const added = addedTo.get(e.command)
+  if (!added) return
+  addedTo.delete(e.command)
+  const text = added.join('; ')
+  await update($, ranAtom, () => text)
+  return [`◆ dbt · this command ran as ${text}: /defer and /target added those flags (the command shown is as written), so its results are from that target and state`]
+}
 
 /** `file.before` holds the text from before the edit only when `editReadsBefore` is true. */
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {}

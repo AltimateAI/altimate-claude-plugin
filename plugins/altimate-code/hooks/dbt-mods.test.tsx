@@ -135,7 +135,7 @@ const DOCTOR = { ...RESULTS, requestId: 'altimate-doctor', props: { ...RESULTS.p
 
 type Options = {
   /** What dbt show answers: rows, or a failure's error lines. */
-  show?: { rows?: Record<string, unknown>[]; error?: string; node?: string | null; onlyName?: string; mustInclude?: string; raw?: { exitCode: number; stdout: string; stderr?: string }; writes?: string; invocation?: string }
+  show?: { rows?: Record<string, unknown>[]; error?: string; node?: string | null; onlyName?: string; mustInclude?: string; raw?: { exitCode: number; stdout: string; stderr?: string }; writes?: string; claudeWrites?: string; invocation?: string }
   /** The node names `dbt ls` prints; the default is none. */
   listed?: (string | { name: string; resource_type: string })[]
   /** What stops dbt from running: its spawn failing, or the shell finding no such command. Asked at each run. */
@@ -223,6 +223,7 @@ type Options = {
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on, { now: options.now ?? 1_000 })
   const runs: string[][] = []
+  const envs: Record<string, string>[] = []
   const cwds: string[] = []
   const toasts: string[] = []
   const prompts: string[] = []
@@ -326,7 +327,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (!exists(e.path)) throw new Error('ENOENT')
     const isDir = !(rel in files)
     const mtimeMs = rel === 'target/run_results.json' ? (options.runResultsAt ?? 5_000) : (mtimes[rel] ?? 500)
-    const size = rel === 'target/manifest.json' && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
+    const size = /(^|\/)manifest\.json$/.test(rel) && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
     return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: false } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
@@ -349,8 +350,12 @@ async function start($: any, on: any, options: Options = {}) {
   })
   let held = false
   let shows = 0
-  on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string } }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string; env?: Record<string, string> } }) => {
     runs.push([...e.argv])
+    envs.push(e.init?.env ?? {})
+    // Where this dbt writes its artifacts: DBT_TARGET_PATH when set, else the project's target folder.
+    const given = e.init?.env?.DBT_TARGET_PATH
+    const out = given ? (given.startsWith(`${ROOT}/`) ? given.slice(ROOT.length + 1) : given) : (options.target ?? 'target')
     if (e.argv[2] === PROFILE_REDACT) {
       redactSent.push({ argv: [...e.argv], stdin: e.init?.stdin })
       await options.holdRedact
@@ -395,11 +400,14 @@ async function start($: any, on: any, options: Options = {}) {
     }
     if (verb === 'show') {
       const show = options.show ?? { rows: [{ order_id: 1, amount: 10 }] }
-      // A dbt show writes run_results.json, whoever's invocation is in it by the time the process exits.
-      if (show.writes) files['target/run_results.json'] = JSON.stringify({ ...RUN_RESULTS, metadata: { invocation_id: show.writes, generated_at: 'x' } })
-      if (options.manifestAfterShow) {
-        files['target/manifest.json'] = JSON.stringify(options.manifestAfterShow)
-        mtimes['target/manifest.json'] = (mtimes['target/manifest.json'] ?? 1_000) + 1
+      // A dbt show writes run_results.json to its own artifact folder; a run of Claude's that ends meanwhile writes the project's.
+      if (show.writes) files[`${out}/run_results.json`] = JSON.stringify({ ...RUN_RESULTS, metadata: { invocation_id: show.writes, generated_at: 'x' } })
+      if (show.claudeWrites) files[`${options.target ?? 'target'}/run_results.json`] = JSON.stringify({ ...RUN_RESULTS, metadata: { invocation_id: show.claudeWrites, generated_at: 'x' } })
+      // dbt parses the project and writes the manifest to its artifact folder, every time.
+      const parsed = options.manifestAfterShow ? JSON.stringify(options.manifestAfterShow) : files[`${options.target ?? 'target'}/manifest.json`]
+      if (parsed) {
+        files[`${out}/manifest.json`] = parsed
+        mtimes[`${out}/manifest.json`] = (mtimes[`${out}/manifest.json`] ?? 1_000) + 1
       }
       // dbt selects a model by its name: the one the test's manifest gives the file, if it gave one.
       const asked = e.argv[e.argv.indexOf('--select') + 1]
@@ -434,7 +442,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { redactSent, clock, runs, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
+  return { redactSent, clock, runs, envs, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -2682,10 +2690,27 @@ test('a docked pane reports the transcript\'s width, which never sets the next d
   await clock.settle()
   expect(sizes.at(-1)).toMatchObject({ columns: 90 })
   const inline = await $.ui.mount({ ...RESULTS, surface: 'terminal', props: { ...RESULTS.props, placement: 'inline' }, viewport: { columns: 100, rows: 50, isFullscreen: false } })
-  await inline.press({ key: 'results-size-max' })
+  await inline.unmount()
+  // The inline drawing gave the terminal's width: the next dock is sized from it.
+  const again = await $.ui.mount({ ...RESULTS, surface: 'terminal', viewport: { columns: 55, rows: 50, isFullscreen: true } })
+  await again.press({ key: 'results-size-max' })
   await clock.settle()
   expect(sizes.at(-1)).toMatchObject({ columns: 45, rows: 60 })
+  await again.unmount()
+})
+
+test('seated inline above the prompt, where Claude Code gives the pane the same height whatever it asks for, the pane has no Min / Default / Max that would do nothing, and says why', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  const inline = await $.ui.mount({ ...RESULTS, surface: 'terminal', props: { ...RESULTS.props, placement: 'inline' }, viewport: { columns: 100, rows: 42, isFullscreen: false } })
+  for (const size of ['min', 'default', 'max']) expect(await inline.find({ type: 'Button', key: `results-size-${size}` })).toBeUndefined()
+  expect(await inline.find({ type: 'Text', text: /Above the prompt the pane is as tall as Claude Code lets it be/ })).toBeDefined()
   await inline.unmount()
+  // Docked, the three are there.
+  const docked = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
+  expect(await docked.find({ type: 'Button', key: 'results-size-max' })).toBeDefined()
+  await docked.unmount()
 })
 
 test('Max asks for the width Default asks for, Min for less, and the first open asks as Default does', async ($, on) => {
@@ -3308,36 +3333,34 @@ test('a run_results.json over 4 MiB that is the one seen before the command is n
   await band.unmount()
 })
 
-for (const [what, show] of [
-  ['one that changed across the plugin\'s process', { writes: 'plugin-show' }],
-] as const) {
-  test(`${what}: the artifact the plugin's own dbt show wrote while Claude's command ran is not that command's result`, async ($, on) => {
-    let ctx: any
-    ctx = await start($, on, {
-      runResultsAt: 9_000_000,
-      show: { rows: [{ order_id: 1 }], ...show },
-      // The plugin's check finishes while Claude's command is running.
-      duringBash: async () => {
-        await editOrders($)
-        await ctx.clock.settle()
-      },
-    })
-    ctx.setBash({ stdout: CUSTOMERS_FAILED, isError: true })
-    await $.tool.call({ tool: 'Bash', command: 'dbt run -s customers' })
-    await ctx.clock.settle()
-    const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-    expect(await band.find({ type: 'Text', text: /customers/ })).toBeDefined()
-    expect(await band.find({ type: 'Text', text: /not_null_orders_amount/ })).toBeUndefined()
-    await band.unmount()
+test('the plugin\'s own dbt show, run while Claude\'s command runs, writes its run results to its own folder: the project\'s are left to Claude\'s command', async ($, on) => {
+  let ctx: any
+  ctx = await start($, on, {
+    runResultsAt: 9_000_000,
+    show: { rows: [{ order_id: 1 }], writes: 'plugin-show' },
+    // The plugin's check finishes while Claude's command is running.
+    duringBash: async () => {
+      await editOrders($)
+      await ctx.clock.settle()
+    },
   })
-}
+  const projectResults = ctx.files['target/run_results.json']
+  ctx.setBash({ stdout: CUSTOMERS_FAILED, isError: true })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s customers' })
+  await ctx.clock.settle()
+  expect(ctx.files['target/run_results.json']).toBe(projectResults)
+  expect(ctx.files['target/.altimate-plugin/run_results.json']).toContain('plugin-show')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /customers/ })).toBeDefined()
+  await band.unmount()
+})
 
 test('Claude\'s run that wrote run_results.json after the plugin\'s own dbt show, before the plugin read it, is still recorded', async ($, on) => {
   let ctx: any
   // The plugin's dbt printed its own id; by the time the process exited Claude's run had written the file.
   ctx = await start($, on, {
     runResultsAt: 9_000_000,
-    show: { rows: [{ order_id: 1 }], writes: 'claude-run', invocation: 'plugin-show' },
+    show: { rows: [{ order_id: 1 }], claudeWrites: 'claude-run', invocation: 'plugin-show' },
     duringBash: async () => {
       await editOrders($)
       await ctx.clock.settle()
@@ -3887,4 +3910,32 @@ kitTest('dbt debug\'s error is scrubbed whole before it is cut, so a value that 
   } finally {
     clearRedactions()
   }
+})
+
+test('the plugin\'s own dbt runs write their artifacts to its own folder: the project\'s manifest, with every model\'s compiled SQL, is left as it was', async ($, on) => {
+  const { clock, runs, envs, files, mtimes } = await start($, on, { manifestAfterShow: { ...MANIFEST, metadata: { invocation_id: 'plugin-show' } } })
+  const kept = files['target/manifest.json']
+  const keptAt = mtimes['target/manifest.json']
+  // The check of an edit, then /dbt-show.
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/orders.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  await $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.settle()
+  const shows = runs.map((argv, i) => ({ argv, env: envs[i]! })).filter(one => one.argv[0] === DBT && one.argv.includes('show'))
+  expect(shows).toHaveLength(2)
+  for (const one of shows) expect(one.env.DBT_TARGET_PATH).toBe(`${ROOT}/target/.altimate-plugin`)
+  expect(files['target/manifest.json']).toBe(kept)
+  expect(mtimes['target/manifest.json']).toBe(keptAt)
+  // The check reads the manifest its own dbt show wrote: the model as it is now.
+  expect(files['target/.altimate-plugin/manifest.json']).toContain('plugin-show')
+  expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toBeDefined()
+})
+
+test('the doctor\'s dbt parse, which the person asks for to refresh a stale manifest, still writes the project\'s own', async ($, on) => {
+  const { clock, runs, envs } = await start($, on)
+  await $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  const parse = runs.findIndex(argv => argv[0] === DBT && argv[1] === 'parse')
+  if (parse >= 0) expect(envs[parse]!.DBT_TARGET_PATH).toBeUndefined()
+  for (const [i, argv] of runs.entries()) if (argv[0] === DBT && (argv[1] === '--version' || argv[1] === 'debug')) expect(envs[i]!.DBT_TARGET_PATH).toBeUndefined()
 })

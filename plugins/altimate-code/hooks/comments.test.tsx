@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { playsClear } from './clear-state.testkit'
 import { PHASE_TIMEOUT_MS } from './tool-chain'
 import { FIRST_READ_WAIT_MS, contextBlock, groupByModel, placeThread, projectName, readOptions, sameText, relativePath, threadsOnFile, toThread } from './features/comments'
 
@@ -795,14 +796,59 @@ test('a folder without a project of its own is looked up again from another proj
   expect(cli.filter(c => c.args.action === 'list').map(c => c.args.project)).toEqual(['jaffle_shop', 'other_shop', 'jaffle_shop', 'other_shop'])
 })
 
-test('a post to a thread a teammate already resolved says nothing was sent and does not lock the other threads', async ($, on) => {
-  const { clock, cli } = await start($, on, { failPost: true, failPostCode: 'unknown_thread' })
+test('resolving a thread a teammate already resolved, which the lagging list still shows, is done: it leaves the pane and the list is read again', async ($, on) => {
+  const second = { ...RAW, group_id: 12, file_path: 'models/customers.sql' }
+  const { clock, cli } = await start($, on, { failPost: true, failPostCode: 'unknown_thread', threads: [RAW, second] })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await clock.settle()
   await ui.press({ key: '7:11-resolve' })
   for (let i = 0; i < 3; i++) await clock.settle()
-  await ui.press({ key: '7:11-resolve' })
+  expect(await ui.find({ type: 'Text', text: /Already resolved: the list was behind/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: '7:11-resolve' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Thread 11 is not an open thread/ })).toBeUndefined()
+  expect(cli.filter(c => c.args.action === 'list')).toHaveLength(2)
+  // The other thread is not locked.
+  await ui.press({ key: '7:12-resolve' })
   for (let i = 0; i < 3; i++) await clock.settle()
   expect(cli.filter(c => c.args.action === 'resolve')).toHaveLength(2)
   await ui.unmount()
+})
+
+test('a reply to a thread that is no longer open says so plainly and reads the list again', async ($, on) => {
+  const { clock, cli } = await start($, on, { failPost: true, failPostCode: 'unknown_thread' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await clock.settle()
+  await ui.input({ key: '7:11-reply', text: 'Yes' })
+  for (let i = 0; i < 3; i++) await clock.settle()
+  expect(cli.filter(c => c.args.action === 'reply')).toHaveLength(1)
+  expect(await ui.find({ type: 'Text', text: /That thread is no longer open \(it was resolved, or the list was behind\): nothing was sent/ })).toBeDefined()
+  expect(cli.filter(c => c.args.action === 'list')).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('after /clear the new conversation loads the threads again: the pane lists them and a read of the model gets them', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, cli } = await start($, on)
+  await clear()
+  await clock.settle()
+  expect(cli.filter(c => c.args.action === 'list')).toHaveLength(2)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: 'models/orders.sql' })).toBeDefined()
+  await ui.unmount()
+  const result: any = await $.tool.call({ tool: 'Read', file_path: FILE })
+  expect(result.context?.[0]).toContain('Grace Hopper: No, gross.')
+})
+
+test('after /clear the first read of a model waits for the new conversation\'s list, as a session\'s first read does', async ($, on) => {
+  const clear = playsClear($, on)
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const { clock } = await start($, on, { holdListCall: { n: 1, until: held } })
+  await clear()
+  const reading = $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.advance(10)
+  release()
+  await clock.advance(10)
+  const result: any = await reading
+  expect(result.context?.[0]).toContain('line 3, model, on “sum(amount)”')
 })

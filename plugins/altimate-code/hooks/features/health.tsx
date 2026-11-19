@@ -15,6 +15,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { HealthInsight, HealthState } from '../../types'
 import { NOT_FOUND, later, runTool, within } from '../altimate-cli'
 import { setStatusPart } from '../status-line'
+import { SCRATCH_TARGET, targetPath } from '../dbt-mods-core'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -51,6 +52,10 @@ let enabled = false
 let eligible = false
 /** The problem told to the user last, so the same one is not told at every turn. */
 let toldProblem: string | null = null
+/** The files the running check was asked about: a check a /clear cuts short has them asked for again. */
+let inFlight: string[] = []
+/** What the conversation a /clear ended knew (its baseline, the changes not yet checked, the issues): the next one keeps it. */
+let carried: HealthState | null = null
 /** Which model each file belonged to in earlier checks: a deleted schema file or model no longer shows in the latest answer. */
 let known: HealthInsight[] = []
 /** Whether the status line carries the health part now. */
@@ -471,6 +476,27 @@ async function isModelFile($: EngineInterface, file: string): Promise<boolean> {
   return project !== null && !(ROOT_FILES.has(path.split('/').pop() ?? '') && norm(project) === dir)
 }
 
+/**
+ * What the check's CLI process is given so its parse never rewrites the project's manifest (which would drop
+ * every model's compiled SQL): dbt's artifact folder is the plugin's own (SCRATCH_TARGET), with the project's
+ * catalog copied in (DataPilot reads it beside the manifest), and the CLI runs the tool in its own process, since
+ * a running tool daemon keeps the environment it started with.
+ */
+async function checkEnv($: EngineInterface): Promise<Record<string, string> | undefined> {
+  const root = await $.session.root().catch(() => '')
+  const project = root ? await projectAbove($, root) : null
+  if (!project) return undefined
+  const path = targetPath(await $.fs.read(`${project}/dbt_project.yml`).catch(() => ''))
+  const target = path.startsWith('/') ? path : `${project}/${path}`
+  const scratch = `${target}/${SCRATCH_TARGET}`
+  if (await $.fs.exists(`${target}/catalog.json`).catch(() => false)) {
+    // Best effort: without the copy the check reads no catalog, as with a project that has none.
+    await $.process.run(['mkdir', '-p', scratch], { timeoutMs: 10_000 }).catch(() => null)
+    await $.process.run(['cp', '-p', `${target}/catalog.json`, `${scratch}/catalog.json`], { timeoutMs: 60_000 }).catch(() => null)
+  }
+  return { DBT_TARGET_PATH: scratch, ALTIMATE_TOOL_DAEMON: '0' }
+}
+
 /** Asks altimate-code's dbt_health for the project's insights. */
 async function check($: EngineInterface): Promise<HealthRun> {
   const badConfig = configPathProblem(options.healthConfigPath)
@@ -478,7 +504,8 @@ async function check($: EngineInterface): Promise<HealthRun> {
   let result: Awaited<ReturnType<typeof runTool>>
   try {
     const until = (await $.clock.now()) + CHECK_MS
-    result = await runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until })
+    const env = await checkEnv($)
+    result = await runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until, ...(env && { env }) })
   } catch (error) {
     // Only a binary that is not there: one that is there and refused to start keeps its own words.
     if (NOT_FOUND.test(String(error))) return { problem: NO_CLI }
@@ -529,6 +556,7 @@ async function loop($: EngineInterface, mine: number) {
     if (!needsBaseline && before.pending.length === 0) return
     // The baseline run leaves `pending` alone: edits made while it ran are checked by the next run.
     const batch = needsBaseline ? [] : before.pending
+    inFlight = batch
     await update($, healthAtom, prev => ({ ...(prev ?? fresh()), pending: needsBaseline ? (prev?.pending ?? []) : (prev?.pending ?? []).filter(f => !batch.includes(f)), running: true }))
     const run = await check($)
     if (mine !== generation) return
@@ -645,6 +673,8 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   generation += 1
   running = null
   enabled = false
+  carried = null
+  inFlight = []
   toldProblem = null
   known = []
   shellBefore = null
@@ -657,10 +687,37 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   // The baseline takes a while (the dbt adapter starts): nothing waits for it. A session with nobody at
   // the prompt checks only when the push gate needs it.
   eligible = e.isInteractive || options.healthBlocksPush === true || options.healthBlocksPush === 'true'
+  await enable($)
+}
+
+/** Turns the checks on when the session's folder is in a dbt project, and starts the baseline. */
+async function enable($: EngineInterface) {
   const root = await $.session.root().catch(() => '')
   if (!eligible || !root || !(await projectAbove($, root))) return
   enabled = true
   later($, () => kick($))
+}
+
+/**
+ * After a /clear: the new conversation's `$.state` is empty. The baseline, the changes not yet checked and
+ * the issues of the conversation that ended are the project's, so they are kept (a change made before the
+ * /clear still holds a push); with none kept, the baseline is taken as at a session's start.
+ */
+export async function clearStart($: EngineInterface) {
+  const kept = carried
+  carried = null
+  generation += 1
+  running = null
+  if (!kept) {
+    await update($, healthAtom, () => fresh())
+    await enable($)
+    return
+  }
+  enabled = true
+  await update($, healthAtom, () => ({ ...kept, running: false }))
+  drawn = true
+  await drawStatus($, kept.issues)
+  if (await wantsCheck($)) later($, () => kick($))
 }
 
 /** Also called for a subagent's turns, which carry `e.agentId`. */
@@ -673,6 +730,9 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 }
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
+  // A /clear: what this conversation knows is handed to the next one. A check it cuts short is asked for again there.
+  const state = e.reason === 'clear' && enabled ? await read($, healthAtom).catch(() => null) : null
+  carried = state ? { ...state, pending: state.running ? [...new Set([...inFlight, ...state.pending])] : state.pending, running: false } : null
   generation += 1
   running = null
   enabled = false

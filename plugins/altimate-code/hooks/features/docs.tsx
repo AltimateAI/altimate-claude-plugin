@@ -9,7 +9,8 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { DocsCandidate, DocsCoverageView, DocsGroup, DocsState } from '../../types'
-import { later, runTool } from '../altimate-cli'
+import { later, runTool, within } from '../altimate-cli'
+import { nextCheckOf } from '../dbt-mods'
 import { setStatusPart } from '../status-line'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -482,21 +483,17 @@ async function schemaEdited($: EngineInterface, file: EditedFile, created: boole
   return lines
 }
 
-async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]> {
-  const project = await projectOf($, file.path)
-  if (!project) return []
-  const model = normal(file.path).split('/').pop()!.replace(/\.sql$/i, '')
-  if (!(await $.fs.exists(project.manifest).catch(() => false))) return []
-  const until = (await $.clock.now()) + ROUND_MS
-  const result = await runTool($, 'dbt_docs_coverage', { model: await modelRef($, project, model, true), manifest_path: project.manifest }, { until, cliOnly: true }).catch(() => null)
-  if (!result) return []
+/** The model's documentation coverage as `manifest` has it; a line for Claude when the tool is missing; null when it could not be read. */
+async function coverageOf($: EngineInterface, project: Project, model: string, manifest: string, until: number): Promise<{ view: DocsCoverageView; star: boolean } | { line: string } | null> {
+  const result = await runTool($, 'dbt_docs_coverage', { model: await modelRef($, project, model, true), manifest_path: manifest }, { until, cliOnly: true }).catch(() => null)
+  if (!result) return null
   const meta = result.metadata
   if (!result.ok || !meta || meta.success !== true) {
     if (MISSING_TOOL.test(result.text) && !saidOldCoverage) {
       saidOldCoverage = true
-      return ['◆ docs · this altimate-code has no dbt_docs_coverage: npm i -g @altimateai/altimate-code']
+      return { line: '◆ docs · this altimate-code has no dbt_docs_coverage: npm i -g @altimateai/altimate-code' }
     }
-    return []
+    return null
   }
   const view: DocsCoverageView = {
     model: typeof meta.model === 'string' && meta.model ? meta.model : model,
@@ -505,17 +502,60 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
     total: Array.isArray(meta.output_columns) ? meta.output_columns.length : 0,
     missing: Array.isArray(meta.missing) ? meta.missing.map(String) : [],
     hasDescription: meta.has_description === true,
+    stale: false,
   }
+  return { view, star: meta.source === 'manifest_columns' }
+}
+
+// The coverage shown came from a manifest older than the model's last edit: the check of that edit parses the
+// project again, and the coverage is read once more from the manifest it wrote. Null when nothing waits on one.
+let waiting: { file: string; model: string; project: Project } | null = null
+// How long the coverage waits for the edit's check (a dbt show against the warehouse), then for its second read.
+const CHECK_WAIT_MS = 180_000
+const RECHECK_MS = 30_000
+
+async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]> {
+  const project = await projectOf($, file.path)
+  if (!project) return []
+  const model = normal(file.path).split('/').pop()!.replace(/\.sql$/i, '')
+  const manifest = await $.fs.stat(project.manifest).catch(() => null)
+  if (!manifest || manifest.kind !== 'file') return []
+  // dbt wrote the manifest before this edit: its compiled SQL is the model as it was, not as it is now.
+  const edited = await $.fs.stat(file.path).catch(() => null)
+  const stale = !!edited && manifest.mtimeMs < edited.mtimeMs
+  const asked = stale ? { file: normal(file.path), model, project } : null
+  waiting = asked
+  // Asked for before the check starts (the dbt helpers run after this feature in the edit phase), so it is not missed.
+  if (asked) {
+    const check = nextCheckOf(file.path)
+    later($, () => coverageAfterCheck($, asked, check))
+  }
+  const read = await coverageOf($, project, model, project.manifest, (await $.clock.now()) + ROUND_MS)
+  if (!read) return []
+  if ('line' in read) return [read.line]
+  const view = { ...read.view, stale }
   await update($, docsAtom, prev => ({ ...(prev ?? empty()), coverage: view }))
   await showStatus($)
   const gaps = [...(view.hasDescription ? [] : ['the model itself']), ...view.missing]
   // A select list that is not plain column names (a `*`, an unaliased expression, a UNION) is counted by the manifest's columns only.
-  const star = meta.source === 'manifest_columns' ? " · the model's select list is not plain column names (a `*`, an unaliased expression or a UNION), so only the columns the manifest lists are counted" : ''
-  if (!gaps.length && !star) return []
+  const star = read.star ? " · the model's select list is not plain column names (a `*`, an unaliased expression or a UNION), so only the columns the manifest lists are counted" : ''
+  if (!gaps.length && !star && !stale) return []
   // Names come from the project and this line goes to Claude, so each is a quoted string.
   const shown = gaps.slice(0, MAX_NAMES).map(one => JSON.stringify(one)).join(', ') + (gaps.length > MAX_NAMES ? `, +${gaps.length - MAX_NAMES} more` : '')
-  // The manifest's compiled SQL is from the last dbt compile, not from this edit.
-  return [`◆ docs · ${JSON.stringify(view.model)}: ${view.documented} of ${view.total} columns documented (${view.percent}%)${gaps.length ? ` · no description for: ${shown}` : ''}${star} · as of the last dbt compile`]
+  // The manifest's compiled SQL is from the last dbt compile: from before this edit when dbt has not run since.
+  const asOf = stale ? ' · as of the last dbt compile, before this edit: columns this edit added, renamed or dropped are not counted yet' : ' · as of the last dbt compile'
+  return [`◆ docs · ${JSON.stringify(view.model)}: ${view.documented} of ${view.total} columns documented (${view.percent}%)${gaps.length ? ` · no description for: ${shown}` : ''}${star}${asOf}`]
+}
+
+/** Once the edit's check ran its model, the coverage shown from before that edit is read again from the check's manifest. */
+async function coverageAfterCheck($: EngineInterface, asked: { file: string; model: string; project: Project }, check: Promise<{ manifest: string } | null>) {
+  const landed = await within($, CHECK_WAIT_MS, check)
+  if (!landed || waiting !== asked) return
+  const read = await coverageOf($, asked.project, asked.model, landed.manifest, (await $.clock.now()) + RECHECK_MS)
+  // A newer edit asks for its own coverage: this one is no longer shown.
+  if (waiting !== asked || !read || 'line' in read) return
+  waiting = null
+  await update($, docsAtom, prev => ({ ...(prev ?? empty()), coverage: read.view }))
 }
 
 async function showStatus($: EngineInterface) {
@@ -559,6 +599,7 @@ export function register(on: On, context: FeatureContext) {
           <Text dimColor>
             {coverage.model}: {coverage.documented} of {coverage.total} columns documented ({coverage.percent}%)
             {coverage.missing.length ? ` · no description: ${coverage.missing.slice(0, MAX_NAMES).join(', ')}` : ''}
+            {coverage.stale ? ' · from the manifest of before the last edit (the edit\'s check reads it again)' : ''}
           </Text>
         ) : null}
         {groups.length === 0 ? <Text dimColor>No description to copy: when Claude writes a column description, the downstream columns that carry the same value are listed here.</Text> : null}
@@ -653,6 +694,7 @@ export function register(on: On, context: FeatureContext) {
 
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
+  waiting = null
   saidOldReach = false
   saidOldCoverage = false
   applied.clear()

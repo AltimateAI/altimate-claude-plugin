@@ -1538,7 +1538,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
       ) : null
     const relationNames = new Map(Object.values(graph.nodes).filter(one => one.relation).map(one => [one.relation!.toLowerCase(), one]))
 
-    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, spec: PANE_SIZES, keyPrefix: 'lineage', terminal: paneTerminalColumns(e) }, work => later($, work))
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: PANE, title: PANE_TITLE, spec: PANE_SIZES, keyPrefix: 'lineage', terminal: paneTerminalColumns(e), placement: (e.props as { placement?: string } | undefined)?.placement }, work => later($, work))
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">

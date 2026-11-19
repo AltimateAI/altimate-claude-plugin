@@ -1,5 +1,6 @@
 import { expect, mock, test as engineTest } from 'claude-code/testing'
 
+import { playsClear } from './clear-state.testkit'
 import { PHASE_TIMEOUT_MS } from './tool-chain'
 import { GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
 
@@ -68,7 +69,7 @@ type Options = {
 
 async function start($: any, on: any, options: Options, session: { isInteractive?: boolean } = {}) {
   const clock = mock.clock(on)
-  const calls: { tool: string; args: Record<string, unknown>; argv: readonly string[] }[] = []
+  const calls: { tool: string; args: Record<string, unknown>; argv: readonly string[]; env?: Record<string, string> }[] = []
   const toasts: string[] = []
   const statuses: string[] = []
   on('command.register', () => ({ value: { command: 'health' } }))
@@ -124,7 +125,7 @@ async function start($: any, on: any, options: Options, session: { isInteractive
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     const index = run++
-    calls.push({ tool, args, argv: e.argv })
+    calls.push({ tool, args, argv: e.argv, env: (e as { init?: { env?: Record<string, string> } }).init?.env })
     if (options.hold?.at === index) await options.hold.until
     const answer = options.runs[Math.min(index, options.runs.length - 1)]!
     if ('missing' in answer) return { deny: 'spawn ENOENT' }
@@ -163,6 +164,56 @@ test('a baseline run at session start; a changed model with a new insight shows 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: '1 new health issue · stg_orders: hard coded references · /health' })).toBeDefined()
   await band.unmount()
+})
+
+test('after /clear the new conversation keeps the baseline and the issues: the band, /health and the push gate still have them', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls, statuses } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  await clear()
+  await clock.settle()
+  expect(statuses.at(-1)).toContain('1 health issue')
+  // No second baseline: the one from the session's start still stands.
+  expect(calls).toHaveLength(2)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: '1 new health issue · stg_orders: hard coded references · /health' })).toBeDefined()
+  await band.unmount()
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toContain('1 new health issue · stg_orders: hard coded references')
+})
+
+test('a /clear while a check runs has the next conversation check those changes again', async ($, on) => {
+  const clear = playsClear($, on)
+  let release!: () => void
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG], [OLD_STG], [OLD_STG, NEW_STG]], hold: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  await clear()
+  release()
+  await clock.settle()
+  expect(calls).toHaveLength(3)
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toContain('1 new health issue · stg_orders')
+})
+
+test('after /clear with no baseline yet (the first check failed), /health in the new conversation takes it', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls } = await start($, on, { runs: [{ fail: 'boom' }, [OLD_STG]] })
+  expect(calls).toHaveLength(1)
+  await clear()
+  await clock.settle()
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toBe('No new health issues in the models changed this session.')
+  expect(calls).toHaveLength(2)
+})
+
+test('the check\'s parse writes to the plugin\'s own artifact folder, in a CLI process of its own: the project\'s manifest keeps its compiled SQL', async ($, on) => {
+  const { calls } = await start($, on, { runs: [[OLD_STG]] })
+  expect(calls).toHaveLength(1)
+  expect(calls[0]!.env).toEqual({ DBT_TARGET_PATH: `${ROOT}/target/.altimate-plugin`, ALTIMATE_TOOL_DAEMON: '0' })
 })
 
 test('two changed models give "2 new health issues" with the first model named', async ($, on) => {

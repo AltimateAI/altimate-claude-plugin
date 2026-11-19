@@ -22,6 +22,9 @@ export function statusLineOf(current: Record<string, string>): string | undefine
   return shown.join(' · ')
 }
 
+// The parts as last drawn: a /clear empties the session's state, and the line is the process's, so they are put back.
+let drawnParts: Record<string, string> = {}
+
 /** Sets one part (null or empty removes it) and draws the status line again. */
 export async function setStatusPart($: EngineInterface, id: StatusPartId, text: string | null) {
   await update($, parts, prev => {
@@ -30,7 +33,13 @@ export async function setStatusPart($: EngineInterface, id: StatusPartId, text: 
     else delete next[id]
     return next
   })
-  $.ui.status(statusLineOf(await read($, parts)))
+  drawnParts = await read($, parts)
+  $.ui.status(statusLineOf(drawnParts))
+}
+
+/** After a /clear: the parts drawn before it, under any the new conversation has set already. */
+export async function restoreStatusParts($: EngineInterface) {
+  await update($, parts, prev => ({ ...drawnParts, ...prev }))
 }
 
 /**
@@ -38,6 +47,7 @@ export async function setStatusPart($: EngineInterface, id: StatusPartId, text: 
  * set is not drawn again before its owner has set it in this one.
  */
 export async function clearStatusParts($: EngineInterface) {
+  drawnParts = {}
   await update($, parts, () => ({}))
   $.ui.status(undefined)
 }

@@ -473,6 +473,14 @@ export function targetPath(yml: string): string {
 }
 
 /**
+ * The folder, inside the project's artifact folder, where the dbt runs the plugin starts by itself (a check's
+ * `dbt show`, a health check's parse) write their artifacts. dbt rewrites manifest.json on every run with the
+ * compiled SQL of only the nodes that run compiled: in the project's own folder that would drop every other
+ * model's compiled SQL (and replace run_results.json), so those runs go here and are read from here.
+ */
+export const SCRATCH_TARGET = '.altimate-plugin'
+
+/**
  * The folders a project's files live in, from dbt_project.yml: its model, seed, snapshot, macro, test
  * and analysis paths (dbt's defaults when a key is absent). `''` is the project folder itself.
  */

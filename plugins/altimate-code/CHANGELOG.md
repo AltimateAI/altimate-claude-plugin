@@ -2,6 +2,17 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- After `/clear`, the new conversation loads the team comments again (the band, and the threads Claude gets when it reads a commented model) instead of waiting for `/comments` or the next poll, and project health keeps its baseline, the changes not yet checked and the issues found (`/health` no longer says the session has no project; a check the `/clear` cut short runs again). The status line keeps its parts.
+- The dbt runs the plugin starts by itself (compile and validate's `dbt show` and `dbt ls`, `/dbt-show` and Re-run, and the project health check's parse) write their artifacts to `target/.altimate-plugin/` instead of `target/`, so they no longer replace the project's `manifest.json` (with every model's compiled SQL) or `run_results.json`. The health check runs its CLI call in its own process for that, with the project's `catalog.json` copied beside its manifest. The doctor's **Run dbt parse** still refreshes the project's own manifest.
+- After Claude edits a model's SQL that dbt has not compiled since, its documentation coverage says it is from before the edit, and once the edit's compile-and-validate check has run the model, `/propagate` shows the coverage of the model as it is now.
+- The end-of-task summary for a model the task created says its columns are new with an unknown reach, not "update altimate-code".
+- When the Query results or lineage pane sits above the prompt (a terminal under 110 columns, or not fullscreen), Claude Code gives it the same height whatever size it asks for, so the Min / Default / Max row, which did nothing there, is replaced by a line saying so.
+- `--defer --state …`, `--favor-state` and `--target …` that `/defer` and `/target` add to Claude's dbt commands are no longer invisible: Claude's result says what the command ran as, and a line above the prompt shows it until the next prompt.
+- **Resolve** on a thread the lagging comment list still shows after it was resolved elsewhere is done (the thread is hidden) instead of answering "not an open thread"; a reply to such a thread says it is no longer open and reads the list again.
+
 ## [1.8.1] — 2026-11-19
 
 ### Fixed
