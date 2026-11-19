@@ -217,7 +217,27 @@ export type ColumnTrace = {
   failed: boolean
   /** The altimate-code answered without a column answer: one from before it. */
   stale?: boolean
+  /** The column is not in the manifest the answer read (added in the task): nothing was traced, so no count is given. */
+  unchecked?: boolean
+  /** Why the reach is unknown though the column was found: the answer reached nothing, and models it reads were not read. */
+  unknown?: string
   consumers?: ReportConsumers
+}
+
+/**
+ * Why an answer that reached no column cannot be read as "reaches 0": models that may read the column were
+ * not read (no compiled SQL, a parse error), or may carry it. Null for a genuine zero, or any reach found.
+ */
+export function unknownReach(answer: ColumnAnswer | null): string | null {
+  if (!answer) return null
+  const r = reachOf(answer)
+  if (r.columns > 0 || r.models > 0) return null
+  const missing = (answer.unresolved ?? []).filter(one => /no compiled sql/i.test(String(one?.reason ?? ''))).length
+  const n = Math.max(r.unresolved, r.mayCarry)
+  if (n === 0) return null
+  if (missing > 0) return `not traced: ${count(missing, 'downstream model')} ${missing === 1 ? 'has' : 'have'} no compiled SQL (run \`dbt compile\`)`
+  const why = (answer.unresolved ?? []).map(one => String(one?.reason ?? '')).find(Boolean)
+  return `not traced: ${count(n, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
 }
 
 /** The band's view of a finished task. */
@@ -230,10 +250,10 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
     const columns = mine
       .filter(one => one.column !== null)
       .map(one => {
-        const reach = one.down ? reachOf(one.down) : null
+        const reach = one.down && !one.unknown ? reachOf(one.down) : null
         for (const entry of one.down?.unresolved ?? []) unresolved.add(one.down!.nodes[entry.model]?.id ?? one.down!.nodes[entry.model]?.name ?? String(entry.model))
         if (reach?.truncated) truncated = true
-        return { name: one.column!, reach, failed: one.failed }
+        return { name: one.column!, reach, failed: one.failed, ...(one.unknown && { note: one.unknown }) }
       })
     return { name: change.model, modelLevel, columns }
   })
@@ -249,6 +269,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
     if (model.columns.length === 0) lines.push('  no output column changed: the model-level count stands')
     for (const col of model.columns) {
       if (view.state === 'tracing' && !col.reach) lines.push(`  ${col.name}  tracing…`)
+      else if (col.note) lines.push(`  ${col.name}  ${col.note}`)
       else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : `no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later`}`)
       else {
         const r = col.reach
@@ -412,7 +433,8 @@ export function impactWords(model: string, column: string | null, trace: ColumnT
     if (level === null) return [['The downstream count could not be read for ', { code: model }, '.']]
     return [[...downstream, ...(level > 0 ? ["No output column changed (a filter or a join, say), so this can't say which of them are affected."] : [])]]
   }
-  if (!down) return [[...downstream, ...(trace?.stale ? [STALE] : ['The column ', { code: column }, ' could not be traced.'])]]
+  if (down && trace?.unknown) return [[...downstream, 'The reach of ', { code: column }, ` is unknown: ${trace.unknown.replace(/^not traced: /, '')}.`]]
+  if (!down) return [[...downstream, ...(trace?.unchecked ? ['The column ', { code: column }, " is new in this task, so the manifest from before it can't trace it: its reach is unknown, not zero."] : trace?.stale ? [STALE] : ['The column ', { code: column }, ' could not be traced.'])]]
   const r = reachOf(down)
   const lines: Words[] = []
   const value = [...new Set(down.columns.filter(one => one.hop > 0).map(one => one.model))].map(index => down.nodes[index]).filter(Boolean)
@@ -528,7 +550,7 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
       edges.push([keyOf(answer, edge[0]), keyOf(answer, edge[1]), String(edge[2] ?? '?')])
     }
   }
-  const reach = down ? reachOf(down) : null
+  const reach = down && !trace?.unknown ? reachOf(down) : null
   const manifestInput = (down?.inputs ?? up?.inputs)?.manifest as any
   return {
     model: change.model,

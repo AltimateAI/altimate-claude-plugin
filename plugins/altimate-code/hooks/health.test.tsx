@@ -329,6 +329,15 @@ test('the same problem at every turn is told once', async ($, on) => {
   expect(toasts).toEqual(["◆ Project health: the dbt adapter didn't start"])
 })
 
+test('an altimate-code without the dbt_health tool toasts nothing at session start or at a turn; /health says what to install', async ($, on) => {
+  const { clock, toasts } = await start($, on, { runs: [{ fail: 'Error: unknown tool: dbt_health' }] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(toasts).toEqual([])
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(String(shown?.text)).toBe('Project health needs an altimate-code release with the dbt_health tool: npm i -g @altimateai/altimate-code')
+})
+
 test('/health shows the issues Claude introduced, and retries a first check that failed', async ($, on) => {
   const { clock, calls } = await start($, on, { runs: [{ fail: "the dbt adapter didn't start" }, [OLD_STG], [OLD_STG, NEW_STG]] })
   const retried: any = await $.command.run({ command: 'health' } as any)

@@ -36,7 +36,16 @@ export function nodeOf(id: string, node: any): GraphNode {
     materialized: node?.config?.materialized ?? null,
     relation: relationOf(node),
     columns,
+    ...(isTestType(type) ? { testColumn: testColumnOf(node), testOn: typeof node?.attached_node === 'string' ? node.attached_node : null } : {}),
   }
+}
+
+const isTestType = (type: string) => type === 'test' || type === 'unit_test'
+
+/** The column a data test checks: dbt writes it under test_metadata.kwargs (generic tests) or as column_name. */
+function testColumnOf(node: any): string | null {
+  const named = node?.column_name ?? node?.test_metadata?.kwargs?.column_name
+  return typeof named === 'string' && named ? named : null
 }
 
 /** `"db"."schema"."orders"` → `db.schema.orders`, lower-cased: how the warehouse names the relation. */
@@ -252,8 +261,9 @@ export type DownstreamRow = { node: GraphNode; depth: number; via: string }
  * Everything downstream, breadth-first, so each node carries its shortest distance (impact_analysis
  * walks depth-first, so in a diamond it may report a longer path); tests are counted, not listed.
  */
-export function downstreamOf(graph: LineageGraph, id: string): { rows: DownstreamRow[]; tests: number } {
+export function downstreamOf(graph: LineageGraph, id: string): { rows: DownstreamRow[]; tests: number; testIds: string[] } {
   const rows: DownstreamRow[] = []
+  const testIds: string[] = []
   const seen = new Set([id])
   let tests = 0
   let frontier = [id]
@@ -266,6 +276,7 @@ export function downstreamOf(graph: LineageGraph, id: string): { rows: Downstrea
         const node = graph.nodes[child] ?? nodeOf(child, null)
         if (isTest(graph.nodes[child], child)) {
           tests++
+          testIds.push(child)
           continue
         }
         rows.push({ node, depth, via: parent })
@@ -274,7 +285,7 @@ export function downstreamOf(graph: LineageGraph, id: string): { rows: Downstrea
     }
     frontier = next
   }
-  return { rows, tests }
+  return { rows, tests, testIds }
 }
 
 export type Severity = 'SAFE' | 'LOW' | 'MEDIUM' | 'HIGH'
@@ -295,6 +306,14 @@ export const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' :
 export function countText(certain: number, maybe: number, incomplete: boolean, noun = 'model'): string {
   const known = certain === 0 ? `no ${noun}${maybe || incomplete ? ' for certain' : ''}` : `${incomplete ? 'at least ' : ''}${plural(certain, noun)}`
   return maybe ? `${known} (${certain ? `${maybe} more` : maybe} may)` : known
+}
+
+/** The tests that check one column of the model itself: a test of another model that shares the column's name is not counted. */
+export function testsOnColumn(graph: LineageGraph, id: string, column: string): number {
+  return downstreamOf(graph, id).testIds.filter(test => {
+    const node = graph.nodes[test]
+    return node?.testColumn === column && (!node.testOn || node.testOn === id)
+  }).length
 }
 
 export type ImpactCounts = { direct: number; transitive: number; tests: number; exposures: string[]; severity: Severity }
@@ -704,7 +723,7 @@ export function subgraph(graph: LineageGraph, id: string): LineageGraph {
       if (keep.has(other)) return true
       // Tests stay as ids so downstream counts them; they are never drawn.
       if (!isTest(graph.nodes[other], other)) return false
-      nodes[other] ??= { ...nodeOf(other, null), type: 'test' }
+      nodes[other] ??= graph.nodes[other] ?? { ...nodeOf(other, null), type: 'test' }
       return true
     })
   }

@@ -14,7 +14,7 @@ For delegation you MUST run the task via the `altimate-code` CLI — do NOT atte
 Delegation workflow (follow in order, no skipping):
 
 1. **Verify altimate-code is installed.** There is no separate check: the run command in step 3 resolves the CLI first, ignoring aliases and shell functions, and exits 127 with `altimate-code CLI not found` before doing anything else. The CLI ships under two names: npm and Homebrew installs expose both `altimate` and `altimate-code`, while older curl and PowerShell installs expose only `altimate`. Either one is fine. If the run exits with `altimate-code CLI not found`, stop and tell the user:
-   > altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install | bash`, then run `altimate` once to configure your provider/warehouse auth, then re-run `/altimate-code:altimate <task>`.
+   > altimate-code is not installed. Install with `npm i -g @altimateai/altimate-code` (Node 20+), then run `altimate` once to configure your provider/warehouse auth, then re-run `/altimate-code:altimate <task>`.
 
 2. **Vague debug** ("X is broken") with no failure named: **stop — ask the user for the specific error before delegating.**
 

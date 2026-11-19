@@ -26,6 +26,7 @@ import {
   findModelOrColumn,
   graphFromSql,
   impactOf,
+  testsOnColumn,
   modelLineageOf,
   parseDbtLineage,
   plural,
@@ -66,6 +67,8 @@ const REACH_RESERVE_MS = 2_500
 const focusAtom = atom({ plugin: 'altimate-code', key: 'lineageFocus' } as const, null, { shape: 'lineage-focus-1' })
 const graphAtom = atom({ plugin: 'altimate-code', key: 'lineageGraph' } as const, null, { shape: 'lineage-graph-1' })
 const columnsAtom = atom({ plugin: 'altimate-code', key: 'lineageColumns' } as const, null, { shape: 'lineage-columns-1' })
+// Why the pane waits undrawn (a terminal narrower than Claude Code draws it in): the band above the prompt says it until the pane opens or /lineage is used.
+const narrowAtom = atom({ plugin: 'altimate-code', key: 'lineageNarrow' } as const, null as { text: string; floor: number | null } | null)
 const columnAtom = atom({ plugin: 'altimate-code', key: 'lineageColumn' } as const, null as string | null)
 const reachAtom = atom({ plugin: 'altimate-code', key: 'lineageReach' } as const, null, { shape: 'lineage-reach-1' })
 const warehouseAtom = atom({ plugin: 'altimate-code', key: 'lineageWarehouse' } as const, null, { shape: 'lineage-warehouse-1' })
@@ -91,6 +94,8 @@ const toolsCache = new Map<string, { graph: LineageGraph; id: string; columns: C
 let paneOpened = false
 // The narrow-terminal hint, once a conversation.
 let narrowHintShown = false
+// The `show_edit_impact` setting: off by default, the per-edit impact note goes to Claude and the debug log only.
+let showEditImpact = false
 /** The latest follow: an older one still reading its manifest must not write over it. */
 // Follows run concurrently. Each takes a number when it starts; one that finds its model claims the
 // pane unless a newer one already has. A follow that fails claims nothing, so it cancels nobody.
@@ -619,10 +624,12 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     await update($, columnAtom, prev => (superseded() ? prev : column ?? null))
     await update($, reachAtom, prev => (superseded() ? prev : null))
   }
-  if (input.open || (!paneOpened && input.auto)) {
+  // While the pane waits on a narrow terminal each follow asks again: it may have been widened.
+  if (input.open || (!paneOpened && input.auto) || (input.auto && (await read($, narrowAtom)))) {
     paneOpened = true
     const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
     if (opened && opened.isPlaced === false && !input.open) await narrowHint($, opened.reason)
+    else if (opened) await update($, narrowAtom, () => null)
   }
   const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
@@ -767,16 +774,29 @@ async function recheckStale($: EngineInterface) {
 async function narrowHint($: EngineInterface, reason: string) {
   $.ui.log(`lineage-pane · waits: ${reason}`, { to: 'debug' })
   // Only a terminal too narrow: a run with no surface to draw on has no one to tell.
-  if (narrowHintShown || !/column/i.test(reason)) return
-  narrowHintShown = true
+  if (!/column/i.test(reason)) return
   // "unasked below 144 columns (100 now): …"
   const floor = /below (\d+) columns/.exec(reason)?.[1]
+  const now = /\((\d+) now\)/.exec(reason)?.[1]
+  // The band stays until the pane can open, so the reason is not lost with the toast.
+  const text = `◆ lineage · the pane needs ${floor ? `${floor} columns` : 'a wider terminal'}${now ? ` (${now} now)` : ''}: make the text smaller (Cmd -) or type /lineage`
+  await update($, narrowAtom, () => ({ text, floor: floor ? Number(floor) : null }))
+  if (narrowHintShown) return
+  narrowHintShown = true
   // The action first: Claude Code cuts a toast to one line of the narrow terminal it is for.
   $.ui.toast(`◆ lineage · /lineage opens the pane (it opens by itself ${floor ? `from ${floor} columns` : 'in a wider terminal'})`, { timeoutMs: 10000 })
 }
 
+/** The band line that keeps the narrow-terminal reason on screen; null once the terminal is wide enough or the pane was opened. */
+export async function narrowBand($: EngineInterface, ui: { Text: any }, viewportColumns?: number) {
+  const narrow = await read($, narrowAtom)
+  if (!narrow || (narrow.floor !== null && typeof viewportColumns === 'number' && viewportColumns >= narrow.floor)) return null
+  return <ui.Text key="lineage-narrow" color="warning">{narrow.text}</ui.Text>
+}
+
 export async function openPane($: EngineInterface) {
   paneOpened = true
+  await update($, narrowAtom, () => null)
   await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), focus: true, closeOnEscape: true })
 }
 
@@ -1077,6 +1097,7 @@ export async function startLineage($: EngineInterface) {
   // A new session opens the pane on its first follow again and owes Claude the context again.
   paneOpened = false
   narrowHintShown = false
+  await update($, narrowAtom, () => null)
   drawnCache = null
   contextGiven.clear()
   newConversation()
@@ -1119,11 +1140,13 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
 }
 
 /** The lineage hooks whose events no other part of the plugin hooks. */
-export function registerLineage(on: On) {
+export function registerLineage(on: On, options: Record<string, unknown> = {}) {
+  showEditImpact = options.show_edit_impact === true || options.show_edit_impact === 'true'
   // A new user turn gets the lineage note again (its context may have been compacted since), once.
   on('session.end', async ($, e, next) => {
     paneOpened = false
     narrowHintShown = false
+    await update($, narrowAtom, () => null)
     drawnCache = null
     contextGiven.clear()
     newConversation()
@@ -1239,14 +1262,18 @@ export function registerLineage(on: On) {
     }
     const note = lookup ? await within($, HOLD_TOTAL_MS, lookup) : null
     // Out of time before even the model-level lookup finished: say so, rather than nothing.
-    // The person sees the end-of-task summary (task-impact.tsx), not a note per edit: what an edit reaches
+    // The person sees the end-of-task summary (task-impact.tsx), and a note per edit only with show_edit_impact: what an edit reaches
     // goes to the debug log, and the note itself to Claude's context below. A lookup that missed or failed
     // is still said, since the summary can't tell this edit went ahead unchecked.
     if (lookup && !note && !finished && progress.project) $.ui.toast('◆ impact-first · the lineage lookup did not finish in time; the edit went ahead without it', { timeoutMs: 8000 })
     // It finished, but its answer could not be used: as worth telling.
     const lookupFailed = !!lookup && !note && finished && !!progress.failed
     if (lookupFailed) $.ui.toast('◆ impact-first · the lineage lookup failed; the edit went ahead without it', { timeoutMs: 8000 })
-    if (note) $.ui.log(note.toast, { to: 'debug' })
+    if (note) {
+      $.ui.log(note.toast, { to: 'debug' })
+      // Opt-in: the same note on the transcript too.
+      if (showEditImpact) $.ui.log(note.toast)
+    }
     const result = await next(e)
     // Any tool may have changed the shown model's file (Edit, a shell command): one stat says so.
     later($, () => recheckStale($))
@@ -1578,7 +1605,7 @@ export function registerLineage(on: On) {
 
         <Box flexDirection="column">
           <Text dimColor>
-            {counts.direct} direct · {counts.transitive}{graph.truncated ? '+' : ''} transitive · {counts.tests} tests ·{' '}
+            {counts.direct} direct · {counts.transitive}{graph.truncated ? '+' : ''} transitive · {column ? `${testsOnColumn(graph, focus.model, column)} tests on ${column}` : `${counts.tests} tests`} ·{' '}
             <Text color={SEVERITY_COLOR[counts.severity]}>{counts.severity}</Text>
           </Text>
         </Box>

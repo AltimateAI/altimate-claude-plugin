@@ -15,8 +15,8 @@ Workflow (follow in order):
    [ -n "$ALTIMATE_BIN" ] || { echo "altimate-code CLI not found (tried altimate, altimate-code)" >&2; exit 127; }
    "$ALTIMATE_BIN" learn proposals --json < /dev/null
    ```
-   - Exit 127 (`altimate-code CLI not found`): tell the user to install it (`npm install -g altimate-code`) and stop.
-   - An error saying `proposals` is an unknown command: tell the user to update altimate-code (`npm install -g altimate-code@latest`) and stop.
+   - Exit 127 (`altimate-code CLI not found`): tell the user to install it (`npm i -g @altimateai/altimate-code`) and stop.
+   - An error saying `proposals` is an unknown command: tell the user to update altimate-code (`npm i -g @altimateai/altimate-code`) and stop.
 
    Then list the user's own skill and knowledge requests to the workspace (read-only here):
    ```bash

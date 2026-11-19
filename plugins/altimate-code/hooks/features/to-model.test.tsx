@@ -238,7 +238,7 @@ test('SQL that tries to close its own fence, or to pose as an instruction throug
 
 test('a missing altimate CLI is told to install it', async ($, on) => {
   const none = await start($, on, { noCli: true })
-  expect((await run($, 'm q.sql')).text).toBe('/to-model needs the altimate-code CLI on your PATH (npm install -g altimate-code).')
+  expect((await run($, 'm q.sql')).text).toBe('/to-model needs the altimate-code CLI on your PATH (npm i -g @altimateai/altimate-code).')
   expect(none.prompts).toEqual([])
 })
 

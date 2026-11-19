@@ -1793,3 +1793,78 @@ test('a very long run of blank lines before a command is read at once', () => {
   for (const blank of ['\r', '\r\n', '\u2028', '\u2029']) expect(commandDir(`${blank.repeat(32000)}cd models`, '/repo')).toBe('/repo/models')
   expect(Date.now() - began).toBeLessThan(500)
 })
+
+const optionTest = (name: string, options: Record<string, unknown>, body: Parameters<typeof kitTest>[1]) => kitTest(name, { options: { dbt_mods: false, ...options } }, body as any)
+
+const NARROW_135 = 'unasked below 144 columns (135 now): placed when the person opens it, or when the terminal is widened to 144 columns'
+
+test('a pane left undrawn keeps its reason on the band until /lineage opens it', async ($, on) => {
+  const { clock } = await start($, on, { narrow: NARROW_135 })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const text = /the pane needs 144 columns \(135 now\): make the text smaller \(Cmd -\) or type \/lineage/
+  // Still there well after the toast is gone.
+  await clock.advance(60_000)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text })).toBeDefined()
+  await band.unmount()
+  await $.command.run({ command: 'lineage', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 135 } } as any)
+  await clock.settle()
+  const after = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await after.find({ type: 'Text', text })).toBeUndefined()
+  await after.unmount()
+})
+
+test('the narrow-terminal band clears once the terminal is wide enough', async ($, on) => {
+  const { clock } = await start($, on, { narrow: NARROW_135 })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const wide = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 150, rows: 40 } } as any)
+  expect(await wide.find({ type: 'Text', text: /the pane needs/ })).toBeUndefined()
+  await wide.unmount()
+  const narrow = await $.ui.mount({ ...BAND, surface: 'terminal', viewport: { columns: 135, rows: 40 } } as any)
+  expect(await narrow.find({ type: 'Text', text: /the pane needs 144 columns/ })).toBeDefined()
+  await narrow.unmount()
+})
+
+const withTests = {
+  ...MANIFEST,
+  nodes: {
+    ...MANIFEST.nodes,
+    'test.shop.not_null_fct_orders_revenue': { resource_type: 'test', name: 'not_null_fct_orders_revenue', column_name: 'revenue', depends_on: { nodes: ['model.shop.fct_orders'] } },
+    'test.shop.unique_fct_orders_revenue': { resource_type: 'test', name: 'unique_fct_orders_revenue', test_metadata: { kwargs: { column_name: 'revenue' } }, depends_on: { nodes: ['model.shop.fct_orders'] } },
+  },
+}
+
+test('with a column in focus the pane counts only that column\'s tests; without one, the model\'s', async ($, on) => {
+  const { clock } = await start($, on, { manifest: withTests })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 3 tests ·/ })).toBeDefined()
+  await ui.unmount()
+  await $.command.run({ command: 'lineage', args: 'fct_orders.revenue', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
+  await clock.settle()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /2 tests on revenue ·/ })).toBeDefined()
+  await ui.unmount()
+})
+
+const EDIT = { tool: 'Edit' as const, file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' }
+const NOTE = '◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue'
+
+test('the per-edit impact note stays off the transcript unless show_edit_impact is set', async ($, on) => {
+  const { clock, logs, debug } = await start($, on)
+  await $.tool.call(EDIT)
+  await clock.settle()
+  expect(debug).toContain(NOTE)
+  expect(logs).not.toContain(NOTE)
+})
+
+optionTest('show_edit_impact also shows the per-edit impact note to the person', { show_edit_impact: true }, async ($, on) => {
+  const { clock, logs, debug } = await start($, on)
+  await $.tool.call(EDIT)
+  await clock.settle()
+  expect(debug).toContain(NOTE)
+  expect(logs).toContain(NOTE)
+})

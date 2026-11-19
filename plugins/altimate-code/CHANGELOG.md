@@ -2,6 +2,20 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.8.1] — 2026-11-19
+
+### Fixed
+- The end-of-task column summary no longer says a changed column "reaches 0 columns in 0 models" when nothing was traced. When the models that read the column have no compiled SQL (a manifest from `dbt parse`), the band says "not traced: N downstream models have no compiled SQL (run `dbt compile`)". A column added or renamed in the task is not looked up by its new name in the manifest from before the task; the old name of a rename is still traced there. A column found with nothing downstream still says it reaches 0.
+- An altimate-code without the `dbt_health` tool no longer pops a toast at session start or after a turn; `/health` says it, naming the tool and the install command instead of a version.
+- The settings say what each option does and that it is optional, with its default. The BigQuery scan limit and the team comments options no longer say they are unused.
+- With a column in focus, the lineage pane counts only the tests on that column ("3 tests on amount"); with none, the model's tests.
+- Install and update instructions in the commands and skills give one method: `npm i -g @altimateai/altimate-code`.
+
+### Added
+- At session start, an altimate-code older than the plugin needs (or none on PATH) keeps a line on the status line with its version, the binary and where it is, and `npm i -g @altimateai/altimate-code`.
+- When the terminal is too narrow for the lineage pane, a line above the prompt says so, with the width it needs, until the pane can open or `/lineage` is used.
+- `show_edit_impact` (off by default): also shows the per-edit impact note Claude gets in the transcript.
+
 ## [1.8.0] — 2026-11-17
 
 ### Added

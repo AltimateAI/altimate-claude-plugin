@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { runTool, within } from './altimate-cli'
+import { compareVersions, parseVersion, runTool, within } from './altimate-cli'
 
 /** A stand-in for `$` whose CLI answers every call and whose MCP connection attempts go through `connect`. */
 function standIn(connect: () => unknown, now = 0) {
@@ -92,4 +92,20 @@ test('within handles the work\'s rejection before it sets the deadline, so a thr
   }
   await expect(within($, 10, work)).rejects.toThrow('clock failed')
   expect(handled).toBe(true)
+})
+
+test('versions are read from what --version prints and compared as semver', () => {
+  expect(parseVersion('0.12.8\n')).toBe('0.12.8')
+  expect(parseVersion('altimate-code 0.12.11')).toBe('0.12.11')
+  expect(parseVersion('v0.13.0-beta.2 (abc)')).toBe('0.13.0-beta.2')
+  expect(parseVersion('local build')).toBeNull()
+  expect(compareVersions('0.12.9', '0.12.11')).toBe(-1)
+  expect(compareVersions('0.12.11', '0.12.11')).toBe(0)
+  expect(compareVersions('0.13.0', '0.12.11')).toBe(1)
+  expect(compareVersions('1.0.0', '0.99.99')).toBe(1)
+  // A prerelease is older than its release, and newer than the release before.
+  expect(compareVersions('0.12.11-beta.1', '0.12.11')).toBe(-1)
+  expect(compareVersions('0.12.12-beta.1', '0.12.11')).toBe(1)
+  expect(compareVersions('0.12.11-beta.2', '0.12.11-beta.10')).toBe(-1)
+  expect(compareVersions('0.12.11-beta', '0.12.11-beta.1')).toBe(-1)
 })

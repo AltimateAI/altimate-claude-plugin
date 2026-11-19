@@ -10,6 +10,7 @@ import {
   answerOf,
   changedColumns,
   columnReportData,
+  type ColumnAnswer,
   type ColumnTrace,
   consumersOf,
   fingerprint,
@@ -22,6 +23,7 @@ import {
   reportHtml,
   summaryLines,
   summaryOf,
+  unknownReach,
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
@@ -201,6 +203,11 @@ async function ask($: EngineInterface, done: Finished, change: ModelChange, colu
   return result?.ok ? result.metadata : null
 }
 
+const unknownOf = (answer: ColumnAnswer | null) => {
+  const unknown = unknownReach(answer)
+  return unknown ? { unknown } : {}
+}
+
 /** What the band needs: each changed column's downstream answer, and the model-level count for a model with none. */
 async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrace[]> {
   const jobs: (() => Promise<ColumnTrace>)[] = []
@@ -213,11 +220,17 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
     }
     for (const col of change.columns) {
       jobs.push(async () => {
-        const meta = await ask($, done, change, col.name, 'downstream')
-        const down = answerOf(meta)
+        // A column the SQL from before the task lacks is no column of the task's manifest: asking for it
+        // would read as nothing downstream. Only the model's own count is asked.
+        const added = col.before === null
+        const meta = await ask($, done, change, added ? null : col.name, 'downstream')
+        const answer = added ? null : answerOf(meta)
+        // An answer that never reached the column (no hop 0) traced nothing: the manifest has no such column.
+        const unchecked = added || (!!answer && !answer.columns.some(one => one.hop === 0))
+        const down = unchecked ? null : answer
         // An altimate-code from before the column answer gives neither the answer nor its error.
-        const stale = !!meta && !down && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
-        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, consumers: consumersOf(meta) }
+        const stale = !unchecked && !!meta && !down && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
+        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
       })
     }
   }
@@ -228,7 +241,7 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
 async function traceFull($: EngineInterface, done: Finished): Promise<ColumnTrace[]> {
   const downs = await (done.downs ??= traceDown($, done))
   const jobs = downs.map(trace => async () => {
-    if (!trace.column) return trace
+    if (!trace.column || trace.unchecked) return trace
     const change = done.changes.find(one => one.model === trace.model)!
     return { ...trace, up: answerOf(await ask($, done, change, trace.column, 'upstream')) }
   })
@@ -536,7 +549,7 @@ async function buildColumnReport($: EngineInterface, model: string, column: stri
   const upAnswer = answerOf(up.metadata)
   if (!downAnswer && !upAnswer) return { error: 'This altimate-code traces no single column. Update it to use /lineage-report <model>.<column>.' }
   const name = typeof (down.metadata as any)?.model === 'string' ? String((down.metadata as any).model) : model
-  const trace: ColumnTrace = { model: name, column, down: downAnswer, up: upAnswer, modelLevel: modelLevelOf(down.metadata), failed: false, consumers: consumersOf(down.metadata) }
+  const trace: ColumnTrace = { model: name, column, down: downAnswer, up: upAnswer, modelLevel: modelLevelOf(down.metadata), failed: false, ...unknownOf(downAnswer), consumers: consumersOf(down.metadata) }
   const data = columnReportData(name, column, trace, { builtAt: stamp(await $.clock.now()), manifest: 'target/manifest.json as it is now' })
   const path = `${root}/${LINEAGE_DIR}/${COLUMN_REPORT}`
   try {

@@ -29,6 +29,66 @@ export async function runAltimate($: EngineInterface, args: string[], timeoutMs 
   throw lastError ?? new Error('altimate CLI not found')
 }
 
+const SEMVER = /(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/
+
+/** The version a `--version` answer names ("0.12.11", "altimate-code 0.12.11", "v0.13.0-beta.2"), or null. */
+export function parseVersion(text: string): string | null {
+  const found = SEMVER.exec(text)
+  return found ? found[0] : null
+}
+
+/** Orders two versions as semver does: a prerelease is older than its release, and prerelease parts compare one by one. */
+export function compareVersions(a: string, b: string): number {
+  const split = (version: string) => {
+    const [, major, minor, patch, pre] = SEMVER.exec(version) ?? []
+    return { core: [Number(major), Number(minor), Number(patch)], pre: pre ? pre.split('.') : [] }
+  }
+  const left = split(a)
+  const right = split(b)
+  for (let i = 0; i < 3; i++) if (left.core[i] !== right.core[i]) return left.core[i]! < right.core[i]! ? -1 : 1
+  if (!left.pre.length || !right.pre.length) return left.pre.length === right.pre.length ? 0 : left.pre.length ? -1 : 1
+  for (let i = 0; i < Math.max(left.pre.length, right.pre.length); i++) {
+    const x = left.pre[i]
+    const y = right.pre[i]
+    if (x === undefined) return -1
+    if (y === undefined) return 1
+    if (x === y) continue
+    const numbers = /^\d+$/.test(x) && /^\d+$/.test(y)
+    // A number is older than a word; two numbers compare as numbers.
+    if (/^\d+$/.test(x) !== /^\d+$/.test(y)) return /^\d+$/.test(x) ? -1 : 1
+    return (numbers ? Number(x) < Number(y) : x < y) ? -1 : 1
+  }
+  return 0
+}
+
+const INSTALL = 'npm i -g @altimateai/altimate-code'
+
+/**
+ * What to tell the person about the altimate-code on PATH, or null when it is current or cannot be told:
+ * the line names the version, the binary that runs and where it is, and the install command.
+ * It never throws.
+ */
+export async function altimateCodeNotice($: EngineInterface): Promise<string | null> {
+  try {
+    for (const bin of CLI_NAMES) {
+      let answer: { exitCode?: number; stdout?: string; stderr?: string }
+      try {
+        answer = await $.process.run([bin, '--version'], { timeoutMs: 10_000 })
+      } catch (error) {
+        if (!MISSING_BINARY.test(String(error))) return null
+        continue
+      }
+      const version = answer.exitCode === 0 ? parseVersion(`${answer.stdout ?? ''}\n${answer.stderr ?? ''}`) : null
+      if (!version || compareVersions(version, MIN_ALTIMATE_CODE) >= 0) return null
+      const where = await $.process.run(['which', bin], { timeoutMs: 5_000 }).then(one => one.stdout.trim().split('\n')[0] ?? '').catch(() => '')
+      return `${bin} ${version} found${where ? ` at ${where}` : ''}; this plugin needs ≥ ${MIN_ALTIMATE_CODE}: ${INSTALL}`
+    }
+    return `altimate-code is not installed; this plugin needs ≥ ${MIN_ALTIMATE_CODE}: ${INSTALL}`
+  } catch {
+    return null
+  }
+}
+
 // The CLI pretty-prints its JSON, so read the whole text first, then fall back
 // to the last line for a CLI that logs before printing one compact line.
 export function parseJson<T>(text: string): T | null {

@@ -11,6 +11,7 @@ import {
   graphFromSql,
   projectLayout,
   impactOf,
+  testsOnColumn,
   parseDbtLineage,
   reachFromMetadata,
   type Segment,
@@ -410,4 +411,15 @@ test('projectLayout reads block lists with comments, blank lines and CRLF', () =
 test('graphFromSql reads materialized from the config dbt renders, not a commented-out one', () => {
   const graph = graphFromSql('shop', [{ path: 'models/a.sql', text: "{# {{ config(materialized='view') }} #}\n{{ config(materialized='table') }} select 1", kind: 'model' }])
   expect(graph.nodes['model.shop.a']!.materialized).toBe('table')
+})
+
+test('the followed model\'s subgraph keeps each test\'s column', () => {
+  const m = 'model.shop.orders'
+  const graph = buildGraph({
+    nodes: {
+      [m]: { resource_type: 'model', name: 'orders' },
+      'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: 'amount', depends_on: { nodes: [m] } },
+    },
+  })
+  expect(testsOnColumn(subgraph(graph, m), m, 'amount')).toBe(1)
 })

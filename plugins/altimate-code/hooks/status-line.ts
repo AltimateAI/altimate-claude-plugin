@@ -6,10 +6,10 @@ import type { EngineInterface } from 'claude-code'
 /** The features, in the order the plugin calls them (features/index.ts calls each by name in this order). */
 export const FEATURE_IDS = ['runs', 'defer', 'toModel', 'comments', 'cost', 'health', 'sqlGraph', 'docs', 'cteProfile'] as const
 export type FeatureId = (typeof FEATURE_IDS)[number]
-export type StatusPartId = 'integrations' | FeatureId
+export type StatusPartId = 'integrations' | 'altimateCode' | FeatureId
 
 /** The order the parts are drawn in. */
-export const STATUS_ORDER: readonly StatusPartId[] = ['integrations', ...FEATURE_IDS]
+export const STATUS_ORDER: readonly StatusPartId[] = ['integrations', 'altimateCode', ...FEATURE_IDS]
 
 const parts = atom({ plugin: 'altimate-code', key: 'statusParts' } as const, {} as Record<string, string>)
 

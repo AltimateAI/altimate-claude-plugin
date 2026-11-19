@@ -62,7 +62,7 @@ description: >-
 
 | Symptom | Message to the user |
 |---|---|
-| `altimate-code CLI not found` (neither `altimate-code` nor `altimate` on PATH) | "altimate-code is not installed. Install with `npm install -g altimate-code` (Node 20+) or `curl -fsSL https://www.altimate.sh/install \| bash`, then run `altimate` once to configure your provider and warehouse auth. Then re-run the review." |
+| `altimate-code CLI not found` (neither `altimate-code` nor `altimate` on PATH) | "altimate-code is not installed. Install with `npm i -g @altimateai/altimate-code` (Node 20+), then run `altimate` once to configure your provider and warehouse auth. Then re-run the review." |
 | `Unauthorized: Incorrect auth token` / `No provider configured` | "altimate-code's LLM provider auth is misconfigured. Run `altimate` (`altimate-code` on npm installs older than v0.7.1) to reconfigure — or re-run with `--no-ai` to skip the LLM lane entirely and get a deterministic-only review." |
 | `fatal: not a git repository` | "This directory isn't a git repo. `altimate-code review` computes the diff via git — run from a dbt project inside a git worktree." |
 | No `dbt_project.yml` found | "No dbt project detected at this path. The review needs a dbt project to compile models against. Run from the directory containing `dbt_project.yml`." |

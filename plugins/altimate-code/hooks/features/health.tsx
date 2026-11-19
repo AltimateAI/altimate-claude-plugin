@@ -31,7 +31,7 @@ export const GATE_WAIT_MS = 4_000
 const COMMAND_WAIT_MS = 3_000
 /** The most issues the push refusal and the report list. */
 const LISTED = 10
-const NEEDS_CLI = 'Project health needs an altimate-code build newer than 0.12.10 (one with the dbt_health tool)'
+const NEEDS_CLI = 'Project health needs an altimate-code release with the dbt_health tool: npm i -g @altimateai/altimate-code'
 const ROOT_FILES = new Set(['dbt_project.yml', 'profiles.yml', 'packages.yml', 'dependencies.yml', 'selectors.yml'])
 const SKIPPED_DIRS = /(?:^|\/)(?:target|dbt_packages|dbt_modules|node_modules|\.git|\.github|logs)\//
 
@@ -502,9 +502,12 @@ async function drawStatus($: EngineInterface, issues: readonly HealthInsight[]) 
   await setStatusPart($, 'health', n > 0 ? `${n} health issue${n === 1 ? '' : 's'}` : null)
 }
 
-/** Tells a problem once, until a different one comes. */
+/**
+ * Tells a problem once, until a different one comes. An altimate-code without the tool is not told: the
+ * checks run by themselves (session start, each turn), so only /health, which asks for the answer, says it.
+ */
 function tell($: EngineInterface, problem: string) {
-  if (problem === toldProblem) return
+  if (problem === toldProblem || problem === NEEDS_CLI) return
   toldProblem = problem
   $.ui.toast(`◆ ${problem}`, { timeoutMs: 8000 })
 }
