@@ -808,15 +808,14 @@ export function pushRefusal(blocks: unknown, command: string, issues: readonly H
  * they have new health issues. A check that cannot run or does not finish holds it too.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
-  // Right after a /clear the kept issues may not be back yet: a push waits for them.
-  await clearStart($)
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) {
     // Where the shell is before this command runs: its own `cd`s are read from there, and `bashAfter` sees the folder after them.
     if (CHANGES_FOLDER.test(e.command)) shellBefore = { command: e.command, folder: await within($, GATE_WAIT_MS, shellFolder($)) }
     return null
   }
   // The whole decision, folder lookups included, is bounded inside the chain's deadline: past it the gate is given up on and the push runs.
-  const decided = await within($, GATE_WAIT_MS, decide($, e))
+  // Right after a /clear the kept issues may not be back yet: the push waits for them, inside the same deadline.
+  const decided = await within($, GATE_WAIT_MS, clearStart($).then(() => decide($, e)))
   const verdict = decided === null ? hold('the check of the changes could not be read in time.') : decided === 'run' ? null : decided
   featureUsed($, 'health_push_gate', verdict ? 'held' : 'allowed')
   return verdict
