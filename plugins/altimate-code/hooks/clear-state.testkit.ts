@@ -21,9 +21,11 @@ export function playsClear($: any, on: any): () => Promise<void> {
     if (cleared) written.add(name(e))
     return next(e)
   })
-  on('session.id', () => ({ value: cleared ? 'after-clear' : 'before-clear' }))
+  let clears = 0
+  on('session.id', () => ({ value: `session-${clears}` }))
   return async () => {
-    await $.session.end({ reason: 'clear', sessionId: 'before-clear' })
+    await $.session.end({ reason: 'clear', sessionId: `session-${clears}` })
+    clears++
     cleared = true
     written.clear()
   }

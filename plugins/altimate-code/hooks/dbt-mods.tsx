@@ -187,6 +187,10 @@ async function dbtBinary($: EngineInterface, root: string): Promise<string> {
   return 'dbt'
 }
 
+// A run's process result, with what `read` gave of its artifacts while the queue was held (null when that failed).
+type Artifact = { manifest: any; mtimeMs: number } | null
+type ProcessDone = { exitCode: number; stdout: string; stderr: string; isStdoutTruncated?: boolean; artifact?: Artifact }
+
 // What a run that was no longer wanted when its turn came answers: it never started.
 const SKIPPED = { exitCode: -2, stdout: '', stderr: 'skipped: a newer check replaced it' }
 
@@ -194,7 +198,7 @@ const SKIPPED = { exitCode: -2, stdout: '', stderr: 'skipped: a newer check repl
  * Runs a command in a project, after any dbt this plugin already started there. `wanted` is asked
  * when its turn comes: a check a newer edit replaced runs no warehouse query.
  */
-function runQueued($: EngineInterface, root: string, argv: () => Promise<string[]>, options: { cwd?: string; timeoutMs?: number; wanted?: () => boolean; scratch?: boolean } = {}) {
+function runQueued($: EngineInterface, root: string, argv: () => Promise<string[]>, options: { cwd?: string; timeoutMs?: number; wanted?: () => boolean; scratch?: boolean; read?: () => Promise<Artifact> } = {}): Promise<ProcessDone> {
   const before = queues.get(root) ?? Promise.resolve()
   const run = before
     .catch(() => {})
@@ -218,7 +222,8 @@ function runQueued($: EngineInterface, root: string, argv: () => Promise<string[
         const own = printedInvocation(done.stdout) ?? (after !== null && after !== before ? after : null)
         if (own) ownInvocation.set(root, own)
       }
-      return done
+      // What the run wrote is read before the next queued run can write over it.
+      return options.read ? { ...done, artifact: await options.read().catch(() => null) } : done
     })
   queues.set(root, run.catch(() => {}))
   return run
@@ -257,8 +262,8 @@ function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): b
 }
 
 /** Runs the project's dbt in the project, after any dbt this plugin already started there. */
-function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DBT_TIMEOUT_MS, wanted?: () => boolean, scratch = false) {
-  return runQueued($, root, async () => [await dbtBinary($, root), ...args], { timeoutMs, wanted, scratch }).then(
+function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DBT_TIMEOUT_MS, wanted?: () => boolean, scratch = false, read?: () => Promise<Artifact>) {
+  return runQueued($, root, async () => [await dbtBinary($, root), ...args], { timeoutMs, wanted, scratch, read }).then(
     done => {
       if (done !== SKIPPED) {
         if (cannotRun(done)) unrunnable.add(root)
@@ -480,8 +485,10 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // name (`defined_in`) is still previewed, and the path keeps it to that one version.
   const pkg = await projectName($, root)
   const selectorFor = (name: string | null) => [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(name ? [name] : [])].join(',')
-  const run1 = (args: string[]) => runDbt($, root, args, DBT_TIMEOUT_MS, current, true).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
-  const show = (select: string) => run1(['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
+  const scratch = await scratchOf($, root)
+  const run1 = (args: string[], read?: () => Promise<Artifact>): Promise<ProcessDone> => runDbt($, root, args, DBT_TIMEOUT_MS, current, true, read).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  // The manifest the show wrote is read while the plugin's dbt queue is still held, so no other run of it replaces it first.
+  const show = (select: string) => run1(['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], () => readManifest($, root, rel, scratch))
   // A newer edit replaced this check before its turn: nothing ran, nothing to report.
   const replaced = () => notChecked('a newer check replaced this one').then(one => ({ ...one, note: '' }))
   const knownName = typeof known?.node?.name === 'string' ? known.node.name : null
@@ -500,8 +507,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   if (run === SKIPPED) return replaced()
   if (cannotRun(run)) return notChecked(NO_DBT)
   // dbt show re-parsed the project: the manifest it wrote (in the plugin's own folder) holds the model and schema.yml as they are.
-  const scratch = await scratchOf($, root)
-  let after = await readManifest($, root, rel, scratch)
+  let after = run.artifact ?? null
   let node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
   let named = typeof node?.node?.name === 'string' ? node.node.name : null
   let preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
@@ -512,7 +518,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
     const again = await show(selectorFor(named))
     if (again === SKIPPED) return replaced()
     run = again
-    after = await readManifest($, root, rel, scratch)
+    after = run.artifact ?? null
     node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
     named = typeof node?.node?.name === 'string' ? node.node.name : null
     preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null

@@ -57,6 +57,8 @@ let toldProblem: string | null = null
 let inFlight: string[] = []
 /** What the conversation a /clear ended knew (its baseline, the changes not yet checked, the issues): the next one keeps it. */
 let carried: HealthState | null = null
+/** A /clear whose conversation has not had clearStart yet. */
+let clearPending = false
 /** Which model each file belonged to in earlier checks: a deleted schema file or model no longer shows in the latest answer. */
 let known: HealthInsight[] = []
 /** Whether the status line carries the health part now. */
@@ -490,8 +492,10 @@ async function checkEnv($: EngineInterface): Promise<Record<string, string> | un
   const path = targetPath(await $.fs.read(`${project}/dbt_project.yml`).catch(() => ''))
   const target = path.startsWith('/') ? path : `${project}/${path}`
   const scratch = `${target}/${SCRATCH_TARGET}/${HEALTH_SCRATCH}`
+  // Best effort: without the copy the check reads no catalog, as with a project that has none; an earlier copy is
+  // removed first, so a catalog the project no longer has, or one that failed to copy, is never read.
+  await $.process.run(['rm', '-f', `${scratch}/catalog.json`], { timeoutMs: 10_000 }).catch(() => null)
   if (await $.fs.exists(`${target}/catalog.json`).catch(() => false)) {
-    // Best effort: without the copy the check reads no catalog, as with a project that has none.
     await $.process.run(['mkdir', '-p', scratch], { timeoutMs: 10_000 }).catch(() => null)
     await $.process.run(['cp', '-p', `${target}/catalog.json`, `${scratch}/catalog.json`], { timeoutMs: 60_000 }).catch(() => null)
   }
@@ -656,6 +660,7 @@ export function register(on: On, context: FeatureContext) {
   options = context.options
   on('command.run', { command: COMMAND }, async $ => {
     featureUsed($, 'health', 'opened')
+    await clearStart($)
     const state = await read($, healthAtom)
     if (!state || !enabled) return { text: 'Project health checks dbt projects: this session has none open yet.' }
     // Asking again retries a first check that failed, and checks changes not yet checked.
@@ -676,6 +681,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   running = null
   enabled = false
   carried = null
+  clearPending = false
   inFlight = []
   toldProblem = null
   known = []
@@ -706,6 +712,9 @@ async function enable($: EngineInterface) {
  * /clear still holds a push); with none kept, the baseline is taken as at a session's start.
  */
 export async function clearStart($: EngineInterface) {
+  // Once per /clear, whichever comes first: the session id's change, or a hook of the new conversation.
+  if (!clearPending) return
+  clearPending = false
   const kept = carried
   carried = null
   generation += 1
@@ -717,17 +726,23 @@ export async function clearStart($: EngineInterface) {
   }
   enabled = true
   // Changes the new conversation recorded before this ran are added to the kept ones, not replaced by them.
-  await update($, healthAtom, prev => ({
-    ...kept,
-    running: false,
-    pending: [...new Set([...kept.pending, ...(prev?.pending ?? [])])],
-    touched: [...new Set([...kept.touched, ...(prev?.touched ?? [])])],
-    // A new change asks for a check again after a failed one, as markChanged does.
-    ...(prev?.pending.length ? { problem: null } : {}),
-  }))
+  await update($, healthAtom, prev => (prev ? mergeKept(kept, prev) : { ...kept, running: false }))
   drawn = true
   await drawStatus($, kept.issues)
   if (await wantsCheck($)) later($, () => kick($))
+}
+
+/** The state a /clear carries, with the changes a conversation recorded on top of it. */
+function mergeKept(kept: HealthState, later: HealthState): HealthState {
+  return {
+    ...kept,
+    baseline: kept.baseline ?? later.baseline,
+    running: false,
+    pending: [...new Set([...kept.pending, ...later.pending])],
+    touched: [...new Set([...kept.touched, ...later.touched])],
+    // A new change asks for a check again after a failed one, as markChanged does.
+    ...(later.pending.length ? { problem: null } : {}),
+  }
 }
 
 /** Also called for a subagent's turns, which carry `e.agentId`. */
@@ -736,13 +751,17 @@ export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 /** After the turn's answer: when model files changed, check again. */
 export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {
   if ((e as { agentId?: string }).agentId) return
+  await clearStart($)
   if (await wantsCheck($)) later($, () => kick($))
 }
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   // A /clear: what this conversation knows is handed to the next one. A check it cuts short is asked for again there.
   const state = e.reason === 'clear' && enabled ? await read($, healthAtom).catch(() => null) : null
-  carried = state ? { ...state, pending: state.running ? [...new Set([...inFlight, ...state.pending])] : state.pending, running: false } : null
+  const now = state ? { ...state, pending: state.running ? [...new Set([...inFlight, ...state.pending])] : state.pending, running: false } : null
+  // A second /clear before the first was restored: what that one carried and what this conversation recorded are both kept.
+  carried = e.reason !== 'clear' ? null : carried && now ? mergeKept(carried, now) : (now ?? carried)
+  clearPending = e.reason === 'clear'
   generation += 1
   running = null
   // Kept on through a /clear that carries the state: a change made before clearStart restores it is still recorded, and merged.
@@ -774,6 +793,8 @@ export function pushRefusal(blocks: unknown, command: string, issues: readonly H
  * they have new health issues. A check that cannot run or does not finish holds it too.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
+  // Right after a /clear the kept issues may not be back yet: a push waits for them.
+  await clearStart($)
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) {
     // Where the shell is before this command runs: its own `cd`s are read from there, and `bashAfter` sees the folder after them.
     if (CHANGES_FOLDER.test(e.command)) shellBefore = { command: e.command, folder: await within($, GATE_WAIT_MS, shellFolder($)) }

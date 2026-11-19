@@ -224,6 +224,8 @@ async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on, { now: options.now ?? 1_000 })
   const runs: string[][] = []
   const envs: Record<string, string>[] = []
+  // dbt processes and manifest reads, in the order they happened.
+  const order: string[] = []
   const cwds: string[] = []
   const toasts: string[] = []
   const prompts: string[] = []
@@ -333,6 +335,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
     const rel = e.path.slice(ROOT.length + 1)
+    if (rel.endsWith('manifest.json')) order.push(`read ${rel}`)
     if (!(rel in files)) throw new Error('ENOENT')
     if (rel === 'target/run_results.json' && (options.runResultsSize ?? 0) > 4 * 1024 * 1024) throw new Error('file is larger than 4 MiB')
     return { value: files[rel] }
@@ -353,6 +356,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string; env?: Record<string, string> } }) => {
     runs.push([...e.argv])
     envs.push(e.init?.env ?? {})
+    if (e.argv[0] === DBT) order.push(`dbt ${e.argv[1]}`)
     // Where this dbt writes its artifacts: DBT_TARGET_PATH when set, else the project's target folder.
     const given = e.init?.env?.DBT_TARGET_PATH
     const out = given ? (given.startsWith(`${ROOT}/`) ? given.slice(ROOT.length + 1) : given) : (options.target ?? 'target')
@@ -442,7 +446,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { redactSent, clock, runs, envs, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
+  return { redactSent, clock, runs, envs, order, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -3959,4 +3963,27 @@ test('Re-run of Claude\'s dbt show drops the artifact folder Claude named: the r
   expect(runs[replay]).not.toContain('--target-path')
   expect(envs[replay]!.DBT_TARGET_PATH).toBe(`${ROOT}/target/.altimate-plugin`)
   expect(files['target/manifest.json']).toBe(kept)
+})
+
+test('a check reads the manifest its dbt show wrote before the plugin\'s next queued dbt run can write over it', async ($, on) => {
+  let release!: () => void
+  let readable!: () => void
+  // The check's read of its manifest is slow: the queued run would start meanwhile if the queue were not held.
+  const statGate = { path: 'target/.altimate-plugin/manifest.json', until: new Promise<void>(resolve => (readable = resolve)) }
+  const { clock, order } = await start($, on, { holdShow: new Promise<void>(resolve => (release = resolve)), statGate })
+  const edit = $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/orders.sql`, old_string: 'a', new_string: 'b' })
+  await clock.advance(10)
+  // A /dbt-show queued behind the check's own show.
+  const shown = $.command.run({ command: 'dbt-show', args: 'orders' })
+  await clock.advance(10)
+  release()
+  for (let i = 0; i < 5; i++) await clock.advance(10)
+  readable()
+  await Promise.all([edit, shown])
+  await clock.settle()
+  const shows = order.map((one, i) => (one === 'dbt show' ? i : -1)).filter(i => i >= 0)
+  expect(shows.length).toBeGreaterThanOrEqual(2)
+  const read = order.findIndex((one, i) => i > shows[0]! && one === 'read target/.altimate-plugin/manifest.json')
+  expect(read).toBeGreaterThan(shows[0]!)
+  expect(read).toBeLessThan(shows[1]!)
 })

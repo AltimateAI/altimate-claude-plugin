@@ -510,6 +510,8 @@ async function coverageOf($: EngineInterface, project: Project, model: string, m
 // The coverage shown came from a manifest older than the model's last edit: the check of that edit parses the
 // project again, and the coverage is read once more from the manifest it wrote. Null when nothing waits on one.
 let waiting: { file: string; model: string; project: Project } | null = null
+// Counts the SQL edits whose coverage is read, and the sessions: only the newest edit's first read may set the coverage shown.
+let coverageSeq = 0
 // How long the coverage waits for the edit's check (a dbt show against the warehouse), then for its second read.
 const CHECK_WAIT_MS = 180_000
 const RECHECK_MS = 30_000
@@ -523,6 +525,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   // dbt wrote the manifest before this edit: its compiled SQL is the model as it was, not as it is now.
   const edited = await $.fs.stat(file.path).catch(() => null)
   const stale = !!edited && manifest.mtimeMs < edited.mtimeMs
+  const mine = ++coverageSeq
   const asked = stale ? { file: normal(file.path), model, project } : null
   waiting = asked
   // Asked for before the check starts (the dbt helpers run after this feature in the edit phase), so it is not missed.
@@ -534,8 +537,11 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   if (!read) return []
   if ('line' in read) return [read.line]
   const view = { ...read.view, stale }
-  await update($, docsAtom, prev => ({ ...(prev ?? empty()), coverage: view }))
-  await showStatus($)
+  // A later edit (or its check's coverage) has set the coverage shown since this read began: it is not replaced.
+  if (mine === coverageSeq && waiting === asked) {
+    await update($, docsAtom, prev => ({ ...(prev ?? empty()), coverage: view }))
+    await showStatus($)
+  }
   const gaps = [...(view.hasDescription ? [] : ['the model itself']), ...view.missing]
   // A select list that is not plain column names (a `*`, an unaliased expression, a UNION) is counted by the manifest's columns only.
   const star = read.star ? " · the model's select list is not plain column names (a `*`, an unaliased expression or a UNION), so only the columns the manifest lists are counted" : ''
@@ -716,7 +722,11 @@ export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 /** After the turn's answer; `out` is what the turn ended with. Also called for a subagent's turns (`e.agentId`). */
 export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {}
 
-export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {}
+export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
+  // A coverage read still running belongs to the conversation that ended (a /clear has no session start).
+  waiting = null
+  coverageSeq++
+}
 
 /** This feature's line in the band, under the lineage line; null when there is nothing to say. */
 export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderElement | null> {

@@ -242,6 +242,31 @@ test('a change made right after /clear, before the kept state is put back, is me
   expect(shown.text).toContain('1 new health issue · fct_orders: model fanout')
 })
 
+test('a git push right after /clear, before the kept issues are back, is still held by them', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  // No settling: the push is the new conversation's first call.
+  const denied: any = await $.tool.call(command('git push'))
+  expect(denied?.deny).toContain('1 new project health issue')
+  expect(calls).toHaveLength(2)
+})
+
+test('a second /clear before the first one\'s state was restored keeps what the first carried', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  await clear()
+  await clock.settle()
+  expect(calls).toHaveLength(2)
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toContain('1 new health issue · stg_orders: hard coded references')
+})
+
 test('two changed models give "2 new health issues" with the first model named', async ($, on) => {
   const { clock } = await start($, on, { runs: [[OLD_STG], [OLD_STG, NEW_STG, NEW_FCT]] })
   await $.tool.call(edit(STG))

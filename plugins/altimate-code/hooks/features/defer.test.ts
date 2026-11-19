@@ -446,3 +446,13 @@ test('Claude is told in the result, and the person in the band until the next pr
   expect(await after.find({ type: 'Text', text: /ran as/ })).toBeUndefined()
   await after.unmount()
 })
+
+test('each call gets the flags added to it: a concurrent call that wrote the same flags itself takes none of them', async ($, on) => {
+  start($, on, DEFER)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  // Claude's own command already names the flags the rewrite would add, so it is not rewritten.
+  const own: any = await $.tool.call({ tool: 'Bash', command: 'dbt build --defer --state /work/prod-state --favor-state -s x', tool_use_id: 'own' })
+  expect((own.context ?? []).some((line: string) => line.startsWith('◆ dbt · this command ran as'))).toBe(false)
+  const ran: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s x', tool_use_id: 'rewritten' })
+  expect(ran.context).toContain('◆ dbt · this command ran as dbt build --defer --state /work/prod-state --favor-state: /defer and /target added those flags (the command shown is as written), so its results are from that target and state')
+})

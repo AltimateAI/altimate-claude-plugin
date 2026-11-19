@@ -10,7 +10,7 @@
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallInput, ToolCallResult } from 'claude-code'
 
 import { later } from '../altimate-cli'
-import { restoreStatusParts } from '../status-line'
+import { keepStatusParts, restoreStatusParts } from '../status-line'
 import type { BashCall, EditedFile, FileCall } from '../tool-chain'
 import {
   CHECK_HOLD_MS as dbtModsCheckHoldMs,
@@ -49,6 +49,7 @@ import {
   bashRewrite as deferBashRewrite,
   bashGate as deferBashGate,
   bashAfter as deferBashAfter,
+  bashDropped as deferBashDropped,
   editAfter as deferEditAfter,
   readOrEditAfter as deferReadOrEditAfter,
   editReadsBefore as deferEditReadsBefore,
@@ -290,7 +291,10 @@ export async function featuresTurnComplete($: EngineInterface, e: Args<'turn.com
 
 export async function featuresSessionEnd($: EngineInterface, e: Args<'session.end'>) {
   // Taken before the features end: a /clear goes on under another id once they have.
-  if (e.reason === 'clear' && typeof e.sessionId === 'string') later($, () => whenCleared($, e.sessionId))
+  if (e.reason === 'clear' && typeof e.sessionId === 'string') {
+    keepStatusParts()
+    later($, () => whenCleared($, e.sessionId))
+  }
   await attempt($, 'runs', 'sessionEnd', () => runsSessionEnd($, e))
   await attempt($, 'defer', 'sessionEnd', () => deferSessionEnd($, e))
   await attempt($, 'toModel', 'sessionEnd', () => toModelSessionEnd($, e))
@@ -369,6 +373,7 @@ export async function featuresCallStart($: EngineInterface, e: ToolCallInput): P
 /** A Bash call that a gate refused, or whose result is a refusal, never reaches bashAfter: the features that kept it let go. */
 export async function featuresBashDropped($: EngineInterface, e: BashCall): Promise<void> {
   await attempt($, 'runs', 'bashDropped', () => runsBashDropped($, e))
+  await attempt($, 'defer', 'bashDropped', () => deferBashDropped($, e))
 }
 
 /** The context lines every feature adds after a Bash call ran. */

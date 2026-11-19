@@ -224,6 +224,8 @@ type Options = {
     holdFirst?: Promise<void>
     /** The coverage read from the project's manifest for the second edit waits for this. */
     holdSecondEdit?: Promise<void>
+    /** The coverage read from the project's manifest for the first edit waits for this. */
+    holdFirstEdit?: Promise<void>
     /** The check's manifest is rewritten (by another plugin run) while its coverage is read. */
     rewrittenWhileRead?: boolean
   }
@@ -290,6 +292,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   let shows = 0
   let plainReads = 0
+  let firstReads = 0
   const previewOf = () => ({ data: { is_inline: false, node_name: options.check!.node, output_format: 'json', preview: JSON.stringify(options.check!.rows), unique_id: `model.shop.${options.check!.node}` }, info: { code: 'Q041', level: 'info', msg: '…' } })
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
     const [, command, , tool] = e.argv
@@ -311,6 +314,10 @@ async function start($: any, on: any, options: Options = {}) {
     if (tool === 'dbt_docs_coverage') {
       if (options.coverageError) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: options.coverageError, metadata: { success: false } }), stderr: '' } }
       const fromCheck = options.check && String(e.argv[5]).includes('.altimate-plugin')
+      if (!fromCheck && options.check?.holdFirstEdit && ++firstReads === 1) {
+        const answer = { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'coverage', metadata: options.coverage }), stderr: '' } }
+        return options.check.holdFirstEdit.then(() => answer)
+      }
       if (!fromCheck && options.check?.holdSecondEdit && ++plainReads === 2) {
         const answer = { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: 'coverage', metadata: options.coverage }), stderr: '' } }
         return options.check.holdSecondEdit.then(() => answer)
@@ -730,5 +737,26 @@ kitTest('a check manifest another plugin run rewrote while its coverage was read
   const ui = await $.ui.mount({ ...COVERAGE_PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /from the manifest of before the last edit/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /no description: payments/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+kitTest('an edit\'s first coverage read that comes back late does not replace the coverage a later edit\'s check already gave', { options: { dbt_mods: true } }, async ($, on) => {
+  const node = { 'model.shop.orders': { resource_type: 'model', name: 'orders', package_name: 'shop', original_file_path: 'models/marts/orders.sql', columns: {} } }
+  const before = { success: true, model: 'orders', has_description: true, output_columns: ['order_id'], documented: ['order_id'], missing: [], percent: 100 }
+  const after = { success: true, model: 'orders', has_description: true, output_columns: ['order_id', 'payments'], documented: ['order_id'], missing: ['payments'], percent: 50 }
+  let releaseA!: () => void
+  const holdFirstEdit = new Promise<void>(resolve => (releaseA = resolve))
+  const { clock } = await start($, on, { editNewer: true, manifest: node, coverage: before, check: { rows: [{ order_id: 1 }], node: 'orders', manifest: node, coverage: after, holdFirstEdit } })
+  const file = `${ROOT}/models/marts/orders.sql`
+  const a = $.tool.call({ tool: 'Edit', file_path: file, old_string: 'a', new_string: 'b' })
+  await clock.advance(10)
+  await $.tool.call({ tool: 'Edit', file_path: file, old_string: 'b', new_string: 'c' })
+  await clock.settle()
+  releaseA()
+  await a
+  await clock.settle()
+  const ui = await $.ui.mount({ ...COVERAGE_PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /orders: 1 of 2 columns documented \(50%\) · no description: payments/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /1 of 1 columns documented/ })).toBeUndefined()
   await ui.unmount()
 })

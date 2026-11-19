@@ -37,9 +37,22 @@ export async function setStatusPart($: EngineInterface, id: StatusPartId, text: 
   $.ui.status(statusLineOf(drawnParts))
 }
 
+// The parts drawn when a /clear ended the conversation, until the next one has them back.
+let beforeClear: Record<string, string> | null = null
+
+/** At a /clear: keeps the parts drawn now, which a part set before restoreStatusParts must not replace. */
+export function keepStatusParts() {
+  beforeClear = { ...(beforeClear ?? {}), ...drawnParts }
+}
+
 /** After a /clear: the parts drawn before it, under any the new conversation has set already. */
 export async function restoreStatusParts($: EngineInterface) {
-  await update($, parts, prev => ({ ...drawnParts, ...prev }))
+  const kept = beforeClear
+  beforeClear = null
+  if (!kept) return
+  await update($, parts, prev => ({ ...kept, ...prev }))
+  drawnParts = await read($, parts)
+  $.ui.status(statusLineOf(drawnParts))
 }
 
 /**
@@ -48,6 +61,7 @@ export async function restoreStatusParts($: EngineInterface) {
  */
 export async function clearStatusParts($: EngineInterface) {
   drawnParts = {}
+  beforeClear = null
   await update($, parts, () => ({}))
   $.ui.status(undefined)
 }
