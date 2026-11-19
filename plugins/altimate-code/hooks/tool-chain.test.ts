@@ -91,6 +91,7 @@ test('through the plugin, a Bash call reaches the tool unchanged and its result 
   // The session beneath has nothing to report, so no feature that is built holds a call or adds to one it has no reason to.
   mock.clock(on)
   on('ui.status', () => ({ value: undefined }))
+  on('session.cwd', () => ({ value: '/repo' }))
   on('session.root', () => ({ value: '/repo' }))
   on('fs.exists', () => ({ value: false }))
   on('process.run', (_: unknown, e: { argv: readonly string[] }) => ({ value: { isStdoutTruncated: false, isStderrTruncated: false, ...(nothingToReport(e.argv) ?? { exitCode: 1, stdout: '', stderr: 'no CLI here' }) } }))

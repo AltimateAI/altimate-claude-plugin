@@ -97,6 +97,37 @@ async function afterShellChange($: EngineInterface, command: string, ran = false
 /** An answer nobody took within this long is dropped: the model may have changed since. */
 const ANSWER_KEEP_MS = 60_000
 
+/** The folder the session is in is asked for this long: a lookup that stalls must not use up the budget of the gates after this one (health's wait is 4 s of the 5 s a phase has). */
+const CWD_WAIT_MS = 80
+
+/** One pass's reading of the session folder: every lookup of the pass spends one budget, and the first that goes unanswered ends the pass's knowledge of it. */
+type Look = { spent: number; lost: boolean }
+const newLook = (): Look => ({ spent: 0, lost: false })
+
+/**
+ * The session's folder. A folder that times out is no project and no change of project: it answers `fallback`, the folder
+ * last known, so nothing the gate holds for that project is touched, and the pass is marked lost: its caller refuses what needs the folder.
+ */
+async function sessionDir($: EngineInterface, look: Look, fallback: string | null): Promise<string | null> {
+  if (look.lost) return fallback
+  const left = CWD_WAIT_MS - look.spent
+  // Read from the process clock, not the engine's: no await is added between the gate's steps that must stay one.
+  const began = Date.now()
+  // A lookup that does not answer in time loses the pass: the folder is not known, and the last one is not assumed.
+  // One that fails outright (a host with no session folder) is the session's root, as before: the gate goes on with it.
+  const failed = async () => ({ dir: (await $.session.root().catch(() => fallback)) as string | null })
+  const read = left > 0 ? await within($, left, $.session.cwd().then(dir => ({ dir: dir as string | null }), failed)) : null
+  look.spent += Date.now() - began
+  if (!read) {
+    look.lost = true
+    return fallback
+  }
+  return read.dir
+}
+
+const UNREADABLE_DENY = 'The project folder could not be read in time, so the scan cannot be estimated. Run the same command again.'
+const UNREADABLE_TEXT = 'No estimate: the project folder could not be read in time. Try again in a moment.'
+
 /** Adds this feature's own hooks. */
 export function register(on: On, context: FeatureContext) {
   const configured = Number((context.options as Record<string, unknown> | undefined)?.maxScanBytes)
@@ -124,7 +155,9 @@ export function register(on: On, context: FeatureContext) {
     }
     const began = await $.clock.now()
     // The wait is short (the user is looking at the screen); the estimate's own budget starts when the wait ends, at the latest.
-    const started = await startWhenIdle($, { model: target }, began + GATE_WAIT_MS, () => undefined, one => one)
+    const look = newLook()
+    const started = await startWhenIdle($, look, { model: target }, began + GATE_WAIT_MS, () => undefined, one => one)
+    if (!started && look.lost) return { text: UNREADABLE_TEXT }
     if (!started) return { text: 'No estimate: another estimate is still running in this project. Try again in a moment.' }
     const answer = await started.answer
     if (answer.kind === 'bytes') {
@@ -203,15 +236,21 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // A command refused for its estimate has not run: its retry is not a change, and keeps the answers it waited for.
   if (!refused.has(e.command)) await afterShellChange($, e.command)
   // A session moved to another project (a /cd) keeps nothing the gate learned in the last one.
-  const dir = await $.session.cwd().catch(() => seenDir)
-  if (seenDir !== null && dir !== seenDir) {
-    // What is still running belongs to the project left behind: it holds nothing back here, and still holds that project back on return.
-    await leaveProject($)
+  const look = newLook()
+  const dir = await sessionDir($, look, seenDir)
+  // A folder that could not be read is not a change: the project last known keeps everything the gate holds for it.
+  if (!look.lost) {
+    if (seenDir !== null && dir !== seenDir) {
+      // What is still running belongs to the project left behind: it holds nothing back here, and still holds that project back on return.
+      await leaveProject($)
+    }
+    seenDir = dir
   }
-  seenDir = dir ?? null
   const all = parseDbtCommand(e.command)
   const invocations = all.filter(i => i.subcommand !== null && SCANNING.has(i.subcommand))
   if (invocations.length === 0) return null
+  // Which project this is cannot be told, so nothing is estimated for it (two estimates could start dbt in one project together) and nothing is let through.
+  if (look.lost) return { deny: UNREADABLE_DENY }
   // An edit or a command that changed the project while the answers were coming in makes them void.
   const startedAt = generation
   const state = (await read($, costAtom)) ?? FRESH
@@ -229,6 +268,28 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // One wait for the whole command, however many queries it names.
   const waitUntil = (await $.clock.now()) + GATE_WAIT_MS
   const pending: string[] = []
+  // A refusal that keeps what the pass already found over the limit, and marks the command refused: its retry is no change,
+  // and a failed estimate then cannot free a command already known to be expensive.
+  const refuse = async (deny: string) => {
+    // What a project changed meanwhile left is not this pass's to record.
+    if (generation !== startedAt) return changedDeny(e.command)
+    if (over.length > 0) {
+      const worst = over.reduce((x, y) => (y.bytes > x.bytes ? y : x))
+      try {
+        await update($, costAtom, prev => {
+          const current = prev ?? FRESH
+          const same = current.held?.command === e.command
+          return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
+        })
+      } catch {
+        // The refusal stands whether or not the hold could be recorded: a gate that throws lets the call run.
+      }
+    }
+    notes.delete(e.command)
+    refused.set(e.command, await $.clock.now())
+    return { deny }
+  }
+  const unreadable = () => refuse(UNREADABLE_DENY)
   // What this pass already has, so the same query named twice on the line is asked for once.
   const taken = new Map<string, Answer>()
   let failed = false
@@ -239,10 +300,22 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
       continue
     }
     const label = target.model ?? 'the inline query'
-    const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken, refused.get(e.command))
+    const answer = await estimateWithin($, target.model ? { model: target.model } : { sql: target.sql }, waitUntil, taken, refused.get(e.command), look)
+    // The folder could not be read in time: the rest of the line is not looked at, or the chain's own deadline would let the whole command through first.
+    if (answer === 'unreadable') return unreadable()
     // A /cd while it was being asked: the answer is of the project left, and nothing here is allowed on it.
-    const now = (await $.session.cwd().catch(() => dir)) ?? null
-    if (now !== (dir ?? null)) {
+    const now = await sessionDir($, look, dir)
+    if (look.lost) {
+      // The answer in hand is still the project's: one over the limit is kept, so the refusal holds the command.
+      if (answer !== 'pending' && answer.kind === 'bytes' && answer.maxBytes > limitBytes) {
+        // Noted before any await, as on the normal path: a parallel pass for this command whose own estimate fails must still see it.
+        mine.note = { label, bytes: answer.maxBytes, display: answer.display }
+        overNow.set(e.command, mine.note as { label: string; bytes: number; display: string })
+        over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display })
+      }
+      return unreadable()
+    }
+    if (now !== dir) {
       await leaveProject($)
       seenDir = now
     }
@@ -290,18 +363,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
   // An estimate still running decides nothing yet, and spends no allowance: the command is refused until it is in.
   if (pending.length > 0) {
     // What is already known to be over the limit stays held, so a failed estimate on the retry cannot free it.
-    if (over.length > 0) {
-      const worst = over.reduce((a, b) => (b.bytes > a.bytes ? b : a))
-      await update($, costAtom, prev => {
-        const current = prev ?? FRESH
-        // An allowance belongs to the command it was given for: another command's hold does not inherit it.
-        const same = current.held?.command === e.command
-        return { ...current, allowOnce: same && current.allowOnce, held: { command: e.command, target: worst.label, bytes: worst.bytes, display: worst.display } }
-      })
-    }
-    notes.delete(e.command)
-    refused.set(e.command, await $.clock.now())
-    return { deny: `The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.` }
+    return refuse(`The scan of ${pending.join(', ')} is still being estimated (the dbt adapter may be starting). Run the same command again in a moment.`)
   }
 
   // A command held earlier stays held while its estimate cannot be made again: only /allow-scan or an estimate under the limit frees it.
@@ -411,6 +473,7 @@ function startEstimate($: EngineInterface, args: { model?: string; sql?: string 
  */
 async function startWhenIdle<T>(
   $: EngineInterface,
+  look: Look,
   args: { model?: string; sql?: string },
   waitUntil: number,
   reuse: () => T | undefined,
@@ -419,7 +482,9 @@ async function startWhenIdle<T>(
   // The project is read again after each wait: a /cd meanwhile moves the check to the project now in use.
   let dir: string | null = null
   for (;;) {
-    dir = (await $.session.cwd().catch(() => seenDir)) ?? null
+    dir = await sessionDir($, look, seenDir)
+    // An unreadable folder starts no estimate: it could be the project one is already running in.
+    if (look.lost) return null
     const running = [...active].filter(([, d]) => d === dir).map(([p]) => p)
     if (running.length === 0) break
     const left = waitUntil - (await $.clock.now())
@@ -622,13 +687,15 @@ async function estimate($: EngineInterface, args: { model?: string; sql?: string
 }
 
 /** The estimate, started on the long budget if none is running for these arguments; `pending` when it is not done by `waitUntil`. */
-async function estimateWithin($: EngineInterface, args: { model?: string; sql?: string }, waitUntil: number, taken: Map<string, Answer>, refusedAt: number | undefined): Promise<Answer | 'pending'> {
+async function estimateWithin($: EngineInterface, args: { model?: string; sql?: string }, waitUntil: number, taken: Map<string, Answer>, refusedAt: number | undefined, look: Look): Promise<Answer | 'pending' | 'unreadable'> {
   const key = JSON.stringify(args)
   const had = taken.get(key)
   if (had) return had
   // The look-up and the insert below are one step: nothing is awaited between them, or two passes would each start one.
   const now = await $.clock.now()
-  const here = (await $.session.cwd().catch(() => seenDir)) ?? null
+  const here = await sessionDir($, look, seenDir)
+  // Which project this is cannot be told: nothing is reused, nothing starts, and the command is refused until it can be.
+  if (look.lost) return 'unreadable'
   let running = inflight.get(key)
   // An answer made in another project is of that project's models, not this one's.
   if (running && (running.generation !== generation || running.dir !== here)) running = undefined
@@ -642,6 +709,7 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
     // this one waits its turn, within the same bound.
     const entry = await startWhenIdle(
       $,
+      look,
       args,
       waitUntil,
       () => {
@@ -655,14 +723,16 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
         return made
       },
     )
-    if (!entry) return 'pending'
+    if (!entry) return look.lost ? 'unreadable' : 'pending'
     running = entry
   }
   const left = waitUntil - (await $.clock.now())
   const done = left > 0 ? await within($, left, running.answer.then(answer => ({ answer }))) : null
   if (!done) return 'pending'
   // The project may have changed while it ran (an edit, a /cd, or a dbt run let through meanwhile): that answer is of the old one, and the next pass asks again.
-  if (running.generation !== generation || running.dir !== ((await $.session.cwd().catch(() => seenDir)) ?? null)) {
+  // A folder lost here is the gate's to refuse: it keeps the answer in hand if it is over the limit.
+  const after = await sessionDir($, look, seenDir)
+  if (running.generation !== generation || running.dir !== after) {
     if (inflight.get(key) === running) inflight.delete(key)
     return 'pending'
   }
