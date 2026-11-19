@@ -10,6 +10,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { SqlGraphState, SqlGraphView } from '../../types'
 import { later, runTool, within } from '../altimate-cli'
+import { openTracked } from '../usage'
 import { projectLayout } from '../lineage-graph'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -202,7 +203,7 @@ export function register(on: On, context: FeatureContext) {
     if (!model) return { text: 'Read or edit a dbt model, or run /sql-graph <model>.' }
     const shownModel = plain(model)
     try {
-      await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
+      await openTracked($, 'sql_graph', () => $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true }))
     } catch (error) {
       return { text: plain(`Could not open the SQL graph: ${String(error)}`) }
     }

@@ -12,6 +12,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 import type { CteProfileState, CteRow, CteTier } from '../../types'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import { later, runTool } from '../altimate-cli'
+import { openTracked } from '../usage'
 import { setStatusPart } from '../status-line'
 import type { BandUi, FeatureContext } from './index'
 
@@ -141,7 +142,7 @@ function missingTool(text: string): boolean {
 }
 
 async function openPane($: EngineInterface) {
-  await $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true })
+  await openTracked($, 'profile_ctes', () => $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true }))
 }
 
 /** The model the command names, else the one last read or edited. */

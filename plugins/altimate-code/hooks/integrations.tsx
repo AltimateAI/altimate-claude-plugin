@@ -9,6 +9,7 @@ import { startReviewNotices } from './review-notices'
 import { clearStatusParts, setStatusPart } from './status-line'
 import { registerTaskImpact, startTaskImpact, taskBand } from './task-impact'
 import { installToolChain } from './tool-chain'
+import { sessionStarted } from './usage'
 
 const PANE = 'altimate-integrations'
 const PANE_TITLE = 'Altimate integrations'
@@ -571,6 +572,8 @@ export const register: Register = (on, options) => {
       name: COMMAND,
       description: 'One-click GitHub, Jira and Linear integrations for your Altimate workspace',
     })
+    // One anonymous usage event per session start, in the background.
+    sessionStarted($)
     // The lineage half failing to start must not stop this pane's own setup below.
     await startLineage($).catch(error => $.ui.log(`lineage-pane · could not start: ${String(error)}`))
     await startTaskImpact($).catch(error => $.ui.log(`lineage-summary · could not start: ${String(error)}`))

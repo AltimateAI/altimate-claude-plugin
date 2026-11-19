@@ -6,6 +6,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later } from './altimate-cli'
+import { openTracked } from './usage'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
   cellText,
@@ -1776,7 +1777,7 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
     // A /clear while the project or the size was being read ended the conversation that asked: open nothing in the new one.
     if (asked !== generation) return { text: 'The conversation was cleared before the query started; run /dbt-show again.' }
     try {
-      await $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...request, focus: true, closeOnEscape: true })
+      await openTracked($, 'dbt_show', () => $.ui.open({ id: RESULTS_PANE, title: RESULTS_TITLE, ...request, focus: true, closeOnEscape: true }))
     } catch (error) {
       return { text: `Could not open the Query results pane: ${String(error)}` }
     }

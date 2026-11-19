@@ -13,6 +13,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import { runTool, within } from '../altimate-cli'
+import { featureUsed } from '../usage'
 import { parseDbtCommand, type DbtInvocation } from '../dbt-command'
 import { setStatusPart } from '../status-line'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
@@ -150,10 +151,12 @@ export function register(on: On, context: FeatureContext) {
     })
     if (!held) return { text: 'Nothing is held: no dbt command is waiting on its scan size.' }
     if (!allowed) return { text: 'The held command changed meanwhile: run /allow-scan again to allow the one now held.' }
+    featureUsed($, 'cost_gate', 'allowed')
     return { text: `Allowed: ${held.target} (≈ ${held.display}${held.planner ? `, ${held.planner} plan estimate` : ''}) runs once when Claude runs the same command again; after that it is held again.` }
   })
 
   on('command.run', { command: 'scan-cost' }, async ($, e) => {
+    featureUsed($, 'scan_cost', 'opened')
     const target = e.args.trim()
     if (!target) {
       const last = (await read($, costAtom))?.lastEstimate
@@ -220,6 +223,8 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
     // Only this pass's own note: a sibling pass for the same command may still be between noting and recording its answer.
     if (overNow.get(e.command) === mine.note) overNow.delete(e.command)
   })
+  // Every refusal is a hold: over the limit, an estimate still coming in, or a project that could not be read.
+  if (verdict) featureUsed($, 'cost_gate', 'held')
   // A dbt run or build that is let through rebuilds relations while it runs: an estimate kept from before it is stale from here.
   if (verdict === null && limitBytes > 0 && parseDbtCommand(e.command).some(i => i.subcommand !== null && REBUILDS.has(i.subcommand))) dropFinished()
   return verdict
