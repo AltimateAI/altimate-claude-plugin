@@ -26,6 +26,7 @@ import {
   summaryOf,
   upstreamWords,
   WINDOWS_EXPLORER,
+  unknownReach,
 } from './impact-report'
 
 // A synthetic project: orders → fct_orders.revenue → three hops of readers.
@@ -550,4 +551,14 @@ describe('the opener', () => {
     // No Windows path: nothing for explorer.exe to open.
     expect(openersFor('wsl', path, { windowsPath: null, explorerAtC: true }).map(one => one.argv[0])).toEqual(['wslview', 'xdg-open'])
   })
+})
+
+test('models read in full that the value was not traced to keep the reach at 0 with "may change"; only unread models make it unknown', () => {
+  const focus = { model: 0, column: 'val', hop: 0, end: false }
+  const base = { version: 1, focus: { model: 'model.p.a', column: 'val' }, direction: 'downstream', nodes: [{ id: 'model.p.a', name: 'a' }, { id: 'model.p.b', name: 'b' }, { id: 'model.p.c', name: 'c' }], columns: [focus] }
+  // Readers that select another column: read, and the value not traced to them.
+  const notTraced = { ...base, counts: { columns: 0, models: 0, ends: 0, hops: 0, may_carry_models: 2, model_level: 2 }, unresolved: [], may_carry: [{ id: 'model.p.b', name: 'b', reason: 'not_traced' }, { id: 'model.p.c', name: 'c', reason: 'not_traced' }] } as any
+  expect(unknownReach(notTraced)).toBeNull()
+  const unread = { ...notTraced, unresolved: [{ model: 1, reason: 'the SQL could not be parsed', code: 'unresolved' }] } as any
+  expect(unknownReach(unread)).toBe('not traced: 1 downstream model could not be read (the SQL could not be parsed)')
 })

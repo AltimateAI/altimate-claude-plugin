@@ -226,18 +226,17 @@ export type ColumnTrace = {
 
 /**
  * Why an answer that reached no column cannot be read as "reaches 0": models that may read the column were
- * not read (no compiled SQL, a parse error), or may carry it. Null for a genuine zero, or any reach found.
+ * not read (no compiled SQL, a parse error). Null for a genuine zero, or any reach found.
  */
 export function unknownReach(answer: ColumnAnswer | null): string | null {
   if (!answer) return null
   const r = reachOf(answer)
-  if (r.columns > 0 || r.models > 0) return null
+  // Models read in full that the value was not traced to stay "may change" beside a real 0; only unread models make it unknown.
+  if (r.columns > 0 || r.models > 0 || r.unresolved === 0) return null
   const missing = (answer.unresolved ?? []).filter(one => /no compiled sql/i.test(String(one?.reason ?? ''))).length
-  const n = Math.max(r.unresolved, r.mayCarry)
-  if (n === 0) return null
   if (missing > 0) return `not traced: ${count(missing, 'downstream model')} ${missing === 1 ? 'has' : 'have'} no compiled SQL (run \`dbt compile\`)`
   const why = (answer.unresolved ?? []).map(one => String(one?.reason ?? '')).find(Boolean)
-  return `not traced: ${count(n, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
+  return `not traced: ${count(r.unresolved, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
 }
 
 /** The band's words for a column the task added: the manifest from before the task cannot trace it. */

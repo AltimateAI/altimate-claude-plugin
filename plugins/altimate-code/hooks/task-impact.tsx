@@ -225,12 +225,11 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
         const added = col.before === null
         const meta = await ask($, done, change, added ? null : col.name, 'downstream')
         const answer = added ? null : answerOf(meta)
-        // An answer that never reached the column (no hop 0) traced nothing: the manifest has no such column.
-        const unchecked = added || (!!answer && !answer.columns.some(one => one.hop === 0))
-        const down = unchecked ? null : answer
+        // An answer that never reached the column (no hop 0) traced nothing: it could not be traced.
+        const down = answer && answer.columns.some(one => one.hop === 0) ? answer : null
         // An altimate-code from before the column answer gives neither the answer nor its error.
-        const stale = !unchecked && !!meta && !down && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
-        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
+        const stale = !added && !answer && !!meta && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
+        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked: added, ...unknownOf(down), consumers: consumersOf(meta) }
       })
     }
   }
@@ -548,6 +547,8 @@ async function buildColumnReport($: EngineInterface, model: string, column: stri
   const downAnswer = answerOf(down.metadata)
   const upAnswer = answerOf(up.metadata)
   if (!downAnswer && !upAnswer) return { error: 'This altimate-code traces no single column. Update it to use /lineage-report <model>.<column>.' }
+  // An answer that never reached the column traced nothing: no report says it reaches 0.
+  if (downAnswer && !downAnswer.columns.some(one => one.hop === 0)) return { error: `${model} has no column ${column} in target/manifest.json. Run \`dbt parse\` or \`dbt compile\` if it was just added, then ask again.` }
   const name = typeof (down.metadata as any)?.model === 'string' ? String((down.metadata as any).model) : model
   const trace: ColumnTrace = { model: name, column, down: downAnswer, up: upAnswer, modelLevel: modelLevelOf(down.metadata), failed: false, ...unknownOf(downAnswer), consumers: consumersOf(down.metadata) }
   const data = columnReportData(name, column, trace, { builtAt: stamp(await $.clock.now()), manifest: 'target/manifest.json as it is now' })

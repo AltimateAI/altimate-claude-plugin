@@ -718,13 +718,29 @@ test('a renamed column is never shown as reaching 0 columns in 0 models: the old
 })
 
 test('a column the queried manifest does not know is not shown as 0, even when the engine answers with an empty reach for it', async ($, on) => {
-  const { turn, logs } = await start($, on, { impact: args => (args.column ? { column_answer: NOT_IN_MANIFEST(args.column) } : {}) })
+  const { turn, logs, writes, clock } = await start($, on, { impact: args => (args.column ? { column_answer: NOT_IN_MANIFEST(args.column) } : {}) })
   await turn('t1', async () => {
     await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
   })
   const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
   expect(line).not.toMatch(/reaches 0 columns/)
   expect(line).toContain('revenue  could not be traced')
+  // The column was there before the task: the report does not call it new.
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  const impact = JSON.stringify(embedded(writes.get(REPORT)!).focuses[0].impact)
+  expect(impact).toContain('could not be traced')
+  expect(impact).not.toContain('new in this task')
+  await band.unmount()
+})
+
+test('/lineage-report on a column the manifest answers without reaching is a plain error, never a report that it reaches 0', async ($, on) => {
+  const { runs, writes } = await start($, on, { openers: { 'xdg-open': 0 }, impact: args => (args.column ? { model: 'fct_orders', column_answer: NOT_IN_MANIFEST(args.column) } : {}) })
+  const shown: any = await $.command.run({ command: 'lineage-report', args: 'fct_orders.fresh' } as any)
+  expect(shown.text).toBe('fct_orders has no column fresh in target/manifest.json. Run `dbt parse` or `dbt compile` if it was just added, then ask again.')
+  expect(runs.some(argv => argv[0] === 'xdg-open')).toBe(false)
+  expect(writes.has(COLUMN_REPORT)).toBe(false)
 })
 
 test('a column found in the manifest with nothing downstream still says it reaches 0', async ($, on) => {
