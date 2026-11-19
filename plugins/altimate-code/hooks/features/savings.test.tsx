@@ -600,7 +600,7 @@ test('a size too small for the queries is marked, and pressing it says they woul
   await ui.unmount()
 })
 
-test('a flagged warehouse is remembered, and a later run that finds it resized says what that saved', async ($, on) => {
+test('a flagged warehouse is remembered, and a later run that finds it resized shows its observed spend, not a saving', async ($, on) => {
   // A run on 2026-11-10 flagged Classic as a SMALL CLASSIC that cost $27.54 over its week.
   const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
   const resized = JSON.parse(JSON.stringify(ANSWER))
@@ -611,7 +611,27 @@ test('a flagged warehouse is remembered, and a later run that finds it resized s
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. \$118\.03 a month then, \$59\.01 now: \$59\.02 a month saved\.$/ })).toBeDefined()
+  const change = (await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\./ })) as any
+  expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. Observed spend: \$118\.03 a month before, \$59\.01 after\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Billed in different weeks, so a change in workload moves these too: not a measured saving\.$/ })).toBeDefined()
+  // The two amounts come from different weeks: the pane never calls their difference saved, nor colours it as one.
+  expect(await ui.find({ type: 'Text', text: /saved/i })).toBeUndefined()
+  expect((change as any).props.color).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a resized warehouse that costs more in its later week shows both amounts the same way', async ($, on) => {
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const resized = JSON.parse(JSON.stringify(ANSWER))
+  const classic = resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  classic.size = 'X_SMALL'
+  classic.window_cost = 41.31
+  const { clock } = await start($, on, { answer: resized, store })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. Observed spend: \$118\.03 a month before, \$177\.04 after\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /saved|more/i })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -940,3 +960,4 @@ test('a finding in a workspace with no SQL warehouse still counts that workspace
   expect(await ui.find({ type: 'Text', text: /^Classic \(workspace 222\) · / })).toBeDefined()
   await ui.unmount()
 })
+

@@ -321,14 +321,16 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
   }
 }
 
-/** What a warehouse was when a run first flagged it, kept across sessions to tell what a change saved. */
+/** What a warehouse was when a run first flagged it, kept across sessions to show its spend before and after a change. */
 type Baseline = { date: string; type: string; size: string | null; windowCost: number }
 
 const baselineKey = (connection: string, warehouseId: string) => `savings-baseline:${connection}:${warehouseId}`
 
 /**
  * Each flagged warehouse's state is kept the first time a run flags it. A later run that finds its
- * size or type changed reports what it cost a month then and now, from the two windows' measured cost.
+ * size or type changed reports its observed spend a month then and now, from the two windows' billed
+ * cost. The windows are different weeks, so a change in workload moves the amounts too: they are not a
+ * saving measured with the workload held constant.
  */
 export async function trackChanges($: EngineInterface, view: SavingsView, warehouses: ToolWarehouse[], today: string): Promise<SavingsView['changes']> {
   const connection = view.connection ?? 'default'
@@ -576,9 +578,10 @@ export function register(on: On, _context: FeatureContext) {
         {report.changes.map((one, at) => {
           const amounts = compared(one.monthlyBefore, one.monthlyNow)
           return (
-            <Text key={`change-${at}`} color="success">
-              {`${one.name}: ${one.from} → ${one.to} since ${one.since}. ${amounts.was} a month then, ${amounts.now} now${one.monthlyBefore > one.monthlyNow ? `: ${amounts.gap} a month saved` : ''}.`}
-            </Text>
+            <Box key={`change-${at}`} flexDirection="column">
+              <Text>{`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${amounts.was} a month before, ${amounts.now} after.`}</Text>
+              <Text dimColor>Billed in different weeks, so a change in workload moves these too: not a measured saving.</Text>
+            </Box>
           )
         })}
         {report.total.resources > 0 ? (

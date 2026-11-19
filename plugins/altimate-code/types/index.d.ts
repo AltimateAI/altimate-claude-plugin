@@ -670,7 +670,8 @@ export type SavingsView = {
     currentMonthly: number
     choices: { label: string; monthlyCost: number; monthlySaving: number; fits: boolean; cores: number; coresNeeded: number }[]
   }[]
-  /** Warehouses whose size or type changed since a run first flagged them, and what that did to their cost. */
+  /** Warehouses whose size or type changed since a run first flagged them, with their observed spend a month before and
+   * after: billed in different weeks, so not a saving measured with the workload held constant. */
   changes: { name: string; from: string; to: string; since: string; monthlyBefore: number; monthlyNow: number }[]
 }
 
