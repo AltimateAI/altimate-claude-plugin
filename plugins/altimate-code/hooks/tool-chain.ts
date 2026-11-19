@@ -1,22 +1,27 @@
 // The one `tool.call` hook the features share. Bash and file-edit handling runs in fixed phases, so
 // a rewrite is seen by the gate and by what runs after:
 //
-//   bashRewrite → bashGate → next(e) → bashAfter → editAfter → readOrEditAfter
+//   bashRewrite → bashGate → callStart → next(e) → bashAfter → editAfter → readOrEditAfter
+//
+// `callStart` is not a phase that decides anything: it lets a feature note what it needs of the call as it
+// was before it ran (the conversation it is in), and it cannot refuse or change the call.
 //
 // Within a phase the features run in the order features/index.ts calls them. A feature that throws is
 // logged and skipped: its failure never stops or alters the call on its own. After-phases are awaited,
 // so they stay quick and leave slow work to `later`. Context lines they return are appended to the
-// call's result, after any the call already carries. Each phase has a deadline (PHASE_TIMEOUT_MS): one
+// call's result, after any the call already carries. Each phase has a deadline (PHASE_TIMEOUT_MS, longer for editAfter: PHASE_DEADLINES): one
 // that does not answer in time is logged and the call goes on as if no feature had spoken in it.
 import type { On, ToolCallInput, ToolCallResult } from 'claude-code'
 
 import { within } from './altimate-cli'
 import {
+  EDIT_AFTER_TIMEOUT_MS,
   EDIT_READS_BEFORE,
   featuresBashAfter,
   featuresBashDropped,
   featuresBashGate,
   featuresBashRewrite,
+  featuresCallStart,
   featuresEditAfter,
   featuresReadOrEditAfter,
 } from './features'
@@ -47,6 +52,9 @@ export const PHASES: readonly Phase[] = ['bashRewrite', 'bashGate', 'bashAfter',
  */
 export const PHASE_TIMEOUT_MS = 5_000
 
+/** A phase's own deadline when it is not PHASE_TIMEOUT_MS: the edit phase holds an edit's result for a slow check. */
+const PHASE_DEADLINES: Partial<Record<Phase | 'readBefore' | 'callStart' | 'bashDropped', number>> = { editAfter: EDIT_AFTER_TIMEOUT_MS }
+
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit'])
 
 /** The Bash call in `e`, or null when it is no Bash call with a command. */
@@ -70,6 +78,8 @@ export function withContext(result: ToolCallResult, lines: readonly string[]): T
 export type ChainSteps = {
   bashRewrite: (e: BashCall) => Promise<string>
   bashGate: (e: BashCall) => Promise<{ deny: string } | null>
+  /** Before the call runs, after the rewrites and the gate: what a feature notes of the call as it was. Never refuses or changes it. */
+  callStart?: (e: ToolCallInput) => Promise<void>
   bashAfter: (e: BashCall, result: ToolCallResult) => Promise<string[]>
   /** Told when a Bash call will not reach bashAfter because a gate refused it or its result is a refusal. */
   bashDropped?: (e: BashCall) => Promise<void>
@@ -79,22 +89,23 @@ export type ChainSteps = {
   readBefore: (path: string) => Promise<string | null>
   readsBefore: boolean
   /** Runs one phase's work under its deadline: null when the work did not finish in time or failed. */
-  limit: <T>(work: Promise<T>) => Promise<T | null>
+  limit: <T>(work: Promise<T>, ms: number) => Promise<T | null>
   /** Where a phase that timed out is logged. */
   log: (text: string) => void
 }
 
 /** The phase's value, or `fallback` (logged) when it ran out of time, failed or threw. */
-async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore' | 'bashDropped', fallback: T, run: () => Promise<T>): Promise<T> {
+async function bounded<T>(steps: ChainSteps, phase: Phase | 'readBefore' | 'callStart' | 'bashDropped', fallback: T, run: () => Promise<T>): Promise<T> {
   try {
     // Wrapped, so a legitimate null value is told apart from the deadline's null.
-    const done = await steps.limit(Promise.resolve().then(run).then(value => ({ value })))
+    const ms = PHASE_DEADLINES[phase] ?? PHASE_TIMEOUT_MS
+    const done = await steps.limit(Promise.resolve().then(run).then(value => ({ value })), ms)
     if (done) return done.value
   } catch {
     // The deadline itself failed: only this phase is dropped, the later ones (the gate) still run.
   }
   try {
-    steps.log(`tool chain · ${phase} did not finish within ${PHASE_TIMEOUT_MS} ms or failed: the call goes on unchanged`)
+    steps.log(`tool chain · ${phase} did not finish within ${PHASE_DEADLINES[phase] ?? PHASE_TIMEOUT_MS} ms or failed: the call goes on unchanged`)
   } catch {
     // A logger that throws does not drop the phases after this one.
   }
@@ -114,6 +125,7 @@ export async function beforeCall(input: ToolCallInput, steps: ChainSteps): Promi
       return { e, deny, before: null }
     }
   }
+  if (steps.callStart) await bounded<void>(steps, 'callStart', undefined, () => steps.callStart!(e))
   const path = filePathOf(e)
   const before = path && EDIT_TOOLS.has(e.tool) && steps.readsBefore ? await bounded(steps, 'readBefore', null, () => steps.readBefore(path)) : null
   return { e, deny: null, before }
@@ -146,13 +158,14 @@ export function installToolChain(on: On) {
     const steps: ChainSteps = {
       bashRewrite: e => featuresBashRewrite($, e),
       bashGate: e => featuresBashGate($, e),
+      callStart: e => featuresCallStart($, e),
       bashAfter: (e, result) => featuresBashAfter($, e, result),
       bashDropped: e => featuresBashDropped($, e),
       editAfter: (e, result, file) => featuresEditAfter($, e, result, file),
       readOrEditAfter: (e, result, file) => featuresReadOrEditAfter($, e, result, file),
       readBefore: path => $.fs.read(path),
       readsBefore: EDIT_READS_BEFORE,
-      limit: work => within($, PHASE_TIMEOUT_MS, work),
+      limit: (work, ms) => within($, ms, work),
       log: text => $.ui.log(text, { to: 'debug' }),
     }
     // The chain failing never stops the call: it then runs as it came, and its result goes back as is.

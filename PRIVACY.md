@@ -1,7 +1,7 @@
 # Privacy Policy — Altimate Code plugin for Claude Code
 
 **Effective date:** November 2, 2026
-**Last revised:** November 13, 2026
+**Last revised:** November 17, 2026
 **Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) MCP server and CLI.
 
 This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai/privacy) and [Terms](https://www.altimate.ai/terms), which govern Altimate services generally. Where this document is silent, the master policy applies. Questions: **info@altimate.ai**.
@@ -29,6 +29,12 @@ The plugin registers a local stdio MCP server through `.mcp.json`, provides rout
 | Database credentials and connection configuration | Read locally by the MCP server to connect to your databases | Local configuration; not included in tool results |
 | Schema metadata, sampled column values, and query results returned by tools | Local MCP server → Claude Code conversation → your configured model provider | Governed by Claude Code and your model provider's policies |
 | Scratch tables and spilled query results | Local session storage or spill files; any content Claude reads enters the conversation and reaches your model provider | Local artifacts; conversation copies follow Claude Code and provider policies |
+
+## dbt helpers
+
+In a dbt project the plugin's hooks module runs the project's own dbt on this machine (`dbt show`, `dbt parse`, `dbt --version`, and `dbt debug` when you ask): after Claude edits a model, at session start, and when you press a button. Those commands connect to your warehouse with your local profile. What the helpers give Claude (dbt's errors, column names, the manifest's facts about a model, the environment check) enters the Claude Code conversation and reaches your model provider. Rows from `dbt show` that the results pane keeps (up to 50 per query, long cells cut, and the last 20 queries) stay in Claude Code's local plugin store until you press **Clear history**; they are not sent anywhere by the plugin. Bookmarked queries (at most 50) are the exception: **Clear history** keeps them and their rows. They are kept with the plugin's other saved settings in Claude Code's plugin store under the Claude Code configuration directory, in files only your user can read, and turning `dbt_mods` off does not delete them; to delete one, un-bookmark it and press **Clear history**. Set the plugin's `dbt_mods` option to false to turn the helpers off.
+
+Opening a dbt folder runs programs the repository supplies, with no action from you: at session start the plugin runs the project's own `.venv/bin/dbt --version` (a `venv` or `Scripts\dbt.exe` too) and the Python that dbt's launcher names. Secret values from the `profiles.yml` a dbt command reads (the one its `--profiles-dir` or `DBT_PROFILES_DIR` names, else the one in the folder it ran in, the project's, or `~/.dbt`'s: the string fields of its outputs, and the env vars it names with their defaults) are removed from dbt's messages (errors, logs, the doctor's details, the failure band, Explain and Fix, and the error text kept in the query history) that the helpers show, save or send, and dbt's errors about a `profiles.yml` it cannot read, validate or render are replaced with a fixed message. Identifiers such as schema, database, dataset, project, catalog, warehouse, role and user are not treated as secrets, nor are values under 6 characters or the `type`, `threads`, `method` and `port` fields; query results and manifest facts are shown as they are. The plugin reads those values locally, keeps them in memory only, and never logs, stores or sends them. Redaction is best effort, not a guarantee about every text dbt prints: it matches those values as written, JSON-escaped and in Python's string and byte forms, including values set for the command (`NAME=value dbt …`, `env`, `export`); it cannot catch a value dbt or an adapter prints in another form (encoded, transformed or split), or one the profile builds other than through `env_var`. Other dbt errors (a missing target or profile name, a model's own missing `env_var`) are kept, since they carry no secret. Claude's own dbt commands show their output to Claude unchanged; the plugin does not alter Claude's tool results.
 
 Direct local data tools do not invoke a planning model. Workspace tools have the additional service flows below; delegation uses the separate provider path described later.
 
@@ -150,6 +156,8 @@ The plugin and the altimate-code CLI are professional developer tools, not direc
 ## Changes to this policy
 
 We will update this document in this repository and revise the effective date when our practices change. Material changes to Altimate-wide practices are governed by the master [Privacy Policy](https://www.altimate.ai/privacy).
+
+**November 17, 2026:** added [dbt helpers](#dbt-helpers) (plugin 1.8.0): the dbt commands the plugin runs in a dbt project, and what it keeps of their results.
 
 **November 16, 2026:** added [The lineage report](#the-lineage-report) (plugin 1.6.0): the offline report page, and the usage events the altimate-code CLI sends for it.
 

@@ -1,9 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 
-import { parseDbtCommand } from './dbt-command'
+import { isDbtSubcommand, parseDbtCommand } from './dbt-command'
 
 /** The fields a caller decides on, without the offsets. */
-const shape = (line: string) => parseDbtCommand(line).map(({ start, end, subcommandEnd, ...rest }) => rest)
+const shape = (line: string) => parseDbtCommand(line).map(({ start, end, subcommandEnd, argv, env, cds, commented, ...rest }) => rest)
 
 const base = { select: [], target: null, targetPath: null, hasDefer: false, hasState: false, dynamic: false }
 
@@ -31,7 +31,7 @@ test('uv run dbt, poetry run dbt and a path to dbt are dbt launchers', () => {
 test('VAR=x in front of dbt is kept in the invocation; DBT_DEFER and DBT_STATE count as defer and state', () => {
   const line = 'DBT_PROFILES_DIR=. dbt run -s a'
   const [one] = parseDbtCommand(line)
-  expect(one).toEqual({ ...base, binary: 'dbt', subcommand: 'run', select: ['a'], start: 0, end: line.length, subcommandEnd: line.indexOf(' -s') })
+  expect(one).toEqual({ ...base, binary: 'dbt', subcommand: 'run', select: ['a'], start: 0, end: line.length, subcommandEnd: line.indexOf(' -s'), argv: ['dbt', 'run', '-s', 'a'], env: ['DBT_PROFILES_DIR=.'], cds: [], commented: false })
   expect(shape('DBT_DEFER=1 DBT_STATE=prod dbt run')).toEqual([{ ...base, binary: 'dbt', subcommand: 'run', hasDefer: true, hasState: true }])
 })
 
@@ -357,4 +357,54 @@ test('unquoted tilde, brace lists and patterns are expansions; $"…" is a quote
   expect(shape('dbt run -t $-')).toEqual([{ ...run, dynamic: true }])
   expect(parseDbtCommand('uv run --help dbt run')).toEqual([])
   expect(parseDbtCommand('uvx --version dbt run')).toEqual([])
+})
+
+test('argv: the executable as written and every argument, quotes decoded, redirections and the launcher left out', () => {
+  const argvs = (line: string) => parseDbtCommand(line).map(one => one.argv)
+  expect(argvs(`dbt show a 'b c' "d \\"e\\"" f\\ g`)).toEqual([['dbt', 'show', 'a', 'b c', 'd "e"', 'f g']])
+  expect(argvs('uv run dbt run -s a 2>&1 | tail -3')).toEqual([['dbt', 'run', '-s', 'a']])
+  expect(argvs('cd x && .venv/bin/dbt build --select a > out.log')).toEqual([['.venv/bin/dbt', 'build', '--select', 'a']])
+  expect(argvs('dbt build \\\n  --select stg_x')).toEqual([['dbt', 'build', '--select', 'stg_x']])
+})
+
+test('env: the variables set for the invocation, from its own prefix, env, and an export earlier in the line; a later one wins', () => {
+  const envs = (line: string) => parseDbtCommand(line).map(one => one.env)
+  expect(envs('DBT_TARGET=prod dbt run -s a')).toEqual([['DBT_TARGET=prod']])
+  expect(envs('env A=1 B="x y" dbt run')).toEqual([['A=1', 'B=x y']])
+  expect(envs('export A=1 B=2; dbt run -s o')).toEqual([['A=1', 'B=2']])
+  expect(envs('export DBT_TARGET=dev; DBT_TARGET=prod dbt run')).toEqual([['DBT_TARGET=prod']])
+  expect(envs('export A=1 && dbt run -s a; dbt test -s a')).toEqual([['A=1'], ['A=1']])
+  // Only real assignments, and only an invocation's own: another command's are not its environment.
+  expect(envs('echo a=b; git commit -m x=1 && dbt run -s o')).toEqual([[]])
+  expect(envs('A=1 echo hi; dbt run -s o')).toEqual([[]])
+  expect(envs('dbt run -s a; export A=1')).toEqual([[]])
+})
+
+test('cds: the folder each cd before the invocation names, in order; one that cannot be named is null', () => {
+  const cds = (line: string) => parseDbtCommand(line).map(one => one.cds)
+  expect(cds('dbt run')).toEqual([[]])
+  expect(cds('cd a && cd ../b && dbt run -s x')).toEqual([['a', '../b']])
+  expect(cds('cd "my dir" && dbt run')).toEqual([['my dir']])
+  expect(cds('cd a && dbt run -s x; cd b && dbt test -s x')).toEqual([['a'], ['a', 'b']])
+  expect(cds('cd ~/x && dbt run')).toEqual([[null]])
+  expect(cds('cd $DIR && dbt run')).toEqual([[null]])
+  expect(cds('cd - && dbt run')).toEqual([[null]])
+  expect(cds('cd && dbt run')).toEqual([[null]])
+  // Text that only mentions cd is no cd.
+  expect(cds('echo "cd x" && dbt run')).toEqual([[]])
+  expect(cds('git commit -m "cd x" && dbt run')).toEqual([[]])
+})
+
+test('commented: a comment after the invocation starts', () => {
+  expect(parseDbtCommand('dbt show -s a # preview')[0]!.commented).toBe(true)
+  expect(parseDbtCommand('dbt show -s a')[0]!.commented).toBe(false)
+  expect(parseDbtCommand('dbt show --inline "select 1 # x" -s a')[0]!.commented).toBe(false)
+  expect(parseDbtCommand('# before\ndbt show -s a')[0]!.commented).toBe(false)
+})
+
+test('isDbtSubcommand tells dbt\'s own subcommands from the first other word', () => {
+  expect(isDbtSubcommand('run')).toBe(true)
+  expect(isDbtSubcommand('run-operation')).toBe(true)
+  expect(isDbtSubcommand('hello')).toBe(false)
+  expect(isDbtSubcommand(null)).toBe(false)
 })

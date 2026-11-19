@@ -166,9 +166,25 @@ test('a phase that never settles is given up on: the call passes through unchang
   expect(await afterCall(edit, ok, null, steps)).toBe(ok)
   expect(seen).toEqual(
     ['bashRewrite', 'bashGate', 'bashAfter', 'readBefore', 'editAfter', 'readOrEditAfter'].map(
-      phase => `log:tool chain · ${phase} did not finish within 5000 ms or failed: the call goes on unchanged`,
+      phase => `log:tool chain · ${phase} did not finish within ${phase === 'editAfter' ? 35000 : 5000} ms or failed: the call goes on unchanged`,
     ),
   )
+})
+
+test('the edit phase may hold an edit longer than the others: a slow check still rides on its result', async () => {
+  const deadlines: number[] = []
+  const { steps } = recording({
+    editAfter: async () => ['held note'],
+    limit: (async (work: Promise<unknown>, ms: number) => {
+      deadlines.push(ms)
+      return work
+    }) as any,
+  })
+  const edit = { tool: 'Edit', file_path: '/repo/models/a.sql' } as any
+  const result = await afterCall(edit, ok, null, steps)
+  expect((result as any).context).toContain('held note')
+  // editAfter, then readOrEditAfter.
+  expect(deadlines).toEqual([35000, 5000])
 })
 
 test('a phase that throws at once is treated like one that timed out', async () => {

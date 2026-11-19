@@ -1,4 +1,8 @@
-import { expect, mock, test } from 'claude-code/testing'
+import { expect, mock, test as kitTest } from 'claude-code/testing'
+
+// These tests are about this half of the plugin: the dbt helpers, which run the project's own dbt, are
+// off here and tested in dbt-mods.test.tsx.
+const test = (name: string, body: Parameters<typeof kitTest>[1]) => kitTest(name, { options: { dbt_mods: false } }, body as any)
 
 import { commandDir } from './lineage'
 import { buildGraph, subgraph } from './lineage-graph'
@@ -74,7 +78,8 @@ async function start($: any, on: any, options: Options = {}) {
   const logs: string[] = []
   const debug: string[] = []
   const lists: string[] = []
-  const opens: string[] = []
+  const opens: { id: string; columns?: number; rows?: number }[] = []
+  const kept = new Map<string, unknown>()
   on('command.register', () => ({ value: { command: 'lineage' } }))
   // A turn's start and end beneath the plugin: the engine's answer is the model's text.
   on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
@@ -83,9 +88,14 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
   // A narrow terminal: Claude Code leaves a pane the plugin opens on its own undrawn, and says why.
-  on('ui.open', (_: unknown, e: { id: string; focus?: boolean }) => {
-    opens.push(e.id)
+  on('ui.open', (_: unknown, e: { id: string; columns?: number; rows?: number; focus?: boolean }) => {
+    opens.push({ id: e.id, columns: e.columns, rows: e.rows })
     return { value: options.narrow && !e.focus ? { isPlaced: false, reason: options.narrow } : {} }
+  })
+  on('store.get', (_: unknown, e: { key: string }) => ({ value: kept.get(e.key) }))
+  on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
+    kept.set(e.key, JSON.parse(JSON.stringify(e.value)))
+    return { value: undefined }
   })
   on('ui.toast', (_: unknown, e: { text: string }) => {
     toasts.push(e.text)
@@ -228,8 +238,32 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, calls, toasts, notes, logs, debug, lists, opens }
+  return { clock, calls, toasts, notes, logs, debug, lists, opens, kept }
 }
+
+test('the lineage pane keeps its default size and Min / Default / Max resize it', async ($, on) => {
+  const { clock, opens, kept } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await $.command.run({ command: 'lineage', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  // Opened from a 200-column terminal: Default is the widest dock, 45% of it.
+  expect(opens.at(-1)).toEqual({ id: 'altimate-lineage', columns: 90, rows: 34 })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', text: /● Default/ })).toBeDefined()
+  await ui.press({ key: 'lineage-size-max' })
+  await clock.settle()
+  expect(opens.at(-1)).toMatchObject({ id: 'altimate-lineage', columns: 90, rows: 60 })
+  expect(await ui.find({ type: 'Button', text: /● Max/ })).toBeDefined()
+  expect(kept.get('pane-sizes')).toEqual({ 'altimate-lineage': 'max' })
+  await ui.press({ key: 'lineage-size-min' })
+  await clock.settle()
+  expect(opens.at(-1)).toMatchObject({ columns: 50, rows: 14 })
+  await ui.press({ key: 'lineage-size-default' })
+  await clock.settle()
+  expect(opens.at(-1)).toMatchObject({ columns: 90, rows: 34 })
+  await ui.unmount()
+})
 
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
@@ -253,7 +287,7 @@ test('the pane opens by itself once a conversation; later reads, edits, shell co
   const { clock, opens } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
-  expect(opens).toEqual(['altimate-lineage'])
+  expect(opens.map(o => o.id)).toEqual(['altimate-lineage'])
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
   await clock.settle()
   await $.tool.call({ tool: 'Bash', command: `cat ${FILE}` })
@@ -261,12 +295,12 @@ test('the pane opens by itself once a conversation; later reads, edits, shell co
   await $.turn.start({ text: 'which model?', turnId: 't2' })
   await $.turn.complete({ answer: 'Look at `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't2' } as any)
   await clock.settle()
-  expect(opens).toEqual(['altimate-lineage'])
+  expect(opens.map(o => o.id)).toEqual(['altimate-lineage'])
 
   // /lineage opens it again, on the model it followed.
   await $.command.run({ command: 'lineage', args: '' } as any)
   await clock.settle()
-  expect(opens).toEqual(['altimate-lineage', 'altimate-lineage'])
+  expect(opens.map(o => o.id)).toEqual(['altimate-lineage', 'altimate-lineage'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()

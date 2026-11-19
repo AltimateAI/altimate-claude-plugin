@@ -77,7 +77,7 @@ export function buildGraph(manifest: Manifest): LineageGraph {
 }
 
 /** A YAML line without its comment: a `#` at the start or after a space, outside quotes. Limit: escaped quotes inside a quoted path are not handled; a YAML parser would. */
-function withoutComment(line: string): string {
+export function withoutComment(line: string): string {
   let quote = ''
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!

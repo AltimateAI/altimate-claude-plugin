@@ -2,6 +2,24 @@
 
 All notable changes to this plugin will be documented in this file.
 
+## [1.8.0] — 2026-11-17
+
+### Added
+- dbt helpers from dbt Power User, in the Claude Code session. Each runs the project's own dbt (its `.venv/bin/dbt` when there is one) and calls no model:
+  - **Compile and validate.** After Claude edits or writes a model, the plugin runs it with `dbt show` (one row) against the warehouse. dbt's error, or the columns `schema.yml` documents that the query no longer returns and those it returns undocumented, go to Claude with the edit's result and to a line above the prompt; the **dbt check** pane shows every column, or dbt's whole error. The check says when the columns could not be compared, and runs again when the model or its schema file changes outside Claude's edits.
+  - **Explain and Fix.** A failed `dbt run`, `test`, `build`, `seed`, `snapshot` or `retry` puts the failed nodes, read from the `run_results.json` the command wrote together with the errors dbt printed, above the prompt with **Explain** and **Fix with Altimate Code** (`/altimate-code:altimate`).
+  - **Query results pane.** Rows from Claude's `dbt show`, `/dbt-show <model>` and `/dbt-show select …` open as a table beside the chat, with **Re-run** (Claude's own command with the same flags and folder, unless it depended on its shell; or your query), **Bookmark**, **Clear history** and a history kept across sessions on this machine. It opens at the widest dock, and **Min / Default / Max** resize it (the lineage pane has them too); the choice is kept across sessions.
+  - **Model context.** When Claude reads a model, its materialization, columns (types, descriptions, tests), parents, children and depth upstream and downstream, from `target/manifest.json`, go with the file, once a turn.
+  - **Environment doctor.** At session start the plugin checks dbt, Python, the profile's adapter, installed packages and whether the manifest is older than the project's files, and offers **Run dbt parse** (or **Run dbt deps**). `/dbt-doctor` runs the checks with the warehouse connection test.
+- Compile and validate runs one `dbt show` per edit (with `dbt ls`, which runs no query, first when the manifest does not name the model). It skips a model whose path holds a space, says "dbt could not be run here" when dbt cannot be started, and asks Claude to fix the model only for errors that are the model's own.
+- Secret values from the `profiles.yml` a dbt command reads (the one its `--profiles-dir` or `DBT_PROFILES_DIR` names, else the one in the folder it ran in, the project's, or `~/.dbt`'s: the string fields of its outputs, and the env vars it names with their defaults) are removed from dbt's messages (errors, logs, the doctor's details, the failure band, Explain and Fix, and the error text kept in the query history) that the helpers show, save or send, and dbt's errors about a `profiles.yml` it cannot read, validate or render are replaced with a fixed message. Identifiers such as schema, database, dataset, project, catalog, warehouse, role and user are not treated as secrets, nor are values under 6 characters or the `type`, `threads`, `method` and `port` fields; query results and manifest facts are shown as they are. The plugin reads those values locally, keeps them in memory only, and never logs, stores or sends them. Redaction is best effort, not a guarantee about every text dbt prints: it matches those values as written, JSON-escaped and in Python's string and byte forms, including values set for the command (`NAME=value dbt …`, `env`, `export`); it cannot catch a value dbt or an adapter prints in another form (encoded, transformed or split), or one the profile builds other than through `env_var`. Other dbt errors (a missing target or profile name, a model's own missing `env_var`) are kept, since they carry no secret. A dbt command Claude runs itself shows its output to Claude unchanged. The fixed message is "profiles.yml could not be parsed; run `dbt debug` yourself to see the error"; it replaces the error on every surface: the compile-and-validate note, the check pane, the band, Explain and Fix, `/dbt-show` and its saved history, and the doctor.
+- Saved queries cut long cells and drop rows to stay within 32 KiB each (a query whose SQL alone is larger is kept whole, within the history's 2 MiB total); bookmarks are capped at 50.
+- Artifacts are read from the `target-path` of `dbt_project.yml`; `DBT_TARGET_PATH`, `--target-path` and a Jinja `target-path` are not followed.
+- The `dbt_mods` option turns the dbt helpers off.
+
+### Privacy
+- README and PRIVACY say that opening a dbt folder runs the project's `.venv` dbt `--version` and its Python at session start, and that bookmarked queries keep their rows after **Clear history** in Claude Code's plugin store.
+
 ## [1.7.0] — 2026-11-17
 
 ### Added

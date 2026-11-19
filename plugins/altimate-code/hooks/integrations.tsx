@@ -605,6 +605,7 @@ export const register: Register = (on, options) => {
     if (e.props.hasSurvey) return next(e)
     const ui = $.ui.resolve(e)
     const lineage = await taskBand($, ui)
+    // The dbt helpers' lines are one of the features' lines (features/index.ts), under the lineage one.
     const extra = await featureBandLines($, ui)
     const tail =
       extra.length === 0 ? (
