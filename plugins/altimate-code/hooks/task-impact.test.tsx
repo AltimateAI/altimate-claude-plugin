@@ -882,3 +882,11 @@ test('a column whose downstream models have no compiled SQL is not shown as reac
   expect(report.focuses[0].down).toEqual({ hops: [], truncated: false, error: 'The reach is unknown: 2 downstream models have no compiled SQL (run `dbt compile`).' })
   await band.unmount()
 })
+
+test('with no manifest copied at the task start, a column added in the task is asked of the project\'s manifest as it is now', async ($, on) => {
+  const { tools, turn } = await start($, on, { noManifest: true })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: STAGING, old_string: 'amount_cents / 100 as amount', new_string: 'amount_cents / 100 as total' })
+  })
+  expect(directional(tools).some(one => one.column === 'total' && one.manifest_path === MANIFEST)).toBe(true)
+})

@@ -1271,7 +1271,6 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     if (lookupFailed) $.ui.toast('◆ impact-first · the lineage lookup failed; the edit went ahead without it', { timeoutMs: 8000 })
     if (note) {
       $.ui.log(note.toast, { to: 'debug' })
-      // Opt-in: the same note on the transcript too.
       if (showEditImpact) $.ui.log(note.toast)
     }
     const result = await next(e)

@@ -452,3 +452,9 @@ test('a graph that does not say which column its tests check gives no column cou
   expect(testCountText(graph, m, 'amount', 1)).toBe('1 test')
   expect(testCountText(buildGraph({ nodes: { [m]: { resource_type: 'model', name: 'orders' }, 'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: 'amount', depends_on: { nodes: [m] } } } }), m, 'amount', 1)).toBe('1 test on amount')
 })
+
+test('a column typed in another case counts the tests on that column', () => {
+  const m = 'model.shop.orders'
+  const graph = buildGraph({ nodes: { [m]: { resource_type: 'model', name: 'orders' }, 'test.shop.nn': { resource_type: 'test', name: 'nn', column_name: 'revenue', attached_node: m, depends_on: { nodes: [m] } } } })
+  expect(testsOnColumn(graph, m, 'REVENUE')).toBe(1)
+})

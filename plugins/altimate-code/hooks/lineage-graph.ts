@@ -319,7 +319,8 @@ export function testsOnColumn(graph: LineageGraph, id: string, column: string): 
   const tests = downstreamOf(graph, id).testIds.map(test => [test, graph.nodes[test]] as const)
   if (tests.some(([, node]) => node?.testColumn === undefined)) return null
   return tests.filter(([test, node]) => {
-    if (node?.testColumn !== column) return false
+    // dbt and warehouses fold unquoted names: REVENUE typed is the yml's revenue.
+    if (node?.testColumn?.toLowerCase() !== column.toLowerCase()) return false
     if (node.testOn) return node.testOn === id
     const parents = graph.parents[test] ?? []
     return parents.length > 0 && parents.every(parent => parent === id)

@@ -220,9 +220,10 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
     }
     for (const col of change.columns) {
       jobs.push(async () => {
-        // A column the SQL from before the task lacks is no column of the task's manifest: asking for it
-        // would read as nothing downstream. Only the model's own count is asked.
-        const added = col.before === null
+        // A column the SQL from before the task lacks is no column of the task's copy of the manifest: asking
+        // for it would read as nothing downstream, so only the model's own count is asked. Without a copy the
+        // project's manifest as it is now is read, which may know it.
+        const added = col.before === null && !!done.manifests[change.root]
         const meta = await ask($, done, change, added ? null : col.name, 'downstream')
         const answer = added ? null : answerOf(meta)
         // An answer that never reached the column (no hop 0) traced nothing: it could not be traced.
