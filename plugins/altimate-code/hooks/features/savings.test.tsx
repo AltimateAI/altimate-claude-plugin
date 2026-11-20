@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, evidenceLines, explain, fixRequest, mentions, runsDatabricksCompute, supportsSavings, toView as toViewOf } from './savings'
+import { DATABRICKS_FACTS, DATABRICKS_REPORT } from './savings-core.testkit'
 
 const ROOT = '/repo'
 
@@ -1759,3 +1760,97 @@ for (const step of ['pane open', 'version probe', 'tool run', 'baseline read', '
     await after.unmount()
   })
 }
+
+/** What `tool run` prints around core's own report for the testkit's synthetic facts. */
+function coreAnswer() {
+  return {
+    status: 'ok',
+    title: 'Databricks Savings',
+    output: 'Databricks savings',
+    metadata: {
+      success: true,
+      window: { start: '2026-11-10', end: '2026-11-17' },
+      warehouse: 'synth_conn',
+      ran_on: 'wh-synth-pro',
+      warehouses_checked: DATABRICKS_FACTS.warehouses.length,
+      clusters_checked: DATABRICKS_FACTS.clusters.length,
+      jobs_checked: DATABRICKS_FACTS.jobs.length,
+      workspaces_checked: 2,
+      skipped: [],
+      warehouses: DATABRICKS_FACTS.warehouses.map(one => ({ id: one.warehouse_id, workspace_id: one.workspace_id, name: one.warehouse_name, type: one.warehouse_type, size: one.warehouse_size, window_cost: one.total_cost })),
+      report: JSON.parse(JSON.stringify(DATABRICKS_REPORT)),
+    },
+  }
+}
+
+/** What the pane draws in place of a value it lacks, or a value read from a field core does not send. */
+const UNREAL = /\?|undefined|NaN/
+
+test('every finding kind core returns is drawn from its own fields: no "?", "undefined" or "NaN" in the pane, a fix draft, a what-if, the notice or the band', async ($, on) => {
+  const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "pro" {\n  name = "synth_pro"\n  cluster_size = "Large"\n}\n' }
+  const { clock, toasts, fills } = await start($, on, { answer: coreAnswer(), files })
+  await savings($)
+  await clock.settle()
+  expect([...new Set(DATABRICKS_REPORT.findings.map(one => one.evidence.kind))].sort()).toEqual(['idle_cluster', 'job_on_all_purpose', 'over_sized', 'serverless'])
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const drawn = async () => [
+    ...((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)),
+    ...((await ui.findAll({ type: 'Button' })) as any[]).map(one => String(one.props.label)),
+  ]
+  const pane = await drawn()
+  for (const one of DATABRICKS_REPORT.findings) {
+    expect(pane.some(text => text.startsWith(`${one.resource_name} (workspace ${one.workspace_id}) · ${one.title} · $`))).toBe(true)
+  }
+  expect(pane).toContain('All-purpose cluster 100% idle across 5 active days (zombie), average worker CPU 3%, peak 10%')
+  expect(pane).toContain('$0.750 a DBU now; a job cluster would be about $0.450 (estimated: the workspace billed no jobs compute)')
+  expect(pane.filter(text => UNREAL.test(text))).toEqual([])
+
+  for (let at = 0; at < DATABRICKS_REPORT.findings.length; at++) await ui.press({ key: `fix-${at}` })
+  await clock.settle()
+  expect(fills.length).toBe(DATABRICKS_REPORT.findings.length)
+  expect(fills.filter(text => UNREAL.test(text))).toEqual([])
+
+  for (const [row, one] of DATABRICKS_REPORT.what_if.entries()) {
+    for (let k = 0; k < one.choices.length; k++) {
+      await ui.press({ key: `whatif-${row}-${k}` })
+      await clock.settle()
+      expect((await drawn()).filter(text => UNREAL.test(text))).toEqual([])
+    }
+  }
+  await ui.unmount()
+  expect(toasts.filter(text => UNREAL.test(text))).toEqual([])
+
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'Large', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  const line = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)).find(text => text.startsWith('synth_pro'))
+  expect(line).toBe('synth_pro: Over-Sized Warehouse, $5,400–$9,450 a month to save. /savings shows why.')
+  await band.unmount()
+})
+
+test('a what-if choice opens only its own warehouse when two workspaces share the warehouse id and the choice', async ($, on) => {
+  const [first, second] = DATABRICKS_REPORT.what_if
+  // Core's own answer: one id, the same choices, two workspaces.
+  expect(first!.resource_id).toBe(second!.resource_id)
+  expect(first!.workspace_id).not.toBe(second!.workspace_id)
+  expect(first!.choices[1]!.label).toBe(second!.choices[1]!.label)
+  const { clock } = await start($, on, { answer: coreAnswer() })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^What if synth_classic in workspace 1001 \(\$283 a month now\) were…$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^What if synth_classic in workspace 1002 \(/ })).toBeDefined()
+  const opened = async () => ((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).map(one => String(one.text))
+
+  await ui.press({ key: 'whatif-0-1' })
+  await clock.settle()
+  expect(await opened()).toEqual([`At X-SMALL: ${compared(first!.current_monthly_cost, first!.choices[1]!.monthly_cost).now} a month instead of ${compared(first!.current_monthly_cost, first!.choices[1]!.monthly_cost).was}, ${compared(first!.current_monthly_cost, first!.choices[1]!.monthly_cost).gap} less. Its 16 cores cover the 4 its queries need (twice what 99% of them use).`])
+
+  await ui.press({ key: 'whatif-1-1' })
+  await clock.settle()
+  const now = await opened()
+  expect(now.length).toBe(1)
+  expect(now[0]).toContain(`instead of ${compared(second!.current_monthly_cost, second!.choices[1]!.monthly_cost).was},`)
+  await ui.unmount()
+})

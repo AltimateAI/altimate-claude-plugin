@@ -671,6 +671,10 @@ export type SavingsView = {
   whatIf: {
     resourceId: string
     resourceName: string
+    /** The workspace it is in; null when the check read only one. */
+    workspace: string | null
+    /** The workspace it is in, whether or not the check read several; null when the answer does not say. */
+    workspaceId: string | null
     currentMonthly: number
     choices: { label: string; monthlyCost: number; monthlySaving: number; fits: boolean; cores: number; coresNeeded: number }[]
   }[]
@@ -765,7 +769,7 @@ declare module 'claude-code' {
       /** The line above the prompt when the session touches Databricks config; null when there is none. */
       savingsBand: { text: string } | null
       /** The alternative pressed in the pane's what-if row; null when none is. */
-      savingsWhatIf: { resourceId: string; label: string } | null
+      savingsWhatIf: { workspaceId: string | null; resourceId: string; label: string } | null
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */
