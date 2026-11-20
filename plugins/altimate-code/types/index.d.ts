@@ -684,6 +684,8 @@ export type SavingsFinding = {
 
 /** What became of a drafted fix, as of one run. */
 export type SavingsFixLine = {
+  /** The fixed resource's type, as its finding gave it (`sql_warehouse`, `warehouse`, `cluster`, `job`). */
+  resourceType: string
   resourceId: string
   /** The workspace the fixed resource is in; null when the answer does not say. */
   workspaceId: string | null

@@ -84,6 +84,7 @@ export function fixChanged(fix: FixRecord, view: SavingsView): boolean | null {
 /** What a run says became of a drafted fix. */
 export function fixProgress(fix: FixRecord, view: SavingsView): SavingsFixLine {
   const line = (state: SavingsFixLine['state'], text: string): SavingsFixLine => ({
+    resourceType: fix.resourceType,
     resourceId: fix.resourceId,
     workspaceId: fix.workspaceId ?? null,
     resourceName: fix.resourceName,

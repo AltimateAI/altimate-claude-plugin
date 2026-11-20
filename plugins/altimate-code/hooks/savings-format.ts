@@ -12,6 +12,7 @@ export const OBSERVED_NOTE = 'Billed in different weeks, so a change in workload
 const roundMoney = (value: number, cents: boolean) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
 
 function money(value: number, cents: boolean): string {
+  if (!Number.isFinite(value)) return '?'
   const rounded = roundMoney(value, cents)
   const [whole, fraction] = rounded.toFixed(cents ? 2 : 0).split('.')
   return `$${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fraction ? `.${fraction}` : ''}`

@@ -111,7 +111,7 @@ test('two connections on one account count a resource once, at its largest savin
 })
 
 test('the page holds the findings, what-ifs, checks not run and the Altimate link', () => {
-  const html = savingsReportHtml([kept(view({ fixes: [{ resourceId: 'w1', workspaceId: null, resourceName: 'Classic', state: 'measuring', text: 'Classic: fix drafted 2026-11-14 · measuring (3 of 7 days)' }] }))], '2026-11-18 10:00 UTC', URL)
+  const html = savingsReportHtml([kept(view({ fixes: [{ resourceType: 'sql_warehouse', resourceId: 'w1', workspaceId: null, resourceName: 'Classic', state: 'measuring', text: 'Classic: fix drafted 2026-11-14 · measuring (3 of 7 days)' }] }))], '2026-11-18 10:00 UTC', URL)
   expect(html).toContain('$10.00–$20.00 a month')
   expect(html).toContain('Classic · Over-Sized Warehouse')
   expect(html).toContain('used at most 10% of its cores')
@@ -190,7 +190,7 @@ test('a resize the run saw is on the page too', () => {
 })
 
 test('two resizes on the page share one observed-spend note, after both', () => {
-  const change = { resourceId: 'w1', workspaceId: null, name: 'Classic', from: 'SMALL CLASSIC', to: 'X-SMALL CLASSIC', since: '2026-11-10', monthlyBefore: 118, monthlyNow: 59 }
+  const change = { resourceType: 'sql_warehouse', resourceId: 'w1', workspaceId: null, name: 'Classic', from: 'SMALL CLASSIC', to: 'X-SMALL CLASSIC', since: '2026-11-10', monthlyBefore: 118, monthlyNow: 59 }
   const html = savingsReportHtml([kept(view({ changes: [change, { ...change, resourceId: 'w2', name: 'Pro' }] }))], 'now', URL)
   expect(html.split('not a measured saving').length - 1).toBe(1)
   expect(html.indexOf('not a measured saving')).toBeGreaterThan(html.indexOf('<p>Pro: SMALL CLASSIC'))
@@ -223,7 +223,7 @@ test('each section says when it was checked', () => {
 })
 
 test('a change whose observed spend fell is plain text, never drawn as a saving; other states are dimmed', () => {
-  const lines = view({ fixes: [{ resourceId: 'a', workspaceId: null, resourceName: 'A', state: 'lower', text: 'A lower' }, { resourceId: 'b', workspaceId: null, resourceName: 'B', state: 'unchanged', text: 'B unchanged' }] })
+  const lines = view({ fixes: [{ resourceType: 'sql_warehouse', resourceId: 'a', workspaceId: null, resourceName: 'A', state: 'lower', text: 'A lower' }, { resourceType: 'sql_warehouse', resourceId: 'b', workspaceId: null, resourceName: 'B', state: 'unchanged', text: 'B unchanged' }] })
   const html = savingsReportHtml([kept(lines)], 'now', URL)
   expect(html).toContain('<p>A lower</p>')
   expect(html).toContain('<p class="gap">B unchanged</p>')
