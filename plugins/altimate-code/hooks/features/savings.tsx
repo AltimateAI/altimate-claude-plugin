@@ -18,7 +18,7 @@ import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
 import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from '../savings-fixes'
-import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
+import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
   type ConnectionFacts,
@@ -143,31 +143,18 @@ const isAssignment = (word: string) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)
 const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
 
 /**
- * The line without its heredoc bodies: data written somewhere, not commands the line runs. A body ends at
- * its own terminator line (after leading tabs for `<<-`); a heredoc without one drops nothing.
- */
-function withoutHeredocs(line: string): string {
-  const lines = line.split('\n')
-  const kept: string[] = []
-  for (let at = 0; at < lines.length; at++) {
-    kept.push(lines[at]!)
-    const open = /<<(-?)\s*(['"]?)(\w+)\2/.exec(lines[at]!)
-    if (!open) continue
-    const end = lines.findIndex((one, row) => row > at && (open[1] === '-' ? one.replace(/^\t+/, '') : one) === open[3])
-    if (end > at) at = end
-  }
-  return kept.join('\n')
-}
-
-/**
  * Whether a shell line runs the Databricks CLI's `warehouses`, `clusters`, `bundle` or `jobs` command,
  * rather than only naming it (`echo databricks bundle deploy`, a commit message). Quoted text is data;
  * the line is split into its simple commands, and each is read past assignments, shell keywords and
  * wrappers with their flags (`sudo -E`, `time`, `then`) to the program it runs. That program must be
  * `databricks` (or a path to it); its own global flags (`-p prod`, `--profile=x`) come before the command.
+ * A line that opens a heredoc is not read: where its body ends is the shell's to say, so it offers nothing,
+ * as the dbt command reader does with one.
  */
 export function runsDatabricksCompute(line: string): boolean {
-  const unquoted = withoutHeredocs(line).replace(/"[^"]*"|'[^']*'/g, '""')
+  const unquoted = line.replace(/"[^"]*"|'[^']*'/g, '""')
+  // `<<<` is a here-string, a word on the same line, not a heredoc.
+  if (/(?<!<)<<(?!<)/.test(unquoted)) return false
   // Backticks run a command too, so they end one as `(` does.
   for (const simple of unquoted.split(/&&|\|\||[;&|(){}`\n]/)) {
     const words = simple.trim().split(/\s+/).filter(Boolean)
@@ -200,8 +187,6 @@ export function runsDatabricksCompute(line: string): boolean {
 }
 const BAND_READ_LIMIT = 200_000
 
-/** A figure the answer gave: not missing, empty or something that reads as NaN. */
-const known = (value: unknown) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
 /** A figure to `digits` decimals; one the answer lacks reads "?". */
 const fixed = (value: unknown, digits: number) => (known(value) ? Number(value).toFixed(digits) : '?')
 const percent = (share: unknown) => (known(share) ? `${Math.round(Number(share) * 100)}%` : '?')
@@ -332,8 +317,8 @@ function factOf(evidence: Record<string, unknown>, title: string): string {
 }
 
 /** A finding and a fix line about one resource: the same id in the same workspace. */
-const sameResource = (finding: Pick<SavingsFinding, 'resourceId' | 'workspaceId'>, line: Pick<SavingsFixLine, 'resourceId' | 'workspaceId'>) =>
-  finding.resourceId === line.resourceId && (finding.workspaceId ?? null) === (line.workspaceId ?? null)
+const sameResource = (finding: Pick<SavingsFinding, 'resourceType' | 'resourceId' | 'workspaceId'>, line: Pick<SavingsFixLine, 'resourceType' | 'resourceId' | 'workspaceId'>) =>
+  finding.resourceType === line.resourceType && finding.resourceId === line.resourceId && (finding.workspaceId ?? null) === (line.workspaceId ?? null)
 
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
@@ -497,7 +482,6 @@ function dailyCostOf(finding: ToolFinding, windowCost: number | null | undefined
 export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform = 'databricks'): SavingsView | null {
   const report = metadata?.report
   if (!metadata?.success || !report || !Array.isArray(report.findings) || !report.total || !metadata.window) return null
-  if (![report.total.monthly_min, report.total.monthly_max, report.total.resources].every(known)) return null
   const days = report.lookback_days || windowDays(metadata.window)
   const inventory = (metadata.warehouses ?? []).map(one => ({
     id: one.id,
@@ -533,7 +517,14 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
     // (its query may still be running), or because core refused its facts.
     skipped: (metadata.skipped ?? []).map(one => oneLine(one.reason ? `${one.check} (${one.reason.trim().replace(/\.$/, '')})` : one.check)),
     limited: (metadata.limited ?? []).map(oneLine),
-    total: { min: report.total.monthly_min, max: report.total.monthly_max, resources: report.total.resources },
+    // A missing amount is drawn as '?'; a missing count is the findings' resources, each once.
+    total: {
+      min: report.total.monthly_min,
+      max: report.total.monthly_max,
+      resources: known(report.total.resources)
+        ? Number(report.total.resources)
+        : new Set(report.findings.map(one => `${one.workspace_id ?? ''}/${one.resource_type}/${one.resource_id}`)).size,
+    },
     findings: report.findings.map(one => {
       const warehouse = isWarehouse(one.resource_type) ? inventory.find(row => row.id === one.resource_id) : undefined
       return {
@@ -546,8 +537,10 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
         matchName: one.resource_name ?? '',
         workspace: workspaces > 1 ? oneLine(one.workspace_id) || null : null,
         workspaceId: one.workspace_id ?? null,
-        monthlyMin: one.monthly_min,
-        monthlyMax: one.monthly_max,
+        // An amount the answer lacks makes it a finding with no dollar estimate, as one priced at $0 is:
+        // totals, the slim ranking and the notes then never add or compare a missing figure.
+        monthlyMin: known(one.monthly_min) ? Number(one.monthly_min) : 0,
+        monthlyMax: known(one.monthly_max) ? Number(one.monthly_max) : 0,
         evidence: evidenceLines(one.evidence, days),
         fact: factOf(one.evidence ?? {}, one.title),
         dailyCost: dailyCostOf(one, warehouse?.windowCost, days),
@@ -1577,13 +1570,13 @@ export function register(on: On, _context: FeatureContext) {
                       {one.choices.map((c, k) => (
                         <Button
                           key={`whatif-${at}-${k}`}
-                          label={`${c.label} ${dollars(c.monthlyCost)}${c.label === 'SERVERLESS' || c.fits ? '' : ' ⚠'}`}
+                          label={`${c.label} ${dollars(c.monthlyCost)}${c.fits === false ? ' ⚠' : ''}`}
                           onPress={() => later($, () => update($, whatIfAtom, () => ({ resourceId: one.resourceId, label: c.label })))}
                         />
                       ))}
                     </Box>
                     {choice && amounts ? (
-                      <Text color={(choice.label === 'SERVERLESS' || choice.fits) && choice.monthlySaving > 0 ? 'success' : 'warning'}>
+                      <Text color={choice.fits !== false && choice.monthlySaving > 0 ? 'success' : 'warning'}>
                         {choice.label === 'SERVERLESS'
                           ? choice.monthlySaving > 0
                             ? `As serverless: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} less: it bills only while queries run.`
@@ -1721,6 +1714,7 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
   if (!DATABRICKS_CONFIG.test(file.path.replace(/\\/g, '/'))) return
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
+  if (!DATABRICKS_TEXT.test(text)) return
   const band = await bandFor($, text)
   if (band) await update($, bandAtom, () => band)
 }

@@ -58,7 +58,7 @@ ${view.whatIf
   .map(
     one => `<div class="card"><h3>What if ${escape(one.resourceName)} (${escape(dollars(one.currentMonthly))} a month now) were…</h3>
 <table><tr><th>Choice</th><th class="n">A month</th><th class="n">Saves</th><th>Fits its queries</th></tr>
-${one.choices.map(c => `<tr><td>${escape(c.label)}</td><td class="n">${escape(dollars(c.monthlyCost))}</td><td class="n">${c.monthlySaving > 0 ? escape(dollars(c.monthlySaving)) : 'none'}</td><td>${c.fits ? 'yes' : 'no: queries would queue'}</td></tr>`).join('\n')}
+${one.choices.map(c => `<tr><td>${escape(c.label)}</td><td class="n">${escape(dollars(c.monthlyCost))}</td><td class="n">${c.monthlySaving > 0 ? escape(dollars(c.monthlySaving)) : 'none'}</td><td>${c.fits === false ? 'no: queries would queue' : c.fits ? 'yes' : 'no size to fit: it scales with its queries'}</td></tr>`).join('\n')}
 </table></div>`,
   )
   .join('\n')}

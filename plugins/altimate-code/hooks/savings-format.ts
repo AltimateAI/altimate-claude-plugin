@@ -11,9 +11,12 @@ export const OBSERVED_NOTE = 'Billed in different weeks, so a change in workload
 /** An amount rounded as it is shown: to the cent, or to the dollar. */
 const roundMoney = (value: number, cents: boolean) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
 
+/** A figure the answer gave: not missing, empty or something that reads as NaN. */
+export const known = (value: unknown) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+
 function money(value: number, cents: boolean): string {
-  if (!Number.isFinite(value)) return '?'
-  const rounded = roundMoney(value, cents)
+  if (!known(value)) return '?'
+  const rounded = roundMoney(Number(value), cents)
   const [whole, fraction] = rounded.toFixed(cents ? 2 : 0).split('.')
   return `$${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fraction ? `.${fraction}` : ''}`
 }

@@ -236,3 +236,11 @@ test('a clean result says so, and both platforms get a section', () => {
   expect(html).toContain('<h2>Databricks</h2>')
   expect(html).toContain('<h2>Snowflake</h2>')
 })
+
+test('the report\'s fit column says what the pane does: only an explicit fits: false is too small', () => {
+  const serverless = view()
+  serverless.whatIf = [{ ...serverless.whatIf[0]!, choices: [{ label: 'SERVERLESS', monthlyCost: 10, monthlySaving: 30, fits: undefined as any, cores: 0, coresNeeded: 1 }] }]
+  const html = savingsReportHtml([kept(serverless)], 'now', URL)
+  expect(html).not.toContain('no: queries would queue')
+  expect(html).toContain('no size to fit: it scales with its queries')
+})

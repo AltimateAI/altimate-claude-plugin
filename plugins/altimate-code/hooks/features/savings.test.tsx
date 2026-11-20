@@ -2949,18 +2949,38 @@ test('the command reader reads past every wrapper, its flags\' values and assign
   }
   // A heredoc that only writes the command somewhere runs nothing.
   expect(runsDatabricksCompute('cat > deploy.sh <<EOF\ndatabricks bundle deploy\nEOF')).toBe(false)
-  expect(runsDatabricksCompute("cat <<'EOF'\ndatabricks jobs list\nEOF\ndatabricks bundle deploy")).toBe(true)
 })
 
-test('an answer without a total, or with one missing its amounts or count, is no report rather than a failed run', () => {
+test('an answer without a total is no report rather than a failed run', () => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   delete answer.metadata.report.total
   expect(toView(answer.metadata)).toBeNull()
-  for (const field of ['monthly_min', 'monthly_max', 'resources']) {
-    const partial = JSON.parse(JSON.stringify(ANSWER))
-    delete partial.metadata.report.total[field]
-    expect(toView(partial.metadata)).toBeNull()
-  }
+})
+
+test('a total missing its amounts or count still draws its findings, with ? for the amounts', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.total.monthly_min
+  delete answer.metadata.report.total.monthly_max
+  delete answer.metadata.report.total.resources
+  const { clock, toasts } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  expect(toasts.at(-1)).toBe('Databricks savings check: ? a month on 1 resource.')
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Classic · Migrate Classic\/Pro to Serverless · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /failed/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('an amount sent as a numeric string is shown like a number, and one that is no number as ?', () => {
+  expect(dollars('27.5' as any)).toBe('$27.50')
+  expect(dollars(undefined as any)).toBe('?')
+  expect(dollars('n/a' as any)).toBe('?')
+})
+
+test('a name the answer lacks is never matched', () => {
+  expect(mentions('databricks warehouses get x', undefined)).toBe(false)
+  expect(mentions('databricks warehouses get x', '  ')).toBe(false)
 })
 
 test('a finding without evidence, amounts or a name is still drawn, with ? for what it lacks', async ($, on) => {
@@ -2994,6 +3014,20 @@ test('a finding without its name is matched in a command by its id, and does not
   const band = await $.ui.mount(BAND)
   expect(await band.find({ type: 'Text', text: /^wh-classic: Migrate Classic\/Pro to Serverless, / })).toBeDefined()
   await band.unmount()
+})
+
+test('a serverless choice the CLI says does not fit is still marked', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.report.what_if[0].choices[0].fits = false
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(((await ui.find({ key: 'whatif-0-0' })) as any)?.props.label).toBe('SERVERLESS $17.24 ⚠')
+  await ui.press({ key: 'whatif-0-0' })
+  await clock.settle()
+  expect(((await ui.find({ type: 'Text', text: /^As serverless: / })) as any)?.props.color).toBe('warning')
+  await ui.unmount()
 })
 
 test('a serverless choice without a fit is not marked as one that does not fit', async ($, on) => {
@@ -3083,10 +3117,30 @@ test('in one workspace a drafted fix hides its warehouse\'s change line though o
   await ui.unmount()
 })
 
-test('a heredoc ends at its own terminator, a tab-indented one for <<-, and one without a terminator drops nothing', () => {
-  expect(runsDatabricksCompute('cat <<-EOF\n\tbody\n\tEOF\ndatabricks bundle deploy')).toBe(true)
-  expect(runsDatabricksCompute('cat <<-EOF\n\tdatabricks bundle deploy\n\tEOF')).toBe(false)
-  expect(runsDatabricksCompute('cat <<EOF\nno end here\ndatabricks jobs list')).toBe(true)
+test('a line that opens a heredoc is not read, whatever its terminator or how many it opens; a here-string is no heredoc', () => {
+  for (const line of [
+    "cat <<'EOF'\ndatabricks jobs list\nEOF\ndatabricks bundle deploy",
+    'cat <<-EOF\n\tdatabricks bundle deploy\n\tEOF',
+    'cat <<A <<B\nbodyA\nA\ndatabricks bundle deploy\nB',
+    'cat <<END-OF-FILE > deploy.sh\ndatabricks bundle deploy\nEND-OF-FILE',
+    'cat <<\\EOF\ndatabricks bundle deploy\nEOF',
+  ]) {
+    expect(runsDatabricksCompute(line)).toBe(false)
+  }
+  expect(runsDatabricksCompute('cat <<< "x"\ndatabricks bundle deploy')).toBe(true)
+  expect(runsDatabricksCompute('echo "a << b" && databricks jobs list')).toBe(true)
+})
+
+test('editing a Terraform file that is not Databricks config names no finding, even one whose name it holds', async ($, on) => {
+  const files = { [`${ROOT}/infra/main.tf`]: 'module "Classic" {\n  source = "./aws-vpc"\n}\n' }
+  const { clock } = await start($, on, { files })
+  await savings($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/main.tf`, old_string: 'aws-vpc', new_string: 'aws-vpc2' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Classic: / })).toBeUndefined()
+  await band.unmount()
 })
 
 test('a drafted job fix that shares a resized warehouse\'s id does not hide that warehouse\'s change line', async ($, on) => {
@@ -3098,5 +3152,26 @@ test('a drafted job fix that shares a resized warehouse\'s id does not hide that
   const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
   expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a finding the answer gives no amounts for is one with no dollar estimate, never a missing figure', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.findings[0].monthly_min
+  answer.metadata.report.findings[0].monthly_max = 'n/a'
+  const finding = toView(answer.metadata)?.findings[0]
+  expect(finding?.monthlyMin).toBe(0)
+  expect(finding?.monthlyMax).toBe(0)
+})
+
+test('a drafted job fix that shares a warehouse finding\'s id is not drawn under that finding', async ($, on) => {
+  const jobFix = { ...FIX, resourceType: 'job', checkId: 'job_on_all_purpose', title: 'Job on all-purpose compute', config: null }
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), store: { [FIX_KEY.replace(':sql_warehouse:', ':job:')]: jobFix } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The job's line is listed on its own, after the findings, not inside the warehouse finding's box.
+  expect(String(((await ui.find({ key: 'finding-0' })) as any)?.text)).not.toContain('no longer flagged')
+  expect(((await ui.findAll({ type: 'Text' })) as any[]).filter(one => /^Classic: no longer flagged since /.test(one.text))).toHaveLength(1)
   await ui.unmount()
 })
