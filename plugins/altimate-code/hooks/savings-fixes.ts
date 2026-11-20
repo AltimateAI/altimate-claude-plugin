@@ -71,22 +71,27 @@ const rowOf = (fix: FixRecord, view: SavingsView) =>
       (one.id === fix.resourceId || (fix.platform === 'snowflake' && one.name === fix.resourceName)) &&
       sameWorkspace(one.workspaceId, fix.workspaceId, severalWorkspaces(view)),
   )
-/** A warehouse's size and type as a fix keeps them, `SMALL PRO`; a size the CLI did not read is left out (`PRO`), not drawn as "?". */
+/** A warehouse's size and type as a fix keeps them: two words, `SMALL PRO`, with "?" for one the CLI did not read. */
+export const configKey = (warehouseSize: unknown, type: unknown) => `${oneLine(warehouseSize) ? size(warehouseSize) : '?'} ${oneLine(type) || '?'}`
+/** The same as a line shows it: what the CLI did not read is left out (`PRO`), never drawn as "?". */
 export const configText = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSize) ? size(warehouseSize) : '', oneLine(type)].filter(Boolean).join(' ')
-/** A kept config's size and type; a record kept before unread sizes were left out has "?" for one. */
+/** A kept config's size and type, null where it was not read; a config kept as one word is a type. */
 const partsOf = (config: string) => {
   const words = config.trim().split(/\s+/)
-  const type = words.pop() ?? ''
-  const read = words.join(' ')
-  return { size: read && read !== '?' ? read : null, type }
+  const [first, ...rest] = words.length > 1 ? words : ['?', ...words]
+  const read = (word: string | undefined) => (word && word !== '?' ? word : null)
+  return { size: read(first), type: read(rest.join(' ')) }
 }
-/** Whether two configs differ: by type, or by size where both read one. A size read on one side only is no resize. */
+/** Whether two configs differ, by size or by type, counting only what both runs read: a value read on one side only is no change. */
 export const configDiffers = (a: string, b: string) => {
   const was = partsOf(a)
   const now = partsOf(b)
-  return was.type !== now.type || (was.size !== null && now.size !== null && was.size !== now.size)
+  return (was.type !== null && now.type !== null && was.type !== now.type) || (was.size !== null && now.size !== null && was.size !== now.size)
 }
-const configOf = (row: SavingsView['inventory'][number]) => configText(row.size, row.type)
+/** Whether `now` reads a size or type `was` did not, with nothing changed: a kept record can take it, so a later change shows. */
+export const configLearns = (was: string, now: string) =>
+  !configDiffers(was, now) && ((partsOf(was).size === null && partsOf(now).size !== null) || (partsOf(was).type === null && partsOf(now).type !== null))
+const configOf = (row: SavingsView['inventory'][number]) => configKey(row.size, row.type)
 const isFlagged = (fix: FixRecord, view: SavingsView, sameCheck: boolean) =>
   view.findings.some(
     one =>
@@ -108,6 +113,12 @@ export function fixChanged(fix: FixRecord, view: SavingsView): boolean | null {
   if (!row) return null
   if (fix.config !== null) return configDiffers(fix.config, configOf(row))
   return checkPartial(fix, view) ? null : !isFlagged(fix, view, true)
+}
+
+/** The config a kept fix takes from this run: what it now reads that the draft did not, or null to keep the record as it is. */
+export function learnedConfig(fix: FixRecord, view: SavingsView): string | null {
+  const row = fix.config === null ? undefined : rowOf(fix, view)
+  return row && fix.config !== null && configLearns(fix.config, configOf(row)) ? configOf(row) : null
 }
 
 /** What a run says became of a drafted fix. */
@@ -138,7 +149,7 @@ export function fixProgress(fix: FixRecord, view: SavingsView): SavingsFixLine {
     if (checkPartial(fix, view)) return notRun
     return line('unmeasured', `${drafted}, and it is no longer flagged. This check does not read its cost afterwards, so no amount is claimed.`)
   }
-  const config = configOf(row)
+  const config = configText(row.size, row.type)
   const changed = fixChanged(fix, view)
   if (changed === null) return notRun
   if (!changed) {

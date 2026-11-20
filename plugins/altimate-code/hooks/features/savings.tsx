@@ -17,7 +17,7 @@ import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseV
 import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
-import { configDiffers, configText, FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, sameWorkspace, type FixRecord } from '../savings-fixes'
+import { configDiffers, configKey, FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, learnedConfig, sameWorkspace, type FixRecord } from '../savings-fixes'
 import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
@@ -557,7 +557,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
         evidence: evidenceLines(one.evidence, days),
         fact: factOf(one.evidence ?? {}, titleOf(one)),
         dailyCost: dailyCostOf(one, warehouse?.windowCost, days),
-        config: warehouse ? configText(warehouse.size, warehouse.type) : null,
+        config: warehouse ? configKey(warehouse.size, warehouse.type) : null,
         fixRequest: fixRequest(one, days, platform, pricing),
       }
     }),
@@ -651,9 +651,13 @@ export async function trackChanges(
     const resized = stored?.size != null && warehouse.size != null && stored.size !== warehouse.size
     const changed = stored && (resized || stored.type !== warehouse.type)
     // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
-    // A baseline kept without a cost takes the first one a later run gives, while the warehouse is still unchanged.
-    if (stored && !changed && stored.windowCost === null && windowCost !== null) {
-      await $.store.set(key, { ...stored, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
+    // A baseline kept without a cost or a size takes the first one a later run gives, while the warehouse is still
+    // unchanged, so a later change shows.
+    const fillCost = stored && !changed && stored.windowCost === null && windowCost !== null
+    const fillSize = stored && !changed && stored.size == null && warehouse.size != null
+    if (stored && (fillCost || fillSize)) {
+      const filled: Baseline = { ...stored, ...(fillCost ? { windowCost, days: windowDays(view.window) } : {}), ...(fillSize ? { size: sizeOrNull(warehouse.size) } : {}) }
+      await $.store.set(key, filled).catch(() => undefined)
     }
     if (stored && changed && typeof stored.windowCost === 'number' && windowCost !== null) {
       changes.push({
@@ -1021,6 +1025,9 @@ async function fixesFor($: EngineInterface, view: SavingsView, today: string, li
     const changed = fixChanged(held, view)
     let fix = held
     if (changed === true && !held.changedSeen) fix = { ...held, changedSeen: today }
+    // A size or type the draft could not read is taken from the first run that reads it, so a later resize shows.
+    const learned = changed === false ? learnedConfig(held, view) : null
+    if (learned) fix = { ...fix, config: learned }
     // A run that cannot tell leaves the day as it was.
     if (changed === false && held.changedSeen) {
       const { changedSeen: _gone, ...rest } = held

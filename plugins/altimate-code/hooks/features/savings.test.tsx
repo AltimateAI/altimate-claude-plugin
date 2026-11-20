@@ -2676,6 +2676,29 @@ for (const [was, now, type, line] of [
   })
 }
 
+test('a fix drafted before the size was read keeps the first size a later run reads', async ($, on) => {
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), store: { [FIX_KEY]: { ...FIX, changedSeen: undefined, config: '? CLASSIC' } } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(FIX_KEY) as any).config).toBe('SMALL CLASSIC')
+})
+
+test('a baseline kept before the size was read takes the first size a later run reads, so a later resize shows', async ($, on) => {
+  const key = 'savings-baseline:dbxmega:wh-classic'
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const { clock, store } = await start($, on, { answer, store: { [key]: { date: '2026-11-10', type: 'CLASSIC', size: null, windowCost: 27.54 } } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(key) as any).size).toBe('SMALL')
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(['Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'])
+  await ui.unmount()
+})
+
 test('after a run that failed, the pane keeps the earlier answer beside why, and the band quotes that answer', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const answer: { value: unknown } = { value: ANSWER }

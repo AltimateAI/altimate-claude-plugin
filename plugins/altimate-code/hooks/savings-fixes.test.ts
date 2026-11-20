@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { SavingsFinding, SavingsView } from '../types'
-import { configDiffers, configText, daysAfter, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from './savings-fixes'
+import { configDiffers, configKey, configText, daysAfter, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, learnedConfig, type FixRecord } from './savings-fixes'
 
 const WINDOW = { start: '2026-11-11', end: '2026-11-18' }
 
@@ -48,6 +48,22 @@ test('a size read on one side only is no resize, and an unread size is left out 
   expect(later.text).toBe('Classic: fix drafted 2026-11-01, but it is still CLASSIC and still flagged, so no saving is claimed.')
   // Drafted without a size, then a run that read one.
   expect(fixChanged(fix({ config: 'CLASSIC' }), view('SMALL', 7))).toBe(false)
+})
+
+test('a kept config names what was not read, so a size is never parsed as a type, and a draft learns what a later run reads', () => {
+  expect(configKey(null, 'PRO')).toBe('? PRO')
+  expect(configKey('SMALL', '')).toBe('SMALL ?')
+  expect(configText('SMALL', '')).toBe('SMALL')
+  // A type read on one side only is no change; a size read on both that differs is.
+  expect(configDiffers('SMALL ?', 'SMALL PRO')).toBe(false)
+  expect(configDiffers('SMALL ?', 'X-SMALL PRO')).toBe(true)
+  // Drafted before the size was read: the first run that reads it gives the record its size, so a later resize shows.
+  const drafted = fix({ config: configKey(null, 'CLASSIC') })
+  expect(fixChanged(drafted, view('SMALL', 7))).toBe(false)
+  expect(learnedConfig(drafted, view('SMALL', 7))).toBe('SMALL CLASSIC')
+  expect(learnedConfig(drafted, view(null, 7))).toBeNull()
+  expect(learnedConfig(fix(), view('SMALL', 7))).toBeNull()
+  expect(fixChanged({ ...drafted, config: 'SMALL CLASSIC' }, view('X_SMALL', 7))).toBe(true)
 })
 
 test('only whole days after the date count, and never more than the window', () => {
