@@ -272,6 +272,8 @@ type Options = {
   storeRefuses?: (key: string) => boolean
   /** What `uname -sr` prints. */
   uname?: string
+  /** WSL without wslview installed. */
+  noWslview?: boolean
   /** `altimate --version` rejects with this, as `$.process.run` does on its timeout. */
   versionRejects?: string
   /** What `altimate --version` prints on stderr. */
@@ -375,7 +377,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { env?: Record<string, string> } }) => {
     const [bin, command, , tool] = e.argv
     if (bin === 'uname') return { value: { exitCode: 0, stdout: `${options.uname ?? 'Darwin 24.6.0'}\n`, stderr: '' } }
-    if (bin === 'wslpath' || bin === 'wslview' || bin === 'xdg-open') {
+    if (bin === 'wslview' && options.noWslview) return { deny: 'spawn wslview ENOENT' }
+    if (bin === 'wslpath' || bin === 'wslview' || bin === 'xdg-open' || bin === 'explorer.exe') {
       opened.push(`${bin} ${e.argv.slice(1).join(' ')}`)
       return { value: { exitCode: 0, stdout: '', stderr: '' } }
     }
@@ -805,8 +808,8 @@ test('/savings typed while a band press\'s run is going says it is running, and 
   await band.unmount()
   await clock.settle()
   expect(runs.length).toBe(1)
-  expect((await savings($)).text).toBe('The savings check is already running in the side pane.')
-  expect((await savings($, 'prod_dbx')).text).toBe('The savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
+  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
+  expect((await savings($, 'prod_dbx')).text).toBe('The Databricks savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
   expect(runs.length).toBe(1)
   finish()
   await clock.settle()
@@ -870,7 +873,7 @@ test('the band\'s Run /savings pressed while a typed /savings check is going sta
   expect(runs.length).toBe(2)
   await band.unmount()
   // A bare /savings meanwhile asks for the first connection, which the running check is not reading.
-  expect((await savings($)).text).toBe('The savings check is already running in the side pane. Run /savings again when it finishes.')
+  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane. Run /savings again when it finishes.')
   finish()
   await clock.settle()
 })
@@ -891,7 +894,7 @@ test('a check from before a /clear that ends after it does not free the new conv
   // The old check ends: the new one is still going, and still the only one.
   finishOld()
   await clock.settle()
-  expect((await savings($)).text).toBe('The savings check is already running in the side pane.')
+  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
   await clock.settle()
   expect(runs.length).toBe(2)
   finishNew()
@@ -910,7 +913,7 @@ test('a session start while a check runs, with no /clear before it, keeps that c
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^Checking the workspace/ })).toBeDefined()
   await ui.unmount()
-  expect((await savings($)).text).toBe('The savings check is already running in the side pane.')
+  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
   await clock.settle()
   expect(runs.length).toBe(1)
   finish()
@@ -927,7 +930,7 @@ test('/savings that finds a check running, with a /clear while its pane opens, s
     options.onOpen = undefined
     await $.session.end({ reason: 'clear' } as any)
   }
-  expect((await savings($)).text).toBe('The conversation was cleared while the savings check ran. Run /savings again.')
+  expect((await savings($)).text).toBe('The conversation was cleared while the Databricks savings check ran. Run /savings again.')
   finish()
   await clock.settle()
 })
@@ -943,7 +946,7 @@ test('/savings that finds a check running, which ends while its pane opens, says
     finish()
     await clock.settle()
   }
-  expect((await savings($)).text).toBe('The savings check just finished: its result is in the side pane.')
+  expect((await savings($)).text).toBe('The Databricks savings check just finished: its result is in the side pane.')
   await clock.settle()
 })
 
@@ -2414,6 +2417,47 @@ test('under WSL the Altimate address is opened as an address, not turned into a 
   await clock.settle()
   expect(opened).toEqual([`wslview ${SIGNUP_URL}`])
   await ui.unmount()
+})
+
+test('under WSL without wslview the Altimate address goes to explorer.exe as it is', async ($, on) => {
+  const { clock, opened } = await start($, on, { uname: 'Linux 5.15-microsoft-standard', noWslview: true })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'altimate' })
+  await clock.settle()
+  expect(opened).toEqual([`explorer.exe ${SIGNUP_URL}`])
+  await ui.unmount()
+})
+
+test('/savings with a name the connection list does not hold runs no check, and names the ones it has', async ($, on) => {
+  const { clock, runs, snowflakeRuns, toasts } = await start($, on, { list: BOTH })
+  await savings($, 'sf_prod')
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(snowflakeRuns).toEqual([])
+  expect(toasts.at(-1)).toBe('Savings check: altimate-code has no connection named sf_prod. Run /savings for every connection, or /savings <connection> with one of: dbxmega, classic, sfmega, sfother, scratch.')
+})
+
+test('a connection the list could not tell the kind of, refused as not Databricks, is not sent to a Databricks one', async ($, on) => {
+  const { clock } = await start($, on, { answer: failure('The Databricks savings check is not available for snowflake warehouses. Try one of: dbx.') })
+  await savings($, 'sf_prod')
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^That connection is not a Databricks one, and altimate-code's connection list could not be read to tell its kind\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Run \/savings with no connection to check each of yours/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('"already running" names the check that is running, not the one just asked for', async ($, on) => {
+  let finish = () => {}
+  const { clock, runs } = await start($, on, { list: BOTH, hold: new Promise<void>(resolve => (finish = resolve)) })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect((await savings($, 'sfmega')).text).toBe('The Databricks savings check is already running in the side pane. Run /savings sfmega again when it finishes.')
+  finish()
+  await clock.settle()
 })
 
 test('a warehouse name that is no plain identifier is quoted in the drafted statement', async ($, on) => {

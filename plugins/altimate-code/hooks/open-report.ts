@@ -18,10 +18,14 @@ async function platformOf($: EngineInterface): Promise<Platform> {
 export async function openReport($: EngineInterface, path: string): Promise<boolean> {
   const platform = await platformOf($)
   let wsl = {}
-  // An address needs no Windows form of a path: only a file does.
-  if (platform === 'wsl' && !/^https?:/.test(path)) {
-    const windows = await $.process.run(['wslpath', '-w', path], { timeoutMs: 5_000 }).catch(() => null)
-    wsl = { windowsPath: windows?.exitCode === 0 ? windows.stdout.trim() || null : null, explorerAtC: await $.fs.exists(WINDOWS_EXPLORER).catch(() => false) }
+  if (platform === 'wsl') {
+    // explorer.exe takes an address as it is: only a file needs its Windows form.
+    const address = /^https?:/.test(path)
+    const windows = address ? null : await $.process.run(['wslpath', '-w', path], { timeoutMs: 5_000 }).catch(() => null)
+    wsl = {
+      windowsPath: address ? path : windows?.exitCode === 0 ? windows.stdout.trim() || null : null,
+      explorerAtC: await $.fs.exists(WINDOWS_EXPLORER).catch(() => false),
+    }
   }
   // The first that starts and exits as it does on success; one that cannot start, or fails, gives way to the next.
   for (const opener of openersFor(platform, path, wsl)) {
