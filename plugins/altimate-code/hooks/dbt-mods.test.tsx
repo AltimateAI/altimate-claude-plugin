@@ -800,6 +800,13 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // A trailing comment is not an item's name; quoted (case-sensitive) names are outside what is compared.
   expect(undocumentedByEdit(['new_col'], 'select\n  id,\n  amount -- note\nfrom raw', 'select\n  id,\n  amount, -- note\n  x as new_col -- note\nfrom raw', null)).toEqual({ fresh: ['new_col'], old: [] })
   expect(undocumentedByEdit(['Amount'], 'select id, "amount" from raw', 'select id, "amount", "Amount" from raw', null)).toEqual({ fresh: ['Amount'], old: [] })
+  // The last check's columns match exactly: `Amount` returned before is not `amount`.
+  expect(undocumentedByEdit(['amount'], 'select id, 10 as "Amount" from raw', 'select id, 10 as "Amount", 20 as "amount" from raw', ['id', 'Amount'])).toEqual({ fresh: ['amount'], old: [] })
+  // A SELECT inside a macro or a `{% set %}` body is not the model's output list.
+  const unused = '{% macro unused() %}\nselect id, amount from raw\n{% endmacro %}\nselect id from raw'
+  expect(undocumentedByEdit(['amount'], unused, unused.replace('select id from raw', 'select id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  const setQuery = '{% set q %}\nselect id, amount from raw\n{% endset %}\nselect id from raw'
+  expect(undocumentedByEdit(['amount'], setQuery, setQuery.replace('\nselect id from raw', '\nselect id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -1077,6 +1084,12 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   expect(hardcodedRelations('select id from "s"."ORDERS3"', quoted, self)).toEqual([])
   expect(hardcodedRelations('select id from "s.orders3"', quoted, self)).toEqual([])
   expect(hardcodedRelations('select id from "s"."orders3"', quoted, self)).toEqual([{ relation: '"s"."orders3"', use: "{{ ref('orders3') }}" }])
+  // A table the manifest quotes in upper or mixed case, or one name holding a dot, is not what an unquoted name reads.
+  const cased = (rel: string) => ({ nodes: { 'model.d.orders4': { resource_type: 'model', name: 'orders4', relation_name: rel } } })
+  expect(hardcodedRelations('select id from s.orders4', cased('"d"."s"."ORDERS4"'), self)).toEqual([])
+  expect(hardcodedRelations('select id from s.orders4', cased('"d"."s"."Orders4"'), self)).toEqual([])
+  expect(hardcodedRelations('select id from raw.orders4', cased('"d"."s"."raw.orders4"'), self)).toEqual([])
+  expect(hardcodedRelations('select id from s.orders4', cased('"d"."s"."orders4"'), self)).toEqual([{ relation: 's.orders4', use: "{{ ref('orders4') }}" }])
   // A macro, or a `{% set %}` block, that may not be rendered here is not read.
   expect(hardcodedRelations('{% macro unused() %}\nselect id from main.stg_orders\n{% endmacro %}\nselect id from raw', manifest, self)).toEqual([])
   // The model itself takes part: its own bare name shared with another relation is ambiguous, and never advice.

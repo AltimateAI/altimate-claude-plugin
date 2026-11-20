@@ -870,18 +870,21 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   // A spelling two relations share (a bare name in two schemas) is ambiguous: null, never flagged.
-  const known = new Map<string, { relation: string; use: string; exact: string[] } | null>()
+  const known = new Map<string, { relation: string; use: string; exact: string[]; quoted: boolean[] } | null>()
   // The model itself takes part (a bare name it shares with another relation is ambiguous) but is never flagged.
   const add = (id: string, node: any, given: string) => {
     const use = id === selfId ? SELF : given
     // Each part as the warehouse stores it (a quoted part keeps its case), and folded for the index.
-    const exact = typeof node?.relation_name === 'string' ? identifierParts(node.relation_name).map(one => one.text) : [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(Boolean).map((one: string) => String(one))
+    const pieces = typeof node?.relation_name === 'string' ? identifierParts(node.relation_name) : [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(Boolean).map((one: string) => ({ text: String(one), quoted: false }))
+    const exact = pieces.map(one => one.text)
+    const stored = pieces.map(one => one.quoted)
     if (!exact.length) return
     const parts = exact.map(one => one.toLowerCase())
+    // Keyed part by part (a name holding a dot stays one part).
     for (let i = 0; i < parts.length; i++) {
-      const key = parts.slice(i).join('.')
+      const key = parts.slice(i).join('\u0000')
       const had = known.get(key)
-      known.set(key, had === undefined || had?.use === use ? { relation: key, use, exact: exact.slice(i) } : null)
+      known.set(key, had === undefined || had?.use === use ? { relation: exact.slice(i).join('.'), use, exact: exact.slice(i), quoted: stored.slice(i) } : null)
     }
   }
   // A manifest too big to read here comes as a slice of the model's graph, with every relation listed apart.
@@ -909,13 +912,16 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
     if (!inQuery(hidden, match.index!) || controlled.some(([a, b]) => match.index! >= a && match.index! < b)) continue
     const start = match.index! + match[0].indexOf(match[1]!)
     const written = text.slice(start, start + match[1]!.length)
-    const pieces = identifierParts(written)
-    const parts = pieces.map(one => one.text.toLowerCase())
+    const sqlParts = identifierParts(written)
+    const parts = sqlParts.map(one => one.text.toLowerCase())
     if (parts.some(one => /^_j_*$/.test(one)) || (parts.length === 1 && ctes.has(parts[0]!))) continue
-    const hit = known.get(parts.join('.'))
+    const hit = known.get(parts.join('\u0000'))
     if (!hit || hit.use === SELF) continue
-    // A quoted part names exactly that identifier, case and all: only an exact match is the relation.
-    if (pieces.some((one, i) => one.quoted && one.text !== hit.exact[i])) continue
+    // A quoted part names exactly that identifier, case and all. An unquoted one is folded by the warehouse, so it
+    // matches only a plain identifier stored in one case (a mixed-case or dotted name needs quotes): else no advice.
+    // A part the manifest quotes is stored in that exact case: an unquoted SQL part, which the warehouse folds (to lower
+    // case, or upper on some), is taken to name it only when it is a plain lower-case identifier.
+    if (sqlParts.some((one, i) => (one.quoted ? one.text !== hit.exact[i] : hit.quoted[i] && !/^[a-z_][a-z0-9_$]*$/.test(hit.exact[i]!)))) continue
     if (!found.has(hit.use)) found.set(hit.use, { relation: written.replace(/\s+/g, ''), use: hit.use })
   }
   return [...found.values()]
@@ -1023,7 +1029,9 @@ function ctesOf(sql: string, code: string, base = 0): Map<string, { raw: string;
  * variables the lists render (`{{ cols }}`). Null when there is no such SELECT.
  */
 export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw: string; at: number; declared: string[] | null }>, base = 0): Outputs | null {
-  const code = masked(sql)
+  // Jinja blocks that render elsewhere or not at all (a `{% set %}` body, a macro) hold no SELECT of this query.
+  let code = masked(sql)
+  for (const [a, b] of jinjaBlocks(sql)) code = code.slice(0, a) + code.slice(a, b).replace(/[^\n]/g, ' ') + code.slice(b)
   const ctes = new Map([...(outer ?? []), ...ctesOf(sql, code, base)])
   const selects: number[] = []
   for (let at = topLevel(code, 'select'); at >= 0; at = topLevel(code, 'select', at + 6)) selects.push(at)
@@ -1126,9 +1134,11 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   // Column lists kept in `{% set %}` blocks that the model's own list renders (`{{ name }}`) name outputs too.
   const wasSet = before === null || !was ? null : setBlocks(before, was.vars)
   const nowSet = after === null || !now ? null : setBlocks(after, now.vars)
-  const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
+  // The last check's columns as the warehouse returned them: a case-sensitive name matches only exactly.
+  const returned = new Set(earlier ?? [])
+  const folded = new Set((earlier ?? []).map(one => one.toLowerCase()))
   const mine = new Set(ours.map(one => one.toLowerCase()))
-  const conditionalJinja = [before, after].some(text => text !== null && jinjaControlled(text).length > 0)
+  const conditionalJinja = [before, after].some(text => text !== null && (jinjaControlled(text).length > 0 || /\{%-?\s*(?:macro|call|raw|filter)\b/.test(text)))
   const quotedIdentifiers = [before, after].some(text => text !== null && /"_*"|`_*`/.test(masked(text)))
   // Whether the edit only rewrote named outputs' items and column-less clauses: one diff for the whole edit.
   let itemsOnly: boolean | null = null
@@ -1136,7 +1146,9 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   const old = (name: string) => {
     const key = name.toLowerCase()
     if (mine.has(key)) return false
-    if (returned.has(key)) return true
+    if (returned.has(name)) return true
+    // Returned before under another case only (`Amount`, now `amount`): a different column.
+    if (folded.has(key)) return false
     if (!was || !now || !wasSet || !nowSet || wasSet.reassigned || nowSet.reassigned) return false
     // Quoted identifiers (case-sensitive names) are outside what this reading compares: the column is the edit's.
     if (quotedIdentifiers) return false
