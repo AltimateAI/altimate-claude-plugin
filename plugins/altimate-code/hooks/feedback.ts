@@ -1,4 +1,4 @@
-// `/altimate-code:feedback <what happened>`: drafts a GitHub issue for this plugin's repository from the
+// `/altimate-feedback <what happened>`: drafts a GitHub issue for this plugin's repository from the
 // person's words plus a few facts the plugin already knows, shows the exact title and body, and creates the
 // issue only after the person confirms with `--confirm`. Nothing is sent, and no `gh` or browser call is
 // made, before that: the draft lives in memory until it is confirmed, discarded, replaced or the session ends.
@@ -17,7 +17,7 @@ import { MAX_RAW_PROBLEM, asVersion, forgetProblem, problemNoted, type DoctorFac
 import { pluginVersion } from './usage'
 
 export const REPO = 'AltimateAI/altimate-claude-plugin'
-export const COMMAND = 'feedback'
+export const COMMAND = 'altimate-feedback'
 export const LABEL = 'feedback'
 /** The issue link is kept under this many characters: GitHub refuses a longer one. */
 export const MAX_URL = 7000
@@ -218,7 +218,7 @@ export function buildDraft(facts: Facts, description: string): Draft {
     '',
     '---',
     '',
-    '**Environment** (added by `/altimate-code:feedback`; nothing else is attached)',
+    '**Environment** (added by `/altimate-feedback`; nothing else is attached)',
     '',
     `- Plugin: altimate-code ${facts.plugin}`,
     `- altimate-code: ${facts.altimate ? `${facts.altimate.name} ${facts.altimate.version}` : 'not found on PATH'}`,
@@ -337,7 +337,7 @@ let sending = false
 let settings: PluginOptions = {}
 
 const usage = `Say what happened, in your own words:
-  /altimate-code:feedback <what happened>
+  /altimate-feedback <what happened>
 Add ${WITH_ERROR} to attach the last plugin error (redacted). You will see the exact issue before anything is sent.`
 
 function preview(draft: Draft): string {
@@ -350,8 +350,8 @@ function preview(draft: Draft): string {
     draft.body,
     '',
     '---',
-    `Create it: /altimate-code:feedback ${CONFIRM}   (uses gh when it is installed and signed in, else gives a prefilled link)`,
-    `Discard it: /altimate-code:feedback ${CANCEL}   ·   Change it: run the command again with new text`,
+    `Create it: /altimate-feedback ${CONFIRM}   (uses gh when it is installed and signed in, else gives a prefilled link)`,
+    `Discard it: /altimate-feedback ${CANCEL}   ·   Change it: run the command again with new text`,
   ].join('\n')
 }
 
@@ -364,7 +364,7 @@ export async function answer($: EngineInterface, args: string): Promise<string> 
     return had ? 'Discarded. Nothing was sent.' : 'There is no draft to discard.'
   }
   if (text === CONFIRM) {
-    if (!pending) return `There is no draft to send. Start with /altimate-code:feedback <what happened>.`
+    if (!pending) return `There is no draft to send. Start with /altimate-feedback <what happened>.`
     if (sending) return 'The issue is already being created.'
     const draft = pending
     pending = null
