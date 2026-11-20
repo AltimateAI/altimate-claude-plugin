@@ -833,6 +833,9 @@ function sqlCode(sql: string): string {
   return sql.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (one.startsWith("'") ? "''" : ' '))
 }
 
+// The use the model's own relation gets in the index: it is never advice.
+const SELF = '\u0000self'
+
 // An identifier part: double-quoted, backquoted, bracketed or bare.
 const PART = String.raw`(?:"[^"]+"|` + '`[^`]+`' + String.raw`|\[[^\]]+\]|[A-Za-z_][\w$]*)`
 const RELATION_AFTER = new RegExp(String.raw`\b(?:from|join)\s+(${PART}(?:\s*\.\s*${PART}){0,2})`, 'gi')
@@ -849,8 +852,9 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   // A spelling two relations share (a bare name in two schemas) is ambiguous: null, never flagged.
   const known = new Map<string, { relation: string; use: string } | null>()
-  const add = (id: string, node: any, use: string) => {
-    if (id === selfId) return
+  // The model itself takes part (a bare name it shares with another relation is ambiguous) but is never flagged.
+  const add = (id: string, node: any, given: string) => {
+    const use = id === selfId ? SELF : given
     const parts = typeof node?.relation_name === 'string' ? node.relation_name.split('.').map(unquote) : [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(Boolean).map((one: string) => String(one).toLowerCase())
     if (!parts.length) return
     for (let i = 0; i < parts.length; i++) {
@@ -878,6 +882,7 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
     const parts = written.split(/\s*\.\s*/).map(unquote)
     if (parts.includes('__jinja__') || (parts.length === 1 && ctes.has(parts[0]!))) continue
     const hit = known.get(parts.join('.'))
+    if (hit?.use === SELF) continue
     if (hit && !found.has(hit.use)) found.set(hit.use, { relation: written.replace(/\s+/g, ''), use: hit.use })
   }
   return [...found.values()]
@@ -945,7 +950,7 @@ function ctesOf(sql: string, code: string): Map<string, { raw: string; code: str
  * reads that CTE's own list, through a chain of them. `star` when a `*` is left that the SQL does not name; `source`
  * is then what it reads, as written, with the bodies of the CTEs it names. Null when there is no such SELECT.
  */
-export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw: string; code: string }>): { names: Set<string>; star: boolean; source?: string } | null {
+export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw: string; code: string }>): { names: Set<string>; star: boolean; source?: string; vars: Set<string> } | null {
   const code = masked(sql)
   const ctes = new Map([...(outer ?? []), ...ctesOf(sql, code)])
   // The top-level SELECTs; the final query starts at the last one that no set operation joins to one before it.
@@ -959,32 +964,37 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
   const end = selects[k + 1] ?? code.length
   const list = code.slice(select + 6, from < 0 || from > end ? end : from).replace(/^\s*(?:distinct|all)\b/i, '')
   const names = new Set<string>()
+  // The Jinja variables the list renders (`{{ cols }}`): their `{% set %}` blocks name outputs.
+  const vars = new Set([...sql.slice(select + 6, from < 0 || from > end ? end : from).matchAll(/\{\{-?\s*([A-Za-z_]\w*)\s*-?\}\}/g)].map(one => one[1]!))
   let star = false
+  // A `*` with a modifier (`exclude`, `replace`, `rename`, `except`) is not the CTE's list: it stays unresolved.
+  let modified = false
   for (const item of topItems(list)) {
     const bare = item.replace(/\s+/g, ' ').trim()
     // `*`, `t.*`, and `* exclude (…)` / `* replace (…)`: columns the SQL does not name.
     if (/^(?:[\w"`]+\.)?\*(?:$|\s)/.test(bare)) {
       star = true
+      if (/^(?:[\w"`]+\.)?\*\s+\S/.test(bare)) modified = true
       continue
     }
     const name = /\bas\s+["`]?([A-Za-z_]\w*)["`]?$/i.exec(bare)?.[1] ?? /[\s)]["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1] ?? /^(?:["`]?[A-Za-z_]\w*["`]?\.)*["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1]
     if (name) names.add(name.toLowerCase())
   }
-  if (!star || from < 0) return { names, star }
+  if (!star || from < 0) return { names, star, vars }
   const tail = code.slice(from + 4)
-  if (depth < 8) {
+  if (depth < 8 && !modified) {
     // `select * from <cte>`: that CTE's own list, once its name is the only relation read.
     const read = /^\s*((?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*))(?:\s+(?:as\s+)?(?!where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b|union\b)[A-Za-z_]\w*)?\s*(?:;\s*)?(?:$|where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b|union\b)/i.exec(tail)
     const body = read ? ctes.get(unquote(read[1]!)) : undefined
     const inner = body !== undefined ? outputColumns(body.raw, depth + 1, ctes) : null
-    if (inner) return { names: new Set([...names, ...inner.names]), star: inner.star, ...(inner.source !== undefined && { source: inner.source }) }
+    if (inner) return { names: new Set([...names, ...inner.names]), star: inner.star, vars, ...(inner.source !== undefined && { source: inner.source }) }
   }
   // What the `*` reads, as written, with every CTE it names: an edit that leaves all of it alone brings no column.
   const cut = Math.min(...['where', 'group', 'order', 'limit', 'qualify', 'having', 'window', 'union'].map(word => topLevel(tail, word)).filter(at => at >= 0), tail.length)
   // Its own list and what it reads, as written, with every CTE of the model (one it names may read another).
   const reads = sql.slice(select, from + 4 + cut)
   const source = [reads, ...[...ctes].map(([name, one]) => `${name}:${one.raw}`)].map(one => one.replace(/\s+/g, ' ').trim()).join(' | ')
-  return { names, star, source }
+  return { names, star, source, vars }
 }
 
 /**
@@ -1001,9 +1011,9 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   if (earlier === null && before !== null && after !== null && before === after) return { fresh: undocumented, old: [] }
   const was = before === null ? null : outputColumns(before)
   const now = after === null ? null : outputColumns(after)
-  // Column lists kept in `{% set %}` blocks (the select reads them through `{{ name }}`) name outputs too.
-  const wasSet = before === null ? new Set<string>() : setBlockNames(before)
-  const nowSet = after === null ? new Set<string>() : setBlockNames(after)
+  // Column lists kept in `{% set %}` blocks that the model's own list renders (`{{ name }}`) name outputs too.
+  const wasSet = before === null || !was ? new Set<string>() : setBlockNames(before, was.vars)
+  const nowSet = after === null || !now ? new Set<string>() : setBlockNames(after, now.vars)
   const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
   const mine = new Set(ours.map(one => one.toLowerCase()))
   const old = (name: string) => {
@@ -1022,11 +1032,12 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
 }
 
-/** The names in the comma lists of a model's `{% set name %}…{% endset %}` blocks. */
-function setBlockNames(sql: string): Set<string> {
+/** The names in the comma lists of a model's `{% set name %}…{% endset %}` blocks, for the variables in `only`. */
+function setBlockNames(sql: string, only: Set<string>): Set<string> {
   const out = new Set<string>()
-  for (const block of sql.matchAll(/\{%-?\s*set\s+\w+\s*-?%\}([\s\S]*?)\{%-?\s*endset\s*-?%\}/gi)) {
-    for (const item of topItems(masked(block[1]!))) {
+  for (const block of sql.matchAll(/\{%-?\s*set\s+(\w+)\s*-?%\}([\s\S]*?)\{%-?\s*endset\s*-?%\}/gi)) {
+    if (!only.has(block[1]!)) continue
+    for (const item of topItems(masked(block[2]!))) {
       const bare = item.replace(/\s+/g, ' ').trim()
       const name = /\bas\s+["`]?([A-Za-z_]\w*)["`]?$/i.exec(bare)?.[1] ?? /^(?:["`]?[A-Za-z_]\w*["`]?\.)*["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1]
       if (name) out.add(name.toLowerCase())

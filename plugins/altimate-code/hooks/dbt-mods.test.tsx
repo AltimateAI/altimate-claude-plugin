@@ -742,6 +742,12 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   const tuva = "{%- set core -%}\n      med.claim_id\n    , med.paid_amount\n{%- endset -%}\nselect {{ core }} {{ extension_columns(ref('x')) }} from {{ ref('x') }} as med"
   expect(undocumentedByEdit(['x_temp_payer'], tuva, tuva.replace('    , med.paid_amount', '    , greatest(med.paid_amount, 0) as paid_amount'), null)).toEqual({ fresh: [], old: ['x_temp_payer'] })
   expect(undocumentedByEdit(['paid_cents'], tuva, tuva.replace('    , med.paid_amount', '    , med.paid_amount\n    , med.paid_amount * 100 as paid_cents'), null)).toEqual({ fresh: ['paid_cents'], old: [] })
+  // A `* exclude (…)` over a CTE stays unresolved: dropping the exclusion exposes a new column.
+  const excluded = 'with src as (select id, amount from raw)\nselect * exclude (amount) from src'
+  expect(undocumentedByEdit(['amount'], excluded, excluded.replace(' exclude (amount)', ''), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // Only the `{% set %}` lists the model's own list renders name its outputs; one a CTE renders does not.
+  const inner = '{% set cols %}id, amount{% endset %}\nwith raw as (select 1 as id, 10 as amount),\n src as (select {{ cols }} from raw)\nselect id from src'
+  expect(undocumentedByEdit(['amount'], inner, inner.replace('select id from src', 'select id, amount from src'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -816,6 +822,8 @@ test('only the columns an edit left undocumented are its gaps; ones undocumented
   const pane = await $.ui.mount({ ...CHECK, surface: 'terminal' })
   expect(await pane.find({ type: 'Text', text: '  not documented, from before this edit' })).toBeDefined()
   await pane.unmount()
+  // A check that found only older gaps does not claim the columns match.
+  show.rows = [{ order_id: 1, amount: 10, status: 'placed', amount_cents: 1000 }]
 
   // A later edit that rewrites the new column, still undocumented, still warns about it.
   files['models/orders.sql'] = 'select order_id, amount, status, amount * 101 as amount_cents from {{ ref("stg_orders") }}'
@@ -831,6 +839,9 @@ test('only the columns an edit left undocumented are its gaps; ones undocumented
   const second = again.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(second).not.toContain('not documented')
   expect(second).not.toContain('already undocumented')
+  const quiet = await $.ui.mount({ ...CHECK, surface: 'terminal' })
+  expect(await quiet.find({ type: 'Text', text: 'Compiles and runs; no new gaps with schema.yml (some columns were undocumented before this edit)' })).toBeDefined()
+  await quiet.unmount()
   const after = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await after.find({ type: 'Text', text: /no new gaps with schema\.yml/ })).toBeDefined()
   expect(await after.find({ type: 'Text', text: /undocumented before this edit/ })).toBeUndefined()
@@ -969,6 +980,10 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   const twice = { nodes: { 'model.s.current_orders': { resource_type: 'model', name: 'current_orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
   expect(hardcodedRelations('select * from orders', twice, self)).toEqual([])
   expect(hardcodedRelations('select * from archive.orders', twice, self)).toEqual([{ relation: 'archive.orders', use: "{{ ref('archived_orders') }}" }])
+  // The model itself takes part: its own bare name shared with another relation is ambiguous, and never advice.
+  const own = { nodes: { 'model.s.orders': { resource_type: 'model', name: 'orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
+  expect(hardcodedRelations('select * from orders', own, 'model.s.orders')).toEqual([])
+  expect(hardcodedRelations('select * from main.orders', own, 'model.s.orders')).toEqual([])
   // Another package's model of the same name is named with its package.
   const packages = { nodes: { 'model.jaffle_shop.orders2': { resource_type: 'model', name: 'orders2', package_name: 'jaffle_shop', relation_name: '"d"."main"."orders2"' }, 'model.pkg.orders2': { resource_type: 'model', name: 'orders2', package_name: 'pkg', relation_name: '"d"."pkg"."orders2"' } } }
   expect(hardcodedRelations('select * from pkg.orders2', packages, self)).toEqual([{ relation: 'pkg.orders2', use: "{{ ref('pkg', 'orders2') }}" }])

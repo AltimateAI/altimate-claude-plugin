@@ -2100,7 +2100,7 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
     const color = { running: 'subtle', ok: 'success', partial: 'subtle', warn: 'warning', error: 'error' }[check.status]
     const verdict = {
       running: 'Compiling and running it against the warehouse…',
-      ok: 'Compiles, runs, and its columns match schema.yml',
+      ok: check.undocumentedBefore?.length ? 'Compiles and runs; no new gaps with schema.yml (some columns were undocumented before this edit)' : 'Compiles, runs, and its columns match schema.yml',
       partial: check.ran ? `Compiles and runs; columns not compared: ${check.reason}` : `Not checked: ${check.reason}`,
       warn: check.hardcoded?.length ? `Compiles and runs, but names ${check.hardcoded.map(one => one.relation).join(', ')} by table: lineage can't follow it` : 'Compiles and runs, but its columns differ from schema.yml',
       error: 'dbt could not compile or run it',
