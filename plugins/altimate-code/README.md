@@ -156,6 +156,18 @@ Compile and validate runs a query on your warehouse after every model edit (`dbt
 
 When Claude mentions `altimate-dbt`, it is the dbt command line that comes with altimate-code (`npm i -g @altimateai/altimate-code`, the same install as the plugin's engine). It finds your dbt project folder, Python environment and warehouse adapter by itself, and altimate-code's agent uses it instead of the raw dbt tool for better error messages. Its commands include `init`, `doctor`, `compile`, `build`, `run`, `test`, `deps`, `columns <model>`, `graph` (lineage) and `execute "<sql>"` (a query through the dbt adapter). You do not need to run it yourself: Claude and the altimate-code agent call it when a task needs it, and the plugin's own dbt helpers above do not depend on it. See [altimate-dbt in the altimate-code docs](https://docs.altimate.sh/data-engineering/tools/dbt-tools/#altimate-dbt-cli).
 
+## Send feedback
+
+**`/altimate-feedback <what happened>`** drafts a GitHub issue for this plugin's repository ([AltimateAI/altimate-claude-plugin](https://github.com/AltimateAI/altimate-claude-plugin/issues)) from your words and a few facts the plugin already knows, shows you the exact title and body, and creates the issue only after you confirm. Run it with no text and it tells you how to start.
+
+1. `/altimate-feedback the band said nothing after a failed dbt run` shows the draft. Nothing is sent, and `gh` and the browser are not touched, yet.
+2. `/altimate-feedback --confirm` creates exactly what you saw. With the [GitHub CLI](https://cli.github.com) installed and signed in (`gh auth status`), it runs `gh issue create` and prints the issue's URL, adding the `feedback` label when the repository has one. Without `gh`, or with `gh` not signed in or failing, it opens a prefilled new-issue link (and prints it, URL-encoded and kept under GitHub's length limit; a longer body is cut at the end and says so). Nothing is created until you press "Submit new issue" there. The plugin never signs you in.
+3. `/altimate-feedback --cancel` discards the draft. Running the command again with new text replaces it. A draft is kept in memory only and ends with the session.
+
+What the issue holds besides your words: the plugin's version, altimate-code's version and binary name (`altimate` or `altimate-code`, never its path), the Claude Code version, the OS, dbt-core, adapter and Python versions when the dbt doctor has run, and which of the plugin's on/off settings are on. Add `--with-error` to also attach the kind of the last error the plugin met: only its type and code (for example `Database Error`, `ENOENT`, `$.process.run`) and a few fixed phrases (`not found`, `timed out`) are kept, none of the message, so no path, SQL, relation, model or column name or secret can come with it. Your own words get the dbt profile's secret values, tokens, passwords, connection-string credentials and paths under your home folder cut out (a home path with a space in a folder name is cut whole when it is quoted or another separator follows the space); the rest is as you wrote it, so leave out what you do not want public: the repository's issues are public.
+
+To see what would run without creating anything, set `ALTIMATE_FEEDBACK_DRY_RUN=1`: `--confirm` then prints the `gh issue create` command (or the link) and stops.
+
 ## Settings
 
 The plugin has seven settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). All are optional: Claude Code may report them as "not set", and each then takes the default below. `dbt_mods` is used by the dbt helpers, `maxScanBytes` by the scan check (BigQuery, Snowflake, Databricks), `healthBlocksPush` and `healthConfigPath` by the project health check, the two comments settings by team comments, and `show_edit_impact` by the per-edit impact note.
@@ -217,6 +229,7 @@ Still stuck? See [Support](#support).
 - **Agent** — `agents/analyst.md` — read-only data analyst (MCP or CLI)
 - **Command** — `commands/altimate.md` — `/altimate-code:altimate` slash command for explicit delegation
 - **Command** — `commands/rules.md` — `/altimate-code:rules` to answer proposed team rules
+- **Mod command** — `hooks/feedback.ts` — `/altimate-feedback` to draft and, once you confirm, file a GitHub issue
 - **Hooks** — `hooks/hooks.json` — SessionStart capability description and workspace skill copy; Stop hook hourly background skill refresh; the team rules hooks (`hooks-handlers/workspace-rules.sh`): SessionStart, UserPromptSubmit and Stop, which call `altimate learn hook <event>` and never fail the session (the per-turn hooks run in the background; session start waits at most 15 seconds); opt-in PreToolUse `warehouse-guard.sh` (needs `ALTIMATE_ROUTE_GUARD=1`)
 
 ## Support

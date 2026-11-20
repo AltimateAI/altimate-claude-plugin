@@ -10,6 +10,8 @@
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallInput, ToolCallResult } from 'claude-code'
 
 import { later } from '../altimate-cli'
+import { feedbackSessionEnd, feedbackSessionStart, registerFeedback } from '../feedback'
+import { noteProblem } from '../last-problem'
 import { keepStatusParts, restoreStatusParts } from '../status-line'
 import type { BashCall, EditedFile, FileCall } from '../tool-chain'
 import {
@@ -169,6 +171,9 @@ export type FeatureContext = {
 
 function failed($: EngineInterface, id: string, part: string, error: unknown) {
   try {
+    noteProblem(`${id} ${part} failed`, String(error))
+  } catch {}
+  try {
     $.ui.log(`${id} · ${part} failed: ${String(error)}`, { to: 'debug' })
   } catch {}
 }
@@ -218,6 +223,9 @@ export function registerFeatures(on: On, context: FeatureContext) {
   try {
     registerDbtMods(on, context)
   } catch {}
+  try {
+    registerFeedback(on, context)
+  } catch {}
 }
 
 export async function featuresSessionStart($: EngineInterface, e: Args<'session.start'>) {
@@ -231,6 +239,7 @@ export async function featuresSessionStart($: EngineInterface, e: Args<'session.
   await attempt($, 'docs', 'sessionStart', () => docsSessionStart($, e))
   await attempt($, 'cteProfile', 'sessionStart', () => cteProfileSessionStart($, e))
   await attempt($, 'dbtMods', 'sessionStart', () => sessionStartDbtMods($, e))
+  await attempt($, 'feedback', 'sessionStart', () => feedbackSessionStart($))
 }
 
 /**
@@ -305,6 +314,7 @@ export async function featuresSessionEnd($: EngineInterface, e: Args<'session.en
   await attempt($, 'docs', 'sessionEnd', () => docsSessionEnd($, e))
   await attempt($, 'cteProfile', 'sessionEnd', () => cteProfileSessionEnd($, e))
   await attempt($, 'dbtMods', 'sessionEnd', () => endDbtMods($))
+  feedbackSessionEnd()
 }
 
 /** Each feature's band line, in order, with its id; a feature with nothing to say is left out. */
