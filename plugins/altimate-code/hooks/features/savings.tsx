@@ -154,11 +154,15 @@ const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses
  *   `clusters:` under another key, is not one.
  * Anything else, flow-style YAML and anchors included, is not: the band stays quiet rather than guess.
  */
+export function isDatabricksPath(path: string): boolean {
+  return DATABRICKS_CONFIG.test(path.replace(/\\/g, '/'))
+}
+
 export function isDatabricksConfig(path: string, text: string): boolean {
   const file = path.replace(/\\/g, '/')
   if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
-  // A block commented out with /* */ declares nothing.
-  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text.replace(/\/\*[\s\S]*?\*\//g, ''))
+  // A block commented out with /* */ from the start of a line declares nothing; a /* inside a string is not one.
+  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, ''))
   if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null
@@ -710,10 +714,11 @@ export async function trackChanges(
     // The baseline is one run's read: its settings, date and cost all come from that run, so a setting is never
     // paired with another run's spend. A run that reads every setting and the cost it knew, finds none changed and
     // reads one more (a setting, or the cost) replaces it whole; any other run leaves it as it was.
+    const baseline = { date: today, config: now, windowCost, days: windowDays(view.window) }
     const readsAll = stored && covers(stored.config, now) && (stored.windowCost === null || windowCost !== null)
     const readsMore = stored && (learns(stored.config, now) || (stored.windowCost === null && windowCost !== null))
     if (stored && changed.length === 0 && readsAll && readsMore) {
-      await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
+      await $.store.set(key, baseline satisfies Baseline).catch(() => undefined)
     }
     // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
     if (stored && changed.length > 0 && stored.windowCost !== null && windowCost !== null) {
@@ -734,7 +739,7 @@ export async function trackChanges(
     // names no workspace matches, but two that name different ones do not.
     const isFlagged = flaggedWarehouses.some(one => one.resourceId === warehouse.id && sameWorkspace(warehouse.workspace_id, one.workspaceId, several))
     if (!stored && isFlagged) {
-      await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
+      await $.store.set(key, baseline satisfies Baseline).catch(() => undefined)
     }
   }
   return changes
@@ -1134,7 +1139,7 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
       // The CLI's text is only the first line of what it printed; an old altimate-code is told by its whole usage.
       const raw = ('raw' in result ? result.raw : '') || ''
       // The CLI's reason is text; anything else is read as text too, never as a script error.
-      return { platform, why: explain(String((metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)) || 'no answer'), connection, platform) }
+      return { platform, why: explain(errorText((metadata?.error === undefined || metadata.error === null || metadata.error === '' ? (tooOldCli(raw) ? raw : result.text || raw) : metadata.error) || 'no answer'), connection, platform) }
     }
     const today = dayOf(await $.clock.now())
     if (!live()) return null
@@ -1379,6 +1384,20 @@ async function openAltimate($: EngineInterface, at: number) {
   if (!opened) await update($, sharedAtom, now => (at === conversation ? { text: `No browser could be opened. Altimate is at ${SIGNUP_URL}` } : now))
 }
 
+/** The CLI's reason as text: a string as it is, an object by its reason or message, anything else as JSON. */
+export function errorText(error: unknown): string {
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object') {
+    const { reason, message } = error as { reason?: unknown; message?: unknown }
+    for (const said of [reason, message]) if (typeof said === 'string' && said.trim()) return said
+  }
+  try {
+    return JSON.stringify(error) ?? String(error)
+  } catch {
+    return String(error)
+  }
+}
+
 /** Whether `text` names `name` as a whole word: `dev` is not in `devices`. */
 export function mentions(text: string, name: string | null | undefined): boolean {
   if (typeof name !== 'string' || !name.trim()) return false
@@ -1417,7 +1436,7 @@ async function bandFor($: EngineInterface, text: string, aboutCompute: boolean):
 async function showBand($: EngineInterface, band: { text: string; offer: boolean } | null, at: number) {
   if (!band || at !== conversation) return
   if (band.offer) offered = true
-  await update($, bandAtom, () => ({ text: band.text }))
+  await update($, bandAtom, now => (at === conversation ? { text: band.text } : now))
 }
 
 type ToolRow = { tool_use_id?: string; tool: string; input: unknown }
@@ -1770,7 +1789,7 @@ export function register(on: On, _context: FeatureContext) {
                         <Button
                           key={`whatif-${at}-${k}`}
                           label={`${c.label} ${dollars(c.monthlyCost)}${c.fits === false ? ' ⚠' : ''}`}
-                          onPress={() => whenPressed($, () => update($, whatIfAtom, () => ({ connection: view.connection, workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label })))}
+                          onPress={() => whenPressed($, pressedIn => update($, whatIfAtom, now => (pressedIn === conversation ? { connection: view.connection, workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label } : now)))}
                         />
                       ))}
                     </Box>
@@ -1881,14 +1900,14 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
           const at = generation
           later($, async () => {
             if (at !== generation) return
-            await update($, bandAtom, () => null)
+            await update($, bandAtom, now => (at === generation ? null : now))
             if (at !== generation) return
             await openPane($)
             await startPressedRun($, lastAsked, at)
           })
         }}
       />
-      <Button key="savings-hide" label="Hide" onPress={() => whenPressed($, () => update($, bandAtom, () => null))} />
+      <Button key="savings-hide" label="Hide" onPress={() => whenPressed($, pressedIn => update($, bandAtom, now => (pressedIn === conversation ? null : now)))} />
     </Box>,
   )
 }
@@ -1919,7 +1938,7 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
 }
 
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
-  if (!DATABRICKS_CONFIG.test(file.path.replace(/\\/g, '/'))) return
+  if (!isDatabricksPath(file.path)) return
   // The conversation the edit was made in: a /clear from here on keeps its line out of the new one.
   const at = conversation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)

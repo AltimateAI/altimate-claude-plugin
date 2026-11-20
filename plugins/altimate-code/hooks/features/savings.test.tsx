@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { SNOWFLAKE_CAPTURE } from './savings-snowflake-capture.test-data'
 import { skippedChecks } from '../savings-checks'
-import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, evidenceLines, explain, fitLine, fixRequest, isDatabricksConfig, mentions, runsDatabricksCompute, slimTitle, statusText, supportsSavings, toView } from './savings'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, errorText, evidenceLines, explain, fitLine, fixRequest, isDatabricksConfig, mentions, runsDatabricksCompute, slimTitle, statusText, supportsSavings, toView } from './savings'
 import { DATABRICKS_FACTS, DATABRICKS_REPORT, SNOWFLAKE_FACTS, SNOWFLAKE_REPORT } from './savings-core.testkit'
 
 const ROOT = '/repo'
@@ -736,6 +736,23 @@ test('editing Databricks compute config offers /savings once a session, and Hide
   await band.unmount()
   // The offer ran nothing.
   expect(runs).toEqual([])
+})
+
+test('Hide pressed just before a /clear leaves the new conversation\'s own offer', async ($, on) => {
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  const { clock } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  let band = await $.ui.mount(BAND)
+  await band.press({ key: 'savings-hide' })
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  await band.unmount()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Medium', new_string: 'Large' })
+  await clock.settle()
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+  await band.unmount()
 })
 
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
@@ -4290,6 +4307,7 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['infra/bi.tf', 'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n'],
     ['infra/bi.tf', 'data "databricks_sql_warehouse" "bi" {\n  name = "bi"\n}\n'],
     ['infra/job.tf', 'resource databricks_job nightly {\n  name = "nightly"\n}\n'],
+    ['infra/logs.tf', 'locals {\n  prefix = "s3://logs/*"\n}\nresource "databricks_sql_endpoint" "wh" {\n  name = "wh"\n}\nlocals {\n  pattern = "a/*/b"\n}\n'],
     ['resources/jobs.yml', 'resources:\n  jobs:\n    nightly: {}\n'],
     ['resources/jobs/nightly.job.yml', 'resources: # every job\n  jobs: # nightly\n    nightly:\n      job_clusters: []\n'],
     ['resources/bi.yml', 'resources:\n\n  # the BI warehouse\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n'],
@@ -4323,7 +4341,28 @@ test('a failed answer whose error is not text says the CLI failed, not a script 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect([...texts, ...toasts].filter(text => /TypeError|is not a function/.test(text))).toEqual([])
+  // The reason the object carries reaches the person.
+  expect(texts.some(text => /no access/.test(text))).toBe(true)
   await ui.unmount()
+})
+
+test('a failed answer whose error is an empty string shows the CLI\'s own text', async ($, on) => {
+  const answer = { status: 'ok', title: 'Databricks Savings: FAILED', output: 'The Databricks savings check failed: warehouse unreachable', metadata: { success: false, error: '' } }
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.some(text => /no answer/.test(text))).toBe(false)
+  await ui.unmount()
+})
+
+test('a CLI error reads as its text: a string, an object by its reason or message, else as JSON', () => {
+  expect(errorText('boom')).toBe('boom')
+  expect(errorText({ reason: 'no access' })).toBe('no access')
+  expect(errorText({ message: 'timed out' })).toBe('timed out')
+  expect(errorText({ code: 7 })).toBe('{"code":7}')
+  expect(errorText(42)).toBe('42')
 })
 
 test('a lookback the answer sends as a string is still the window\'s length', async ($, on) => {
@@ -4363,6 +4402,9 @@ test('an answer whose window cannot be read gives the length its evidence is mea
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => / · the \d+ days/.test(text)).map(text => /the (\d+) days/.exec(text)![1])).toEqual(['30'])
   expect(texts.filter(text => /the last \d+ days' rate/.test(text)).map(text => /the last (\d+) days/.exec(text)![1])).toEqual(['30'])
+  // The evidence lines and the fix request read the same length.
+  expect(texts.some(text => /over 30 days/.test(text))).toBe(true)
+  expect(texts.some(text => /over 7 days/.test(text))).toBe(false)
   await ui.unmount()
 })
 

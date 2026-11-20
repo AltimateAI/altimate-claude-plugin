@@ -713,8 +713,7 @@ export type SavingsView = {
   pricing: string
   /** The SQL warehouse its queries ran on. */
   ranOn: string | null
-  /** The days the check read (YYYY-MM-DD, UTC). */
-  /** `days` is the length the CLI measured over, when it said. */
+  /** The window the check read (YYYY-MM-DD, UTC) and its length in days; `days` is derived from the ends when the CLI did not send `lookback_days`, and is absent only on reports saved before it was kept. */
   window: { start: string; end: string; days?: number }
   /** What was read; `workspaces` counts the Databricks workspaces the run read warehouses, clusters or jobs from. */
   checked: { warehouses: number; clusters: number; jobs: number; workspaces: number }
