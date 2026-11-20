@@ -656,6 +656,8 @@ export type SavingsView = {
     matchName: string
     /** The workspace it is in; null when the check read only one. */
     workspace: string | null
+    /** The workspace it is in, whether or not the check read several; null when the answer does not say. */
+    workspaceId: string | null
     monthlyMin: number
     monthlyMax: number
     evidence: string[]

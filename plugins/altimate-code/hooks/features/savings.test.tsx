@@ -1074,3 +1074,30 @@ for (const command of ['databricks jobs list', 'ls; databricks clusters list', '
     await band.unmount()
   })
 }
+
+test('the same warehouse id in two workspaces keeps two baselines, and only the flagged one is kept', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  classic.workspace_id = '111'
+  answer.metadata.warehouses.push({ ...classic, workspace_id: '222', name: 'Classic in 222', size: 'LARGE', window_cost: 500 })
+  answer.metadata.report.findings.forEach((one: any) => (one.workspace_id = '111'))
+  const { clock, store } = await start($, on, { answer, now: Date.parse('2026-11-18T10:00:00Z') })
+  await savings($)
+  await clock.settle()
+  expect(store.get('savings-baseline:dbxmega:111:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375 })
+  expect(store.has('savings-baseline:dbxmega:222:wh-classic')).toBe(false)
+  expect(store.has('savings-baseline:dbxmega:wh-classic')).toBe(false)
+})
+
+test('a baseline in one workspace says nothing about the same warehouse id in another', async ($, on) => {
+  // Workspace 111's Classic was SMALL; workspace 222's warehouse with that id is LARGE and never was flagged.
+  const store = { 'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: one.id === 'wh-classic' ? '222' : '111', size: one.id === 'wh-classic' ? 'LARGE' : one.size }))
+  const { clock } = await start($, on, { answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: / → .* since 2026-11-10/ })).toBeUndefined()
+  await ui.unmount()
+})

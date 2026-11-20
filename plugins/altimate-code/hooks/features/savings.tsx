@@ -65,7 +65,7 @@ const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 const ADD_CONNECTION =
   'Add a Databricks connection to altimate-code (in ~/.altimate-code/connections.json: type "databricks", server_hostname, the http_path of a SQL warehouse and an access_token), then run /savings again.'
 
-const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-5' })
+const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-6' })
 const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, null as { label: string } | null)
 const messageAtom = atom({ plugin: 'altimate-code', key: 'savingsMessage' } as const, null as { text: string; recovery: string } | null)
 const bandAtom = atom({ plugin: 'altimate-code', key: 'savingsBand' } as const, null as { text: string } | null)
@@ -318,6 +318,7 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
       // As the workspace spells it, to recognise it in files and commands.
       matchName: one.resource_name,
       workspace: workspaces > 1 ? (one.workspace_id ?? null) : null,
+      workspaceId: one.workspace_id ?? null,
       monthlyMin: one.monthly_min,
       monthlyMax: one.monthly_max,
       evidence: evidenceLines(one.evidence, days),
@@ -344,7 +345,9 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
 /** What a warehouse was when a run first flagged it, kept across sessions to show its spend before and after a change. */
 type Baseline = { date: string; type: string; size: string | null; windowCost: number }
 
-const baselineKey = (connection: string, warehouseId: string) => `savings-baseline:${connection}:${warehouseId}`
+// One connection can read several workspaces, where warehouse ids can repeat: the workspace is part of the key.
+const baselineKey = (connection: string, warehouse: Pick<ToolWarehouse, 'id' | 'workspace_id'>) =>
+  `savings-baseline:${connection}:${warehouse.workspace_id ? `${warehouse.workspace_id}:` : ''}${warehouse.id}`
 
 /**
  * Each flagged warehouse's state is kept the first time a run flags it. A later run that finds its
@@ -354,10 +357,10 @@ const baselineKey = (connection: string, warehouseId: string) => `savings-baseli
  */
 export async function trackChanges($: EngineInterface, view: SavingsView, warehouses: ToolWarehouse[], today: string): Promise<SavingsView['changes']> {
   const connection = view.connection ?? 'default'
-  const flagged = new Set(view.findings.filter(one => one.resourceType === 'sql_warehouse').map(one => one.resourceId))
+  const flagged = new Set(view.findings.filter(one => one.resourceType === 'sql_warehouse').map(one => `${one.workspaceId ?? ''}/${one.resourceId}`))
   const changes: SavingsView['changes'] = []
   for (const warehouse of warehouses) {
-    const key = baselineKey(connection, warehouse.id)
+    const key = baselineKey(connection, warehouse)
     const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
     const changed = stored && (stored.size !== warehouse.size || stored.type !== warehouse.type)
     if (stored && changed) {
@@ -370,7 +373,7 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
         monthlyNow: (warehouse.window_cost * 30) / windowDays(view.window),
       })
     }
-    if (!stored && flagged.has(warehouse.id)) {
+    if (!stored && flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`)) {
       await $.store
         .set(key, { date: today, type: warehouse.type, size: warehouse.size, windowCost: warehouse.window_cost } satisfies Baseline)
         .catch(() => undefined)
