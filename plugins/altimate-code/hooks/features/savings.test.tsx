@@ -255,6 +255,8 @@ type Options = {
   listError?: string
   /** `$.store` refuses every write, as it does past its size limit. */
   storeFull?: boolean
+  /** `$.store` refuses the writes to these keys. */
+  storeRefuses?: (key: string) => boolean
   /** What `uname -sr` prints. */
   uname?: string
   /** `altimate --version` rejects with this, as `$.process.run` does on its timeout. */
@@ -311,7 +313,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('store.get', (_: unknown, e: { key: string }) => ({ value: store.get(e.key) }))
   on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
-    if (options.storeFull) return { deny: 'the store is over its limit' }
+    if (options.storeFull || options.storeRefuses?.(e.key)) return { deny: 'the store is over its limit' }
     store.set(e.key, e.value)
     return { value: undefined }
   })
@@ -2854,4 +2856,76 @@ test('a cluster whose auto-termination the answer does not give reads "?", not "
   expect(evidenceLines(evidence)[1]).toMatch(/^Auto-termination \?; /)
   expect(evidenceLines({ ...evidence, auto_termination_minutes: 0 })[1]).toMatch(/^Auto-termination off; /)
   expect(evidenceLines({ ...evidence, auto_termination_minutes: 120 })[1]).toMatch(/^Auto-termination 120 minutes; /)
+})
+
+// --- The merged head's review: the startup probe, saving every answer, slim fix lines, Snowflake gaps, baseline costs.
+
+test('at session start a source build is not listed from, whatever its stderr names', async ($, on) => {
+  const { atStart } = await start($, on, { list: BOTH, version: 'local', versionStderr: 'warning: node v22.1.0 is deprecated\n' })
+  expect(atStart.listRuns).toBe(0)
+})
+
+test('an answer the store refuses does not keep the next one from being saved', async ($, on) => {
+  const { clock, store } = await start($, on, { list: BOTH, storeRefuses: key => key.startsWith('savings-report:') && /dbxmega|classic/.test(key) })
+  await savings($)
+  await clock.settle()
+  expect([...store.keys()].filter(key => key.startsWith('savings-report:'))).toHaveLength(1)
+})
+
+test('in the slim view a drafted fix in another workspace is not drawn under a finding with the same id', async ($, on) => {
+  const key = `savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`
+  // A second, smaller finding on another warehouse, so the slim view shows two titles: Classic's first.
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  const { clock } = await start($, on, { answer, now: Date.parse('2026-11-18T10:00:00Z'), store: { [key]: { ...FIX, workspaceId: '222' } } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  // Listed on its own, after every finding shown, not under the first Classic one.
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(titles.length).toBeGreaterThan(1)
+  expect(texts.indexOf(lines[0])).toBeGreaterThan(titles.at(-1)!)
+  await ui.unmount()
+})
+
+test('Snowflake evidence and requests with a figure missing read "?" or ask for the value, never "undefined"', () => {
+  for (const kind of ['underutilized_cluster', 'frequent_restart', 'downsize_warehouse']) {
+    for (const line of evidenceLines({ kind })) expect(line).not.toMatch(/undefined|NaN/)
+    const request = fixRequest({ title: 'Check', resource_type: 'warehouse', resource_id: 'BI_WH', resource_name: 'BI_WH', monthly_min: 0, monthly_max: 0, evidence: { kind } } as any, 7, 'snowflake')
+    expect(request).not.toMatch(/undefined|UNDEFINED|NaN/)
+  }
+})
+
+test('a baseline kept without a cost takes the first cost a later run gives, while the warehouse is unchanged', async ($, on) => {
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: null } }
+  const { clock, store: kept } = await start($, on, { store })
+  await savings($)
+  await clock.settle()
+  expect(kept.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375, days: 7 })
+})
+
+test('a drafted fix hides the change line of its own workspace\'s warehouse, not of the same id in another', async ($, on) => {
+  const key = `savings-fix:project:${ROOT}/dbxmega:111:sql_warehouse:wh-classic`
+  const store = {
+    [key]: { ...FIX, workspaceId: '111' },
+    'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-01', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 },
+    'savings-baseline:dbxmega:222:wh-classic': { date: '2026-11-01', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 },
+  }
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.workspaces_checked = 2
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  answer.metadata.warehouses.push({ ...classic, workspace_id: '222', name: 'Classic in 222' })
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  expect(texts.filter(text => /^Classic in 222: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
+  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(0)
+  await ui.unmount()
 })

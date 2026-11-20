@@ -241,13 +241,13 @@ export function evidenceLines(evidence: Record<string, unknown>, days = 7): stri
     }
     case 'underutilized_cluster':
       return [
-        `Cluster ${evidence.cluster_number} of ${evidence.max_cluster_count} was barely needed on ${daysOf(evidence.flagged_days)} (up to ${percentOf(evidence.highest_idle_percent)} idle)`,
-        `Lowering the maximum to ${evidence.recommended_max_cluster_count} cluster${Number(evidence.recommended_max_cluster_count) === 1 ? '' : 's'} may add some queueing; no dollar estimate`,
+        `Cluster ${count(evidence.cluster_number)} of ${count(evidence.max_cluster_count)} was barely needed on ${daysOf(evidence.flagged_days)} (up to ${percentOf(evidence.highest_idle_percent)} idle)`,
+        `Lowering the maximum to ${count(evidence.recommended_max_cluster_count)} cluster${Number(evidence.recommended_max_cluster_count) === 1 ? '' : 's'} may add some queueing; no dollar estimate`,
       ]
     case 'frequent_restart':
       return [
         `${count(evidence.bounces)} suspend-and-resume bounces inside a billed minute on ${daysOf(evidence.flagged_days)}`,
-        `${count(evidence.double_billed_seconds)} seconds billed twice at ${evidence.credits_per_hour} credit${Number(evidence.credits_per_hour) === 1 ? '' : 's'} an hour`,
+        `${count(evidence.double_billed_seconds)} seconds billed twice at ${known(evidence.credits_per_hour) ? oneLine(evidence.credits_per_hour) : '?'} credit${Number(evidence.credits_per_hour) === 1 ? '' : 's'} an hour`,
       ]
     default:
       return plainFacts(evidence)
@@ -292,7 +292,7 @@ function factOf(evidence: Record<string, unknown>, title: string): string {
     case 'downsize_warehouse':
       return `${oneLine(evidence.current_size) || '?'} could be ${oneLine(evidence.recommended_size) || '?'}`
     case 'underutilized_cluster':
-      return `cluster ${evidence.cluster_number} of ${evidence.max_cluster_count} barely needed`
+      return `cluster ${count(evidence.cluster_number)} of ${count(evidence.max_cluster_count)} barely needed`
     case 'frequent_restart':
       return `${count(evidence.bounces)} suspend-and-resume bounces`
     case 'over_sized':
@@ -303,6 +303,10 @@ function factOf(evidence: Record<string, unknown>, title: string): string {
       return title
   }
 }
+
+/** A finding and a fix line about one resource: the same id in the same workspace. */
+const sameResource = (finding: Pick<SavingsFinding, 'resourceId' | 'workspaceId'>, line: Pick<SavingsFixLine, 'resourceId' | 'workspaceId'>) =>
+  finding.resourceId === line.resourceId && (finding.workspaceId ?? null) === (line.workspaceId ?? null)
 
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
@@ -376,16 +380,22 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
     case 'downsize_warehouse':
       return {
         noun: 'Warehouse',
-        change: `resize it to ${e.recommended_size} (WAREHOUSE_SIZE)`,
+        change: oneLine(e.recommended_size) ? `resize it to ${oneLine(e.recommended_size)} (WAREHOUSE_SIZE)` : 'resize it to a smaller size its queries still fit (the check named no size)',
         defines: SNOWFLAKE_DEFINES,
-        otherwise: `write the \`ALTER WAREHOUSE ${sqlName(shownName(finding.resource_name, finding.resource_id))} SET WAREHOUSE_SIZE = '${String(e.recommended_size).toUpperCase()}'\` statement`,
+        otherwise: oneLine(e.recommended_size)
+          ? `write the \`ALTER WAREHOUSE ${sqlName(shownName(finding.resource_name, finding.resource_id))} SET WAREHOUSE_SIZE = '${oneLine(e.recommended_size).toUpperCase()}'\` statement`
+          : `write the \`ALTER WAREHOUSE ${sqlName(shownName(finding.resource_name, finding.resource_id))} SET WAREHOUSE_SIZE = ...\` statement once the size is chosen`,
       }
     case 'underutilized_cluster':
       return {
         noun: 'Warehouse',
-        change: `lower MAX_CLUSTER_COUNT to ${e.recommended_max_cluster_count}; this may add some queueing at its busiest`,
+        change: known(e.recommended_max_cluster_count)
+          ? `lower MAX_CLUSTER_COUNT to ${count(e.recommended_max_cluster_count)}; this may add some queueing at its busiest`
+          : 'lower MAX_CLUSTER_COUNT to the clusters its busiest hours use (the check named no count); this may add some queueing',
         defines: SNOWFLAKE_DEFINES,
-        otherwise: `write the \`ALTER WAREHOUSE ${sqlName(shownName(finding.resource_name, finding.resource_id))} SET MAX_CLUSTER_COUNT = ${e.recommended_max_cluster_count}\` statement`,
+        otherwise: known(e.recommended_max_cluster_count)
+          ? `write the \`ALTER WAREHOUSE ${sqlName(shownName(finding.resource_name, finding.resource_id))} SET MAX_CLUSTER_COUNT = ${count(e.recommended_max_cluster_count)}\` statement`
+          : `write the \`ALTER WAREHOUSE ${sqlName(shownName(finding.resource_name, finding.resource_id))} SET MAX_CLUSTER_COUNT = ...\` statement once the count is chosen`,
       }
     case 'frequent_restart':
       return {
@@ -577,6 +587,10 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
     const windowCost = typeof warehouse.window_cost === 'number' ? warehouse.window_cost : null
     const changed = stored && (stored.size !== sizeOrNull(warehouse.size) || stored.type !== warehouse.type)
     // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
+    // A baseline kept without a cost takes the first one a later run gives, while the warehouse is still unchanged.
+    if (stored && !changed && stored.windowCost === null && windowCost !== null) {
+      await $.store.set(key, { ...stored, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
+    }
     if (stored && changed && typeof stored.windowCost === 'number' && windowCost !== null) {
       changes.push({
         resourceId: warehouse.id,
@@ -779,13 +793,18 @@ const versionOf = (printed: { stdout?: unknown; stderr?: unknown }) => {
 }
 /** A source build prints `local` instead of a version. */
 const isSourceBuild = (printed: { stdout?: unknown }) => String(printed.stdout ?? '').trim().split('\n').pop()?.trim() === 'local'
+/** A probe that exited non-zero, whatever it printed. */
+const probeFailed = (printed: { exitCode?: unknown }) => typeof printed.exitCode === 'number' && printed.exitCode !== 0
+/** The release a probe names, or null for a source build, a failed probe or no version: none of them is started. */
+const releaseOf = (printed: { stdout?: unknown; stderr?: unknown; exitCode?: unknown }) => (isSourceBuild(printed) || probeFailed(printed) ? null : versionOf(printed))
 
 /** At session start: which platforms could be checked, for the status line. Runs no check. */
 async function detectPlatforms($: EngineInterface) {
   const mine = generation
   const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY).catch(() => null)
   // An altimate-code too old for assessment mode is not started at all, as for the check itself.
-  if (!printed || !supportsSavings(versionOf(printed) ?? '') || mine !== generation) return
+  const release = printed ? releaseOf(printed) : null
+  if (!release || !supportsSavings(release) || mine !== generation) return
   await listConnections($)
   if (mine === generation) await drawStatus($)
 }
@@ -1010,8 +1029,7 @@ async function runCheck($: EngineInterface, asked: string | null) {
     // A source build prints `local`, whatever version a runtime note on stderr names; a probe that failed
     // reads as no version.
     const source = isSourceBuild(printed)
-    const failed = typeof (printed as { exitCode?: unknown }).exitCode === 'number' && (printed as { exitCode: number }).exitCode !== 0
-    const version = source || failed ? null : versionOf(printed)
+    const version = releaseOf(printed)
     if (source || !version || !supportsSavings(version)) {
       const targets = targetsFor(asked, known)
       const noCheck = `This altimate-code has no ${checkName(targets)}.`
@@ -1054,7 +1072,9 @@ async function runCheck($: EngineInterface, asked: string | null) {
       if ('view' in answer) {
         const kept: SavingsKept = { savedAt: now, view: answer.view }
         fresh[keyOf(answer.view)] = kept
-        unsaved ||= !(await $.store.set(`${REPORT_PREFIX}${keyOf(answer.view)}`, kept).then(() => true, () => false))
+        // Each answer is offered to the store, whether or not an earlier one fit.
+        const saved = await $.store.set(`${REPORT_PREFIX}${keyOf(answer.view)}`, kept).then(() => true, () => false)
+        if (!saved) unsaved = true
         notices.push(summary(answer.view))
       } else {
         refusals.push({ platform: answer.platform, ...answer.why })
@@ -1355,7 +1375,8 @@ export function register(on: On, _context: FeatureContext) {
       const platforms = new Set(views.map(view => view.platform)).size
       // A drafted fix's line goes under its resource; one whose resource has no finding now (the fix may
       // have cleared it) is shown on its own, after the top findings.
-      const unflagged = views.flatMap(view => view.fixes.filter(line => !view.findings.some(one => one.resourceId === line.resourceId)))
+      // A fix whose resource is not among the findings shown (not flagged now, or below the top few) is listed on its own.
+      const unflagged = views.flatMap(view => view.fixes.filter(line => !top.some(one => one.view === view && sameResource(one.finding, line))))
       return cleanTree(
         <Box flexDirection="column" gap={1}>
           {refusals}
@@ -1387,7 +1408,7 @@ export function register(on: On, _context: FeatureContext) {
               <Box flexDirection="column" paddingLeft={2}>
                 {finding.evidence[0] ? <Text dimColor>{fitLine(finding.evidence[0], SLIM_WIDTH - 2)}</Text> : null}
                 {view.fixes
-                  .filter(line => line.resourceId === finding.resourceId)
+                  .filter(line => sameResource(finding, line))
                   .map((line, row) => (
                     <Text key={`fix-line-${at}-${row}`} color={line.state === 'measuring' || line.state === 'lower' ? undefined : 'warning'} dimColor={line.state === 'measuring'}>
                       {line.text}
