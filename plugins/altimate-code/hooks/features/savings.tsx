@@ -784,9 +784,9 @@ export function smallerLine(slim: Pick<ReturnType<typeof slimFindings>, 'hidden'
   const { hidden, hiddenPriced, adds } = slim
   if (hidden === 0) return null
   const plural = hidden === 1 ? '' : 's'
-  if (adds.max > 0) return `+ ${hidden} smaller finding${plural}, adding ${range(adds.min, adds.max)} a month to the total`
+  if (adds.max > 0) return `+ ${hidden} more finding${plural}, adding ${range(adds.min, adds.max)} a month to the total`
   // Each one is on a resource above, which the total counts once at its largest finding, or has no figure.
-  return hiddenPriced > 0 ? `+ ${hidden} smaller finding${plural}, already in the total` : `+ ${hidden} more finding${plural}, no dollar estimate`
+  return hiddenPriced > 0 ? `+ ${hidden} more finding${plural}, already in the total` : `+ ${hidden} more finding${plural}, no dollar estimate`
 }
 
 /** `text` within `width` columns: cut at the last clause (", " or "; ") that fits, else at a word, with "…". */
