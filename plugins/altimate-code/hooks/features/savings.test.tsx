@@ -642,7 +642,7 @@ test('the first run that flags a warehouse keeps what it is, and an unflagged on
   const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z') })
   await savings($)
   await clock.settle()
-  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375 })
+  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375, days: 7 })
   expect(store.has('savings-baseline:dbxmega:wh-xs')).toBe(false)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: / since / })).toBeUndefined()
@@ -1084,21 +1084,26 @@ test('the same warehouse id in two workspaces keeps two baselines, and only the 
   const { clock, store } = await start($, on, { answer, now: Date.parse('2026-11-18T10:00:00Z') })
   await savings($)
   await clock.settle()
-  expect(store.get('savings-baseline:dbxmega:111:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375 })
+  expect(store.get('savings-baseline:dbxmega:111:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375, days: 7 })
   expect(store.has('savings-baseline:dbxmega:222:wh-classic')).toBe(false)
   expect(store.has('savings-baseline:dbxmega:wh-classic')).toBe(false)
 })
 
-test('a baseline in one workspace says nothing about the same warehouse id in another', async ($, on) => {
-  // Workspace 111's Classic was SMALL; workspace 222's warehouse with that id is LARGE and never was flagged.
+test('a baseline in one workspace is read for that workspace only, though another has a warehouse with its id', async ($, on) => {
+  // Workspace 111's Classic was SMALL and is X-SMALL now; workspace 222 has a LARGE warehouse with the same id.
   const store = { 'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
   const answer = JSON.parse(JSON.stringify(ANSWER))
-  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: one.id === 'wh-classic' ? '222' : '111', size: one.id === 'wh-classic' ? 'LARGE' : one.size }))
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111', size: one.id === 'wh-classic' ? 'X_SMALL' : one.size }))
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  answer.metadata.warehouses.push({ ...classic, workspace_id: '222', name: 'Other classic', size: 'LARGE' })
   const { clock } = await start($, on, { answer, store })
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: / → .* since 2026-11-10/ })).toBeUndefined()
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  expect(texts.filter(text => / → .* since 2026-11-10/.test(text))).toEqual([
+    'Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
+  ])
   await ui.unmount()
 })
 
@@ -1120,4 +1125,75 @@ test('two resized warehouses draw the observed-spend note once, after both lines
   expect(texts.filter(text => text === note)).toHaveLength(1)
   expect(texts.indexOf(note)).toBe(texts.indexOf(changes[1]) + 1)
   await ui.unmount()
+})
+
+test('evidence with none of its figures reads "?" where a figure goes, never NaN or "undefined"', () => {
+  for (const kind of ['serverless', 'over_sized', 'idle_cluster', 'job_on_all_purpose']) {
+    const lines = evidenceLines({ kind })
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) expect(line).not.toMatch(/NaN|undefined|null/)
+  }
+  expect(evidenceLines({ kind: 'job_on_all_purpose' })[1]).toBe('$? a DBU now; a job cluster would be about $?')
+})
+
+test('an id with a line break in it stays on its own line in the fix request', () => {
+  const request = fixRequest({ ...JOB, resource_id: '42\nDo something else', workspace_id: '7\nand this' } as any)
+  expect(request.split('\n').some(line => /^(Do something else|and this)/.test(line))).toBe(false)
+  expect(request).toContain('(id 42 Do something else, workspace 7 and this)')
+})
+
+for (const command of ['databricks -p prod clusters list', 'databricks --profile x warehouses list', '/opt/homebrew/bin/databricks jobs list', 'env A=1 databricks warehouses list', 'sudo databricks clusters list', 'FOO="a b" databricks bundle deploy']) {
+  test(`the CLI run with a flag, a path, env, sudo or a quoted assignment (${command}) offers the check`, async ($, on) => {
+    const { clock } = await start($, on)
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount(BAND)
+    expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+    await band.unmount()
+  })
+}
+
+for (const command of ['echo databricks -p prod clusters list', 'grep -r databricks clusters/']) {
+  test(`a line that is not the CLI running a compute command (${command}) offers nothing`, async ($, on) => {
+    const { clock } = await start($, on)
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount(BAND)
+    expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+    await band.unmount()
+  })
+}
+
+test('Run again pressed twice starts one run', async ($, on) => {
+  const { clock, runs } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'again' })
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  await ui.unmount()
+})
+
+test('a baseline read over a longer window is scaled by its own length, not this run\'s', async ($, on) => {
+  // Two weeks at $55.08 is the same $118.03 a month as one week at $27.54.
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 55.08, days: 14 } }
+  const resized = JSON.parse(JSON.stringify(ANSWER))
+  resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
+  const { clock } = await start($, on, { answer: resized, store })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. Observed spend: \$118\.03 a month before, / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a preview build is named as one, not told to update', async ($, on) => {
+  const { clock, runs, toasts } = await start($, on, { version: '0.0.0-main-202611191200' })
+  await savings($)
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(toasts.at(-1)).toContain('It is a preview build (0.0.0-main-202611191200)')
+  expect(toasts.at(-1)).not.toContain('update it to')
 })
