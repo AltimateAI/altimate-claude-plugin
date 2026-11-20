@@ -192,6 +192,8 @@ type Options = {
   holdEdit?: Promise<void>
   /** dbt debug answers once this settles. */
   holdDebug?: Promise<void>
+  /** The first dbt debug answers once this settles; later ones at once. */
+  holdFirstDebug?: Promise<void>
   /** dbt deps answers once this settles. */
   holdDeps?: Promise<void>
   /** A stat of this path answers what it read only once `until` settles (an older read finishing late). */
@@ -367,6 +369,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   let held = false
   let shows = 0
+  let firstDebugHeld = false
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string; env?: Record<string, string> } }) => {
     runs.push([...e.argv])
     envs.push(e.init?.env ?? {})
@@ -415,6 +418,10 @@ async function start($: any, on: any, options: Options = {}) {
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
     if (verb === 'debug') {
       if (options.holdDebug) await options.holdDebug
+      if (options.holdFirstDebug && !firstDebugHeld) {
+        firstDebugHeld = true
+        await options.holdFirstDebug
+      }
       return { value: { ...(options.debug ?? { exitCode: 0, stdout: DEBUG }), stderr: '' } }
     }
     if (verb === 'ls' && options.listFails) return { value: { exitCode: 1, stdout: '', stderr: 'ls failed' } }
@@ -4468,6 +4475,38 @@ test('a change while dbt deps runs and fails is read once it is done: the doctor
   await $.tool.call({ tool: 'Bash', command: 'touch models/orders.sql' } as any)
   await clock.settle()
   release()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a change whose read of the doctor finds it busy, then finds it idle only after it published, is still read', async ($, on) => {
+  let releaseDebug!: () => void
+  const holdDebug = new Promise<void>(resolve => (releaseDebug = resolve))
+  let holdRead = false
+  let releaseRead!: () => void
+  const readGate = new Promise<void>(resolve => (releaseRead = resolve))
+  on('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    const got = await next(e)
+    if (holdRead && e.key === 'dbtDoctor') {
+      holdRead = false
+      await readGate
+    }
+    return got
+  })
+  const { clock, mtimes } = await start($, on, { now: 200_000, holdDebug, show: { rows: [{ order_id: 1, amount: 10 }] } })
+  const reply = $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  mtimes['models/orders.sql'] = 150_000
+  holdRead = true
+  void $.tool.call({ tool: 'Bash', command: 'touch models/orders.sql' } as any)
+  await clock.settle()
+  // The doctor publishes while that read of its (busy) state is still out.
+  releaseDebug()
+  await reply
+  await clock.settle()
+  releaseRead()
   await clock.settle()
   const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()

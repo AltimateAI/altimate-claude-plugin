@@ -1524,13 +1524,12 @@ async function manifestCheck($: EngineInterface, root: string): Promise<{ check:
  * line is read again, so a doctor shown before the change no longer says the manifest is current.
  */
 async function recheckDoctorManifest($: EngineInterface) {
+  // Marked first: a doctor running now that publishes what it read before this change reads the manifest again
+  // when it is done, even if it finishes while this read of its state is under way.
+  recheckWhenIdle = true
   const view = await read($, doctorAtom)
-  if (!view) return
-  // A doctor running now may publish what it read before this change: it reads the manifest again when it is done.
-  if (view.busy) {
-    recheckWhenIdle = true
-    return
-  }
+  if (!view || view.busy) return
+  recheckWhenIdle = false
   const seq = ++manifestSeq
   const { check, staleFiles } = await manifestCheck($, view.root)
   // A newer read (another change, or the doctor itself) has the say.
@@ -1544,7 +1543,10 @@ async function recheckDoctorManifest($: EngineInterface) {
     landed = true
     return { ...prev, checks: prev.checks.map(one => (one.id === 'manifest' ? check : one)), staleFiles }
   })
-  if (!landed && (await read($, doctorAtom))?.busy) recheckWhenIdle = true
+  if (!landed && seq === manifestSeq) {
+    recheckWhenIdle = true
+    if (!(await read($, doctorAtom))?.busy) drainDoctorRecheck($)
+  }
 }
 
 /** When the doctor is idle again: a change made while it was busy has its manifest line read now. */
@@ -1625,7 +1627,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   }
 
   // Manifest freshness. A read after a change that is still going is outdated by this one.
-  manifestSeq++
+  const doctorSeq = ++manifestSeq
   const manifest = await manifestCheck($, root)
   checks.push(manifest.check)
   const staleFiles = manifest.staleFiles
@@ -1649,8 +1651,15 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     check.detail = redactValues(check.detail)
     if (check.fix) check.fix = redactValues(check.fix)
   }
-  const view: DoctorView = { root, checks, at: await $.clock.now(), staleFiles, busy: null }
-  await update($, doctorAtom, () => view)
+  let view: DoctorView = { root, checks, at: await $.clock.now(), staleFiles, busy: null }
+  await update($, doctorAtom, prev => {
+    // A newer read of the manifest (after a change, or another doctor) has the say on its line.
+    if (doctorSeq !== manifestSeq && prev?.root === root) {
+      const newer = prev.checks.find(one => one.id === 'manifest')
+      if (newer) view = { ...view, checks: view.checks.map(one => (one.id === 'manifest' ? newer : one)), staleFiles: prev.staleFiles }
+    }
+    return view
+  })
   // A change while it ran (the connection test can take minutes): its manifest line is read again.
   drainDoctorRecheck($)
   return view
