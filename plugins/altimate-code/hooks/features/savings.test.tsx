@@ -2157,6 +2157,7 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['proj/databricks.yaml', 'include:\n  - resources/*.yml\n'],
     ['infra/bi.tf', 'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n'],
     ['infra/bi.tf', 'data "databricks_sql_warehouse" "bi" {\n  name = "bi"\n}\n'],
+    ['infra/job.tf', 'resource databricks_job nightly {\n  name = "nightly"\n}\n'],
     ['resources/jobs.yml', 'resources:\n  jobs:\n    nightly: {}\n'],
     ['resources/jobs/nightly.job.yml', 'resources: # every job\n  jobs: # nightly\n    nightly:\n      job_clusters: []\n'],
     ['resources/bi.yml', 'resources:\n\n  # the BI warehouse\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n'],
@@ -2173,6 +2174,7 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['resources/other.yml', 'myresources:\n  jobs:\n    a: {}\n'],
     ['resources/commented.yml', '# resources:\n#   jobs:\n'],
     ['resources/near.yml', 'resources:\n  jobs_extra:\n    a: {}\n'],
+    ['resources/dash.yml', 'resources:\n  dashboards:\n    jobs:\n      a: {}\n'],
     ['infra/eks.tf', 'variable "databricks_account_id" {}\nresource "aws_eks_cluster" "main" {\n  name = var.databricks_account_id\n}\n'],
     ['config/jobs.yml', 'resources:\n  jobs:\n    a: {}\n'],
   ]
