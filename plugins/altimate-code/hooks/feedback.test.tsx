@@ -34,7 +34,7 @@ test('the issue holds the description and each fact the plugin knows, and nothin
       '',
       '---',
       '',
-      '**Environment** (added by `/altimate-code:feedback`; nothing else is attached)',
+      '**Environment** (added by `/altimate-feedback`; nothing else is attached)',
       '',
       '- Plugin: altimate-code 1.8.3',
       '- altimate-code: altimate 0.12.11',
@@ -265,7 +265,7 @@ async function start($: any, on: any, options: { registerError?: string; gh?: Gh
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
   const run = async (args: string) => {
-    const answer = (await $.command.run({ command: 'feedback', args } as any)) as { text?: string }
+    const answer = (await $.command.run({ command: 'altimate-feedback', args } as any)) as { text?: string }
     await clock.settle()
     return answer.text ?? ''
   }
@@ -281,8 +281,8 @@ const shownTitle = (text: string) => /^Title: (.*)$/m.exec(text)![1]
 test('with no description the command asks for one and does nothing else', async ($, on) => {
   const { run, calls } = await start($, on)
   const text = await run('')
-  expect(text).toContain('/altimate-code:feedback <what happened>')
-  expect(await run('--with-error')).toContain('/altimate-code:feedback <what happened>')
+  expect(text).toContain('/altimate-feedback <what happened>')
+  expect(await run('--with-error')).toContain('/altimate-feedback <what happened>')
   expect(calls).toEqual([])
 })
 
@@ -297,7 +297,7 @@ test('a description gives the exact draft and sends nothing: no gh call, no brow
   expect(shownBody(text)).toContain('- OS: macos')
   expect(shownBody(text)).toContain('- dbt: not checked this session')
   expect(shownBody(text)).toContain('- Settings: dbt helpers on')
-  expect(text).toContain('/altimate-code:feedback --confirm')
+  expect(text).toContain('/altimate-feedback --confirm')
   expect(calls).toEqual([])
 })
 
