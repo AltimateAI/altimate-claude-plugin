@@ -592,6 +592,8 @@ export interface DocsCoverageView {
   /** Output columns without a description. */
   missing: string[]
   hasDescription: boolean
+  /** Read from a manifest dbt wrote before the model's last edit; the edit's check reads it again. */
+  stale: boolean
 }
 
 export interface DocsState {
@@ -695,6 +697,8 @@ declare module 'claude-code' {
       runs: Shaped<RunsState | null>
       /** hooks/features/: DeferState. */
       defer: DeferState | null
+      /** hooks/features/: the flags /defer and /target added to Claude's last dbt command, until the next prompt; null with none. */
+      deferRan: string | null
       /** hooks/features/: ToModelState. */
       toModel: ToModelState | null
       /** hooks/features/: CommentsState. */

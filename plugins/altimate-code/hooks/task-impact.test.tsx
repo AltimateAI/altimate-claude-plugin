@@ -952,3 +952,17 @@ test('a column the SQL from before the task did not name but the manifest has (a
   expect(line).toContain('amount  reaches 2 columns in 2 models')
   expect(line).not.toMatch(/not in the manifest from before the task/)
 })
+
+test('a model the task created, which the manifest from before it lacks, has its columns called new with an unknown reach, not an altimate-code to update', async ($, on) => {
+  const NEW_MODEL = `${ROOT}/models/marts/region_revenue.sql`
+  const { turn, logs } = await start($, on, {
+    answer: args => (args.model === 'region_revenue' ? { status: 'ok', output: 'Model "region_revenue" not found in manifest. Available models: fct_orders, int_orders', metadata: { success: false, truncated: false } } : undefined),
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: NEW_MODEL, content: 'select\n  region,\n  sum(revenue) as revenue\nfrom {{ ref("fct_orders") }}\ngroup by 1\n' })
+  })
+  const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
+  expect(line).toContain('region_revenue')
+  expect(line).toContain('region  not in the manifest from before the task (new in it?): its reach is unknown, not zero')
+  expect(line).not.toContain('update altimate-code')
+})

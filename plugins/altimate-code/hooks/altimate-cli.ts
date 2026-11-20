@@ -18,11 +18,11 @@ export const NOT_FOUND = /ENOENT|not found|no such file/i
 export const MISSING_BINARY = new RegExp(`${NOT_FOUND.source}|(cannot|could not|failed to) (start|spawn|run)`, 'i')
 
 /** Runs the altimate CLI under the first name that is installed; 90 s unless the caller says otherwise. */
-export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 90_000) {
+export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 90_000, env?: Record<string, string>) {
   let lastError: unknown = null
   for (const bin of CLI_NAMES) {
     try {
-      return await $.process.run([bin, ...args], { timeoutMs })
+      return await $.process.run([bin, ...args], { timeoutMs, ...(env && { env }) })
     } catch (error) {
       if (!MISSING_BINARY.test(String(error))) throw error
       lastError = error
@@ -191,6 +191,8 @@ export type RunToolOptions = {
    * item 4), as the skill does before it adds `--allow-write`.
    */
   write?: boolean
+  /** Variables set for the CLI process (CLI route only, so a call that sets them never goes over MCP). */
+  env?: Record<string, string>
 }
 
 /**
@@ -201,7 +203,7 @@ export type RunToolOptions = {
  */
 export async function runTool($: EngineInterface, name: string, args: Record<string, unknown>, options: RunToolOptions = {}) {
   const { until, write = false } = options
-  const cliOnly = options.cliOnly === true || write
+  const cliOnly = options.cliOnly === true || write || options.env !== undefined
   // With a deadline, nothing starts once it has passed, and the CLI is stopped at it.
   const left = async () => {
     const ms = until === undefined ? TOOL_TIMEOUT_MS : until - (await $.clock.now())
@@ -241,7 +243,7 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
     }
   }
   const argv = ['tool', 'run', name, '--args', JSON.stringify(args), '--json', ...(write ? ['--allow-write'] : [])]
-  const result = await runAltimate($, argv, await left())
+  const result = await runAltimate($, argv, await left(), options.env)
   if ((result as { isStdoutTruncated?: boolean }).isStdoutTruncated) {
     return { metadata: null as any, text: `${name}'s answer was larger than the 4 MiB a plugin can read`, ok: false }
   }
