@@ -18,9 +18,10 @@ const SHELL_VALUE_OPTIONS = new Set(['--rcfile', '--init-file'])
 /**
  * The script a shell runs from its `-c` option (alone or in a cluster: `-lc`, `-cx`, `-Ec`): the first word
  * after the shell's options, where each `o` or `O` in a cluster takes the next word as its value, in order
- * (`-o pipefail`, `-euo pipefail`, `-oc pipefail`). '' when `-c` has no script word after it; null when none
- * of the shell's options is `-c`, so `bash deploy.sh -c x` runs no script here. `at` is where the shell's own
- * name is.
+ * (`-o pipefail`, `-euo pipefail`, `-oc pipefail`). '' when `-c` has no script word after it. An option
+ * this reader does not know may take a value and so hide a `-c` after it (`zsh --emulate sh -c x`): then,
+ * as the push check always did, any `-c` after the shell's name counts, with the word after it as its
+ * script. Null when there is none. `at` is where the shell's own name is.
  */
 export function shellScript(words: readonly string[], at: number): string | null {
   let script = false
@@ -32,7 +33,9 @@ export function shellScript(words: readonly string[], at: number): string | null
     else if (/^[-+][A-Za-z]+$/.test(word)) i += (word.match(/[oO]/g) ?? []).length
   }
   if (words[i] === '--') i++
-  return script ? (words[i] ?? '') : null
+  if (script) return words[i] ?? ''
+  const c = words.findIndex((word, k) => k > at && /^-[A-Za-z]*c[A-Za-z]*$/.test(word))
+  return c < 0 ? null : (words[c + 1] ?? '')
 }
 
 /** Where the heredoc started by `<<` at `i` ends: its delimiter, whether it was quoted, and `<<` at `i` is one at all (not `<<<`, not a shift in `$((x<<2))`). */

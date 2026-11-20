@@ -1158,7 +1158,7 @@ test('with ALTIMATE_TELEMETRY_DISABLED the push gate holds as before and sends n
   expect(usage).toEqual([])
 })
 
-test('a shell runs its -c script only when -c is among its own options, in any cluster', () => {
+test('a shell runs its -c script from any option cluster, and past options this reader does not know', () => {
   expect(isGitPush("bash -cx 'git push'")).toBe(true)
   expect(isGitPush("bash -o pipefail -c 'git push'")).toBe(true)
   expect(isGitPush("bash -eo pipefail -c 'git push'")).toBe(true)
@@ -1168,7 +1168,9 @@ test('a shell runs its -c script only when -c is among its own options, in any c
   expect(isGitPush("bash -eoc pipefail 'git push'")).toBe(true)
   // `-c` with no script word runs nothing, so a heredoc fed to it is not its script.
   expect(isGitPush('bash -c <<EOF\ngit push\nEOF')).toBe(false)
-  expect(isGitPush("bash deploy.sh -c 'git push'")).toBe(false)
+  // An unknown option may take a value, so a `-c` after it still counts, as it always did.
+  expect(isGitPush("zsh --emulate sh -c 'git push'")).toBe(true)
+  expect(isGitPush("ksh -R x -c 'git push'")).toBe(true)
   expect(filesWrittenBy("bash -ec 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
   expect(filesWrittenBy("bash -euo pipefail -c 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
 })
