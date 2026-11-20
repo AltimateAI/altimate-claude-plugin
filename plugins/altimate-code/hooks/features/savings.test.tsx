@@ -3878,6 +3878,7 @@ test('a fix drafted on a warehouse core sends with no size reads its type alone 
 
 test('two workspaces sharing a warehouse id: a drafted fix, a what-if press and a baseline each touch only their own workspace', async ($, on) => {
   const ours = DATABRICKS_REPORT.findings.findIndex(one => one.resource_id === 'wh-synth-classic' && one.workspace_id === '1001' && one.check_id === 'wh_classic_pro_to_serverless')
+  expect(ours).not.toBe(-1)
   expect(DATABRICKS_REPORT.findings.some(one => one.resource_id === 'wh-synth-classic' && one.workspace_id === '1002')).toBe(true)
   const baseline = (workspace: string) => `savings-baseline:dbxmega:${workspace}:wh-synth-classic`
   const fix = (workspace: string) => `savings-fix:project:${ROOT}/dbxmega:${workspace}:sql_warehouse:wh-synth-classic`
@@ -3902,13 +3903,18 @@ test('two workspaces sharing a warehouse id: a drafted fix, a what-if press and 
   expect(kept.get(fix('1001'))).toMatchObject({ workspaceId: '1001', config: { size: 'SMALL', type: 'CLASSIC' } })
   expect(Math.abs((kept.get(fix('1001')) as any).dailyCost - 66 / 7)).toBeLessThan(1e-9)
   expect(kept.has(fix('1002'))).toBe(false)
-  // What-if: pressing 1001's choice opens 1001's comparison alone.
-  await ui.press({ key: 'whatif-0-1' })
+  // What-if, with 1001's fix drafted: pressing 1002's choice opens 1002's comparison alone, and leaves 1001's
+  // record and 1002's (absent) record as they were.
+  const drafted = kept.get(fix('1001'))
+  await ui.press({ key: 'whatif-1-1' })
   await clock.settle()
   const opened = ((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).map(one => String(one.text))
-  const first = DATABRICKS_REPORT.what_if[0]!
-  expect(first.workspace_id).toBe('1001')
-  expect(opened).toEqual([`At X-SMALL: ${compared(first.current_monthly_cost, first.choices[1]!.monthly_cost).now} a month instead of ${compared(first.current_monthly_cost, first.choices[1]!.monthly_cost).was}, ${compared(first.current_monthly_cost, first.choices[1]!.monthly_cost).gap} less. Its 16 cores cover the 4 its queries need (twice what 99% of them use).`])
+  const second = DATABRICKS_REPORT.what_if[1]!
+  expect(second.workspace_id).toBe('1002')
+  const costs = compared(second.current_monthly_cost, second.choices[1]!.monthly_cost)
+  expect(opened).toEqual([`At X-SMALL: ${costs.now} a month instead of ${costs.was}, ${costs.gap} less. Its 16 cores cover the 4 its queries need (twice what 99% of them use).`])
+  expect(kept.get(fix('1001'))).toEqual(drafted)
+  expect(kept.has(fix('1002'))).toBe(false)
   await ui.unmount()
 })
 
