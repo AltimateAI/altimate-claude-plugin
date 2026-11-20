@@ -109,11 +109,15 @@ const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses
  *   `clusters:` under another key, is not one.
  * Anything else, flow-style YAML and anchors included, is not: the band stays quiet rather than guess.
  */
+export function isDatabricksPath(path: string): boolean {
+  return DATABRICKS_CONFIG.test(path.replace(/\\/g, '/'))
+}
+
 export function isDatabricksConfig(path: string, text: string): boolean {
   const file = path.replace(/\\/g, '/')
   if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
-  // A block commented out with /* */ declares nothing.
-  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text.replace(/\/\*[\s\S]*?\*\//g, ''))
+  // A block commented out with /* */ from the start of a line declares nothing; a /* inside a string is not one.
+  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, ''))
   if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null
@@ -541,14 +545,15 @@ export async function trackChanges(
     }
     // In one workspace an id is unambiguous, so it is matched alone: the finding or the warehouse may lack the workspace id.
     const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flaggedIds.has(warehouse.id))
+    const baseline = { date: today, config: now, windowCost, days: windowDays(view.window) }
     if (!stored && isFlagged && windowCost !== null) {
-      await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
+      await $.store.set(key, baseline satisfies Baseline).catch(() => undefined)
     }
     // The baseline is one run's read: its settings, date and cost all come from that run, so a setting is never
     // paired with another run's spend. A run that reads every setting it knew, finds none changed and reads one
     // more replaces it whole; a run that saw a change, or missed a setting, leaves it as it was.
     if (stored && windowCost !== null && learns(stored.config, now) && covers(stored.config, now)) {
-      await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
+      await $.store.set(key, baseline satisfies Baseline).catch(() => undefined)
     }
   }
   return changes
@@ -688,8 +693,7 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
       // The CLI's text is only the first line of what it printed; an old altimate-code is told by its whole usage.
       const raw = ('raw' in result ? result.raw : '') || ''
       const error = metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)
-      // The CLI's reason is text; anything else is read as text too, never as a script error.
-      const why = explain(String(error || 'no answer'), connection)
+      const why = explain(errorText(error || 'no answer'), connection)
       await update($, messageAtom, now => (live() ? why : now))
       say(`Databricks savings check: ${why.text} ${why.recovery}`)
       return
@@ -738,6 +742,20 @@ async function draftFix($: EngineInterface, finding: SavingsView['findings'][num
   )
 }
 
+/** The CLI's reason as text: a string as it is, an object by its reason or message, anything else as JSON. */
+export function errorText(error: unknown): string {
+  if (typeof error === 'string') return error
+  if (error && typeof error === 'object') {
+    const { reason, message } = error as { reason?: unknown; message?: unknown }
+    for (const said of [reason, message]) if (typeof said === 'string' && said.trim()) return said
+  }
+  try {
+    return JSON.stringify(error) ?? String(error)
+  } catch {
+    return String(error)
+  }
+}
+
 /** Whether `text` names `name` as a whole word: `dev` is not in `devices`. */
 export function mentions(text: string, name: string | null | undefined): boolean {
   if (typeof name !== 'string' || !name.trim()) return false
@@ -769,7 +787,7 @@ async function bandFor($: EngineInterface, text: string, aboutCompute: boolean):
 async function showBand($: EngineInterface, band: { text: string; offer: boolean } | null, at: number) {
   if (!band || at !== conversation) return
   if (band.offer) offered = true
-  await update($, bandAtom, () => ({ text: band.text }))
+  await update($, bandAtom, now => (at === conversation ? { text: band.text } : now))
 }
 
 /** Adds this feature's own hooks. */
@@ -902,7 +920,7 @@ export function register(on: On, _context: FeatureContext) {
                   <Button
                     key={`whatif-${at}-${k}`}
                     label={`${c.label} ${dollars(c.monthlyCost)}${c.fits === false ? ' ⚠' : ''}`}
-                    onPress={() => whenPressed($, () => update($, whatIfAtom, () => ({ workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label })))}
+                    onPress={() => whenPressed($, pressedIn => update($, whatIfAtom, now => (pressedIn === conversation ? { workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label } : now)))}
                   />
                 ))}
               </Box>
@@ -1030,7 +1048,7 @@ export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCal
 }
 
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
-  if (!DATABRICKS_CONFIG.test(file.path.replace(/\\/g, '/'))) return
+  if (!isDatabricksPath(file.path)) return
   // The conversation the edit was made in: a /clear from here on keeps its line out of the new one.
   const at = conversation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)

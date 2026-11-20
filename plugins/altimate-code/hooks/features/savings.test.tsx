@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, evidenceLines, explain, fixRequest, isDatabricksConfig, mentions, runsDatabricksCompute, supportsSavings, toView as toViewOf } from './savings'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, errorText, evidenceLines, explain, fixRequest, isDatabricksConfig, mentions, runsDatabricksCompute, supportsSavings, toView as toViewOf } from './savings'
 import { DATABRICKS_FACTS, DATABRICKS_REPORT } from './savings-core.testkit'
 
 const ROOT = '/repo'
@@ -2158,6 +2158,7 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['infra/bi.tf', 'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n'],
     ['infra/bi.tf', 'data "databricks_sql_warehouse" "bi" {\n  name = "bi"\n}\n'],
     ['infra/job.tf', 'resource databricks_job nightly {\n  name = "nightly"\n}\n'],
+    ['infra/logs.tf', 'locals {\n  prefix = "s3://logs/*"\n}\nresource "databricks_sql_endpoint" "wh" {\n  name = "wh"\n}\nlocals {\n  pattern = "a/*/b"\n}\n'],
     ['resources/jobs.yml', 'resources:\n  jobs:\n    nightly: {}\n'],
     ['resources/jobs/nightly.job.yml', 'resources: # every job\n  jobs: # nightly\n    nightly:\n      job_clusters: []\n'],
     ['resources/bi.yml', 'resources:\n\n  # the BI warehouse\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n'],
@@ -2191,7 +2192,17 @@ test('a failed answer whose error is not text says the CLI failed, not a script 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect([...texts, ...toasts].filter(text => /TypeError|is not a function/.test(text))).toEqual([])
+  // The reason the object carries reaches the person.
+  expect(texts.some(text => /no access/.test(text))).toBe(true)
   await ui.unmount()
+})
+
+test('a CLI error reads as its text: a string, an object by its reason or message, else as JSON', () => {
+  expect(errorText('boom')).toBe('boom')
+  expect(errorText({ reason: 'no access' })).toBe('no access')
+  expect(errorText({ message: 'timed out' })).toBe('timed out')
+  expect(errorText({ code: 7 })).toBe('{"code":7}')
+  expect(errorText(42)).toBe('42')
 })
 
 test('a lookback the answer sends as a string is still the window\'s length', async ($, on) => {
@@ -2231,6 +2242,9 @@ test('an answer whose window cannot be read gives the length its evidence is mea
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => / · the \d+ days/.test(text)).map(text => /the (\d+) days/.exec(text)![1])).toEqual(['30'])
   expect(texts.filter(text => /the last \d+ days' rate/.test(text)).map(text => /the last (\d+) days/.exec(text)![1])).toEqual(['30'])
+  // The evidence lines and the fix request read the same length.
+  expect(texts.some(text => /over 30 days/.test(text))).toBe(true)
+  expect(texts.some(text => /over 7 days/.test(text))).toBe(false)
   await ui.unmount()
 })
 
