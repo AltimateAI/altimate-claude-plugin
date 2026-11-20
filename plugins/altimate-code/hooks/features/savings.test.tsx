@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, evidenceLines, explain, fixRequest, mentions, runsDatabricksCompute, supportsSavings, toView as toViewOf } from './savings'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, evidenceLines, explain, fixRequest, isDatabricksConfig, mentions, runsDatabricksCompute, supportsSavings, toView as toViewOf } from './savings'
 import { DATABRICKS_FACTS, DATABRICKS_REPORT } from './savings-core.testkit'
 
 const ROOT = '/repo'
@@ -2151,9 +2151,32 @@ test('two unnamed warehouses a file names by id, in two workspaces, are not one 
   await band.unmount()
 })
 
+test('Databricks config is a Terraform databricks_ resource, a top-level bundle:, or a top-level resources: block holding compute', () => {
+  const yes = [
+    'resources:\n  jobs:\n    nightly: {}\n',
+    'resources: # every job\n  jobs: # nightly\n    nightly:\n      job_clusters: []\n',
+    'resources:\n\n  # the BI warehouse\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n',
+    'resources:\r\n  clusters:\r\n    shared: {}\r\n',
+    'targets:\n  dev: {}\nresources:\n  pipelines:\n    p: {}\n',
+    'bundle:\n  name: x\n',
+    'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n',
+  ]
+  const no = [
+    '',
+    'resources:\n  limits:\n    cpu: 1\nkafka:\n  clusters:\n    - a\n',
+    'spec:\n  resources:\n    jobs:\n      a: {}\n',
+    'resources:\n  limits:\n    jobs: 1\n',
+    'myresources:\n  jobs:\n    a: {}\n',
+    '# resources:\n#   jobs:\n',
+    'resources:\n  jobs_extra:\n    a: {}\n',
+  ]
+  expect(yes.filter(text => !isDatabricksConfig(text))).toEqual([])
+  expect(no.filter(text => isDatabricksConfig(text))).toEqual([])
+})
+
 test('a Helm or Kubernetes file under a resources/ folder is not Databricks config, whatever its words', async ($, on) => {
   const files = {
-    [`${ROOT}/deploy/resources/values.yaml`]: 'resources:\n  limits:\n    cpu: 1\n  requests:\n    memory: 1Gi\n# runs on the shared cluster\n',
+    [`${ROOT}/deploy/resources/values.yaml`]: 'resources:\n  limits:\n    cpu: 1\n  requests:\n    memory: 1Gi\n# runs on the shared cluster\nkafka:\n  clusters:\n    - main\n',
     [`${ROOT}/k8s/resources/app.yml`]: 'spec:\n  containers:\n    - name: app\n      resources:\n        limits:\n          cpu: 1\n# cluster: prod\n',
   }
   const { clock } = await start($, on, { files })
