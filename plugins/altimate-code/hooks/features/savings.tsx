@@ -1004,6 +1004,18 @@ export function rankFindings(views: readonly SavingsView[]): RankedFinding[] {
 /** Two answers that count a resource once (`resourceKey`): the same platform and the same account. */
 const sameAccount = (a: SavingsView, b: SavingsView) => a.platform === b.platform && (a.scope ?? null) === (b.scope ?? null)
 
+/**
+ * The lines of the drafted fix that belong to a finding shown: those of the answer it is from, else those of another
+ * answer of the same account. Two connections that read one workspace list its findings twice and only one copy is
+ * shown, so the copy shown may not be the one whose answer holds the fix. Each answer's lines are taken whole, so
+ * a fix both drafted is not listed twice.
+ */
+function fixLinesOf(views: readonly SavingsView[], view: SavingsView, finding: SavingsFinding): SavingsView['fixes'] {
+  const lines = (from: SavingsView) => from.fixes.filter(line => sameResource(from, finding, line))
+  const own = lines(view)
+  return own.length > 0 ? own : views.filter(other => other !== view && sameAccount(other, view)).map(lines).find(found => found.length > 0) ?? []
+}
+
 /** Every finding across the answers, largest first, each once: two connections that read one workspace list its findings twice. */
 export function distinctFindings(views: readonly SavingsView[]): RankedFinding[] {
   const seen = new Set<string>()
@@ -1575,7 +1587,7 @@ export function register(on: On, _context: FeatureContext) {
     const altimate = () => whenPressed($, at => openAltimate($, at))
     const buttons = (
       <Box gap={1} key="buttons" flexWrap="wrap">
-        {kept.length > 0 ? <Button key="fewer" label="Show fewer" onPress={() => whenPressed($, () => update($, expandedAtom, () => false))} /> : null}
+        {kept.length > 0 ? <Button key="fewer" label="Show fewer" onPress={() => whenPressed($, pressedIn => update($, expandedAtom, now => (pressedIn === conversation ? false : now)))} /> : null}
         <Button key="again" label="Run again" onPress={again} />
         {kept.length > 0 ? <Button key="share" label="Share report" onPress={share} /> : null}
         {kept.length > 0 ? <Button key="altimate" label="See every check in Altimate" onPress={altimate} /> : null}
@@ -1657,9 +1669,7 @@ export function register(on: On, _context: FeatureContext) {
               <Text bold>{slimTitle(view, finding)}</Text>
               <Box flexDirection="column" paddingLeft={2}>
                 {finding.evidence[0] ? <Text dimColor>{fitLine(finding.evidence[0], SLIM_WIDTH - 2)}</Text> : null}
-                {view.fixes
-                  .filter(line => sameResource(view, finding, line))
-                  .map((line, row) => (
+                {fixLinesOf(views, view, finding).map((line, row) => (
                     <Text key={`fix-line-${at}-${row}`} color={line.state === 'measuring' || line.state === 'lower' ? undefined : 'warning'} dimColor={line.state === 'measuring'}>
                       {line.text}
                     </Text>
@@ -1688,7 +1698,7 @@ export function register(on: On, _context: FeatureContext) {
           })}
           <Box gap={2} key="more">
             {smaller ? <Text>{smaller}</Text> : null}
-            <Button key="more" label="Show all" onPress={() => whenPressed($, () => update($, expandedAtom, () => true))} />
+            <Button key="more" label="Show all" onPress={() => whenPressed($, pressedIn => update($, expandedAtom, now => (pressedIn === conversation ? true : now)))} />
           </Box>
           <Box gap={2} key="pitch">
             <Text dimColor>{`Altimate runs ${checksNotRunCount(views)} more checks on ${platforms === 1 ? 'this platform' : 'these platforms'}.`}</Text>

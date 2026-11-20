@@ -2921,6 +2921,29 @@ test('with two connections on one workspace, a fix drafted from the one listed s
   await ui.unmount()
 })
 
+test('with two connections on one workspace, a fix drafted from one stays under the finding when the other connection\'s copy ranks higher', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  const store = { [`savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-classic`]: FIX }
+  const { clock } = await start($, on, { list: BOTH, answer, now: Date.parse('2026-11-18T10:00:00Z'), store })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  // The other connection ran on another day and reads a larger saving for the same finding.
+  classic.monthly_max += 50
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(texts[titles[0]!]).toContain('Classic')
+  expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
+  await ui.unmount()
+})
+
 test('with two connections on one workspace that both drafted the fix, its line shows once, under the finding', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
