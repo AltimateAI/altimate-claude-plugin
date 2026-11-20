@@ -1200,6 +1200,28 @@ test('a warehouse the answer gives no cost for draws no change line and keeps no
   await ui.unmount()
 })
 
+test('a cost sent as a numeric string is a cost: the change line is drawn', async ($, on) => {
+  const key = 'savings-baseline:dbxmega:wh-classic'
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: 'X_SMALL', window_cost: '27.544375' })
+  const { clock } = await start($, on, { answer, store: { [key]: { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(['Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'])
+  await ui.unmount()
+})
+
+test('a flagged warehouse whose cost is a numeric string keeps a baseline with that cost', async ($, on) => {
+  const fresh = JSON.parse(JSON.stringify(ANSWER))
+  fresh.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost = '27.544375'
+  const { clock, store } = await start($, on, { answer: fresh })
+  await savings($)
+  await clock.settle()
+  expect((store.get('savings-baseline:dbxmega:wh-classic') as any)?.windowCost).toBe(27.544375)
+})
+
 test('a flagged warehouse the answer gives no cost for keeps no baseline', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   delete answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost

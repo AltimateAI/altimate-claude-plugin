@@ -479,7 +479,7 @@ export async function trackChanges(
     if (!live()) return []
     const now = configOf(warehouse)
     // A cost the answer did not give is no amount: no line is drawn from it, and no baseline kept with it.
-    const windowCost = typeof warehouse.window_cost === 'number' && Number.isFinite(warehouse.window_cost) ? warehouse.window_cost : null
+    const windowCost = known(warehouse.window_cost) ? Number(warehouse.window_cost) : null
     // Only a setting both runs read can have changed, and the line names only those.
     const changed = stored ? changedSettings(stored.config, now) : []
     if (stored && changed.length > 0 && windowCost !== null) {
