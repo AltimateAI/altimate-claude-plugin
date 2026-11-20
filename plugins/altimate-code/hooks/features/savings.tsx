@@ -499,8 +499,8 @@ export async function trackChanges(
     if (!stored && isFlagged && windowCost !== null) {
       await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
     }
-    // A setting the baseline did not know is filled from the first run that reads it, whatever else changed, and a
-    // known one is never overwritten, so a later change of it shows.
+    // A setting the baseline did not know is filled from the first run that reads it with nothing known changed, and
+    // a known one is never overwritten, so a later change of it shows (`mergeConfig`).
     if (stored && learns(stored.config, now)) {
       await $.store.set(key, { ...stored, config: mergeConfig(stored.config, now) } satisfies Baseline).catch(() => undefined)
     }
@@ -669,8 +669,11 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
 }
 
 /** Puts the finding's fix request in the prompt box; nothing is sent until the person presses Enter. */
-async function draftFix($: EngineInterface, finding: SavingsView['findings'][number]) {
+async function draftFix($: EngineInterface, finding: SavingsView['findings'][number], at: number) {
+  // Pressed before a /clear: the new conversation's prompt box gets no request from the old one.
+  if (at !== generation) return
   const filled = await $.prompt.fill({ text: finding.fixRequest }).catch(() => null)
+  if (at !== generation) return
   $.ui.toast(
     filled?.isFilled
       ? 'The fix request is in your prompt box: edit it, or press Enter to have Claude draft the change.'
@@ -686,7 +689,7 @@ export function mentions(text: string, name: string | null | undefined): boolean
 }
 
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
-async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
+async function bandFor($: EngineInterface, text: string, at: number, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
   // After a run that failed, the pane shows only why: the band does not quote the answer the pane hides.
   const report = (await read($, messageAtom)) ? null : await read($, reportAtom)
   const matches = (report?.findings ?? []).filter(one => mentions(text, one.matchName) || (one.resourceType !== 'job' && mentions(text, one.resourceId)))
@@ -698,6 +701,8 @@ async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_
   if (named && workspaces.size > 1) return { text: `${named.resourceName} has findings in ${workspaces.size} workspaces. /savings shows each.` }
   if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
   if (report || offered || !aboutCompute) return null
+  // A /clear while the answer was read: the new conversation keeps its own once-a-session offer.
+  if (at !== generation) return null
   offered = true
   return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection; it starts the SQL warehouse if it is stopped, which bills).' }
 }
@@ -816,7 +821,10 @@ export function register(on: On, _context: FeatureContext) {
                 </Text>
               ))}
               <Box>
-                <Button key={`fix-${at}`} label="Draft the fix" onPress={() => later($, () => draftFix($, one))} />
+                <Button key={`fix-${at}`} label="Draft the fix" onPress={() => {
+                    const at = generation
+                    later($, () => draftFix($, one, at))
+                  }} />
               </Box>
             </Box>
           </Box>
@@ -951,17 +959,21 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   if (!runsDatabricksCompute(e.command)) return
+  // The conversation the command ran in: a /clear from here on keeps its line out of the new one.
+  const at = generation
   // A databricks warehouses, clusters, bundle or jobs command is about compute whatever its words.
-  const band = await bandFor($, e.command, true)
-  if (band) await update($, bandAtom, () => band)
+  const band = await bandFor($, e.command, at, true)
+  if (band) await update($, bandAtom, now => (at === generation ? band : now))
 }
 
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
   if (!DATABRICKS_CONFIG.test(file.path.replace(/\\/g, '/'))) return
+  // The conversation the edit was made in: a /clear from here on keeps its line out of the new one.
+  const at = generation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
-  if (!DATABRICKS_TEXT.test(text)) return
-  const band = await bandFor($, text)
-  if (band) await update($, bandAtom, () => band)
+  if (!DATABRICKS_TEXT.test(text) || at !== generation) return
+  const band = await bandFor($, text, at)
+  if (band) await update($, bandAtom, now => (at === generation ? band : now))
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}

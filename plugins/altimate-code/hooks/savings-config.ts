@@ -24,17 +24,23 @@ export function loadConfig(value: unknown): WarehouseConfig {
   return configOf(value as Partial<Record<Setting, unknown>>)
 }
 
-/** Per setting: a later read fills one that was unknown and never overwrites one that was known. */
-export const mergeConfig = (was: WarehouseConfig, now: WarehouseConfig): WarehouseConfig => ({ size: was.size ?? now.size, type: was.type ?? now.type })
-
-/** Whether a merge would teach `was` anything. */
-export const learns = (was: WarehouseConfig, now: WarehouseConfig) => SETTINGS.some(setting => was[setting] === null && now[setting] !== null)
-
 /** The settings both reads know: the only ones a line may compare or name. */
 export const comparable = (was: WarehouseConfig, now: WarehouseConfig) => SETTINGS.filter(setting => was[setting] !== null && now[setting] !== null)
 
 /** The settings both reads know that differ. One read on one side only is no change. */
 export const changedSettings = (was: WarehouseConfig, now: WarehouseConfig) => comparable(was, now).filter(setting => was[setting] !== now[setting])
+
+/**
+ * Per setting, a later read fills one that was unknown and never overwrites one that was known; but only from a
+ * read in which no known setting changed. A read after a change shows the warehouse as it is now, so its value
+ * for a setting not known before would record a state nobody saw: that setting stays unknown.
+ */
+export const mergeConfig = (was: WarehouseConfig, now: WarehouseConfig): WarehouseConfig =>
+  changedSettings(was, now).length > 0 ? was : { size: was.size ?? now.size, type: was.type ?? now.type }
+
+/** Whether a merge would teach `was` anything. */
+export const learns = (was: WarehouseConfig, now: WarehouseConfig) =>
+  changedSettings(was, now).length === 0 && SETTINGS.some(setting => was[setting] === null && now[setting] !== null)
 
 const shown: Record<Setting, (value: string) => string> = { size: value => value.replace(/_/g, '-'), type: value => value }
 

@@ -189,6 +189,8 @@ type Options = {
   now?: number
   /** File texts `$.fs.read` answers, by path. */
   files?: Record<string, string>
+  /** `$.fs.read` waits for what this returns before it answers: given the path and how many times it was read. */
+  readHold?: (path: string, count: number) => Promise<void> | undefined
   /** Whether the prompt box takes a fill. */
   canFill?: boolean
   /** What `$.store` holds when the session starts. */
@@ -246,7 +248,12 @@ async function start($: any, on: any, options: Options = {}) {
     return <Box key="engine" />
   })
   on('fs.exists', () => ({ value: false }))
-  on('fs.read', (_: unknown, e: { path: string }) => ({ value: options.files?.[e.path] ?? '' }))
+  const reads = new Map<string, number>()
+  on('fs.read', async (_: unknown, e: { path: string }) => {
+    reads.set(e.path, (reads.get(e.path) ?? 0) + 1)
+    await options.readHold?.(e.path, reads.get(e.path)!)
+    return { value: options.files?.[e.path] ?? '' }
+  })
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { env?: Record<string, string> } }) => {
@@ -1132,56 +1139,102 @@ test('a baseline in one workspace is read for that workspace only, though anothe
 })
 
 // Each setting, known or not before and after, the same or not: what the baseline keeps, and the line the pane draws.
-// The other setting is known and the same on both sides, so the line can always name it.
+// The other setting is either known and the same on both sides, or unknown before and read now: a read in which a
+// known setting changed fills nothing, since its values are the warehouse after the change.
 const SETTING_CASES = [
-  { setting: 'size', a: 'SMALL', b: 'X_SMALL', other: { type: 'CLASSIC' } },
-  { setting: 'type', a: 'CLASSIC', b: 'PRO', other: { size: 'SMALL' } },
+  { setting: 'size', a: 'SMALL', b: 'X_SMALL', other: 'type', otherValue: 'CLASSIC' },
+  { setting: 'type', a: 'CLASSIC', b: 'PRO', other: 'size', otherValue: 'SMALL' },
 ] as const
-for (const { setting, a, b, other } of SETTING_CASES) {
-  for (const before of ['known', 'unknown'] as const) {
-    for (const after of ['known', 'unknown'] as const) {
-      for (const same of [true, false]) {
-        test(`baseline ${setting}: ${before} before, ${after} after, ${same ? 'same' : 'different'} value`, async ($, on) => {
-          const was = { ...other, [setting]: before === 'known' ? a : null } as Record<string, string | null>
-          const now = { ...other, [setting]: after === 'known' ? (same ? a : b) : null } as Record<string, string | null>
-          const key = 'savings-baseline:dbxmega:wh-classic'
-          const store = { [key]: { date: '2026-11-10', config: { size: was.size ?? null, type: was.type ?? null }, windowCost: 27.54 } }
-          const answer = JSON.parse(JSON.stringify(ANSWER))
-          Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: now.size ?? null, type: now.type ?? null })
-          const started = await start($, on, { answer, store })
-          await savings($)
-          await started.clock.settle()
-          // Merge: a known setting is never overwritten; an unknown one takes what this run read.
-          const merged = before === 'known' ? a : after === 'known' ? (same ? a : b) : null
-          expect((started.store.get(key) as any).config[setting]).toBe(merged)
-          // Changed: only a setting known on both sides, with different values.
-          const changed = before === 'known' && after === 'known' && !same
-          const label = (config: Record<string, string | null>) => [config.size?.replace(/_/g, '-'), config.type].filter(Boolean).join(' ')
-          const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-          const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
-          expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(
-            changed ? [`Classic: ${label(was)} → ${label(now)} since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.`] : [],
-          )
-          expect(texts.filter(text => /\?|null|undefined/.test(text) && / since /.test(text))).toEqual([])
-          await ui.unmount()
-        })
+for (const { setting, a, b, other, otherValue } of SETTING_CASES) {
+  for (const otherBefore of ['known', 'unknown'] as const) {
+    for (const before of ['known', 'unknown'] as const) {
+      for (const after of ['known', 'unknown'] as const) {
+        for (const same of [true, false]) {
+          test(`baseline ${setting}: ${before} before, ${after} after, ${same ? 'same' : 'different'} value; ${other} ${otherBefore === 'known' ? 'known throughout' : 'read only now'}`, async ($, on) => {
+            const was = { [other]: otherBefore === 'known' ? otherValue : null, [setting]: before === 'known' ? a : null } as Record<string, string | null>
+            const now = { [other]: otherValue, [setting]: after === 'known' ? (same ? a : b) : null } as Record<string, string | null>
+            const key = 'savings-baseline:dbxmega:wh-classic'
+            const store = { [key]: { date: '2026-11-10', config: { size: was.size ?? null, type: was.type ?? null }, windowCost: 27.54 } }
+            const answer = JSON.parse(JSON.stringify(ANSWER))
+            Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: now.size ?? null, type: now.type ?? null })
+            const started = await start($, on, { answer, store })
+            await savings($)
+            await started.clock.settle()
+            // Changed: only a setting known on both sides, with different values.
+            const changed = before === 'known' && after === 'known' && !same
+            // Merge: a known setting is never overwritten; an unknown one takes what this run read, unless this run
+            // saw a change.
+            const kept = (started.store.get(key) as any).config
+            expect(kept[setting]).toBe(before === 'known' ? a : changed || after === 'unknown' ? null : now[setting])
+            expect(kept[other]).toBe(otherBefore === 'known' ? otherValue : changed ? null : otherValue)
+            // The line names only the settings known on both sides.
+            const named = (['size', 'type'] as const).filter(one => was[one] !== null && now[one] !== null)
+            const label = (config: Record<string, string | null>) => named.map(one => (one === 'size' ? config.size!.replace(/_/g, '-') : config.type!)).join(' ')
+            const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+            const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+            expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(
+              changed ? [`Classic: ${label(was)} → ${label(now)} since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.`] : [],
+            )
+            expect(texts.filter(text => /\?|null|undefined/.test(text) && / since /.test(text))).toEqual([])
+            await ui.unmount()
+          })
+        }
       }
     }
   }
 }
 
-test('a setting the baseline did not know is filled even when another setting changed, and the known one is kept', async ($, on) => {
+test('a setting the baseline did not know is not filled from a read in which another setting changed', async ($, on) => {
+  // The baseline knew only the type. This run reads SMALL PRO: the type changed, so SMALL is the size after the
+  // change, not the size the baseline had.
   const key = 'savings-baseline:dbxmega:wh-classic'
   const answer = JSON.parse(JSON.stringify(ANSWER))
   Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: 'SMALL', type: 'PRO' })
   const { clock, store } = await start($, on, { answer, store: { [key]: { date: '2026-11-10', config: { size: null, type: 'CLASSIC' }, windowCost: 27.54 } } })
   await savings($)
   await clock.settle()
-  expect((store.get(key) as any).config).toEqual({ size: 'SMALL', type: 'CLASSIC' })
+  expect((store.get(key) as any).config).toEqual({ size: null, type: 'CLASSIC' })
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(['Classic: CLASSIC → PRO since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'])
   await ui.unmount()
+})
+
+test('Draft the fix pressed just before a /clear puts nothing in the new conversation\'s prompt box', async ($, on) => {
+  const { clock, fills, toasts } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const before = toasts.length
+  await ui.press({ key: 'fix-0' })
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  expect(fills).toEqual([])
+  expect(toasts.slice(before).filter(text => /prompt box/.test(text))).toEqual([])
+  await ui.unmount()
+})
+
+test('a config edit whose file is read across a /clear puts no line above the new conversation\'s prompt, and keeps its offer', async ($, on) => {
+  let release = () => {}
+  const held = new Promise<void>(done => (release = done))
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  // The Edit itself reads the file first; the second read is the hook's.
+  const { clock } = await start($, on, { files, readHold: (_, count) => (count === 2 ? held : undefined) })
+  const edit = $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  await edit
+  await clock.settle()
+  let band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+  await band.unmount()
+  // The new conversation still gets its own once-a-session offer.
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Medium', new_string: 'Large' })
+  await clock.settle()
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+  await band.unmount()
 })
 
 test('a warehouse the answer gives no cost for draws no change line and keeps no baseline from it', async ($, on) => {

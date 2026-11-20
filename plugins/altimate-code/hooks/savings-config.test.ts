@@ -13,8 +13,12 @@ test('a kept config loads only as the object this version keeps; anything else i
 test('each setting merges, compares and is named on its own', () => {
   const was = { size: 'SMALL', type: null }
   const now = { size: 'X_SMALL', type: 'PRO' }
-  expect(mergeConfig(was, now)).toEqual({ size: 'SMALL', type: 'PRO' })
-  expect(learns(was, now)).toBe(true)
+  // The size changed, so PRO is the type after the change: it is not recorded as the type before.
+  expect(mergeConfig(was, now)).toEqual({ size: 'SMALL', type: null })
+  expect(learns(was, now)).toBe(false)
+  // With nothing known changed, the unknown type is filled.
+  expect(mergeConfig(was, { size: 'SMALL', type: 'PRO' })).toEqual({ size: 'SMALL', type: 'PRO' })
+  expect(learns(was, { size: 'SMALL', type: 'PRO' })).toBe(true)
   expect(learns(now, was)).toBe(false)
   expect(comparable(was, now)).toEqual(['size'])
   expect(changedSettings(was, now)).toEqual(['size'])
