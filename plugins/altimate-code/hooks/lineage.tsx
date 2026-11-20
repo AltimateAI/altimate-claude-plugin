@@ -1171,8 +1171,8 @@ async function bashChanged($: EngineInterface, start: BashStart): Promise<{ file
   // holds the command's result. With no project there, the projects below it (a monorepo, a shell in a subfolder).
   const base = await $.session.root().catch(() => '.')
   const own = await projectRoot($, commandDir(start.command, base), false).catch(() => null)
-  // Below it only once a dbt project has been seen this session: a session that never touches dbt never walks its folder.
-  const roots = own ? [own] : projectSeen ? (await projectsBelow($, base).catch(() => [] as string[])).slice(0, MAX_BASH_PROJECTS) : []
+  // The walk below it is bounded (2000 folders) and kept for the session.
+  const roots = own ? [own] : (await projectsBelow($, base).catch(() => [] as string[])).slice(0, MAX_BASH_PROJECTS)
   // Files touched since the command started, in whole minutes rounded up, then each one's own time against its start.
   const minutes = Math.max(1, Math.ceil(((await $.clock.now()) - start.startedAt) / 60_000))
   const files: { file: string; before: string }[] = []

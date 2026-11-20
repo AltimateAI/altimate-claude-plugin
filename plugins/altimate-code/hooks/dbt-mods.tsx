@@ -334,7 +334,7 @@ fields = ('name', 'package_name', 'resource_type', 'original_file_path', 'relati
 out = {'nodes': {}, 'parent_map': {}, 'child_map': {}, 'metadata': {'project_name': project or (m.get('metadata') or {}).get('project_name')}}
 # Every model, seed, snapshot and source by its relation, whatever the graph reaches: a table a model names
 # instead of ref() or source() is no longer in its graph.
-rk = ('name', 'resource_type', 'relation_name', 'source_name', 'version', 'latest_version')
+rk = ('name', 'resource_type', 'relation_name', 'source_name', 'version', 'latest_version', 'package_name')
 out['relations'] = [dict({'id': k}, **{f: n.get(f) for f in rk if n.get(f) is not None}) for group in ((m.get('nodes') or {}), (m.get('sources') or {})) for k, n in group.items() if n.get('resource_type') in ('model', 'seed', 'snapshot', 'source') and n.get('relation_name')]
 for k in keep:
     n = nodes.get(k)

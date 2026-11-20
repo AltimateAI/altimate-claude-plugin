@@ -859,7 +859,10 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   for (const [id, node] of nodes) {
     // A versioned model other than its latest is named with its version, so the advice keeps reading it.
     const pinned = node?.version !== undefined && node?.version !== null && String(node.version) !== String(node?.latest_version ?? '') ? `, v=${JSON.stringify(node.version)}` : ''
-    if (['model', 'seed', 'snapshot'].includes(node?.resource_type) && typeof node?.name === 'string') add(id, node, `{{ ref('${node.name}'${pinned}) }}`)
+    // Another package's model is named with its package, so the advice reads that one, not a same-named model of this project.
+    const own = String(selfId ?? '').split('.')[1]
+    const pkg = typeof node?.package_name === 'string' && own && node.package_name !== own ? `'${node.package_name}', ` : ''
+    if (['model', 'seed', 'snapshot'].includes(node?.resource_type) && typeof node?.name === 'string') add(id, node, `{{ ref(${pkg}'${node.name}'${pinned}) }}`)
   }
   for (const [id, node] of Array.isArray(manifest?.relations) ? manifest.relations.filter((one: any) => one?.resource_type === 'source').map((one: any) => [String(one.id), one]) : Object.entries<any>(manifest?.sources ?? {})) {
     if (typeof node?.source_name === 'string' && typeof node?.name === 'string') add(id, node, `{{ source('${node.source_name}', '${node.name}') }}`)
@@ -915,9 +918,9 @@ function topItems(list: string): string[] {
   return out.map(one => one.trim()).filter(Boolean)
 }
 
-/** The CTEs of a model's SQL, by name, with their bodies (masked text). */
-function ctesOf(code: string): Map<string, string> {
-  const out = new Map<string, string>()
+/** The CTEs of a model's SQL, by name, with their bodies as written and masked (the same length). */
+function ctesOf(sql: string, code: string): Map<string, { raw: string; code: string }> {
+  const out = new Map<string, { raw: string; code: string }>()
   for (const match of code.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))) {
     let depth = 1
     const open = match.index! + match[0].length
@@ -926,22 +929,30 @@ function ctesOf(code: string): Map<string, string> {
       if (code[i] === '(') depth++
       else if (code[i] === ')') depth--
     }
-    out.set(unquote(match[1]!), code.slice(open, i - 1))
+    out.set(unquote(match[1]!), { raw: sql.slice(open, i - 1), code: code.slice(open, i - 1) })
   }
   return out
 }
 
 /**
- * The model's own output columns: the names in its last top-level SELECT (after its CTEs), not those of a CTE or a
- * subquery inside it. A `select *` from one of its CTEs reads that CTE's own list. `star` when a `*` is left that the
- * SQL does not name. Null when there is no such SELECT.
+ * The model's own output columns: the names in the first SELECT of its final query (after its CTEs; a UNION takes
+ * its names from its first branch), not those of a CTE or a subquery inside it. A `select *` from one of its CTEs
+ * reads that CTE's own list, through a chain of them. `star` when a `*` is left that the SQL does not name; `source`
+ * is then what it reads, as written, with the bodies of the CTEs it names. Null when there is no such SELECT.
  */
-export function outputColumns(sql: string, depth = 0): { names: Set<string>; star: boolean; source?: string } | null {
+export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw: string; code: string }>): { names: Set<string>; star: boolean; source?: string } | null {
   const code = masked(sql)
-  const select = topLevel(code, 'select', 0, true)
-  if (select < 0) return null
+  const ctes = new Map([...(outer ?? []), ...ctesOf(sql, code)])
+  // The top-level SELECTs; the final query starts at the last one that no set operation joins to one before it.
+  const selects: number[] = []
+  for (let at = topLevel(code, 'select'); at >= 0; at = topLevel(code, 'select', at + 6)) selects.push(at)
+  if (!selects.length) return null
+  let k = selects.length - 1
+  while (k > 0 && /\b(?:union|intersect|except|minus)\b/i.test(code.slice(selects[k - 1]!, selects[k]!)) && topLevel(code.slice(selects[k - 1]!, selects[k]!), '(?:union|intersect|except|minus)') >= 0) k--
+  const select = selects[k]!
   const from = topLevel(code, 'from', select + 6)
-  const list = code.slice(select + 6, from < 0 ? code.length : from).replace(/^\s*(?:distinct|all)\b/i, '')
+  const end = selects[k + 1] ?? code.length
+  const list = code.slice(select + 6, from < 0 || from > end ? end : from).replace(/^\s*(?:distinct|all)\b/i, '')
   const names = new Set<string>()
   let star = false
   for (const item of topItems(list)) {
@@ -953,17 +964,21 @@ export function outputColumns(sql: string, depth = 0): { names: Set<string>; sta
     const name = /\bas\s+["`]?([A-Za-z_]\w*)["`]?$/i.exec(bare)?.[1] ?? /[\s)]["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1] ?? /^(?:["`]?[A-Za-z_]\w*["`]?\.)*["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1]
     if (name) names.add(name.toLowerCase())
   }
-  // What a `*` reads, as written: an edit that leaves it alone brings no column through it.
-  const cut = from < 0 ? -1 : Math.min(...['where', 'group', 'order', 'limit', 'qualify', 'having', 'window', 'union'].map(word => topLevel(code, word, from + 4)).filter(at => at >= 0), code.length)
-  const source = star && from >= 0 ? sql.slice(from + 4, cut).replace(/\s+/g, ' ').trim() : undefined
-  if (star && depth < 5 && from >= 0) {
+  if (!star || from < 0) return { names, star }
+  const tail = code.slice(from + 4)
+  if (depth < 8) {
     // `select * from <cte>`: that CTE's own list, once its name is the only relation read.
-    const read = /^\s*((?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*))(?:\s+(?:as\s+)?(?!where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b)[A-Za-z_]\w*)?\s*(?:;\s*)?(?:$|where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b)/i.exec(code.slice(from + 4))
-    const body = read ? ctesOf(code).get(unquote(read[1]!)) : undefined
-    const inner = body !== undefined ? outputColumns(body, depth + 1) : null
+    const read = /^\s*((?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*))(?:\s+(?:as\s+)?(?!where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b|union\b)[A-Za-z_]\w*)?\s*(?:;\s*)?(?:$|where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b|union\b)/i.exec(tail)
+    const body = read ? ctes.get(unquote(read[1]!)) : undefined
+    const inner = body !== undefined ? outputColumns(body.raw, depth + 1, ctes) : null
     if (inner) return { names: new Set([...names, ...inner.names]), star: inner.star, ...(inner.source !== undefined && { source: inner.source }) }
   }
-  return { names, star, ...(source !== undefined && { source }) }
+  // What the `*` reads, as written, with every CTE it names: an edit that leaves all of it alone brings no column.
+  const cut = Math.min(...['where', 'group', 'order', 'limit', 'qualify', 'having', 'window', 'union'].map(word => topLevel(tail, word)).filter(at => at >= 0), tail.length)
+  const reads = sql.slice(from + 4, from + 4 + cut)
+  const named = [...ctes].filter(([name]) => new RegExp(`(?:^|[^\\w])["\`]?${name.replace(/[^\w]/g, '')}["\`]?(?:[^\\w]|$)`, 'i').test(code.slice(from + 4, from + 4 + cut)))
+  const source = [reads, ...named.map(([name, one]) => `${name}:${one.raw}`)].map(one => one.replace(/\s+/g, ' ').trim()).join(' | ')
+  return { names, star, source }
 }
 
 /**

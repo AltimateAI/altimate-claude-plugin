@@ -724,6 +724,15 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   }
   const chained = 'with src as (select id, amount from raw), a as (select * from src), b as (select id from a) select * from b'
   expect(undocumentedByEdit(['amount'], chained, chained.replace('b as (select id from a)', 'b as (select id, amount from a)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A column added two `select *` CTEs up is new in the model's output.
+  const up = 'with src as (select id from raw),\n b as (select * from src)\nselect * from b'
+  expect(undocumentedByEdit(['amount'], up, up.replace('select id from raw', 'select id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A `*` over a join of CTEs: a column added to one of them is the edit's.
+  const joined = 'with a as (select * from {{ ref("x") }}), b as (select id from raw) select * from a join b using (id)'
+  expect(undocumentedByEdit(['amount'], joined, joined.replace('select id from raw', 'select id, amount from raw'), null)).toEqual({ fresh: ['amount'], old: [] })
+  // A UNION takes its names from its first branch.
+  const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
+  expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
   // A `*` from a ref(): what it reads unchanged brings no column (a filter edit); another ref() may.
   const star = "select * from {{ ref('stg') }}"
   expect(undocumentedByEdit(['x'], `${star} where a = 1`, `${star} where a = 2`, null)).toEqual({ fresh: [], old: ['x'] })
@@ -944,6 +953,9 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
     { relation: 'main.stg_orders', use: "{{ ref('stg_orders') }}" },
     { relation: 'shop.customers', use: "{{ source('shop', 'customers') }}" },
   ])
+  // Another package's model of the same name is named with its package.
+  const packages = { nodes: { 'model.jaffle_shop.orders2': { resource_type: 'model', name: 'orders2', package_name: 'jaffle_shop', relation_name: '"d"."main"."orders2"' }, 'model.pkg.orders2': { resource_type: 'model', name: 'orders2', package_name: 'pkg', relation_name: '"d"."pkg"."orders2"' } } }
+  expect(hardcodedRelations('select * from pkg.orders2', packages, self)).toEqual([{ relation: 'pkg.orders2', use: "{{ ref('pkg', 'orders2') }}" }])
   // A versioned model other than the latest keeps its version in the advice.
   const versions = { nodes: { 'model.p.orders.v1': { resource_type: 'model', name: 'orders', version: 1, latest_version: 2, relation_name: '"d"."s"."orders_v1"' }, 'model.p.orders.v2': { resource_type: 'model', name: 'orders', version: 2, latest_version: 2, relation_name: '"d"."s"."orders"' } } }
   expect(hardcodedRelations('select * from s.orders_v1', versions, self)).toEqual([{ relation: 's.orders_v1', use: "{{ ref('orders', v=1) }}" }])

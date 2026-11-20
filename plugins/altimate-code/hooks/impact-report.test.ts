@@ -632,6 +632,13 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   for (const sql of ['select {{ cols }} from raw where exists (select 1 from t) and\n  paid_amount > 0', 'select {{ cols }} from {{ ref("x") }} where paid_amount > 0', "select a from t where status = 'select'\n and paid_amount > 0"]) {
     expect(valueCandidates(sql, sql.replace('> 0', '> 100'))).toEqual([])
   }
+  // A threshold changed beside an unchanged select, a predicate after `exists (…)`, an inline comment reworded.
+  const single = 'select paid_amount from raw where paid_amount > 0'
+  expect(valueCandidates(single, single.replace('> 0', '> 100'))).toEqual([])
+  const exists = 'select {{ cols }} from raw\nwhere exists (select 1) and\n  paid_amount > 0'
+  expect(valueCandidates(exists, exists.replace('> 0', '> 100'))).toEqual([])
+  const inline = 'select\n  paid_amount /* cents */\nfrom raw'
+  expect(valueCandidates(inline, inline.replace('cents', 'dollars'))).toEqual([])
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')
   expect(valueCandidates(commented, commented.replace('in cents', 'in dollars'))).toEqual([])
   const answer = {
