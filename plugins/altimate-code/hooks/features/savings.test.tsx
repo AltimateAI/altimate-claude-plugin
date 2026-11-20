@@ -694,6 +694,38 @@ test('/savings typed while a band press runs its check to the end says the check
   expect(runs.length).toBe(1)
 })
 
+test('/savings typed as a /clear lands during its read of a running check says the conversation was cleared', async ($, on) => {
+  // The command's read of the running flag answers "running", and is held while the conversation is cleared: that
+  // answer belongs to the old conversation, where the check was running.
+  let armed = false
+  let reached = () => {}
+  const reading = new Promise<void>(resolve => (reached = resolve))
+  let release = () => {}
+  const released = new Promise<void>(resolve => (release = resolve))
+  const hook = on as any
+  hook('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    if (!armed || e.key !== 'savingsBusy') return next(e)
+    armed = false
+    const before = await next(e)
+    reached()
+    await released
+    return before
+  })
+  let finish = () => {}
+  const { clock, runs } = await start($, on, { hold: new Promise<void>(resolve => (finish = resolve)) })
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  armed = true
+  const said = savings($)
+  await reading
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  expect((await said).text).toBe('The conversation was cleared before the Databricks savings check started. Run /savings again.')
+  finish()
+  await clock.settle()
+})
+
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const { clock } = await start($, on, { files })

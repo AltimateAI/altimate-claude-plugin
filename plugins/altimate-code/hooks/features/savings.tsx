@@ -106,8 +106,8 @@ const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses
  * Whether an edited file is Databricks config, decided by its kind first:
  * - a bundle's `databricks.yml` always is;
  * - a Terraform file is when a line starts with a `databricks` provider, resource or data source (its label quoted or
- *   not). It is read line by line, not parsed: a commented line (`#`, `//`) does not start with the keyword, and a wrong
- *   guess only shows or hides the offer;
+ *   not). It is read line by line, not parsed: a commented line (`#`, `//`) does not start with the keyword, while a
+ *   declaration line inside a block comment or a heredoc still counts. A wrong guess only shows or hides the offer;
  * - a YAML file under `resources/` is when its top-level `resources:` block, in the block style bundles are written
  *   in, lists jobs, pipelines, clusters or SQL warehouses. The block is read line by line, comments dropped, and
  *   ends at the next top-level key, so a container's `resources:` limits in a Kubernetes or Helm file, or a
@@ -817,7 +817,6 @@ export function register(on: On, _context: FeatureContext) {
       await openPane($)
       return { text: 'The Databricks savings check is already running in the side pane.' }
     }
-    if (await read($, busyAtom)) return running()
     // A /clear while the busy state was read, the write or the pane open: no pane, no run, and no claim that one
     // is running. A press's run that started meanwhile is the one running.
     const stopped = async () => {
@@ -826,6 +825,8 @@ export function register(on: On, _context: FeatureContext) {
       await openPane($)
       return { text: 'The Databricks savings check just ran: its result is in the side pane.' }
     }
+    // A running flag read before a /clear, or before a run that has since ended, is not taken as it is.
+    if (await read($, busyAtom)) return at === generation && inConversation === conversation ? running() : stopped()
     if (at !== generation) return stopped()
     await update($, busyAtom, now => (at === generation ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
     if (at !== generation) return stopped()
