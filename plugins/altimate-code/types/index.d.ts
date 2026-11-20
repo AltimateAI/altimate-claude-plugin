@@ -740,7 +740,8 @@ export type SavingsView = {
    * after: billed in different weeks, so not a saving measured with the workload held constant. */
   changes: { resourceId: string; workspaceId: string | null; name: string; from: string; to: string; since: string; monthlyBefore: number; monthlyNow: number }[]
   /** Every warehouse the run read, with what it cost over the window. */
-  inventory: { id: string; name: string; type: string; size: string | null; windowCost: number | null }[]
+  /** `workspaceId` is null when the answer did not say; an answer kept before it was stored has none. */
+  inventory: { id: string; workspaceId?: string | null; name: string; type: string; size: string | null; windowCost: number | null }[]
   /** Queries the findings' evidence counted; null when none did. */
   queryCount: number | null
   /** The warehouse type those queries ran on (`CLASSIC`), when they all ran on one. */

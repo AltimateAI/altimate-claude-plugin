@@ -6,7 +6,7 @@
 // and never calls the difference saved. A fix that changes neither leaves nothing to see but its finding
 // clearing, which usage falling can do too.
 import type { SavingsFinding, SavingsFixLine, SavingsPlatform, SavingsView } from '../types'
-import { cents, DAY_MS, OBSERVED_NOTE, PLATFORM_NAME, size, windowDays } from './savings-format'
+import { cents, DAY_MS, OBSERVED_NOTE, oneLine, PLATFORM_NAME, size, windowDays } from './savings-format'
 
 /** What is kept when a fix is drafted. */
 export type FixRecord = {
@@ -55,8 +55,15 @@ export function daysAfter(date: string, window: { start: string; end: string }):
   return Number.isFinite(days) ? Math.min(Math.max(days, 0), windowDays(window)) : 0
 }
 
-// Snowflake gives a warehouse with no usage its name for an id, so there the name finds it too.
-const rowOf = (fix: FixRecord, view: SavingsView) => view.inventory.find(one => one.id === fix.resourceId || (fix.platform === 'snowflake' && one.name === fix.resourceName))
+// Snowflake gives a warehouse with no usage its name for an id, so there the name finds it too. An id repeats across
+// workspaces, so with several read the row must be the fix's workspace's; an answer kept without row workspaces finds none.
+const severalWorkspaces = (view: SavingsView) => (view.checked?.workspaces ?? 1) > 1
+const rowOf = (fix: FixRecord, view: SavingsView) =>
+  view.inventory.find(
+    one =>
+      (one.id === fix.resourceId || (fix.platform === 'snowflake' && one.name === fix.resourceName)) &&
+      (!severalWorkspaces(view) || (one.workspaceId ?? null) === (fix.workspaceId ?? null)),
+  )
 const configOf = (row: SavingsView['inventory'][number]) => `${size(row.size)} ${row.type}`
 const isFlagged = (fix: FixRecord, view: SavingsView, sameCheck: boolean) =>
   view.findings.some(
@@ -89,7 +96,8 @@ export function fixProgress(fix: FixRecord, view: SavingsView): SavingsFixLine {
     workspaceId: fix.workspaceId ?? null,
     resourceName: fix.resourceName,
     state,
-    text: `${fix.resourceName}: ${text}`,
+    // Names repeat across workspaces, so with several read the line names its own.
+    text: `${fix.resourceName}${severalWorkspaces(view) && fix.workspaceId ? ` (workspace ${oneLine(fix.workspaceId)})` : ''}: ${text}`,
   })
   const flagged = isFlagged(fix, view, fix.config === null)
   const drafted = `fix drafted ${fix.date}`

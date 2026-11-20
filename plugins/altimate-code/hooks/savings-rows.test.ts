@@ -154,6 +154,10 @@ test('a finding is matched to compute exactly, on its own platform and account, 
   expect(findingOn({ platform: 'snowflake', warehouse: 'wh-1', scope: 'acct-a' }, all)).toBeNull()
   // The same name in another account is another warehouse.
   expect(findingOn({ platform: 'snowflake', warehouse: 'COMPUTE_WH', scope: 'acct-b' }, all)).toBeNull()
+  // A connection names its warehouse by id alone: an id flagged in two workspaces gets no note, not one of theirs.
+  const shared = { a: kept('databricks', [finding({ workspaceId: '111', monthlyMax: 20 }), finding({ workspaceId: '222', monthlyMax: 90 })]) }
+  expect(findingOn(dbx('wh-1'), shared)).toBeNull()
+  expect(findingOn(dbx('wh-1'), { a: kept('databricks', [finding({ workspaceId: '111', monthlyMax: 20 }), finding({ workspaceId: '111', monthlyMax: 90, title: 'Migrate' })]) })?.title).toBe('Migrate')
   expect(rowNote(large)).toBe('Classic: 95% idle · $10.00–$90.00 a month → /savings')
   expect(rowNote(finding({ monthlyMin: 0, monthlyMax: 0 }))).toBe('Classic: 95% idle · no dollar estimate → /savings')
 })

@@ -140,11 +140,18 @@ export function findingOn(ref: SavingsWarehouseRef, kept: Record<string, Savings
       ? one.resourceType === 'sql_warehouse' && one.resourceId === ref.warehouse
       : (one.resourceType === 'warehouse' || one.resourceType === 'sql_warehouse') && [one.resourceId, one.matchName].some(name => name.toLowerCase() === ref.warehouse.toLowerCase())
   let best: SavingsFinding | null = null
+  const workspaces = new Set<string>()
   for (const { view } of Object.values(kept)) {
     if (view.platform !== ref.platform || view.scope !== ref.scope) continue
-    for (const one of view.findings) if (same(one) && (!best || one.monthlyMax > best.monthlyMax)) best = one
+    for (const one of view.findings) {
+      if (!same(one)) continue
+      workspaces.add(one.workspaceId ?? '')
+      if (!best || one.monthlyMax > best.monthlyMax) best = one
+    }
   }
-  return best
+  // A connection names its warehouse by id, which repeats across workspaces: one flagged in several gets no note,
+  // rather than another workspace's saving.
+  return workspaces.size > 1 ? null : best
 }
 
 /** The line under a tool row. */

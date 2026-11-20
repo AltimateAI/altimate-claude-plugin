@@ -496,6 +496,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
   const days = report.lookback_days || windowDays(metadata.window)
   const inventory = (metadata.warehouses ?? []).map(one => ({
     id: one.id,
+    workspaceId: one.workspace_id ?? null,
     name: shownName(one.name, one.id),
     type: one.type,
     size: one.size ?? null,
@@ -506,15 +507,20 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
   const listed = new Set([...(metadata.warehouses ?? []), ...report.findings].map(one => one.workspace_id).filter(Boolean)).size
   const reported = Number(metadata.workspaces_checked)
   const workspaces = Number.isInteger(reported) && reported > 0 ? Math.max(reported, listed) : listed
+  // A warehouse id repeats across workspaces, so with several read the row is found by its workspace too; in one,
+  // the id alone finds it, since the finding or the row may lack the workspace id.
+  const rowOf = (id: string, workspaceId: string | null | undefined) =>
+    inventory.find(row => row.id === id && (workspaces <= 1 || row.workspaceId === (workspaceId ?? null)))
   // Each warehouse's queries once, however many findings quote them.
-  const queries = new Map<string, number>()
+  const queries = new Map<string, { id: string; workspaceId: string | null; count: number }>()
   for (const one of report.findings) {
     const e = one.evidence ?? {}
     const counted = Number(e.total_query_count ?? e.parallelism_query_count ?? e.query_count)
-    if (Number.isFinite(counted) && counted > 0) queries.set(one.resource_id, Math.max(queries.get(one.resource_id) ?? 0, counted))
+    const key = `${one.workspace_id ?? ''}/${one.resource_id}`
+    if (Number.isFinite(counted) && counted > 0) queries.set(key, { id: one.resource_id, workspaceId: one.workspace_id ?? null, count: Math.max(queries.get(key)?.count ?? 0, counted) })
   }
   const pricing = metadata.price?.source === 'rate_sheet' && typeof metadata.price.per_credit === 'number' ? `your account's $${metadata.price.per_credit.toFixed(2)} a credit` : 'list price'
-  const counted = new Set([...queries.keys()].map(id => inventory.find(row => row.id === id)?.type ?? null))
+  const counted = new Set([...queries.values()].map(one => rowOf(one.id, one.workspaceId)?.type ?? null))
   const view: SavingsView = {
     platform,
     connection: metadata.warehouse ?? null,
@@ -535,7 +541,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
     limited: (Array.isArray(metadata.limited) ? metadata.limited : []).map(oneLine),
     total: { min: Number(report.total.monthly_min), max: Number(report.total.monthly_max), resources: Number(report.total.resources) },
     findings: report.findings.map(one => {
-      const warehouse = isWarehouse(one.resource_type) ? inventory.find(row => row.id === one.resource_id) : undefined
+      const warehouse = isWarehouse(one.resource_type) ? rowOf(one.resource_id, one.workspace_id) : undefined
       return {
         checkId: one.check_id ?? '',
         title: titleOf(one),
@@ -587,7 +593,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
       .filter(one => one.choices.length > 0),
     changes: [],
     inventory,
-    queryCount: queries.size > 0 ? [...queries.values()].reduce((sum, one) => sum + one, 0) : null,
+    queryCount: queries.size > 0 ? [...queries.values()].reduce((sum, one) => sum + one.count, 0) : null,
     queriesOn: counted.size === 1 ? [...counted][0]! : null,
     fixes: [],
   }

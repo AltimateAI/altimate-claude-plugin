@@ -1588,6 +1588,50 @@ test('with no prompt box nothing was drafted, so nothing is kept', async ($, on)
   await ui.unmount()
 })
 
+/** An answer with a warehouse of one id in workspaces 111 and 222: 111's resized to X-SMALL at $2 a day, 222's still SMALL at $10 a day. */
+function sharedIdAnswer() {
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.workspaces_checked = 2
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  answer.metadata.warehouses.push({ ...classic, workspace_id: '222', size: 'SMALL', window_cost: 70 })
+  return answer
+}
+
+test('a drafted fix on a warehouse id two workspaces share is followed on its own workspace\'s warehouse', async ($, on) => {
+  const key = `savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`
+  const store = { [key]: { ...FIX, workspaceId: '222', dailyCost: 10 } }
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer: sharedIdAnswer(), store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  // Workspace 111's resize is not workspace 222's fix: 222's warehouse is still SMALL.
+  expect(texts.filter(text => /changed to X-SMALL/.test(text))).toEqual([])
+  expect(texts.filter(text => text.startsWith('Classic (workspace 222): fix drafted 2026-11-01'))).toEqual([
+    'Classic (workspace 222): fix drafted 2026-11-01, but it is still SMALL CLASSIC: it is no longer flagged, and its size did not change, so no saving is claimed.',
+  ])
+  await ui.unmount()
+})
+
+test('Draft the fix on a warehouse id two workspaces share keeps its own workspace\'s cost and size', async ($, on) => {
+  const answer = sharedIdAnswer()
+  answer.metadata.report = JSON.parse(JSON.stringify(ANSWER.metadata.report))
+  answer.metadata.report.findings = answer.metadata.report.findings.slice(0, 1).map((one: any) => ({ ...one, workspace_id: '222' }))
+  answer.metadata.report.what_if = []
+  answer.metadata.report.total = { monthly_min: answer.metadata.report.findings[0].monthly_min, monthly_max: answer.metadata.report.findings[0].monthly_max, resources: 1 }
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  const kept = store.get(`savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`) as any
+  expect(kept).toMatchObject({ workspaceId: '222', config: 'SMALL CLASSIC' })
+  expect(Math.abs(kept.dailyCost - 70 / 7)).toBeLessThan(1e-9)
+  await ui.unmount()
+})
+
 test('the run that first sees a change notes the day, and measuring counts from it', async ($, on) => {
   const { date, changedSeen, ...drafted } = FIX
   const { clock, store } = await start($, on, { now: Date.parse('2026-11-14T10:00:00Z'), answer: resizedAnswer('2026-11-14', 14), store: { [FIX_KEY]: { ...drafted, date: '2026-11-01' } } })
