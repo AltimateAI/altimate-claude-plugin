@@ -9,7 +9,7 @@ import { later, runAltimate, runTool, within } from './altimate-cli'
 import { usageOff } from './usage'
 import {
   answerOf,
-  changedColumns,
+  changedColumnsAll,
   columnReportData,
   type ColumnAnswer,
   type ColumnTrace,
@@ -176,11 +176,12 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     if (state && !isModelFile(state.layout, relative(one.root, file))) continue
     const current = await $.fs.read(file).catch(() => '')
     if (current === one.original) continue
-    const columns = changedColumns(one.original, current)
+    const all = changedColumnsAll(one.original, current)
+    const columns = all.slice(0, MAX_TASK_COLUMNS)
     // No select item changed (a value computed in a Jinja block the select reads, say): the names the change rewrote
     // are asked of the manifest, and the ones it has are traced as columns whose values change.
     const values = columns.length === 0 ? valueCandidates(one.original, current) : []
-    changes.push({ model: modelName(file), file: relative(one.root, file), root: one.root, columns, ...(values.length ? { values } : {}), ended: fingerprint(current) })
+    changes.push({ model: modelName(file), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }
   if (changes.length > MAX_MODELS) $.ui.log(`lineage-summary · ${changes.length} models changed; tracing the first ${MAX_MODELS}`)
   return changes.slice(0, MAX_MODELS)
@@ -314,7 +315,7 @@ async function finishTask($: EngineInterface, t: Task) {
   if (changes.length === 0) return
   const tracing: TaskSummaryView = {
     state: 'tracing',
-    models: changes.map(one => ({ name: one.model, modelLevel: null, columns: one.columns.map(col => ({ name: col.name, reach: null, failed: false })) })),
+    models: changes.map(one => ({ name: one.model, modelLevel: null, columns: one.columns.map(col => ({ name: col.name, reach: null, failed: false })), ...(one.more ? { more: one.more } : {}) })),
     unresolved: 0,
     truncated: false,
     report: null,

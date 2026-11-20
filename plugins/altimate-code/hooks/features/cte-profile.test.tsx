@@ -405,3 +405,20 @@ test('/profile-ctes uses the reads altimate-code lists: a sibling after a slower
   expect(await ui.find({ type: 'Text', text: /^final .*\+500 ms/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('a CTE whose count took less than the CTEs it reads is shown as ≈0 with the reason, not as +0 ms', async ($, on) => {
+  const rows = withTiers([
+    row('order_items', { queryMs: 15000, reads: [] }),
+    row('payments', { queryMs: 4000, reads: [] }),
+    row('customer_orders', { queryMs: 17000, reads: [0, 1] }),
+  ])
+  expect(rows.map(one => [one.marginalMs, one.underReads ?? false])).toEqual([[15000, false], [4000, false], [0, true]])
+  expect(summaryOf({ model: 'customer_revenue', status: 'done', rows })).toContain('- "customer_orders" (line 1): ≈0 ms (the CTEs it reads cost less inside this query) (cool), 17,000 ms in total, 0 rows')
+  const { clock, run } = await start($, on, { ctes: ['order_items', 'payments', 'customer_orders'], times: { order_items: 15000, payments: 4000, customer_orders: 17000 }, reads: { customer_orders: [0, 1] } })
+  await run('customer_revenue')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^customer_orders .*≈0 ms \(the CTEs it reads cost less inside this query\)/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^customer_orders .*\+0 ms/ })).toBeUndefined()
+  await ui.unmount()
+})

@@ -61,6 +61,7 @@ export const readsKnown = (rows: readonly CteRow[]) => rows.length > 0 && rows.e
  */
 export function withTiers(rows: readonly CteRow[]): CteRow[] {
   const marginals = new Map<number, number>()
+  const underReadsAt = new Set<number>()
   if (readsKnown(rows)) {
     const read = (i: number, seen = new Set<number>()): Set<number> => {
       for (const at of rows[i]?.reads ?? []) if (at < i && !seen.has(at)) read(at, seen.add(at))
@@ -70,7 +71,10 @@ export function withTiers(rows: readonly CteRow[]): CteRow[] {
       if (row.status !== 'done' || row.queryMs === undefined) return
       const under = [...read(i)]
       if (under.some(at => !marginals.has(at))) return
-      marginals.set(i, Math.max(0, row.queryMs - under.reduce((sum, at) => sum + marginals.get(at)!, 0)))
+      const own = row.queryMs - under.reduce((sum, at) => sum + marginals.get(at)!, 0)
+      marginals.set(i, Math.max(0, own))
+      // Less than the CTEs it reads took on their own: the warehouse did their work cheaper inside this count.
+      if (own < 0) underReadsAt.add(i)
     })
   } else {
     const previous = new Map<number, number>()
@@ -88,10 +92,11 @@ export function withTiers(rows: readonly CteRow[]): CteRow[] {
   return rows.map((row, i) => {
     const at = timed.indexOf(i)
     if (at < 0) {
-      const { marginalMs, tier, ...rest } = row
+      const { marginalMs, tier, underReads, ...rest } = row
       return rest
     }
-    return { ...row, marginalMs: marginals.get(i)!, tier: tiers[at] }
+    const { underReads, ...rest } = row
+    return { ...rest, marginalMs: marginals.get(i)!, tier: tiers[at], ...(underReadsAt.has(i) ? { underReads: true } : {}) }
   })
 }
 
@@ -100,6 +105,11 @@ export function slowestFirst(rows: readonly CteRow[]): CteRow[] {
   const timed = rows.filter(row => row.marginalMs !== undefined)
   const rest = rows.filter(row => row.marginalMs === undefined)
   return [...timed.sort((a, b) => b.marginalMs! - a.marginalMs!), ...rest]
+}
+
+/** A row's own part as shown: ≈0 when its count took less than the CTEs it reads did on their own. */
+function ownPart(row: CteRow): string {
+  return row.underReads ? '≈0 ms (the CTEs it reads cost less inside this query)' : `+${ms(row.marginalMs)}`
 }
 
 function ms(value: number | undefined): string {
@@ -122,7 +132,7 @@ export function summaryOf(state: CteProfileState): string {
   const lines = slowestFirst(measured).map(row =>
     row.marginalMs === undefined
       ? `- ${oneLine(row.name, 80)} (line ${row.line}): ${ms(row.queryMs)} in total, own part unknown (a CTE before it failed), ${row.rows ?? 0} rows`
-      : `- ${oneLine(row.name, 80)} (line ${row.line}): +${ms(row.marginalMs)} (${row.tier}), ${ms(row.queryMs)} in total, ${row.rows ?? 0} rows`,
+      : `- ${oneLine(row.name, 80)} (line ${row.line}): ${ownPart(row)} (${row.tier}), ${ms(row.queryMs)} in total, ${row.rows ?? 0} rows`,
   )
   const failed = state.rows.filter(row => row.status === 'failed').map(row => `- ${oneLine(row.name, 80)} (line ${row.line}): ${oneLine(row.error ?? 'failed', 160)}`)
   const text = [
@@ -338,7 +348,7 @@ export function register(on: On, context: FeatureContext) {
               {row.status === 'running' && '… '}
               {row.status === 'failed' && '✗ '}
               {row.name} · line {row.line}
-              {row.marginalMs !== undefined && ` · +${ms(row.marginalMs)} (${row.tier}) · ${ms(row.queryMs)} in total · ${row.rows} rows`}
+              {row.marginalMs !== undefined && ` · ${ownPart(row)} (${row.tier}) · ${ms(row.queryMs)} in total · ${row.rows} rows`}
               {row.status === 'done' && row.marginalMs === undefined && ` · ${ms(row.queryMs)} in total (own part unknown) · ${row.rows} rows`}
               {row.status === 'failed' && ` · ${row.error}`}
             </Text>

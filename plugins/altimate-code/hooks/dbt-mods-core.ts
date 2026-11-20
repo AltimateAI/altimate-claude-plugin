@@ -184,6 +184,16 @@ function jsonLines(stdout: string): any[] {
   return out
 }
 
+// A number as dbt's text table writes it: grouped by commas or not, with an optional sign and decimals.
+const TABLE_NUMBER = /^-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/
+
+/** A number from the text table as a number, unless that would round it (more digits than a double holds): then its digits as text. */
+function tableNumber(cell: string): number | string {
+  const plain = cell.replace(/,/g, '')
+  const value = Number(plain)
+  return Number.isFinite(value) && plain.replace(/^-|\.|^0+/g, '').length <= 15 ? value : plain
+}
+
 /**
  * The rows of dbt show's text table (`| a | b |` with a `| --- |` rule), for a `dbt show` Claude ran
  * without `--output json`. Null when the output holds no such table, or when a line of it does not fit
@@ -217,7 +227,11 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
     }
     // dbt's text table elides the columns past its width as one `...` column.
     const keep = columns.map((name, i) => (name === '...' ? -1 : i)).filter(i => i >= 0)
-    return { columns: keep.map(i => columns[i]!), rows: rows.map(row => keep.map(i => row[i] ?? null)) }
+    const kept = rows.map(row => keep.map(i => row[i] ?? null))
+    // A column of numbers is read as numbers, as dbt's JSON output gives them: the table's grouping commas and
+    // padded decimals (21,109.09, 20,476.10) would show apart from the same query run again through JSON.
+    const numeric = keep.map((_, k) => kept.length > 0 && kept.every(row => row[k] === null || row[k] === '' || TABLE_NUMBER.test(row[k]!)) && kept.some(row => !!row[k]))
+    return { columns: keep.map(i => columns[i]!), rows: kept.map(row => row.map((cell, k) => (numeric[k] && cell ? tableNumber(cell) : cell))) }
   }
   return null
 }

@@ -777,3 +777,16 @@ test('/clear drops the "docs N to copy" status part with the offers it counted, 
   await clock.settle()
   expect(statuses.at(-1) ?? '').not.toContain('docs')
 })
+
+test('after Apply, /propagate says what was sent rather than that no description was written', async ($, on) => {
+  const { clock, submitted } = await start($, on)
+  await $.tool.call(EDIT)
+  await clock.settle()
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'docs-apply' })
+  await clock.settle()
+  await pane.unmount()
+  expect(submitted).toHaveLength(1)
+  const out: any = await $.command.run({ command: 'propagate', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
+  expect(out.text).toMatch(/^Nothing left to copy: Apply sent 2 downstream columns to Claude this session\./)
+})

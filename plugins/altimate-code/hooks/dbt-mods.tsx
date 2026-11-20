@@ -1501,6 +1501,37 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   }
 }
 
+/** The doctor's manifest line: whether the manifest is missing, current, or older than files of the project. */
+async function manifestCheck($: EngineInterface, root: string): Promise<{ check: DoctorCheck; staleFiles: string[] }> {
+  const target = await targetOf($, root)
+  const stat = await $.fs.stat(`${target}/manifest.json`).catch(() => null)
+  const shown = target.startsWith(`${root}/`) ? relative(root, target) : target
+  if (!stat) return { check: { id: 'manifest', label: 'Manifest', status: 'warn', detail: `${shown}/manifest.json is missing: lineage, model context and docs need it`, fix: 'dbt parse' }, staleFiles: [] }
+  const scan = await changedSince($, root, stat.mtimeMs)
+  const staleFiles = scan.files
+  const age = Math.round(((await $.clock.now()) - stat.mtimeMs) / 60_000)
+  const ageText = age < 60 ? `${age} min` : age < 2880 ? `${Math.round(age / 60)} h` : `${Math.round(age / 1440)} days`
+  const check: DoctorCheck = staleFiles.length
+    ? { id: 'manifest', label: 'Manifest', status: 'warn', detail: `stale: ${staleFiles.length} file${staleFiles.length === 1 ? '' : 's'} changed since it was written ${ageText} ago (${staleFiles.slice(0, 3).join(', ')}${staleFiles.length > 3 ? ', …' : ''})`, fix: 'dbt parse' }
+    : scan.complete
+      ? { id: 'manifest', label: 'Manifest', status: 'ok', detail: `current (written ${ageText} ago)`, fix: null }
+      : { id: 'manifest', label: 'Manifest', status: 'warn', detail: `no change found, but not every project file could be checked (over ${MAX_SCANNED} files, or a folder could not be read), so it may be stale (written ${ageText} ago)`, fix: 'dbt parse' }
+  return { check, staleFiles }
+}
+
+/**
+ * After a tool call that may have changed the project's files (an edit, a shell command): the doctor's manifest
+ * line is read again, so a doctor shown before the change no longer says the manifest is current.
+ */
+async function recheckDoctorManifest($: EngineInterface) {
+  const view = await read($, doctorAtom)
+  if (!view || view.busy) return
+  const { check, staleFiles } = await manifestCheck($, view.root)
+  check.detail = redactValues(check.detail)
+  if (check.fix) check.fix = redactValues(check.fix)
+  await update($, doctorAtom, prev => (prev && prev.root === view.root && !prev.busy && prev.at === view.at ? { ...prev, checks: prev.checks.map(one => (one.id === 'manifest' ? check : one)), staleFiles } : prev))
+}
+
 async function runDoctor($: EngineInterface, root: string, connection = false): Promise<DoctorView> {
   const previous = await read($, doctorAtom)
   await update($, doctorAtom, () => ({ root, checks: previous?.root === root ? previous.checks : [], at: previous?.at ?? 0, staleFiles: previous?.staleFiles ?? [], busy: connection ? 'Testing the connection…' : 'Checking the dbt environment…' }))
@@ -1567,24 +1598,9 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   }
 
   // Manifest freshness.
-  const target = await targetOf($, root)
-  const stat = await $.fs.stat(`${target}/manifest.json`).catch(() => null)
-  let staleFiles: string[] = []
-  const shown = target.startsWith(`${root}/`) ? relative(root, target) : target
-  if (!stat) checks.push({ id: 'manifest', label: 'Manifest', status: 'warn', detail: `${shown}/manifest.json is missing: lineage, model context and docs need it`, fix: 'dbt parse' })
-  else {
-    const scan = await changedSince($, root, stat.mtimeMs)
-    staleFiles = scan.files
-    const age = Math.round(((await $.clock.now()) - stat.mtimeMs) / 60_000)
-    const ageText = age < 60 ? `${age} min` : age < 2880 ? `${Math.round(age / 60)} h` : `${Math.round(age / 1440)} days`
-    checks.push(
-      staleFiles.length
-        ? { id: 'manifest', label: 'Manifest', status: 'warn', detail: `stale: ${staleFiles.length} file${staleFiles.length === 1 ? '' : 's'} changed since it was written ${ageText} ago (${staleFiles.slice(0, 3).join(', ')}${staleFiles.length > 3 ? ', …' : ''})`, fix: 'dbt parse' }
-        : scan.complete
-          ? { id: 'manifest', label: 'Manifest', status: 'ok', detail: `current (written ${ageText} ago)`, fix: null }
-          : { id: 'manifest', label: 'Manifest', status: 'warn', detail: `no change found, but not every project file could be checked (over ${MAX_SCANNED} files, or a folder could not be read), so it may be stale (written ${ageText} ago)`, fix: 'dbt parse' },
-    )
-  }
+  const manifest = await manifestCheck($, root)
+  checks.push(manifest.check)
+  const staleFiles = manifest.staleFiles
 
   // The connection test opens a warehouse session: only when asked for.
   if (connection) {
@@ -1618,7 +1634,7 @@ async function parseNow($: EngineInterface, root: string) {
   if (run.exitCode !== 0) {
     const reason = dbtTail({ stdout: run.stdout || run.stderr, stderr: '' }, 3, true, ' ').slice(0, 200)
     $.ui.toast(`✖ dbt parse failed · ${reason}`, { timeoutMs: 10000 })
-  } else $.ui.toast('✓ dbt parse finished · the manifest is current', { timeoutMs: 6000 })
+  } else infoToast($, '✓ dbt parse finished · the manifest is current', 6000)
   const view = await runDoctor($, root)
   // Claude hears the manifest is current again on its next prompt.
   noteDoctor(root, view, asked)
@@ -1887,6 +1903,7 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
   const start = takeStart(startKey(e, command))
   // A command may have changed the checked model.
   later($, () => recheck($, null))
+  later($, () => recheckDoctorManifest($))
   const invocations = dbtCommands(command)
   if (invocations.length === 0) return pendingLines(agentId)
   const asked = start?.asked ?? generation
@@ -1952,6 +1969,7 @@ function pendingLines(agentId: string | null): string[] {
 /** After a model Claude edited: compile it and run it against the warehouse, then check its columns. */
 export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string }): Promise<string[]> {
   if (!enabled || !EDIT_TOOLS.has(e.tool)) return []
+  later($, () => recheckDoctorManifest($))
   const path = normalize(file.path)
   // The conversation this edit belongs to, taken before the edit ran, so a /clear during it is seen.
   const asked = takeStart(startKey(e, path))?.asked ?? generation

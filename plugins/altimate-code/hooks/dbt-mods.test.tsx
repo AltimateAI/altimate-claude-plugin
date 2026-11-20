@@ -469,11 +469,16 @@ async function start($: any, on: any, options: Options = {}) {
 kitTest('a text table is cut at the rule\'s pipes, so a value with a pipe stays whole; one that does not fit is declined', () => {
   const table = (...lines: string[]) => lines.join('\n')
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b   | c     |'))).toEqual({ columns: ['value', 'other'], rows: [['a|b', 'c']] })
-  expect(textTable(table('| id | note  |', '| -- | ----- |', '| 1  | x|y|z |'))).toEqual({ columns: ['id', 'note'], rows: [['1', 'x|y|z']] })
+  expect(textTable(table('| id | note  |', '| -- | ----- |', '| 1  | x|y|z |'))).toEqual({ columns: ['id', 'note'], rows: [[1, 'x|y|z']] })
   // agate pads by code points: an emoji is one cell.
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| 🙂🙂    | c     |', '| a|🙂   | d     |'))).toEqual({ columns: ['value', 'other'], rows: [['🙂🙂', 'c'], ['a|🙂', 'd']] })
   // A line out of step with the rule is not guessed at: nothing is captured.
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b  | c     |'))).toBeNull()
+  // A column of numbers comes back as numbers, the way dbt's JSON output gives them, so Re-run shows them the same.
+  expect(textTable(table('| region  | revenue   | id                  |', '| ------- | --------- | ------------------- |', '| central | 21,109.09 | 1234567890123456789 |', '| east    | 20,476.10 | 7                   |'))).toEqual({
+    columns: ['region', 'revenue', 'id'],
+    rows: [['central', 21109.09, '1234567890123456789'], ['east', 20476.1, 7]],
+  })
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a     | c     |', '| a | b | c |'))).toBeNull()
   // Through dbt's JSON logs, a text preview takes the same road.
   const log = (preview: string) => JSON.stringify({ info: { code: 'Q041' }, data: { preview, output_format: 'text' } })
@@ -485,7 +490,7 @@ kitTest('dbt show JSON logs give the rows in dbt\'s column order; the text table
   expect(showPreview(showLog([{ b: 1, a: 'x' }, { b: 2, a: null }], 'orders'))).toEqual({ columns: ['b', 'a'], rows: [[1, 'x'], [2, null]], node: 'orders' })
   expect(showPreview('no preview here')).toBeNull()
   const text = '\u001b[0m06:36:55  Previewing node \'customers\':\n| customer_id | first_name | ... |\n| ----------- | ---------- | --- |\n|           1 | Michael    | ... |\n'
-  expect(textTable(text)).toEqual({ columns: ['customer_id', 'first_name'], rows: [['1', 'Michael']] })
+  expect(textTable(text)).toEqual({ columns: ['customer_id', 'first_name'], rows: [[1, 'Michael']] })
 })
 
 kitTest('a failed dbt command is read from run_results.json by node name, and from its text when there is none', () => {
@@ -546,7 +551,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   const shared = { metadata: { project_name: 'shop' }, nodes: { 'model.pkg.orders': { resource_type: 'model', package_name: 'pkg', original_file_path: 'models/orders.sql' }, 'model.shop.orders': { resource_type: 'model', package_name: 'shop', original_file_path: 'models/orders.sql' } } }
   expect(nodeForFile(shared, 'models/orders.sql')?.id).toBe('model.shop.orders')
   // dbt show's two other output forms: text preview in JSON logs, and a JSON block in text logs.
-  expect(showPreview(JSON.stringify({ data: { output_format: 'text', node_name: 'm', preview: '| a | b |\n| - | - |\n| 1 | 2 |' }, info: { code: 'Q041' } }))?.rows).toEqual([['1', '2']])
+  expect(showPreview(JSON.stringify({ data: { output_format: 'text', node_name: 'm', preview: '| a | b |\n| - | - |\n| 1 | 2 |' }, info: { code: 'Q041' } }))?.rows).toEqual([[1, 2]])
   expect(showPreview('06:00:00  Previewing node \'m\':\n{\n  "node": "m",\n  "show": [\n    {"a": 1}\n  ]\n}\n')?.columns).toEqual(['a'])
   // A prefix applies only to its own command.
   expect(dbtCommand('A=1 echo hi; dbt run -s o')?.env).toEqual([])
@@ -4347,4 +4352,17 @@ kitTest('with info_toasts off, a passing recheck raises no toast but the band sa
   await $.tool.call({ tool: 'Write', file_path: ORDERS, content: 'select order_dte from x' })
   await clock.settle()
   expect(toasts).toContain('✖ orders · dbt could not compile or run it · see the band')
+})
+
+test('a doctor shown before an edit reads the manifest again after it: it no longer says current once a model file is newer', async ($, on) => {
+  const { clock, mtimes } = await start($, on, { interactive: true, now: 200_000, show: { rows: [{ order_id: 1, amount: 10 }] } })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^current \(written \d+ min ago\)$/ })).toBeDefined()
+  mtimes['models/orders.sql'] = 150_000
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^current \(written/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await ui.unmount()
 })

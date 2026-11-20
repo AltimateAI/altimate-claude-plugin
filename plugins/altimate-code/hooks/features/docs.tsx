@@ -41,6 +41,8 @@ let saidOldCoverage = false
 // writing is not offered again (once each, and only that text: a different description written to the same
 // column later is a new one; whatever Apply's turn does not write stays until the session starts again).
 const applied = new Map<string, string>()
+// How many downstream columns this session's Apply presses asked Claude to copy a description to.
+let copiedThisSession = 0
 // An Apply whose request is still being sent; a second press is ignored.
 let applying = false
 /** Whether this feature has put a part in the status line, so a session start clears it only then. */
@@ -595,7 +597,12 @@ export function register(on: On, context: FeatureContext) {
       return { text: `Could not open Altimate docs: ${String(error)}` }
     }
     const state = await read($, docsAtom)
-    return { text: state?.groups.length ? 'Descriptions to copy are in the side pane.' : 'No column description has been written yet; the pane shows each one Claude writes, with the downstream columns that can take it.' }
+    const text = state?.groups.length
+      ? 'Descriptions to copy are in the side pane.'
+      : copiedThisSession > 0
+        ? `Nothing left to copy: Apply sent ${plural(copiedThisSession, 'downstream column')} to Claude this session. The pane shows each new description Claude writes, with the downstream columns that can take it.`
+        : 'No column description has been written yet; the pane shows each one Claude writes, with the downstream columns that can take it.'
+    return { text }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -676,6 +683,7 @@ export function register(on: On, context: FeatureContext) {
                       for (const key of marks) applied.delete(key)
                       throw error
                     }
+                    copiedThisSession += marks.length
                     // Only what was sent is cleared: an offer that arrived meanwhile stays.
                     await update($, docsAtom, prev => {
                       const left = (prev?.groups ?? []).filter(group => !sent.has(offerKey(group)))
@@ -711,6 +719,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   saidOldReach = false
   saidOldCoverage = false
   applied.clear()
+  copiedThisSession = 0
   applying = false
   await update($, docsAtom, () => null)
   if (statusShown) await setStatusPart($, 'docs', null)

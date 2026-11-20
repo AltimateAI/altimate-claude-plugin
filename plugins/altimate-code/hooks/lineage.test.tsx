@@ -2119,3 +2119,14 @@ test("a manifest over 4 MiB: the schema.yml altimate-code's graph names is check
   expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
   await ui.unmount()
 })
+
+test('the pane\'s key hints wrap in a narrow pane instead of squeezing the last ones a letter a line', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const keys: any = await ui.find({ key: 'lineage-keys' })
+  expect(keys?.props).toMatchObject({ flexDirection: 'row', flexWrap: 'wrap' })
+  expect(await ui.find({ key: 'lineage-ask' })).toBeDefined()
+  await ui.unmount()
+})

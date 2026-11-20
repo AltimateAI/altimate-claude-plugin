@@ -27,6 +27,12 @@ All notable changes to this plugin will be documented in this file.
 - `/profile-ctes` times a CTE that reads none of the CTEs before it (a sibling) on its own, instead of as its time less the slower CTE before it (which showed `payments +0 ms` after `order_items` in `customer_revenue`): with an altimate-code that lists the CTEs each one reads, a CTE's own part is its count's time less the own parts of the CTEs it reads, directly or through another. An older altimate-code keeps the previous rule.
 - The lineage pane says when the model's schema.yml changed after the manifest was written ("run `dbt parse`, then r"): its test count comes from there, and removing a model's tests left it counting them with no warning. For a manifest over 4 MiB, whose graph altimate-code builds, this needs an altimate-code whose graph names each node's schema.yml.
 - The model-context toast says "N columns in schema.yml" (those listed there, not the columns the model returns) and "1 column", "1 test"; Claude's note says the same. The lineage pane's log line says "read by 1 model".
+- The lineage pane's key hints (u, d, c, v, r, a) wrap to a second line in a narrow pane instead of running down its right edge a letter a line.
+- A doctor shown before Claude edits a file or runs a shell command reads the manifest again afterwards, so it no longer says "Manifest current" once a project file is newer than the manifest. "dbt parse finished" is an `info_toasts` toast: the doctor shows it.
+- After Apply, `/propagate` says how many downstream columns it sent to Claude this session, instead of "No column description has been written yet".
+- The end-of-task band traces the first three changed columns of a model and now says how many more changed ("+ 1 more changed column, not traced here (/lineage-report <model>.<column> traces one)"), instead of listing three as if they were all.
+- Claude's `dbt show` text table and **Re-run** show numbers the same way: a column of numbers in dbt's text table (`21,109.09`, `20,476.10`) is read as numbers, as dbt's JSON output gives them (`21109.09`, `20476.1`). A number with more digits than a double holds keeps its digits as text.
+- `/profile-ctes`: a CTE whose count took less than the CTEs it reads took on their own (the warehouse shares their work inside the count) shows "≈0 ms (the CTEs it reads cost less inside this query)" instead of "+0 ms".
 
 ## [1.8.3] — 2026-11-19
 

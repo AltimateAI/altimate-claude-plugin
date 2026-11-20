@@ -343,7 +343,8 @@ export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean
 /** What the band shows after a task that changed models. */
 export type TaskSummaryView = {
   state: 'tracing' | 'ready'
-  models: { name: string; modelLevel: number | null; columns: SummaryColumn[] }[]
+  /** `more`: changed columns past the three traced, counted only. */
+  models: { name: string; modelLevel: number | null; columns: SummaryColumn[]; more?: number }[]
   /** Models whose SQL could not be read, across every column traced: the reach is a lower bound. */
   unresolved: number
   /** Models read in full that may pass a column on without naming it (`select *`), where no reach was traced. */
@@ -636,6 +637,8 @@ export interface CteRow {
   reads?: number[]
   /** Time this CTE adds: over the CTEs it reads where that is known, else over the one before it. */
   marginalMs?: number
+  /** Its count took less than the CTEs it reads took on their own (the warehouse shared their work): own part shown as ≈0. */
+  underReads?: boolean
   tier?: CteTier
   error?: string
 }

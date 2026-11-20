@@ -1037,3 +1037,19 @@ test('a value change on Tuva: the band says tracing until the trace answers, nev
   expect(await band.find({ type: 'Text', text: /model-level count stands/ })).toBeUndefined()
   await band.unmount()
 })
+
+test('a task that changes four output columns traces three and says one more changed', async ($, on) => {
+  const NEW_MODEL = `${ROOT}/models/marts/monthly_region_revenue.sql`
+  const { turn, logs } = await start($, on, {
+    answer: args => (args.model === 'monthly_region_revenue' ? { status: 'ok', output: 'Model "monthly_region_revenue" not found in manifest.', metadata: { success: false, truncated: false } } : undefined),
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: NEW_MODEL, content: 'select\n  region,\n  order_month,\n  count(*) as orders,\n  sum(amount) as revenue\nfrom {{ ref("fct_orders") }}\ngroup by 1, 2\n' })
+  })
+  const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
+  expect(line.match(/new in it\?/g)?.length).toBe(3)
+  expect(line).toContain('+ 1 more changed column, not traced here (/lineage-report monthly_region_revenue.<column> traces one)')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: '  + 1 more changed column, not traced here (/lineage-report monthly_region_revenue.<column> traces one)' })).toBeDefined()
+  await band.unmount()
+})

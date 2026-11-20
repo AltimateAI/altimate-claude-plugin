@@ -1855,7 +1855,8 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
           </Box>
         )}
 
-        <Box flexDirection="row" gap={2}>
+        {/* The keys wrap to a second line in a narrow pane rather than squeezing the last ones a letter a line. */}
+        <Box key="lineage-keys" flexDirection="row" flexWrap="wrap" columnGap={2}>
           {/* Only the ends and list views fold; the graph and folders draw everything. */}
           {(view === 'ends' || view === 'list') && <Button key="lineage-up" plain hotkey="u" label="upstream" onPress={() => update($, expandedAtom, current => ({ ...current, up: !current.up }))} />}
           {(view === 'ends' || view === 'list') && <Button key="lineage-down" plain hotkey="d" label="downstream" onPress={() => update($, expandedAtom, current => ({ ...current, down: !current.down }))} />}

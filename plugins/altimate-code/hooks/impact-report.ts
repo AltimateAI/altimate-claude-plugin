@@ -43,6 +43,8 @@ export type ModelChange = {
    * values may change (an expression in a Jinja block the select list reads). The manifest says which are columns.
    */
   values?: string[]
+  /** Changed output columns past the first three, which are traced: counted, not traced. */
+  more?: number
   /** The file's fingerprint as the task ended, to tell whether it changed since. */
   ended?: string
 }
@@ -75,14 +77,17 @@ const lastExpr = (items: Map<string, string>, name: string) => items.get(name)?.
  * Empty when no output column changed (a filter, a join): the model-level count stands in.
  */
 export function changedColumns(original: string, current: string): ModelChange['columns'] {
+  return changedColumnsAll(original, current).slice(0, MAX_TASK_COLUMNS)
+}
+
+/** Every output column one file's change touches, ranked: the band traces the first three and counts the rest. */
+export function changedColumnsAll(original: string, current: string): ModelChange['columns'] {
   const before = selectItems(original)
   const after = selectItems(current)
   // Only output columns whose select item was rewritten, added or removed: a column merely named on a
   // changed line (a filter, a join) keeps its value.
   const rewritten = [...new Set([...before.keys(), ...after.keys()])].filter(name => name !== '*' && before.get(name) !== after.get(name))
-  return touchedColumns([original], [current], rewritten)
-    .slice(0, MAX_TASK_COLUMNS)
-    .map(name => ({ name, before: lastExpr(before, name), after: lastExpr(after, name) }))
+  return touchedColumns([original], [current], rewritten).map(name => ({ name, before: lastExpr(before, name), after: lastExpr(after, name) }))
 }
 
 // Words on a changed line that are SQL or Jinja, not a column.
@@ -329,7 +334,7 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
         const note = one.unknown ?? (one.unchecked ? ADDED_NOTE : undefined)
         return { name: one.column!, reach, failed: one.failed, ...(note && { note }), ...(one.value && { value: true }) }
       })
-    return { name: change.model, modelLevel, columns }
+    return { name: change.model, modelLevel, columns, ...(change.more ? { more: change.more } : {}) }
   })
   for (const id of unresolved) unseen.delete(id)
   return { state: 'ready', models, unresolved: unresolved.size, ...(unseen.size ? { unseen: unseen.size } : {}), truncated, report, openFailed: false }
@@ -359,6 +364,8 @@ export function summaryLines(view: TaskSummaryView): string[] {
         lines.push(`  ${name} ${parts.join(' · ')}`)
       }
     }
+    // Columns past the three traced: said, so the list never reads as every column the task changed.
+    if (model.more) lines.push(`  + ${plural(model.more, 'more changed column')}, not traced here (/lineage-report ${model.name}.<column> traces one)`)
   }
   if (view.unresolved > 0 || view.truncated || (view.unseen ?? 0) > 0) {
     const why = [
