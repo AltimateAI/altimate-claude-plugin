@@ -17,6 +17,7 @@ import { NOT_FOUND, later, runTool, within } from '../altimate-cli'
 import { featureUsed } from '../usage'
 import { setStatusPart } from '../status-line'
 import { SHELLS, leaderEnd, shellScript, simpleCommands } from '../shell'
+import { HEALTH_SCRATCH, SCRATCH_TARGET, targetPath } from '../dbt-mods-core'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -53,6 +54,26 @@ let enabled = false
 let eligible = false
 /** The problem told to the user last, so the same one is not told at every turn. */
 let toldProblem: string | null = null
+/** The files the running check was asked about: a check a /clear cuts short has them asked for again. */
+let inFlight: string[] = []
+/** What the conversation a /clear ended knew (its baseline, the changes not yet checked, the issues): the next one keeps it. */
+let carried: HealthState | null = null
+/** A /clear whose conversation has not had clearStart yet. */
+let clearPending = false
+/** clearStart's restore while it runs. */
+let restoring: Promise<void> | null = null
+/** The last health CLI call queued, settled either way: the next one starts after it. */
+let cliQueue: Promise<void> = Promise.resolve()
+
+/** Runs `job` after every one queued before it; its place is taken at once, before anything is awaited. */
+function oneAtATime<T>(job: () => Promise<T>): Promise<T> {
+  const run = cliQueue.then(job, job)
+  cliQueue = run.then(
+    () => {},
+    () => {},
+  )
+  return run
+}
 /** Which model each file belonged to in earlier checks: a deleted schema file or model no longer shows in the latest answer. */
 let known: HealthInsight[] = []
 /** Whether the status line carries the health part now. */
@@ -252,6 +273,29 @@ async function isModelFile($: EngineInterface, file: string): Promise<boolean> {
   return project !== null && !(ROOT_FILES.has(path.split('/').pop() ?? '') && norm(project) === dir)
 }
 
+/**
+ * What the check's CLI process is given so its parse never rewrites the project's manifest (which would drop
+ * every model's compiled SQL): dbt's artifact folder is the plugin's own (SCRATCH_TARGET), with the project's
+ * catalog copied in (DataPilot reads it beside the manifest), and the CLI runs the tool in its own process, since
+ * a running tool daemon keeps the environment it started with.
+ */
+async function checkEnv($: EngineInterface): Promise<Record<string, string> | undefined> {
+  const root = await $.session.root().catch(() => '')
+  const project = root ? await projectAbove($, root) : null
+  if (!project) return undefined
+  const path = targetPath(await $.fs.read(`${project}/dbt_project.yml`).catch(() => ''))
+  const target = path.startsWith('/') ? path : `${project}/${path}`
+  const scratch = `${target}/${SCRATCH_TARGET}/${HEALTH_SCRATCH}`
+  // Best effort: without the copy the check reads no catalog, as with a project that has none; an earlier copy is
+  // removed first, so a catalog the project no longer has, or one that failed to copy, is never read.
+  await $.process.run(['rm', '-f', `${scratch}/catalog.json`], { timeoutMs: 10_000 }).catch(() => null)
+  if (await $.fs.exists(`${target}/catalog.json`).catch(() => false)) {
+    await $.process.run(['mkdir', '-p', scratch], { timeoutMs: 10_000 }).catch(() => null)
+    await $.process.run(['cp', '-p', `${target}/catalog.json`, `${scratch}/catalog.json`], { timeoutMs: 60_000 }).catch(() => null)
+  }
+  return { DBT_TARGET_PATH: scratch, ALTIMATE_TOOL_DAEMON: '0' }
+}
+
 /** Asks altimate-code's dbt_health for the project's insights. */
 async function check($: EngineInterface): Promise<HealthRun> {
   const badConfig = configPathProblem(options.healthConfigPath)
@@ -259,7 +303,12 @@ async function check($: EngineInterface): Promise<HealthRun> {
   let result: Awaited<ReturnType<typeof runTool>>
   try {
     const until = (await $.clock.now()) + CHECK_MS
-    result = await runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until })
+    // One CLI call at a time, its folder's preparation included, across a /clear or a new session too: a call whose
+    // loop was cut short still runs, and the next one would share its artifact folder, so it takes its turn after it.
+    result = await oneAtATime(async () => {
+      const env = await checkEnv($)
+      return runTool($, 'dbt_health', toolArgs(options.healthConfigPath), { write: true, until, ...(env && { env }) })
+    })
   } catch (error) {
     // Only a binary that is not there: one that is there and refused to start keeps its own words.
     if (NOT_FOUND.test(String(error))) return { problem: NO_CLI }
@@ -310,6 +359,7 @@ async function loop($: EngineInterface, mine: number) {
     if (!needsBaseline && before.pending.length === 0) return
     // The baseline run leaves `pending` alone: edits made while it ran are checked by the next run.
     const batch = needsBaseline ? [] : before.pending
+    inFlight = batch
     await update($, healthAtom, prev => ({ ...(prev ?? fresh()), pending: needsBaseline ? (prev?.pending ?? []) : (prev?.pending ?? []).filter(f => !batch.includes(f)), running: true }))
     const run = await check($)
     if (mine !== generation) return
@@ -408,6 +458,7 @@ export function register(on: On, context: FeatureContext) {
   options = context.options
   on('command.run', { command: COMMAND }, async $ => {
     featureUsed($, 'health', 'opened')
+    await clearStart($)
     const state = await read($, healthAtom)
     if (!state || !enabled) return { text: 'Project health checks dbt projects: this session has none open yet.' }
     // Asking again retries a first check that failed, and checks changes not yet checked.
@@ -427,9 +478,13 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   generation += 1
   running = null
   enabled = false
+  carried = null
+  clearPending = false
+  restoring = null
+  inFlight = []
   toldProblem = null
   known = []
-  shellBefore = null
+  shellBefore.clear()
   projects.clear()
   await update($, healthAtom, () => fresh())
   // The status line outlives a process: a part an earlier one left is cleared whether or not this one drew it.
@@ -439,10 +494,73 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   // The baseline takes a while (the dbt adapter starts): nothing waits for it. A session with nobody at
   // the prompt checks only when the push gate needs it.
   eligible = e.isInteractive || options.healthBlocksPush === true || options.healthBlocksPush === 'true'
+  await enable($)
+}
+
+/** Turns the checks on when the session's folder is in a dbt project, and starts the baseline. */
+async function enable($: EngineInterface) {
   const root = await $.session.root().catch(() => '')
   if (!eligible || !root || !(await projectAbove($, root))) return
   enabled = true
   later($, () => kick($))
+}
+
+/**
+ * After a /clear: the new conversation's `$.state` is empty. The baseline, the changes not yet checked and
+ * the issues of the conversation that ended are the project's, so they are kept (a change made before the
+ * /clear still holds a push); with none kept, the baseline is taken as at a session's start.
+ */
+export async function clearStart($: EngineInterface) {
+  // Once per /clear, whichever comes first: the session id's change, or a hook of the new conversation. A caller
+  // that comes while it runs waits for it, so a push is never decided on the empty state.
+  // Another /clear may come while a restore runs: once it ends, the one that /clear asked for runs too.
+  for (;;) {
+    if (restoring) {
+      await restoring
+      continue
+    }
+    if (!clearPending) return
+    clearPending = false
+    const run = restore($)
+    restoring = run
+    try {
+      await run
+    } finally {
+      if (restoring === run) restoring = null
+    }
+  }
+}
+
+async function restore($: EngineInterface) {
+  // The snapshot is let go only once it is written: a /clear while the write is under way carries it on.
+  const kept = carried
+  generation += 1
+  running = null
+  if (!kept) {
+    await update($, healthAtom, () => fresh())
+    await enable($)
+    return
+  }
+  enabled = true
+  // Changes the new conversation recorded before this ran are added to the kept ones, not replaced by them.
+  await update($, healthAtom, prev => (prev ? mergeKept(kept, prev) : { ...kept, running: false }))
+  if (carried === kept) carried = null
+  drawn = true
+  await drawStatus($, kept.issues)
+  if (await wantsCheck($)) later($, () => kick($))
+}
+
+/** The state a /clear carries, with the changes a conversation recorded on top of it. */
+function mergeKept(kept: HealthState, recorded: HealthState): HealthState {
+  return {
+    ...kept,
+    baseline: kept.baseline ?? recorded.baseline,
+    running: false,
+    pending: [...new Set([...kept.pending, ...recorded.pending])],
+    touched: [...new Set([...kept.touched, ...recorded.touched])],
+    // A new change asks for a check again after a failed one, as markChanged does.
+    ...(recorded.pending.length ? { problem: null } : {}),
+  }
 }
 
 /** Also called for a subagent's turns, which carry `e.agentId`. */
@@ -451,13 +569,22 @@ export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 /** After the turn's answer: when model files changed, check again. */
 export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {
   if ((e as { agentId?: string }).agentId) return
+  await clearStart($)
   if (await wantsCheck($)) later($, () => kick($))
 }
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
+  // A /clear: what this conversation knows is handed to the next one. A check it cuts short is asked for again there.
+  const state = e.reason === 'clear' && enabled ? await read($, healthAtom).catch(() => null) : null
+  const now = state ? { ...state, pending: state.running ? [...new Set([...inFlight, ...state.pending])] : state.pending, running: false } : null
+  // A second /clear before the first was restored: what that one carried and what this conversation recorded are both kept.
+  // A fresh object either way, so a restore still writing the earlier snapshot does not let this one go.
+  carried = e.reason !== 'clear' ? null : carried ? (now ? mergeKept(carried, now) : { ...carried }) : now
+  clearPending = e.reason === 'clear'
   generation += 1
   running = null
-  enabled = false
+  // Kept on through a /clear that carries the state: a change made before clearStart restores it is still recorded, and merged.
+  if (!carried) enabled = false
 }
 
 /** This feature's line in the band, under the lineage line; null when there is nothing to say. */
@@ -485,13 +612,16 @@ export function pushRefusal(blocks: unknown, command: string, issues: readonly H
  * they have new health issues. A check that cannot run or does not finish holds it too.
  */
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
+  // A session outside a dbt project has no check to wait for and no folder to note.
+  if (!enabled) return null
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) {
     // Where the shell is before this command runs: its own `cd`s are read from there, and `bashAfter` sees the folder after them.
-    if (CHANGES_FOLDER.test(e.command)) shellBefore = { command: e.command, folder: await within($, GATE_WAIT_MS, shellFolder($)) }
+    if (CHANGES_FOLDER.test(e.command)) noteFolder(e, await within($, GATE_WAIT_MS, shellFolder($)))
     return null
   }
   // The whole decision, folder lookups included, is bounded inside the chain's deadline: past it the gate is given up on and the push runs.
-  const decided = await within($, GATE_WAIT_MS, decide($, e))
+  // Right after a /clear the kept issues may not be back yet: the push waits for them, inside the same deadline.
+  const decided = await within($, GATE_WAIT_MS, clearStart($).then(() => decide($, e)))
   const verdict = decided === null ? hold('the check of the changes could not be read in time.') : decided === 'run' ? null : decided
   featureUsed($, 'health_push_gate', verdict ? 'held' : 'allowed')
   return verdict
@@ -505,7 +635,7 @@ async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string }
   const startedAt = await $.clock.now()
   // An edit in the same command would run before any check of it.
   const here = await shellFolder($)
-  if (CHANGES_FOLDER.test(e.command)) shellBefore = { command: e.command, folder: here }
+  if (CHANGES_FOLDER.test(e.command)) noteFolder(e, here)
   for (const name of filesWrittenBy(e.command)) if (await isModelFile($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${here}/${name}`)) return hold(`this command changes the model file ${name} and pushes in one go, so the change is not checked first. Run them as separate commands.`)
   // With nothing changed this session there is nothing to wait for or hold.
   if (((await read($, healthAtom))?.touched.length ?? 0) === 0) return 'run'
@@ -521,8 +651,16 @@ async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string }
   return pushRefusal(options.healthBlocksPush, e.command, state?.issues ?? []) ?? 'run'
 }
 
-// The folder noted before a command with its own `cd` ran; `folder` is null when the lookup ran out of time.
-let shellBefore: { command: string; folder: string | null } | null = null
+// The folder noted before each command with its own `cd` ran, by call (by command when the call has no id); `folder` is null when the lookup ran out of time.
+// Calls can overlap (a subagent's), so one slot would lose a start folder.
+const shellBefore = new Map<string, string | null>()
+const callKey = (e: BashCall) => e.tool_use_id ?? e.command
+function noteFolder(e: BashCall, folder: string | null) {
+  shellBefore.delete(callKey(e))
+  shellBefore.set(callKey(e), folder)
+  // A call a later gate refused never reaches its after-phase: only the newest notes are kept.
+  for (const old of [...shellBefore.keys()].slice(0, -50)) shellBefore.delete(old)
+}
 const CHANGES_FOLDER = /\b(cd|pushd)\b/
 
 /** The folder the session's shell is in now; the session's root when the host does not say. */
@@ -532,13 +670,15 @@ async function shellFolder($: EngineInterface): Promise<string> {
 
 /** A model file Bash writes (a `sed -i`, a redirect, a `git checkout -- file`) is checked like one Claude edited. */
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
+  if (!enabled) return
   const root = await $.session.root().catch(() => '')
   // A relative name is relative to the folder the session's shell is in now: an earlier `cd` moved it.
   // A command with its own `cd` is read from the folder it started in, which the gate noted.
   // A note belongs to its own command; a command with a `cd` whose start is unknown is read from the session's root, where it began.
-  const noted = shellBefore?.command === e.command ? shellBefore : null
-  shellBefore = null
-  const here = noted ? (noted.folder ?? root) : CHANGES_FOLDER.test(e.command) ? root : await shellFolder($)
+  const noted = shellBefore.has(callKey(e))
+  const folder = shellBefore.get(callKey(e)) ?? null
+  shellBefore.delete(callKey(e))
+  const here = noted ? (folder ?? root) : CHANGES_FOLDER.test(e.command) ? root : await shellFolder($)
   for (const name of filesWrittenBy(e.command)) await markChanged($, name.startsWith('/') || /^[A-Za-z]:/.test(name) ? name : `${here}/${name}`, root)
 }
 

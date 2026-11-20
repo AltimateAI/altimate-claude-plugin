@@ -1,5 +1,6 @@
 import { expect, mock, test as engineTest } from 'claude-code/testing'
 
+import { playsClear } from './clear-state.testkit'
 import { PHASE_TIMEOUT_MS } from './tool-chain'
 import { GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, toolArgs } from './features/health'
 import { simpleCommands } from './shell'
@@ -62,7 +63,7 @@ type Options = {
   /** Holds the folder lookup while it returns a promise. */
   holdCwd?: () => Promise<void> | undefined
   /** Called when the Bash command itself runs, between the gate and the after-phase. */
-  onCall?: () => void
+  onCall?: () => Promise<void> | void
   /** Called at each project lookup; a promise it returns holds the lookup. */
   onExists?: () => Promise<void> | void
   /** The environment the plugin reads, which turns the usage events on (none set) or off; unset, they are not sent. */
@@ -71,9 +72,10 @@ type Options = {
 
 async function start($: any, on: any, options: Options, session: { isInteractive?: boolean } = {}) {
   const clock = mock.clock(on)
-  const calls: { tool: string; args: Record<string, unknown>; argv: readonly string[] }[] = []
+  const calls: { tool: string; args: Record<string, unknown>; argv: readonly string[]; env?: Record<string, string> }[] = []
   const toasts: string[] = []
   const statuses: string[] = []
+  const concurrent = { now: 0, most: 0 }
   /** The usage events sent: feature and outcome. */
   const usage: string[][] = []
   if (options.env) {
@@ -124,8 +126,8 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   on('fs.read', () => ({ value: '' }))
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
-  on('tool.call', () => {
-    options.onCall?.()
+  on('tool.call', async () => {
+    await options.onCall?.()
     return { result: { ok: true } }
   })
   let run = 0
@@ -138,8 +140,11 @@ async function start($: any, on: any, options: Options, session: { isInteractive
     }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     const index = run++
-    calls.push({ tool, args, argv: e.argv })
+    calls.push({ tool, args, argv: e.argv, env: (e as { init?: { env?: Record<string, string> } }).init?.env })
+    // How many tool calls run at once: a held one counts until it is released.
+    concurrent.most = Math.max(concurrent.most, ++concurrent.now)
     if (options.hold?.at === index) await options.hold.until
+    concurrent.now--
     const answer = options.runs[Math.min(index, options.runs.length - 1)]!
     if ('missing' in answer) return { deny: 'spawn ENOENT' }
     if ('refused' in answer) return { deny: 'failed to spawn: operation not permitted' }
@@ -150,7 +155,7 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: session.isInteractive ?? true })
   await clock.settle()
-  return { clock, calls, toasts, statuses, usage }
+  return { clock, calls, toasts, statuses, usage, concurrent }
 }
 
 async function endTurn($: any, clock: any, id: string) {
@@ -177,6 +182,195 @@ test('a baseline run at session start; a changed model with a new insight shows 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: '1 new health issue · stg_orders: hard coded references · /health' })).toBeDefined()
   await band.unmount()
+})
+
+test('after /clear the new conversation keeps the baseline and the issues: the band, /health and the push gate still have them', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls, statuses } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  await clear()
+  await clock.settle()
+  expect(statuses.at(-1)).toContain('1 health issue')
+  // No second baseline: the one from the session's start still stands.
+  expect(calls).toHaveLength(2)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: '1 new health issue · stg_orders: hard coded references · /health' })).toBeDefined()
+  await band.unmount()
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toContain('1 new health issue · stg_orders: hard coded references')
+})
+
+test('a /clear while a check runs has the next conversation check those changes again', async ($, on) => {
+  const clear = playsClear($, on)
+  let release!: () => void
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG], [OLD_STG], [OLD_STG, NEW_STG]], hold: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  await clear()
+  release()
+  await clock.settle()
+  expect(calls).toHaveLength(3)
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toContain('1 new health issue · stg_orders')
+})
+
+test('after /clear with no baseline yet (the first check failed), /health in the new conversation takes it', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls } = await start($, on, { runs: [{ fail: 'boom' }, [OLD_STG]] })
+  expect(calls).toHaveLength(1)
+  await clear()
+  await clock.settle()
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toBe('No new health issues in the models changed this session.')
+  expect(calls).toHaveLength(2)
+})
+
+test('the check\'s parse writes to the plugin\'s own artifact folder, in a CLI process of its own: the project\'s manifest keeps its compiled SQL', async ($, on) => {
+  const { calls } = await start($, on, { runs: [[OLD_STG]] })
+  expect(calls).toHaveLength(1)
+  expect(calls[0]!.env).toEqual({ DBT_TARGET_PATH: `${ROOT}/target/.altimate-plugin/health`, ALTIMATE_TOOL_DAEMON: '0' })
+})
+
+test('a change made right after /clear, before the kept state is put back, is merged into it and checked', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_FCT]] })
+  await clear()
+  // The new conversation's first edit lands before the kept state is restored.
+  await $.tool.call(edit(FCT))
+  await clock.settle()
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toContain('1 new health issue · fct_orders: model fanout')
+})
+
+test('a git push right after /clear, before the kept issues are back, is still held by them', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  // No settling: the push is the new conversation's first call.
+  const denied: any = await $.tool.call(command('git push'))
+  expect(denied?.deny).toContain('1 new project health issue')
+  expect(calls).toHaveLength(2)
+})
+
+test('a git push that comes while the /clear restore is running waits for it and is held', { options: { healthBlocksPush: true } }, async ($, on) => {
+  let release!: () => void
+  const clear = playsClear($, on, { holdWriteOf: { key: 'health', until: new Promise<void>(resolve => (release = resolve)) } })
+  const { clock } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  // /health starts the restore, whose write of the kept state is held; the push and a second /health come meanwhile.
+  const asked = $.command.run({ command: 'health' } as any)
+  const pushed = $.tool.call(command('git push'))
+  const again = $.command.run({ command: 'health' } as any)
+  await clock.advance(10)
+  release()
+  const [first, denied, second]: any[] = await Promise.all([asked, pushed, again])
+  expect(denied?.deny).toContain('1 new project health issue')
+  for (const shown of [first, second]) expect(shown.text).toContain('1 new health issue · stg_orders')
+})
+
+test('a git push whose /clear restore does not finish within the gate\'s wait is held, not let through', { options: { healthBlocksPush: true } }, async ($, on) => {
+  const clear = playsClear($, on, { holdWriteOf: { key: 'health', until: new Promise<void>(() => {}) } })
+  const { clock } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  const pushed = $.tool.call(command('git push'))
+  await clock.advance(GATE_WAIT_MS + 10)
+  const denied: any = await pushed
+  expect(denied?.deny).toContain('git push is held')
+})
+
+test('a /clear that comes while the previous one\'s restore is still writing keeps the state, and the push stays held', { options: { healthBlocksPush: true } }, async ($, on) => {
+  let release!: () => void
+  const clear = playsClear($, on, { holdWriteOf: { key: 'health', until: new Promise<void>(resolve => (release = resolve)) } })
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  const asked = $.command.run({ command: 'health' } as any)
+  await clock.advance(10)
+  await clear()
+  release()
+  await asked
+  await clock.settle()
+  expect(calls).toHaveLength(2)
+  const denied: any = await $.tool.call(command('git push'))
+  expect(denied?.deny).toContain('1 new project health issue')
+})
+
+test('a git push after a second /clear that came while the first restore was writing waits for both restores and is held', { options: { healthBlocksPush: true } }, async ($, on) => {
+  let release!: () => void
+  const clear = playsClear($, on, { holdWriteOf: { key: 'health', until: new Promise<void>(resolve => (release = resolve)) } })
+  const { clock } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  const asked = $.command.run({ command: 'health' } as any)
+  await clock.advance(10)
+  await clear()
+  const pushed = $.tool.call(command('git push'))
+  const again = $.command.run({ command: 'health' } as any)
+  await clock.advance(10)
+  release()
+  const [denied, shown]: any[] = await Promise.all([pushed, again])
+  await asked
+  expect(denied?.deny).toContain('1 new project health issue')
+  expect(shown.text).toContain('1 new health issue · stg_orders')
+})
+
+test('the next conversation\'s check waits for a CLI call the /clear cut short, so the two never share the artifact folder', async ($, on) => {
+  const clear = playsClear($, on)
+  let release!: () => void
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG], [OLD_STG], [OLD_STG, NEW_STG]], hold: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  await clear()
+  await clock.settle()
+  // The cut-short call is still running: the restored conversation's check has not started.
+  expect(calls).toHaveLength(2)
+  release()
+  await clock.settle()
+  expect(calls).toHaveLength(3)
+})
+
+test('two /clears while a cut-short CLI call runs still start their checks one after another', async ($, on) => {
+  const clear = playsClear($, on)
+  let release!: () => void
+  const { clock, calls, concurrent } = await start($, on, { runs: [[OLD_STG], [OLD_STG], [OLD_STG, NEW_STG]], hold: { at: 1, until: new Promise<void>(resolve => (release = resolve)) } })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  await clock.settle()
+  await $.tool.call(edit(STG))
+  await clear()
+  await clock.settle()
+  release()
+  await clock.settle()
+  expect(calls.length).toBeGreaterThanOrEqual(3)
+  expect(concurrent.most).toBe(1)
+})
+
+test('a second /clear before the first one\'s state was restored keeps what the first carried', async ($, on) => {
+  const clear = playsClear($, on)
+  const { clock, calls } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_STG]] })
+  await $.tool.call(edit(STG))
+  await endTurn($, clock, 't1')
+  await clear()
+  await clear()
+  await clock.settle()
+  expect(calls).toHaveLength(2)
+  const shown: any = await $.command.run({ command: 'health' } as any)
+  expect(shown.text).toContain('1 new health issue · stg_orders: hard coded references')
 })
 
 test('two changed models give "2 new health issues" with the first model named', async ($, on) => {
@@ -547,6 +741,8 @@ test('a comment never hides the push that follows it, and a push inside a commen
   expect(isGitPush('echo x # ; git push')).toBe(false)
   expect(isGitPush('git status # git push')).toBe(false)
   expect(isGitPush('echo a#b && git push')).toBe(true)
+  expect(isGitPush('echo ${#arr[@]}; git push')).toBe(true)
+  expect(isGitPush('echo $# ${#x}; git push')).toBe(true)
 })
 
 test('an unnamed YAML file edited before the baseline lands does not empty the baseline', async ($, on) => {
@@ -875,6 +1071,53 @@ test('the band line and the report', () => {
 
 test('the push gate waits for less than the tool chain gives a phase, so a held push is never given up on', () => {
   expect(GATE_WAIT_MS).toBeLessThan(PHASE_TIMEOUT_MS)
+})
+
+test('a Bash call that finishes while another is running leaves the other its own start folder', async ($, on) => {
+  let inner = false
+  const options: Options = {
+    runs: [[], [NEW_STG]],
+    cwd: `${ROOT}/models`,
+    onCall: async () => {
+      if (inner) return
+      inner = true
+      await $.tool.call({ ...command('ls'), tool_use_id: 'b' })
+    },
+  }
+  const { clock, calls, toasts } = await start($, on, options)
+  await $.tool.call({ ...command(`cd staging && sed -i 's/a/b/' stg_orders.sql`), tool_use_id: 'a' })
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+let stall = false
+
+test('a command with its own cd whose start folder could not be read in time is read from the session root', async ($, on) => {
+  const never = new Promise<void>(() => {})
+  const { clock, calls, toasts } = await start($, on, { runs: [[], [NEW_STG]], cwd: `${ROOT}/models/staging`, holdCwd: () => (stall ? never : undefined) })
+  stall = true
+  const pending = $.tool.call(command(`cd models/staging && sed -i 's/a/b/' stg_orders.sql`))
+  await clock.advance(GATE_WAIT_MS + 100)
+  await pending
+  stall = false
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('a YAML file no insight names, edited after the baseline, counts every model as edited', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_FCT]] })
+  await $.tool.call(edit(`${ROOT}/models/_sources.yml`))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · fct_orders: model fanout · /health'])
+})
+
+test('with the push gate on, a session opened above its dbt project holds nothing', { options: { healthBlocksPush: true } }, async ($, on) => {
+  await start($, on, { runs: [[]], projects: [`${ROOT}/dbt`] })
+  const allowed: any = await $.tool.call(command(`cd dbt && echo x > models/a.sql && git push`))
+  expect(allowed?.deny).toBeUndefined()
 })
 
 test('with the push gate on, a held push sends one health_push_gate held usage event, and /health one opened', { options: { healthBlocksPush: true } }, async ($, on) => {

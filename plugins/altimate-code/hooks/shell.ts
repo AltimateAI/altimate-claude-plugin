@@ -143,8 +143,9 @@ export function simpleCommands(line: string): string[][] {
   }
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!
-    if (c === '#' && !inWord) {
+    if (c === '#' && !inWord && !(line[i - 1] === '{' && line[i - 2] === '$')) {
       // An unquoted `#` at the start of a word is a comment to the end of the line: its quotes and commands are text.
+      // The `#` of `${#name}` (a length) is not one: `{` ends the word before it.
       const end = line.indexOf('\n', i)
       i = end < 0 ? line.length : end - 1
     } else if (c === "'") {

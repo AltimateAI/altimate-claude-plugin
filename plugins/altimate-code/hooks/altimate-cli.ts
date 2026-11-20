@@ -25,7 +25,7 @@ export async function runAltimate($: EngineInterface, args: string[], timeoutMs 
   let lastError: unknown = null
   for (const bin of CLI_NAMES) {
     try {
-      return await $.process.run([bin, ...args], env ? { timeoutMs, env } : { timeoutMs })
+      return await $.process.run([bin, ...args], { timeoutMs, ...(env && { env }) })
     } catch (error) {
       if (!MISSING_BINARY.test(String(error))) throw error
       lastError = error

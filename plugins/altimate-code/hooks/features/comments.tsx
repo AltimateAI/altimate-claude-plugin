@@ -38,6 +38,8 @@ const MODEL_FILE = /\.(sql|ya?ml|py|md|csv)$/i
 const PARTIAL_NOTE = 'Not every open thread is listed: the service sent only part of the shares, or the list was cut for size.'
 const UNCONFIRMED_NOTE = 'An earlier post is not confirmed yet: press Refresh first.'
 const LOCKED_NOTE = ' The thread stays locked until the list shows the post or a few minutes have passed (the list can lag): press Refresh later.'
+const NOT_OPEN_NOTE = 'That thread is no longer open (it was resolved, or the list was behind): nothing was sent. The list is read again.'
+const ALREADY_RESOLVED_NOTE = 'Already resolved: the list was behind. It is hidden now.'
 const REFUSALS = new Set(['read_only', 'missing_text', 'missing_ids', 'unknown_thread', 'incomplete_list'])
 const MIN_POLL_SECONDS = 30
 const MAX_POLL_SECONDS = 86_400
@@ -192,6 +194,12 @@ export function register(on: On, context: FeatureContext) {
   })
 }
 
+/** What a conversation keeps of its own, reset when one starts (a session's start, or a /clear's end). */
+function newConversation() {
+  firstWaitSpent = false
+  pendingFor = null
+}
+
 /** After the session started: the command, a first load, and the poll. */
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
   await $.command.register({ name: COMMAND, description: 'Open comment threads from your team’s shared dbt docs; reply or resolve' })
@@ -199,8 +207,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   poll = null
   loadAgain = false
   generation++
-  firstWaitSpent = false
-  pendingFor = null
+  newConversation()
   uncertain = null
   resolvedAt.clear()
   // Work still running when an earlier session ended can never finish, so it must not block this one.
@@ -215,6 +222,20 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   await attach($, cwd)
 }
 
+/**
+ * After a /clear: the new conversation's `$.state` is empty, so the project is found and its threads are
+ * loaded again now (sessionEnd has reset the first-read wait, so its first read of a model waits for them). The poll and a
+ * post's lock carry on (sessionEnd keeps them: they describe the shared docs, not the conversation).
+ */
+export async function clearStart($: EngineInterface) {
+  // A read in the new conversation that came first has found its project already: that one stays.
+  if ((await get($)).root) return
+  searched.clear()
+  within.clear()
+  const cwd = (await $.session.cwd().catch(() => null)) ?? (await $.session.root().catch(() => null))
+  if (cwd) await attach($, cwd)
+}
+
 /** Also called for a subagent's turns, which carry `e.agentId`. */
 export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 
@@ -224,7 +245,12 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
   // /clear ends a session without starting another: the pane keeps its threads and drafts, so the poll goes on
   // and a post still running or unconfirmed keeps its lock (it describes the shared docs, not the conversation).
-  if (e.reason === 'clear') return
+  if (e.reason === 'clear') {
+    // The next conversation starts with empty state: its first read of a model waits for its list, as a session's
+    // first read does, even when it comes before clearStart.
+    newConversation()
+    return
+  }
   poll?.cancel()
   poll = null
   generation++
@@ -530,14 +556,22 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
       { write: true, until: (await $.clock.now()) + POST_TIMEOUT_MS },
     )
     if (mine !== generation) return
-    const sent = out.ok && (out.metadata as { success?: boolean } | null)?.success !== false
+    const code = (out.metadata as { error?: unknown } | null)?.error
+    // The list this pane drew from can be minutes behind the service: a thread it still shows may be resolved
+    // already. Resolving it is then done, not refused; a reply to it is refused, and says why.
+    const gone = code === 'unknown_thread'
+    const sent = (out.ok && (out.metadata as { success?: boolean } | null)?.success !== false) || (gone && args.action === 'resolve')
     if (!sent) {
-      const note = oneLine(out.text) || 'The comment service did not accept that.'
+      const note = gone ? NOT_OPEN_NOTE : oneLine(out.text) || 'The comment service did not accept that.'
       // Only a refusal the tool names (no write permission, no text, no ids, a thread that is not open or cannot be checked) is known not to have posted.
-      const code = (out.metadata as { error?: unknown } | null)?.error
       // The pre-post check that failed says so in its text: nothing was sent.
       if ((typeof code === 'string' && REFUSALS.has(code)) || /Nothing was sent/i.test(out.text)) {
         await change($, current => (mine !== generation ? current : { ...current, posting: null, note }))
+        // A thread that is no longer open: the list is read again, so it shows what the service holds now.
+        if (gone) {
+          release()
+          await load($)
+        }
         return
       }
       // Any other failure, a timeout included, may have landed: posting stays locked until a list of this
@@ -563,7 +597,7 @@ async function post($: EngineInterface, thread: CommentsThread, args: Record<str
         : {
             ...current,
             posting: null,
-            note: done,
+            note: gone ? ALREADY_RESOLVED_NOTE : done,
             drafts: { ...current.drafts, [key]: '' },
             threads: resolved ? current.threads.filter(one => one.shareId !== thread.shareId || one.groupId !== thread.groupId) : current.threads,
           },

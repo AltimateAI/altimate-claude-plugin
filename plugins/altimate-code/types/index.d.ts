@@ -504,7 +504,7 @@ export interface CostState {
   /** The warehouse with no estimate (not BigQuery, Snowflake or Databricks, or an altimate-code too old for it), once the tool said so: nothing is estimated after that. */
   unsupportedAdapter: string | null
   /** The newest estimate: what was estimated, in bytes, as the dry run or the planner gave it. */
-  lastEstimate: { target: string; bytes: number; display: string } | null
+  lastEstimate: { target: string; bytes: number; display: string; planner?: string } | null
   /** The command held for being over the limit, until it is allowed or a later dbt command is estimated under the limit; `bytes` is its scan's upper bound, `planner` the warehouse whose planner made the estimate (none for a dry run). */
   held: { command: string; target: string; bytes: number; display: string; planner?: string } | null
   /** /allow-scan was given for the held command: that same command runs once. */
@@ -592,6 +592,8 @@ export interface DocsCoverageView {
   /** Output columns without a description. */
   missing: string[]
   hasDescription: boolean
+  /** Read from a manifest dbt wrote before the model's last edit; the edit's check reads it again. */
+  stale: boolean
 }
 
 export interface DocsState {
@@ -742,6 +744,8 @@ declare module 'claude-code' {
       runs: Shaped<RunsState | null>
       /** hooks/features/: DeferState. */
       defer: DeferState | null
+      /** hooks/features/: the flags /defer and /target added to Claude's last dbt command, until the next prompt; null with none. */
+      deferRan: string | null
       /** hooks/features/: ToModelState. */
       toModel: ToModelState | null
       /** hooks/features/: CommentsState. */
