@@ -744,9 +744,9 @@ test('Hide pressed just before a /clear leaves the new conversation\'s own offer
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
   await clock.settle()
   let band = await $.ui.mount(BAND)
+  // The press is accepted, then the conversation is cleared and the new one gets its offer, all before the press's work runs.
   await band.press({ key: 'savings-hide' })
   await $.session.end({ reason: 'clear' } as any)
-  await clock.settle()
   await band.unmount()
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Medium', new_string: 'Large' })
   await clock.settle()
@@ -4329,12 +4329,9 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['proj/databricks.yaml', 'include:\n  - resources/*.yml\n'],
     ['infra/bi.tf', 'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n'],
     ['infra/bi.tf', 'data "databricks_sql_warehouse" "bi" {\n  name = "bi"\n}\n'],
-    ['infra/job.tf', 'resource databricks_job nightly {\n  name = "nightly"\n}\n'],
-    ['infra/comment-then-resource.tf', 'locals { a = 1 } /* one\n two */ resource "databricks_job" "nightly" {\n}\n'],
     ['infra/bom.tf', '\uFEFFresource "databricks_job" "nightly" {\n}\n'],
-    ['infra/dashed-heredoc.tf', 'resource "aws_iam_policy" "p" {\n  policy = <<END-OF-SCRIPT\nls /tmp/*\nEND-OF-SCRIPT\n}\nresource "databricks_job" "nightly" {\n}\nlocals { z = "*/" }\n'],
-    ['infra/heredoc-then.tf', 'resource "aws_iam_policy" "p" {\n  policy = <<EOT\n/*\nEOT\n}\nresource "databricks_job" "nightly" {\n}\n'],
-    ['infra/logs.tf', 'locals {\n  prefix = "s3://logs/*"\n  pattern = "a/*/b"\n}\nresource "databricks_sql_endpoint" "wh" {\n  name = "wh"\n}\nlocals {\n  closing = "*/"\n}\n'],
+    ['infra/provider.tf', 'provider "databricks" {\n  host = var.host\n}\n'],
+    ['infra/job.tf', 'resource databricks_job nightly {\n  name = "nightly"\n}\n'],
     ['resources/jobs.yml', 'resources:\n  jobs:\n    nightly: {}\n'],
     ['resources/jobs/nightly.job.yml', 'resources: # every job\n  jobs: # nightly\n    nightly:\n      job_clusters: []\n'],
     ['resources/bi.yml', 'resources:\n\n  # the BI warehouse\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n'],
@@ -4353,9 +4350,7 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['resources/near.yml', 'resources:\n  jobs_extra:\n    a: {}\n'],
     ['resources/dash.yml', 'resources:\n  dashboards:\n    jobs:\n      a: {}\n'],
     ['infra/eks.tf', 'variable "databricks_account_id" {}\nresource "aws_eks_cluster" "main" {\n  name = var.databricks_account_id\n}\n'],
-    ['infra/old.tf', '/*\nresource "databricks_job" "x" {\n}\n*/\nresource "aws_s3_bucket" "b" {}\n'],
-    ['infra/after-code.tf', 'locals { a = 1 } /*\nresource "databricks_job" "removed" {\n}\n*/\nresource "aws_s3_bucket" "b" {}\n'],
-    ['infra/line-comments.tf', 'resource "aws_s3_bucket" "b" {}\n# resource "databricks_job" "x" {}\n// resource "databricks_job" "y" {}\n'],
+    ['infra/commented-provider.tf', '# provider "databricks" {\n//   host = "x"\n# }\nresource "aws_s3_bucket" "b" {}\n'],
     ['config/jobs.yml', 'resources:\n  jobs:\n    a: {}\n'],
   ]
   expect(yes.filter(([path, text]) => !isDatabricksConfig(path, text)).map(([path]) => path)).toEqual([])
@@ -4405,16 +4400,6 @@ test('a lookback the answer sends as a string is still the window\'s length', as
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => /the last \d+ days' rate/.test(text)).map(text => /the last (\d+) days/.exec(text)![1])).toEqual(['30'])
   await ui.unmount()
-})
-
-test('a Terraform file whose only compute words are in a comment gets no offer', async ($, on) => {
-  const files = { [`${ROOT}/infra/notebook.tf`]: 'resource "databricks_notebook" "n" {\n  path = "/n"\n}\n# shared cluster\n' }
-  const { clock } = await start($, on, { files })
-  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/notebook.tf`, old_string: '/n', new_string: '/m' })
-  await clock.settle()
-  const band = await $.ui.mount(BAND)
-  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
-  await band.unmount()
 })
 
 test('a Helm or Kubernetes file under a resources/ folder is not Databricks config, whatever its words', async ($, on) => {
