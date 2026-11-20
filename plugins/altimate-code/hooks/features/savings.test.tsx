@@ -3602,6 +3602,25 @@ test('a name flagged in two workspaces is not pinned on one of them by the band'
   await band.unmount()
 })
 
+test('a Snowflake warehouse name flagged in two accounts is not pinned on one of them by the band', async ($, on) => {
+  const answer = coreSnowflakeAnswer()
+  // A bundle's job config that names the Snowflake warehouse its tasks load into.
+  const files = { ...CONNECTION_FILES, [`${ROOT}/resources/load.yml`]: 'resources:\n  jobs:\n    load:\n      parameters:\n        - name: sf_warehouse\n          default: SYNTH_MULTI\n      timeout_seconds: 30\n' }
+  const { clock } = await start($, on, { list: BOTH, env: { HOME }, files, snowflake: answer })
+  await savings($, 'sfmega')
+  await clock.settle()
+  // The other connection is another account with a warehouse of the same name.
+  answer.metadata.warehouse = 'sfother'
+  await savings($, 'sfother')
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/load.yml`, old_string: '30', new_string: '60' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  const texts = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => text.startsWith('SYNTH_MULTI'))).toEqual(['SYNTH_MULTI has findings in 2 Snowflake accounts. /savings shows each.'])
+  await band.unmount()
+})
+
 test('a what-if choice opens only its own warehouse when two workspaces share the warehouse id and the choice', async ($, on) => {
   const [first, second] = DATABRICKS_REPORT.what_if
   // Core's own answer: one id, the same choices, two workspaces.
