@@ -1633,3 +1633,46 @@ test('a job figure the answer leaves blank reads ?, not "under 0.1"', () => {
   const [line] = evidenceLines({ ...JOB.evidence, task_hours: ' ', estimated_dbus: [] as any })
   expect(line).toContain('? hours on all-purpose compute, ? DBUs')
 })
+
+test('/savings gives no note for a shell -c script behind a word its reader does not take for an option', async ($, on) => {
+  for (const command of ["bash 2>/dev/null -c 'databricks bundle deploy'", "zsh --emulate sh -c 'databricks bundle deploy'", "bash -oc pipefail 'databricks bundle deploy'"]) {
+    expect(runsDatabricksCompute(command)).toBe(false)
+  }
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Bash', command: "bash 2>/dev/null -c 'databricks warehouses list'" })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ key: 'savings-run' })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a /clear in the same tick as /savings drops that run: nothing lands in the new conversation', async ($, on) => {
+  const { clock, runs, versionRuns, toasts } = await start($, on)
+  await savings($)
+  // The run is scheduled but has not started when the session ends.
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  expect(versionRuns.length + runs.length).toBe(0)
+  expect(toasts.filter(text => text.startsWith('Databricks savings check'))).toEqual([])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /a month/ })).toBeUndefined()
+  await ui.unmount()
+  // The next /savings runs as usual.
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+})
+
+test('a skipped check whose reason is not text, or carries control characters, is drawn on one line without failing the run', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.skipped = [{ check: 'Idle Cluster Detection', reason: 42 }, { check: 'Over-Sized Warehouse', reason: 'refused\n\u001b[2J by the warehouse.' }, { reason: 'no name' }]
+  const view = toViewOf(answer.metadata)
+  expect(view?.skipped).toEqual(['Idle Cluster Detection (42)', 'Over-Sized Warehouse (refused [2J by the warehouse)', '? (no name)'])
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /failed/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Classic · / })).toBeDefined()
+  await ui.unmount()
+})

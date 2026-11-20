@@ -364,8 +364,13 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
     checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0, workspaces: Math.max(1, workspaces) },
     // Each with the CLI's reason: a check can be skipped for a refused read, for the run's time limit
     // (its query may still be running), or because core refused its facts.
-    skipped: (metadata.skipped ?? []).map(one => (one.reason ? `${one.check} (${one.reason.trim().replace(/\.$/, '')})` : one.check)),
-    limited: metadata.limited ?? [],
+    skipped: (Array.isArray(metadata.skipped) ? metadata.skipped : []).map(one => {
+      // The CLI's reason can carry a warehouse's error text: one line, control characters dropped.
+      const check = oneLine(one?.check) || '?'
+      const reason = oneLine(one?.reason).replace(/\.$/, '')
+      return reason ? `${check} (${reason})` : check
+    }),
+    limited: (Array.isArray(metadata.limited) ? metadata.limited : []).map(oneLine),
     // A missing amount is drawn as '?'; a missing count is the findings' resources, each once.
     total: {
       min: report.total.monthly_min,
@@ -547,7 +552,12 @@ async function openPane($: EngineInterface) {
   return $.ui.open({ id: PANE, title: PANE_TITLE, ...PANE_SIZE, focus: true, closeOnEscape: true }).catch(() => null)
 }
 
-async function runCheck($: EngineInterface, connection: string | null) {
+/**
+ * One check. `asked` is the generation when it was asked for: a /clear or a session end since then (even in
+ * the same tick, before this scheduled run started) drops it, so a late run never lands in the new conversation.
+ */
+async function runCheck($: EngineInterface, connection: string | null, asked: number) {
+  if (asked !== generation) return
   const mine = ++generation
   const live = () => mine === generation
   lastConnection = connection
@@ -665,7 +675,8 @@ export function register(on: On, _context: FeatureContext) {
     }
     await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
     const opened = await openPane($)
-    later($, () => runCheck($, asked || null))
+    const at = generation
+    later($, () => runCheck($, asked || null, at))
     if (opened && opened.isPlaced === false) {
       return { text: 'Running the Databricks savings check. The terminal is too narrow for the side pane, so the result comes as a notice; widen the window to see the details.' }
     }
@@ -864,12 +875,13 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
 function pressRun($: EngineInterface, first?: () => Promise<unknown>) {
   if (pressQueued) return
   pressQueued = true
+  const at = generation
   later($, async () => {
     try {
       await first?.()
       if (await read($, busyAtom)) return
       await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
-      await runCheck($, lastConnection)
+      await runCheck($, lastConnection, at)
     } finally {
       pressQueued = false
     }
