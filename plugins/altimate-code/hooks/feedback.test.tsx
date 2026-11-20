@@ -534,6 +534,39 @@ test('a description at the read limit is redacted whole and quickly, whatever sh
   expect(Date.now() - worst).toBeLessThan(3000)
 })
 
+test('a quoted secret value is cut whole, whatever escaped quotes it holds', () => {
+  for (const text of ['{"password":"alpha\\"omega-secret"}', "password='alpha\\'omega-secret'", 'secret = "x" and then password=plain-secret']) {
+    const out = redactSecrets(text)
+    expect(out).not.toMatch(/omega|b-secret|plain-secret/)
+  }
+  expect(redactSecrets('{"password":"alpha\\"omega-secret","user":"bob"}')).toBe('{"password":‹redacted›,"user":"bob"}')
+})
+
+test('a home path whose names hold apostrophes, quotes of another kind, or many spaces is replaced whole', () => {
+  expect(withoutHome(`"${HOME}/O'Brien/payroll.sql"`, [HOME])).toBe('"<path under home>"')
+  expect(withoutHome(`'${HOME}/say "hi"/payroll.sql'`, [HOME])).toBe("'<path under home>'")
+  expect(withoutHome(`see ${HOME}/O'Brien/payroll.sql now`, [HOME])).toBe('see <path under home> now')
+  expect(withoutHome(`see ${HOME}/My Very Private Client Files/payroll.sql now`, [HOME])).toBe('see <path under home> now')
+  expect(withoutHome(`a "${HOME}/x\\"y/z.sql" b`, [HOME])).toBe('a "<path under home>" b')
+})
+
+test('a description that is refused as too long, or empty after the flag, leaves no earlier draft to confirm, finished or still being built', async ($, on) => {
+  let hold = false
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const { run, creates } = await start($, on, { holdVersion: () => (hold ? held : undefined) })
+  await run('obsolete draft')
+  expect(await run('x'.repeat(100_001))).toContain('too long')
+  expect(await run('--confirm')).toContain('no draft to send')
+  hold = true
+  const building = run('in flight draft')
+  expect(await run('y'.repeat(100_001))).toContain('too long')
+  release()
+  expect(await building).toContain('replaced or discarded before it was ready')
+  expect(await run('--confirm')).toContain('no draft to send')
+  expect(creates()).toEqual([])
+})
+
 test('a Windows home path as JSON or a Python repr writes it, with doubled backslashes or escaped slashes, is replaced whole', () => {
   const home = 'C:\\Users\\Alice'
   const json = JSON.stringify({ path: 'C:\\Users\\Alice\\work\\orders.sql', posix: `${HOME}/work/orders.sql` })
