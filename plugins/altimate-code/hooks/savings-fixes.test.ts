@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { SavingsFinding, SavingsView } from '../types'
-import { daysAfter, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from './savings-fixes'
+import { configDiffers, configText, daysAfter, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from './savings-fixes'
 
 const WINDOW = { start: '2026-11-11', end: '2026-11-18' }
 
@@ -19,7 +19,7 @@ const fix = (over: Partial<FixRecord> = {}): FixRecord => ({
   ...over,
 })
 
-const view = (size: string, windowCost: number | null, findings: Partial<SavingsFinding>[] = [], window = WINDOW) =>
+const view = (size: string | null, windowCost: number | null, findings: Partial<SavingsFinding>[] = [], window = WINDOW) =>
   ({
     platform: 'databricks',
     window,
@@ -31,6 +31,24 @@ const view = (size: string, windowCost: number | null, findings: Partial<Savings
   }) as unknown as SavingsView
 
 const flagged = [{ checkId: 'wh_oversized', resourceId: 'w1', resourceType: 'sql_warehouse', workspaceId: null }]
+
+test('a size read on one side only is no resize, and an unread size is left out of a fix line, never "?"', () => {
+  expect(configText(null, 'PRO')).toBe('PRO')
+  expect(configText('2X_SMALL', 'PRO')).toBe('2X-SMALL PRO')
+  expect(configDiffers('SMALL PRO', 'PRO')).toBe(false)
+  expect(configDiffers('PRO', 'SMALL PRO')).toBe(false)
+  // A record kept before unread sizes were left out.
+  expect(configDiffers('? PRO', 'SMALL PRO')).toBe(false)
+  expect(configDiffers('SMALL PRO', 'X-SMALL PRO')).toBe(true)
+  expect(configDiffers('SMALL CLASSIC', 'SMALL PRO')).toBe(true)
+  // Drafted with a size, then a run that did not read one: no change, and the line names no "?".
+  expect(fixChanged(fix(), view(null, 7))).toBe(false)
+  const later = fixProgress(fix(), view(null, 7, flagged))
+  expect(later.text).not.toMatch(/\?|changed to/)
+  expect(later.text).toBe('Classic: fix drafted 2026-11-01, but it is still CLASSIC and still flagged, so no saving is claimed.')
+  // Drafted without a size, then a run that read one.
+  expect(fixChanged(fix({ config: 'CLASSIC' }), view('SMALL', 7))).toBe(false)
+})
 
 test('only whole days after the date count, and never more than the window', () => {
   expect(daysAfter('2026-11-10', WINDOW)).toBe(7)

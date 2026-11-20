@@ -17,7 +17,7 @@ import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseV
 import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
-import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, sameWorkspace, type FixRecord } from '../savings-fixes'
+import { configDiffers, configText, FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, sameWorkspace, type FixRecord } from '../savings-fixes'
 import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
@@ -557,7 +557,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
         evidence: evidenceLines(one.evidence, days),
         fact: factOf(one.evidence ?? {}, titleOf(one)),
         dailyCost: dailyCostOf(one, warehouse?.windowCost, days),
-        config: warehouse ? `${size(warehouse.size)} ${warehouse.type}` : null,
+        config: warehouse ? configText(warehouse.size, warehouse.type) : null,
         fixRequest: fixRequest(one, days, platform, pricing),
       }
     }),
@@ -1216,7 +1216,8 @@ async function rememberFix($: EngineInterface, view: SavingsView, finding: Savin
   const held = await $.store.get(key).catch(() => undefined)
   const config = fixConfig(finding)
   // Asked again before anything changed: the first draft's date and cost still stand.
-  if (isFixRecord(held) && held.config === config && (config !== null || held.checkId === finding.checkId)) return true
+  const sameConfig = held && isFixRecord(held) && (held.config === null ? config === null : config !== null && !configDiffers(held.config, config))
+  if (isFixRecord(held) && sameConfig && (config !== null || held.checkId === finding.checkId)) return true
   // A fix that can be measured is not given up for one on the same warehouse that cannot.
   if (isFixRecord(held) && held.config !== null && config === null) return true
   const fix: FixRecord = {
@@ -1290,7 +1291,8 @@ async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_
   const named = matches[0]?.one
   // A file does not say which workspace or account it deploys to: a name flagged in several is not pinned on one of them.
   // Two connections that read the same workspace list its findings twice; they count once.
-  const same = matches.filter(({ one }) => one.resourceType === named?.resourceType && (one.matchName === named.matchName || one.resourceId === named.resourceId))
+  // The same warehouse by name, or by id where an id means something (a Databricks warehouse or cluster).
+  const same = matches.filter(({ one, byId }) => one.resourceType === named?.resourceType && (one.matchName === named.matchName || (byId && one.resourceId === named.resourceId)))
   const places = new Set(same.map(({ one, view }) => `${view.platform}:${view.scope ?? ''}:${one.workspaceId ?? ''}`))
   if (named && places.size > 1) {
     const platforms = new Set(same.map(({ view }) => view.platform))

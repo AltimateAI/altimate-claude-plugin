@@ -3705,6 +3705,42 @@ test('a Snowflake warehouse name flagged in two accounts is not pinned on one of
   await band.unmount()
 })
 
+test('queries are counted once per warehouse in its own workspace, so one id in two workspaces is two warehouses', () => {
+  const view = toView(coreAnswer().metadata as any)!
+  const each = new Map<string, number>()
+  for (const one of DATABRICKS_REPORT.findings) {
+    const e = one.evidence as Record<string, unknown>
+    const queries = Number(e.total_query_count ?? e.parallelism_query_count ?? e.query_count)
+    if (queries > 0) each.set(`${one.workspace_id}/${one.resource_id}`, Math.max(each.get(`${one.workspace_id}/${one.resource_id}`) ?? 0, queries))
+  }
+  // wh-synth-classic's queries in 1001 and in 1002 both count.
+  expect([...each.keys()].filter(key => key.endsWith('/wh-synth-classic')).sort()).toEqual(['1001/wh-synth-classic', '1002/wh-synth-classic'])
+  expect(view.queryCount).toBe([...each.values()].reduce((sum, one) => sum + one, 0))
+})
+
+test('a fix drafted on a warehouse core sends with no size reads its type alone on a later run, never "?"', async ($, on) => {
+  const nosize = DATABRICKS_REPORT.findings.find(one => one.resource_id === 'wh-synth-nosize')!
+  expect(nosize.evidence).toMatchObject({ warehouse_size: null })
+  const answer = coreAnswer()
+  const { clock, fills } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  let ui = await mountFull($)
+  const at = DATABRICKS_REPORT.findings.indexOf(nosize)
+  await ui.press({ key: `fix-${at}` })
+  await clock.settle()
+  expect(fills.length).toBe(1)
+  await ui.unmount()
+  await savings($)
+  await clock.settle()
+  ui = await mountFull($)
+  const lines = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)).filter(text => text.startsWith('synth_nosize (workspace 1002): fix drafted'))
+  expect(lines.length).toBe(1)
+  expect(lines[0]).not.toMatch(/\?|changed to/)
+  expect(lines[0]).toContain('still PRO')
+  await ui.unmount()
+})
+
 test('a what-if choice opens only its own warehouse when two workspaces share the warehouse id and the choice', async ($, on) => {
   const [first, second] = DATABRICKS_REPORT.what_if
   // Core's own answer: one id, the same choices, two workspaces.

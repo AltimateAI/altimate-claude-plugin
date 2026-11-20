@@ -71,7 +71,22 @@ const rowOf = (fix: FixRecord, view: SavingsView) =>
       (one.id === fix.resourceId || (fix.platform === 'snowflake' && one.name === fix.resourceName)) &&
       sameWorkspace(one.workspaceId, fix.workspaceId, severalWorkspaces(view)),
   )
-const configOf = (row: SavingsView['inventory'][number]) => `${size(row.size)} ${row.type}`
+/** A warehouse's size and type as a fix keeps them, `SMALL PRO`; a size the CLI did not read is left out (`PRO`), not drawn as "?". */
+export const configText = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSize) ? size(warehouseSize) : '', oneLine(type)].filter(Boolean).join(' ')
+/** A kept config's size and type; a record kept before unread sizes were left out has "?" for one. */
+const partsOf = (config: string) => {
+  const words = config.trim().split(/\s+/)
+  const type = words.pop() ?? ''
+  const read = words.join(' ')
+  return { size: read && read !== '?' ? read : null, type }
+}
+/** Whether two configs differ: by type, or by size where both read one. A size read on one side only is no resize. */
+export const configDiffers = (a: string, b: string) => {
+  const was = partsOf(a)
+  const now = partsOf(b)
+  return was.type !== now.type || (was.size !== null && now.size !== null && was.size !== now.size)
+}
+const configOf = (row: SavingsView['inventory'][number]) => configText(row.size, row.type)
 const isFlagged = (fix: FixRecord, view: SavingsView, sameCheck: boolean) =>
   view.findings.some(
     one =>
@@ -91,7 +106,7 @@ const checkPartial = (fix: FixRecord, view: SavingsView) => view.limited.length 
 export function fixChanged(fix: FixRecord, view: SavingsView): boolean | null {
   const row = rowOf(fix, view)
   if (!row) return null
-  if (fix.config !== null) return configOf(row) !== fix.config
+  if (fix.config !== null) return configDiffers(fix.config, configOf(row))
   return checkPartial(fix, view) ? null : !isFlagged(fix, view, true)
 }
 
