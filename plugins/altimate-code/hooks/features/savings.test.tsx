@@ -575,12 +575,61 @@ test('Hide pressed just before a /clear leaves the new conversation\'s own offer
   await clock.settle()
   let band = await $.ui.mount(BAND)
   // The press is accepted, then the conversation is cleared and the new one gets its offer, all before the press's work
-  // runs: only the conversation check in front of the work keeps that late Hide from wiping the new offer.
+  // runs: the conversation check in front of the work keeps that late Hide from wiping the new offer.
   await band.press({ key: 'savings-hide' })
   await $.session.end({ reason: 'clear' } as any)
   await band.unmount()
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Medium', new_string: 'Large' })
   await clock.settle()
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('Hide whose write is under way when a /clear lands leaves the new conversation\'s own offer', async ($, on) => {
+  // Holds the press's read of the line above the prompt: the /clear and the new conversation's offer both land
+  // after the press's work has started and before its change is applied.
+  let armed = false
+  let reached = () => {}
+  const reading = new Promise<void>(resolve => (reached = resolve))
+  let release = () => {}
+  const released = new Promise<void>(resolve => (release = resolve))
+  let applied = () => {}
+  const written = new Promise<void>(resolve => (applied = resolve))
+  let holding = false
+  // The kit's own hooks take `on` untyped too (clear-state.testkit.ts): a state hook's event is a union of every key.
+  const hook = on as any
+  hook('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    if (!armed || e.key !== 'savingsBand') return next(e)
+    armed = false
+    holding = true
+    reached()
+    await released
+    return next(e)
+  })
+  hook('state.set', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    const done = await next(e)
+    if (holding && e.key === 'savingsBand') {
+      holding = false
+      applied()
+    }
+    return done
+  })
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  const { clock } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  let band = await $.ui.mount(BAND)
+  await band.press({ key: 'savings-hide' })
+  await band.unmount()
+  armed = true
+  const settling = clock.settle()
+  await reading
+  await $.session.end({ reason: 'clear' } as any)
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Medium', new_string: 'Large' })
+  release()
+  await settling
+  await written
   band = await $.ui.mount(BAND)
   expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
   await band.unmount()
