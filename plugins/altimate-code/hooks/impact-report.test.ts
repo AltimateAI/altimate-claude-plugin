@@ -628,6 +628,10 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   expect(valueCandidates(filtered, filtered.replace('> 0', '> 100'))).toEqual([])
   const split = 'select paid_amount from raw where\n paid_amount > 0'
   expect(valueCandidates(split, split.replace('> 0', '> 100'))).toEqual([])
+  // A predicate beside a subquery, on one line with its select, or after a string that reads like a keyword.
+  for (const sql of ['select {{ cols }} from raw where exists (select 1 from t) and\n  paid_amount > 0', 'select {{ cols }} from {{ ref("x") }} where paid_amount > 0', "select a from t where status = 'select'\n and paid_amount > 0"]) {
+    expect(valueCandidates(sql, sql.replace('> 0', '> 100'))).toEqual([])
+  }
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')
   expect(valueCandidates(commented, commented.replace('in cents', 'in dollars'))).toEqual([])
   const answer = {

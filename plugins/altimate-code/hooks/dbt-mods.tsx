@@ -334,7 +334,7 @@ fields = ('name', 'package_name', 'resource_type', 'original_file_path', 'relati
 out = {'nodes': {}, 'parent_map': {}, 'child_map': {}, 'metadata': {'project_name': project or (m.get('metadata') or {}).get('project_name')}}
 # Every model, seed, snapshot and source by its relation, whatever the graph reaches: a table a model names
 # instead of ref() or source() is no longer in its graph.
-rk = ('name', 'resource_type', 'relation_name', 'source_name')
+rk = ('name', 'resource_type', 'relation_name', 'source_name', 'version', 'latest_version')
 out['relations'] = [dict({'id': k}, **{f: n.get(f) for f in rk if n.get(f) is not None}) for group in ((m.get('nodes') or {}), (m.get('sources') or {})) for k, n in group.items() if n.get('resource_type') in ('model', 'seed', 'snapshot', 'source') and n.get('relation_name')]
 for k in keep:
     n = nodes.get(k)
@@ -604,17 +604,15 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   }
   if (!name && viaRunner) {
     // From the project that installs the package and no manifest there that lists the file: dbt names the file's
-    // model, and its version, so only the edited version runs. `ls` runs no query.
-    const base = basename(file).replace(/\.sql$/i, '')
-    const listing = await run1(['ls', '--select', `${pkg ? `package:${pkg},` : ''}${base.replace(/_v(\d+)$/i, '')}`, '--resource-type', 'model', '--output', 'json', '--output-keys', 'name version original_file_path', '--log-format', 'text'])
+    // model and its version (the file's name need not be the model's), so only the edited model runs. `ls` runs no query.
+    const listing = await run1(['ls', '--select', pkg ? `package:${pkg}` : 'fqn:*', '--resource-type', 'model', '--output', 'json', '--output-keys', 'name version original_file_path', '--log-format', 'text'])
     if (listing === SKIPPED) return replaced()
     if (cannotRun(listing)) return notChecked(NO_DBT)
     const mine = listing.exitCode === 0 ? listedFiles(listing.stdout).filter(one => one.file === rel) : []
-    if (mine.length === 1) {
-      name = mine[0]!.name
-      const version = mine[0]!.version
-      versionOf = () => version
-    }
+    if (mine.length !== 1) return notChecked('dbt has no model for this file in the project that installs this package (disabled, or not a model), so nothing was compiled or run')
+    name = mine[0]!.name
+    const version = mine[0]!.version
+    versionOf = () => version
   }
   const selector = selectorFor(name)
   let run = await show(selector)
@@ -1938,6 +1936,7 @@ export async function endDbtMods($: EngineInterface) {
   contextGiven.clear()
   oldGapsSaid.clear()
   lastReturned.clear()
+  editGaps.clear()
   pendingNotes.splice(0)
   doctorNoteDue = null
   await update($, checkAtom, () => null)

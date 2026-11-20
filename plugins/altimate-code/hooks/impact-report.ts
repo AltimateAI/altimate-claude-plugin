@@ -93,49 +93,50 @@ const NOT_COLUMNS = new Set(
     'set endset if endif for endfor macro endmacro ref source config var this dbt type_string type_numeric ' +
     'type_int type_float type_timestamp type_boolean quote_column int integer numeric decimal varchar text float double boolean').split(' '),
 )
-// A line that starts a clause, and the clauses that filter or join rather than compute a value.
-const CLAUSE = /^\s*(select|from|where|join|left|right|inner|full|cross|on|group|having|qualify|order|limit|union|with)\b/i
-const CLAUSES = /\b(select|from|where|join|on|group|having|qualify|order|limit|union)\b/gi
-const FILTERS = new Set(['where', 'join', 'left', 'right', 'inner', 'full', 'cross', 'on', 'having', 'qualify', 'group', 'order'])
-// A changed line that filters or joins rather than computes a value.
-const NOT_A_VALUE = /^\s*(?:where|and|or|on|from|join|left|right|inner|full|cross|group|order|having|limit|qualify|union|\)|\{%-?\s*(?:if|endif|for|endfor|else))\b/i
+// The clauses that filter, join, group or order rather than compute a value.
+const CLAUSE_WORDS = new Set(['select', 'from', 'where', 'join', 'on', 'group', 'having', 'qualify', 'order', 'limit', 'union', 'using'])
+const FILTERS = new Set(['where', 'join', 'on', 'having', 'qualify', 'group', 'order', 'from', 'using', 'limit'])
 
 /**
  * When no output column changed: names on the lines the change rewrote or added (not filters or joins) that may
  * be the model's columns, the ones named most often first. Whether each is a column is the manifest's to say.
  */
 export function valueCandidates(original: string, current: string, max = MAX_TASK_COLUMNS * 2): string[] {
-  // Comments are not code: a reworded comment changes no value.
-  const lines = (text: string) =>
-    text
-      .replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}/g, ' ')
-      .split('\n')
-      .map(line => line.replace(/--.*$/, '').trim())
-      .filter(Boolean)
-  const was = lines(original)
-  const now = lines(current)
+  // Comments are not code, and string literals and Jinja expressions hold no column of the model's: all blanked, the
+  // lines kept, so a reworded comment changes nothing and a string never opens a clause.
+  const blank = (text: string) =>
+    text.replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}|\{\{[\s\S]*?\}\}|'(?:[^']|'')*'|--[^\n]*/g, one => one.replace(/[^\n]/g, ' '))
+  const was = blank(original).split('\n').map(line => line.trim())
+  const now = blank(current).split('\n')
   const left = new Map<string, number>()
-  for (const line of was) left.set(line, (left.get(line) ?? 0) + 1)
-  // Each line of the text after, with whether it sits in a filter or join clause (a predicate split over lines).
-  // The clause a line starts in is the one it opens, else the last one the line before it reached.
-  let carried = false
-  const added = now.flatMap(line => {
-    const opens = CLAUSE.exec(line)?.[1]?.toLowerCase()
-    const filtering = opens ? FILTERS.has(opens) : carried
-    const clauses = [...line.matchAll(CLAUSES)].map(one => one[1]!.toLowerCase())
-    carried = clauses.length ? FILTERS.has(clauses[clauses.length - 1]!) : filtering
+  for (const line of was) if (line) left.set(line, (left.get(line) ?? 0) + 1)
+  // The clause each paren depth is in, carried across lines: a name counts only where no enclosing level filters,
+  // joins, groups or orders (a predicate split over lines, or one beside a subquery).
+  const clauses: string[] = ['']
+  const counts = new Map<string, number>()
+  for (const raw of now) {
+    const line = raw.trim()
     const n = left.get(line) ?? 0
     if (n > 0) left.set(line, n - 1)
-    return n === 0 && !filtering ? [line] : []
-  })
-  const counts = new Map<string, number>()
-  for (const line of added) {
-    if (NOT_A_VALUE.test(line)) continue
-    const code = line.replace(/--.*$/, '').replace(/'(?:[^']|'')*'/g, ' ')
-    for (const match of code.matchAll(/(?<![\w.])(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\b(?!\s*\()/g)) {
-      const name = match[1]!.toLowerCase()
-      if (NOT_COLUMNS.has(name) || name.length < 2) continue
-      counts.set(name, (counts.get(name) ?? 0) + 1)
+    const changed = !!line && n === 0
+    for (const token of line.matchAll(/\(|\)|(?<![\w.])(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\b(\s*\()?/g)) {
+      const text = token[0]
+      if (text === '(') {
+        clauses.push(clauses[clauses.length - 1]!)
+        continue
+      }
+      if (text === ')') {
+        if (clauses.length > 1) clauses.pop()
+        continue
+      }
+      const word = token[1]!.toLowerCase()
+      if (!text.includes('.') && CLAUSE_WORDS.has(word)) {
+        clauses[clauses.length - 1] = word
+        continue
+      }
+      if (!changed || token[2] || NOT_COLUMNS.has(word) || word.length < 2) continue
+      if (clauses.some(one => FILTERS.has(one))) continue
+      counts.set(word, (counts.get(word) ?? 0) + 1)
     }
   }
   return [...counts].sort((a, b) => b[1] - a[1]).slice(0, max).map(([name]) => name)

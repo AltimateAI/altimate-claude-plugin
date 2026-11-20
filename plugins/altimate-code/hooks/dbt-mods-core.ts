@@ -3,7 +3,7 @@
 // each reading is tested on dbt's real output.
 import type { DbtFailure, DoctorCheck, ModelContext, QueryResult } from '../types'
 import { isDbtSubcommand, parseDbtCommand, type DbtInvocation } from './dbt-command'
-import { selectItems, withoutComment } from './lineage-graph'
+import { withoutComment } from './lineage-graph'
 
 const ANSI = /\u001b\[[0-9;]*m/g
 
@@ -857,7 +857,9 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   // A manifest too big to read here comes as a slice of the model's graph, with every relation listed apart.
   const nodes: [string, any][] = Array.isArray(manifest?.relations) ? manifest.relations.map((one: any) => [String(one?.id), one]) : Object.entries<any>(manifest?.nodes ?? {})
   for (const [id, node] of nodes) {
-    if (['model', 'seed', 'snapshot'].includes(node?.resource_type) && typeof node?.name === 'string') add(id, node, `{{ ref('${node.name}') }}`)
+    // A versioned model other than its latest is named with its version, so the advice keeps reading it.
+    const pinned = node?.version !== undefined && node?.version !== null && String(node.version) !== String(node?.latest_version ?? '') ? `, v=${JSON.stringify(node.version)}` : ''
+    if (['model', 'seed', 'snapshot'].includes(node?.resource_type) && typeof node?.name === 'string') add(id, node, `{{ ref('${node.name}'${pinned}) }}`)
   }
   for (const [id, node] of Array.isArray(manifest?.relations) ? manifest.relations.filter((one: any) => one?.resource_type === 'source').map((one: any) => [String(one.id), one]) : Object.entries<any>(manifest?.sources ?? {})) {
     if (typeof node?.source_name === 'string' && typeof node?.name === 'string') add(id, node, `{{ source('${node.source_name}', '${node.name}') }}`)
@@ -934,7 +936,7 @@ function ctesOf(code: string): Map<string, string> {
  * subquery inside it. A `select *` from one of its CTEs reads that CTE's own list. `star` when a `*` is left that the
  * SQL does not name. Null when there is no such SELECT.
  */
-export function outputColumns(sql: string, depth = 0): { names: Set<string>; star: boolean } | null {
+export function outputColumns(sql: string, depth = 0): { names: Set<string>; star: boolean; source?: string } | null {
   const code = masked(sql)
   const select = topLevel(code, 'select', 0, true)
   if (select < 0) return null
@@ -951,14 +953,17 @@ export function outputColumns(sql: string, depth = 0): { names: Set<string>; sta
     const name = /\bas\s+["`]?([A-Za-z_]\w*)["`]?$/i.exec(bare)?.[1] ?? /[\s)]["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1] ?? /^(?:["`]?[A-Za-z_]\w*["`]?\.)*["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1]
     if (name) names.add(name.toLowerCase())
   }
+  // What a `*` reads, as written: an edit that leaves it alone brings no column through it.
+  const cut = from < 0 ? -1 : Math.min(...['where', 'group', 'order', 'limit', 'qualify', 'having', 'window', 'union'].map(word => topLevel(code, word, from + 4)).filter(at => at >= 0), code.length)
+  const source = star && from >= 0 ? sql.slice(from + 4, cut).replace(/\s+/g, ' ').trim() : undefined
   if (star && depth < 5 && from >= 0) {
     // `select * from <cte>`: that CTE's own list, once its name is the only relation read.
-    const source = /^\s*((?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*))\s*(?:as\s+\w+\s*)?(?:$|where\b|group\b|order\b|limit\b|qualify\b|having\b)/i.exec(code.slice(from + 4))
-    const body = source ? ctesOf(code).get(unquote(source[1]!)) : undefined
+    const read = /^\s*((?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*))(?:\s+(?:as\s+)?(?!where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b)[A-Za-z_]\w*)?\s*(?:;\s*)?(?:$|where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b)/i.exec(code.slice(from + 4))
+    const body = read ? ctesOf(code).get(unquote(read[1]!)) : undefined
     const inner = body !== undefined ? outputColumns(body, depth + 1) : null
-    if (inner) return { names: new Set([...names, ...inner.names]), star: inner.star }
+    if (inner) return { names: new Set([...names, ...inner.names]), star: inner.star, ...(inner.source !== undefined && { source: inner.source }) }
   }
-  return { names, star }
+  return { names, star, ...(source !== undefined && { source }) }
 }
 
 /**
@@ -973,14 +978,8 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   if (before === null && earlier === null) return { fresh: undocumented, old: [] }
   // The file reads the same as before the edit: what the edit changed is not seen, so nothing is set aside.
   if (earlier === null && before !== null && after !== null && before === after) return { fresh: undocumented, old: [] }
-  const outputs = (sql: string | null) => {
-    if (sql === null) return null
-    const own = outputColumns(sql)
-    // A model whose own list is `*` takes its names from wherever the SQL names them (its CTEs).
-    return own && !own.star ? own.names : new Set(selectItems(sql).keys())
-  }
-  const was = outputs(before)
-  const now = outputs(after)
+  const was = before === null ? null : outputColumns(before)
+  const now = after === null ? null : outputColumns(after)
   const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
   const mine = new Set(ours.map(one => one.toLowerCase()))
   const old = (name: string) => {
@@ -988,7 +987,12 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     if (mine.has(key)) return false
     if (returned.has(key)) return true
     if (!was || !now) return false
-    return was.has(key) || !now.has(key)
+    // Named in the model's own list after the edit: there before only when that list named it before too.
+    if (now.names.has(key)) return was.names.has(key)
+    // Not named, and the list is all the SQL says (a macro or a package's passthrough fills it): not the edit's.
+    if (!now.star && !was.star) return true
+    // Through a `*` the SQL does not resolve (a ref()), the edit brought nothing when it left what the `*` reads alone.
+    return now.star && was.star && now.source !== undefined && now.source === was.source
   }
   return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
 }

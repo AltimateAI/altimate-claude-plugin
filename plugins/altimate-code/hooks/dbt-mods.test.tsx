@@ -213,6 +213,8 @@ type Options = {
   listFails?: boolean
   /** A file whose stat waits for `until` while it is set. */
   statGate?: { path: string; until?: Promise<void> }
+  /** Runs as an Edit lands, beneath the plugin: the test writes the file's new text there. */
+  onEdit?: () => void
   /** The first read of this project file after `shows` dbt shows have run waits for `until`. */
   holdReadAfterShows?: { path: string; shows: number; until: Promise<void> }
   /** The project's artifact folder, when not `target`. */
@@ -449,6 +451,7 @@ async function start($: any, on: any, options: Options = {}) {
   let bash: { stdout: string; isError?: boolean } = { stdout: '' }
   on('tool.call', async (_: unknown, e: { tool: string }) => {
     if (e.tool === 'Bash' && options.duringBash) await options.duringBash()
+    if (e.tool === 'Edit') options.onEdit?.()
     if (e.tool === 'Edit' && options.holdEdit && !editHeld) {
       editHeld = true
       await options.holdEdit
@@ -714,6 +717,17 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // A `select *` from a CTE reads that CTE's own list, not an earlier CTE's.
   const two = 'with src as (select id, amount from raw), b as (select id from src) select * from b'
   expect(undocumentedByEdit(['amount'], two, two.replace('b as (select id from src)', 'b as (select id, amount from src)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // The CTE a `*` reads is found behind an alias, a semicolon, or another `select *` CTE.
+  for (const tail of [' t', ';']) {
+    const aliased = `with src as (select id, amount from raw),\nb as (select id from src)\nselect * from b${tail}`
+    expect(undocumentedByEdit(['amount'], aliased, aliased.replace('b as (select id from src)', 'b as (select id, amount from src)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  }
+  const chained = 'with src as (select id, amount from raw), a as (select * from src), b as (select id from a) select * from b'
+  expect(undocumentedByEdit(['amount'], chained, chained.replace('b as (select id from a)', 'b as (select id, amount from a)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A `*` from a ref(): what it reads unchanged brings no column (a filter edit); another ref() may.
+  const star = "select * from {{ ref('stg') }}"
+  expect(undocumentedByEdit(['x'], `${star} where a = 1`, `${star} where a = 2`, null)).toEqual({ fresh: [], old: ['x'] })
+  expect(undocumentedByEdit(['x'], star, "select * from {{ ref('other') }}", null)).toEqual({ fresh: ['x'], old: [] })
   // A gap an earlier edit made stays the edit's when a later edit rewrites its expression.
   expect(undocumentedByEdit(['amount_cents'], 'select id, amount as amount_cents from x', 'select id, amount * 100 as amount_cents from x', ['id'], ['amount_cents'])).toEqual({ fresh: ['amount_cents'], old: [] })
 })
@@ -757,7 +771,7 @@ test('from integration_tests with no manifest there, dbt ls names the file\'s mo
   await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
   const ls = runs.find(argv => argv[1] === 'ls')!
-  expect(ls.slice(0, 4)).toEqual([DBT, 'ls', '--select', 'package:shop,orders'])
+  expect(ls.slice(0, 4)).toEqual([DBT, 'ls', '--select', 'package:shop'])
   expect(runs.find(argv => argv[1] === 'show')!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
 })
 
@@ -806,6 +820,8 @@ test('a package tested from integration_tests is compiled and validated from the
   const { clock, runs, cwds, toasts } = await start($, on, {
     pathDbtPython: '/usr/bin/python3',
     show: { rows: [{ order_id: 1, amount: 10 }], node: 'orders' },
+    // No manifest in integration_tests: dbt ls names the file's model there.
+    listed: [{ name: 'orders', original_file_path: 'models/orders.sql' } as any],
     files: {
       'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
       'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
@@ -847,6 +863,39 @@ test('from integration_tests the package repo\'s own dbt is used, and a versione
   // The repo's .venv dbt (integration_tests has none), run in integration_tests, for version 2 only.
   expect(runs[at]!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
   expect(cwds[at]).toBe(`${ROOT}/integration_tests`)
+})
+
+test('from integration_tests, a file whose model dbt does not list there runs nothing, even when another model has the file\'s name', async ($, on) => {
+  const { clock, runs } = await start($, on, {
+    listed: [{ name: 'orders', version: 2, original_file_path: 'models/legacy.sql' } as any, { name: 'orders', original_file_path: 'models/other/orders.sql' } as any],
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+    },
+  })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  expect(runs.some(argv => argv[1] === 'show')).toBe(false)
+  expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- not checked: dbt has no model for this file in the project that installs this package')
+})
+
+test('after /clear, a gap an edit made in the last conversation is not this conversation\'s', async ($, on) => {
+  const show: Options['show'] = { rows: [{ order_id: 1, amount: 10, amount_cents: 1000 }] }
+  let next = 'select order_id, amount, amount * 100 as amount_cents from {{ ref("stg_orders") }}'
+  const { clock, files } = await start($, on, { show, files: { 'models/orders.sql': 'select order_id, amount from {{ ref("stg_orders") }}' }, onEdit: () => void (files['models/orders.sql'] = next) })
+  const first: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount from', new_string: 'amount, amount * 100 as amount_cents from' })
+  await clock.settle()
+  expect(first.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: amount_cents')
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  next = 'select order_id, amount, amount * 101 as amount_cents from {{ ref("stg_orders") }}'
+  const later: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount * 100', new_string: 'amount * 101' })
+  await clock.settle()
+  const note = later.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).not.toContain('- returned but not documented in schema.yml: amount_cents')
+  expect(note).toContain('already undocumented before this edit')
 })
 
 test('a project whose packages are not installed gets a one-line note, not a failure, when nothing installs it elsewhere', async ($, on) => {
@@ -895,6 +944,10 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
     { relation: 'main.stg_orders', use: "{{ ref('stg_orders') }}" },
     { relation: 'shop.customers', use: "{{ source('shop', 'customers') }}" },
   ])
+  // A versioned model other than the latest keeps its version in the advice.
+  const versions = { nodes: { 'model.p.orders.v1': { resource_type: 'model', name: 'orders', version: 1, latest_version: 2, relation_name: '"d"."s"."orders_v1"' }, 'model.p.orders.v2': { resource_type: 'model', name: 'orders', version: 2, latest_version: 2, relation_name: '"d"."s"."orders"' } } }
+  expect(hardcodedRelations('select * from s.orders_v1', versions, self)).toEqual([{ relation: 's.orders_v1', use: "{{ ref('orders', v=1) }}" }])
+  expect(hardcodedRelations('select * from s.orders', versions, self)).toEqual([{ relation: 's.orders', use: "{{ ref('orders') }}" }])
   expect(MANIFEST_SLICE).toContain("out['relations'] = ")
 })
 

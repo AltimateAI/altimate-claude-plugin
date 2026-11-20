@@ -1156,8 +1156,9 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
 
 // A shell command that may write the SQL files it names (`sed -i`, a redirect, `tee`, a script).
 const WRITES = /\bsed\b[^|;&]*\s-i|\bperl\b[^|;&]*\s-\w*i|>>?\s*['"]?[^\s'"|;&]*\.sql\b|\btee\b|\b(?:python3?|node|ruby|bun|deno)\b|\b(?:mv|cp|patch|truncate)\b|\bgit\s+(?:apply|checkout|restore)\b/
-// The most model files one shell command's note is about.
+// The most model files one shell command's note is about, and the most projects below the session folder looked in.
 const MAX_BASH_MODELS = 3
+const MAX_BASH_PROJECTS = 5
 // A file's time can trail the clock read as the command started by this much.
 const MTIME_SLACK_MS = 1_000
 
@@ -1165,29 +1166,33 @@ const MTIME_SLACK_MS = 1_000
 type BashStart = { command: string; startedAt: number }
 
 /** The project's model files a shell command changed: modified since it started, with their text from the last commit. */
-async function bashChanged($: EngineInterface, start: BashStart): Promise<{ root: string; files: { file: string; before: string }[] } | null> {
-  // From the session's folder, as the task summary reads it: Claude's shell folder can be slow to read, and this holds the command's result.
+async function bashChanged($: EngineInterface, start: BashStart): Promise<{ file: string; before: string }[]> {
+  // From the session's folder, as the task summary reads it: Claude's shell folder can be slow to read, and this
+  // holds the command's result. With no project there, the projects below it (a monorepo, a shell in a subfolder).
   const base = await $.session.root().catch(() => '.')
-  const root = await projectRoot($, commandDir(start.command, base), false).catch(() => null)
-  if (!root) return null
-  const models = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')).models.map(one => one.replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean)
-  const dirs = models.map(one => (one === '.' ? root : `${root}/${one}`))
-  if (!dirs.length) return null
+  const own = await projectRoot($, commandDir(start.command, base), false).catch(() => null)
+  // Below it only once a dbt project has been seen this session: a session that never touches dbt never walks its folder.
+  const roots = own ? [own] : projectSeen ? (await projectsBelow($, base).catch(() => [] as string[])).slice(0, MAX_BASH_PROJECTS) : []
   // Files touched since the command started, in whole minutes rounded up, then each one's own time against its start.
   const minutes = Math.max(1, Math.ceil(((await $.clock.now()) - start.startedAt) / 60_000))
-  const listed = await $.process.run(['find', ...dirs, '-name', '*.sql', '-type', 'f', '-mmin', `-${minutes}`], { timeoutMs: 10_000 }).catch(() => null)
-  const top = (await $.process.run(['git', '-C', root, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 }).catch(() => null))?.stdout.trim() ?? ''
   const files: { file: string; before: string }[] = []
-  for (const file of (listed?.stdout ?? '').split('\n').map(one => one.trim()).filter(Boolean)) {
-    if (files.length >= MAX_BASH_MODELS) break
-    if (/[\\/](?:target|dbt_packages|dbt_modules)[\\/]/.test(file.slice(root.length)) || !isModelPath(root, models, file)) continue
-    const stat = await $.fs.stat(file).catch(() => null)
-    if (!stat || stat.mtimeMs < start.startedAt) continue
-    // Its text before: the last commit's (an untracked file had none).
-    const head = top && file.startsWith(`${top}/`) ? await $.process.run(['git', '-C', top, 'show', `HEAD:${file.slice(top.length + 1)}`], { timeoutMs: 5_000 }).catch(() => null) : null
-    files.push({ file, before: head?.exitCode === 0 ? head.stdout : '' })
+  for (const root of roots) {
+    const models = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')).models.map(one => one.replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean)
+    const dirs = models.map(one => (one === '.' ? root : `${root}/${one}`))
+    if (!dirs.length) continue
+    const listed = await $.process.run(['find', ...dirs, '-name', '*.sql', '-type', 'f', '-mmin', `-${minutes}`], { timeoutMs: 10_000 }).catch(() => null)
+    const top = (await $.process.run(['git', '-C', root, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 }).catch(() => null))?.stdout.trim() ?? ''
+    for (const file of (listed?.stdout ?? '').split('\n').map(one => one.trim()).filter(Boolean)) {
+      if (files.length >= MAX_BASH_MODELS) return files
+      if (/[\\/](?:target|dbt_packages|dbt_modules)[\\/]/.test(file.slice(root.length)) || !isModelPath(root, models, file)) continue
+      const stat = await $.fs.stat(file).catch(() => null)
+      if (!stat || stat.mtimeMs < start.startedAt) continue
+      // Its text before: the last commit's (an untracked file had none).
+      const head = top && file.startsWith(`${top}/`) ? await $.process.run(['git', '-C', top, 'show', `HEAD:${file.slice(top.length + 1)}`], { timeoutMs: 5_000 }).catch(() => null) : null
+      files.push({ file, before: head?.exitCode === 0 ? head.stdout : '' })
+    }
   }
-  return { root, files }
+  return files
 }
 
 /** Whether a file is under one of the project's model folders. */
@@ -1351,14 +1356,14 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     const bashNotes: ImpactNote[] = []
     if (bash) {
       const changed = await within($, 3_000, bashChanged($, bash).catch(() => null))
-      if (changed?.files.length) {
+      if (changed?.length) {
         clearSqlGraphs()
-        later($, async () => void (await follow($, { file: changed.files[0]!.file, auto: true })))
+        later($, async () => void (await follow($, { file: changed[0]!.file, auto: true })))
         const deadline = (await $.clock.now()) + HOLD_TOTAL_MS - 500
         const notes = await within(
           $,
           HOLD_TOTAL_MS,
-          Promise.all(changed.files.map(async one => impactFirst($, { tool: 'Edit', file_path: one.file, old_string: one.before, new_string: await $.fs.read(one.file).catch(() => '') }, one.file, deadline, { project: false }, null).catch(() => null))),
+          Promise.all(changed.map(async one => impactFirst($, { tool: 'Edit', file_path: one.file, old_string: one.before, new_string: await $.fs.read(one.file).catch(() => '') }, one.file, deadline, { project: false }, null).catch(() => null))),
         )
         for (const note of notes ?? []) {
           if (!note) continue
