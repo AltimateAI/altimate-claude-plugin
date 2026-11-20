@@ -152,6 +152,10 @@ Opening a dbt folder runs two programs the repository supplies, with no action f
 
 Compile and validate runs a query on your warehouse after every model edit (`dbt show --limit 1`). On a warehouse that bills by bytes scanned or wakes a suspended warehouse for it, that costs money. Set the plugin's `dbt_mods` option to false (in `/config`) to turn all of the helpers off.
 
+### altimate-dbt
+
+When Claude mentions `altimate-dbt`, it is the dbt command line that comes with altimate-code (`npm i -g @altimateai/altimate-code`, the same install as the plugin's engine). It finds your dbt project folder, Python environment and warehouse adapter by itself, and altimate-code's agent uses it instead of the raw dbt tool for better error messages. Its commands include `init`, `doctor`, `compile`, `build`, `run`, `test`, `deps`, `columns <model>`, `graph` (lineage) and `execute "<sql>"` (a query through the dbt adapter). You do not need to run it yourself: Claude and the altimate-code agent call it when a task needs it, and the plugin's own dbt helpers above do not depend on it. See [altimate-dbt in the altimate-code docs](https://docs.altimate.sh/data-engineering/tools/dbt-tools/#altimate-dbt-cli).
+
 ## Settings
 
 The plugin has seven settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). All are optional: Claude Code may report them as "not set", and each then takes the default below. `dbt_mods` is used by the dbt helpers, `maxScanBytes` by the scan check (BigQuery, Snowflake, Databricks), `healthBlocksPush` and `healthConfigPath` by the project health check, the two comments settings by team comments, and `show_edit_impact` by the per-edit impact note.

@@ -1626,6 +1626,12 @@ test('/scan-cost on Snowflake names the plan estimate and the verdict', async ($
   )
 })
 
+test('/scan-cost with no model keeps the plan estimate label of the last estimate', async ($, on) => {
+  await start($, on, { answers: { orders: planned('snowflake', 20 * GIB, '20.0 GiB') } })
+  await $.command.run({ command: 'scan-cost', args: 'orders' } as any)
+  expect((await $.command.run({ command: 'scan-cost', args: '' } as any)).text).toBe('Last estimate: orders would scan 20.0 GiB (Snowflake plan estimate). Run /scan-cost <model> for another.')
+})
+
 test('/scan-cost on an older altimate-code over Databricks says a newer one is needed', async ($, on) => {
   await start($, on, { fallback: { success: true, supported: false, adapter: 'databricks' } })
   expect((await $.command.run({ command: 'scan-cost', args: 'orders' } as any)).text).toBe(
