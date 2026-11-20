@@ -103,10 +103,25 @@ const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
  * wrappers with their flags (`sudo -E`, `time`, `then`) to the program it runs. That program must be
  * `databricks` (or a path to it); its own global flags (`-p prod`, `--profile=x`) come before the command.
  */
+/**
+ * The line without its heredoc bodies: data written somewhere, not commands the line runs. A body ends at
+ * its own terminator line (after leading tabs for `<<-`); a heredoc without one drops nothing.
+ */
+function withoutHeredocs(line: string): string {
+  const lines = line.split('\n')
+  const kept: string[] = []
+  for (let at = 0; at < lines.length; at++) {
+    kept.push(lines[at]!)
+    const open = /<<(-?)\s*(['"]?)(\w+)\2/.exec(lines[at]!)
+    if (!open) continue
+    const end = lines.findIndex((one, row) => row > at && (open[1] === '-' ? one.replace(/^\t+/, '') : one) === open[3])
+    if (end > at) at = end
+  }
+  return kept.join('\n')
+}
+
 export function runsDatabricksCompute(line: string): boolean {
-  // A heredoc's body is data written somewhere, not commands this line runs.
-  const withoutHeredocs = line.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?(?:\n\2(?=\n|$)|$)/g, '')
-  const unquoted = withoutHeredocs.replace(/"[^"]*"|'[^']*'/g, '""')
+  const unquoted = withoutHeredocs(line).replace(/"[^"]*"|'[^']*'/g, '""')
   // Backticks run a command too, so they end one as `(` does.
   for (const simple of unquoted.split(/&&|\|\||[;&|(){}`\n]/)) {
     const words = simple.trim().split(/\s+/).filter(Boolean)

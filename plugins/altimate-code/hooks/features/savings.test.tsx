@@ -1436,3 +1436,9 @@ test('a what-if row whose every choice lacks its figures is left out, not drawn 
   expect(await ui.find({ type: 'Text', text: /^Press a size to see/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('a heredoc ends at its own terminator, a tab-indented one for <<-, and one without a terminator drops nothing', () => {
+  expect(runsDatabricksCompute('cat <<-EOF\n\tbody\n\tEOF\ndatabricks bundle deploy')).toBe(true)
+  expect(runsDatabricksCompute('cat <<-EOF\n\tdatabricks bundle deploy\n\tEOF')).toBe(false)
+  expect(runsDatabricksCompute('cat <<EOF\nno end here\ndatabricks jobs list')).toBe(true)
+})
