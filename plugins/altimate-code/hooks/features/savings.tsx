@@ -878,8 +878,10 @@ function pressRun($: EngineInterface, first?: () => Promise<unknown>) {
   const at = generation
   later($, async () => {
     try {
+      // A /clear since the press drops it before anything is marked running.
+      if (at !== generation) return
       await first?.()
-      if (await read($, busyAtom)) return
+      if (at !== generation || (await read($, busyAtom))) return
       await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
       await runCheck($, lastConnection, at)
     } finally {

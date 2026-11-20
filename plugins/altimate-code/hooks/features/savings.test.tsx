@@ -1676,3 +1676,22 @@ test('a skipped check whose reason is not text, or carries control characters, i
   expect(await ui.find({ type: 'Text', text: /Classic · / })).toBeDefined()
   await ui.unmount()
 })
+
+test('Run again pressed in the same tick as a /clear starts nothing, and /savings then runs as usual', async ($, on) => {
+  const { clock, runs, toasts } = await start($, on)
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'again' })
+  // The press is scheduled but has not started when the session ends.
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  await ui.unmount()
+  expect(runs.length).toBe(1)
+  const said = await savings($)
+  expect(String((said as any)?.text)).not.toContain('already running')
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  expect(toasts.filter(text => text.startsWith('Databricks savings check')).length).toBe(2)
+})
