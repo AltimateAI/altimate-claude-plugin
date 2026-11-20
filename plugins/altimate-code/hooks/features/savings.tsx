@@ -310,7 +310,9 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
     case 'over_sized':
       return {
         noun: 'Warehouse',
-        change: `resize it to ${apiSize(e.recommended_size)} (cluster_size "${apiSize(e.recommended_size)}")`,
+        change: apiSize(e.recommended_size)
+          ? `resize it to ${apiSize(e.recommended_size)} (cluster_size "${apiSize(e.recommended_size)}")`
+          : 'resize it to a smaller size its queries still fit (the check named no size)',
         defines: 'a Databricks bundle, Terraform databricks_sql_endpoint, or JSON',
         otherwise: `write the JSON for \`databricks warehouses edit ${id} --json\``,
       }
@@ -955,14 +957,16 @@ async function runCheck($: EngineInterface, asked: string | null) {
       return { stdout: '', stderr: '' }
     })
     if (!live()) return
-    const version = versionOf(printed)
-    if (!version || !supportsSavings(version)) {
+    // A source build prints `local`, whatever version a runtime note on stderr names.
+    const source = isSourceBuild(printed)
+    const version = source ? null : versionOf(printed)
+    if (source || !version || !supportsSavings(version)) {
       const targets = targetsFor(asked, known)
       const noCheck = `This altimate-code has no ${checkName(targets)}.`
       await refuse(
         targets[0]!.platform,
         checkName(targets),
-        isSourceBuild(printed)
+        source
           ? {
               text: noCheck,
               recovery: `It is a source build, which does not show whether it has assessment mode; use a released altimate-code ${SAVINGS_MIN_ALTIMATE_CODE} or later, then run /savings again.`,
@@ -1466,7 +1470,7 @@ export function register(on: On, _context: FeatureContext) {
                             ? `As serverless: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} less: it bills only while queries run.`
                             : `As serverless: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} more: its queries keep it busy most of the time.`
                           : choice.fits
-                            ? `At ${choice.label}: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} less. Its ${choice.cores} cores cover the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use).`
+                            ? `At ${choice.label}: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} ${choice.monthlySaving > 0 ? 'less' : 'more'}. Its ${choice.cores} cores cover the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use).`
                             : `At ${choice.label}: ${dollars(choice.monthlyCost)} a month, but its ${choice.cores} cores are short of the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use): queries would queue.`}
                       </Text>
                     ) : (
@@ -1588,7 +1592,8 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 }
 
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
-  if (!DATABRICKS_COMMAND.test(e.command)) return
+  // Quoted text (a commit message, an echo) is data: its `;` or `&&` separates no command.
+  if (!DATABRICKS_COMMAND.test(e.command.replace(/"[^"]*"|'[^']*'/g, '""'))) return
   // A databricks warehouses, clusters, bundle or jobs command is about compute whatever its words.
   const band = await bandFor($, e.command, true)
   if (band) await update($, bandAtom, () => band)

@@ -70,7 +70,9 @@ export const amount = (min: number, max: number) => (max > 0 ? `${range(min, max
 /** A size as the pane writes it: `2X_SMALL` is `2X-SMALL`. */
 export const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
 
-export const count = (value: unknown) => Math.round(Number(value) || 0).toLocaleString('en-US')
+/** A whole count; one the answer lacks (missing, empty, not a number) reads "?", not 0. */
+export const count = (value: unknown) =>
+  value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? '?' : Math.round(Number(value)).toLocaleString('en-US')
 
 /** Days a window covers, from its YYYY-MM-DD ends; 7 when they cannot be read. */
 export function windowDays(window: { start: string; end: string }): number {

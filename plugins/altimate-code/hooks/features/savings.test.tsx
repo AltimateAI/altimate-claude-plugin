@@ -259,6 +259,8 @@ type Options = {
   uname?: string
   /** `altimate --version` rejects with this, as `$.process.run` does on its timeout. */
   versionRejects?: string
+  /** What `altimate --version` prints on stderr. */
+  versionStderr?: string
 }
 
 // The clock of the test that is running: tests in a file run one at a time.
@@ -354,7 +356,7 @@ async function start($: any, on: any, options: Options = {}) {
       if (options.versionRejects) return { deny: options.versionRejects }
       // The status line's own version check at session start runs without the switches: not the savings check's.
       if (e.init?.env?.ALTIMATE_ASSESSMENT_MODE === 'true') versionRuns.push({ env: e.init?.env })
-      return { value: { exitCode: 0, stdout: `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: '' } }
+      return { value: { exitCode: 0, stdout: `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: options.versionStderr ?? '' } }
     }
     if (command === 'tool' && tool === 'warehouse_list') {
       listRuns.push({ argv: [...e.argv], env: e.init?.env })
@@ -2643,7 +2645,7 @@ test('evidence with none of its figures reads "?" where a figure goes, never NaN
   for (const kind of ['serverless', 'over_sized', 'idle_cluster', 'job_on_all_purpose', 'high_idle_time', 'downsize_warehouse']) {
     const lines = evidenceLines({ kind })
     expect(lines.length).toBeGreaterThan(0)
-    for (const line of lines) expect(line).not.toMatch(/NaN|undefined|null/)
+    for (const line of lines) expect(line).not.toMatch(/NaN|undefined|null|\b0 (queries|task runs|active days)/)
   }
   expect(evidenceLines({ kind: 'job_on_all_purpose' })[1]).toBe('$? a DBU now; a job cluster would be about $?')
 })
@@ -2696,4 +2698,43 @@ test('a preview build is named as one, not told to update', async ($, on) => {
   expect(runs).toEqual([])
   expect(toasts.at(-1)).toContain('It is a preview build (0.0.0-main-202611191200)')
   expect(toasts.at(-1)).not.toContain('update it to')
+})
+
+test('an over-sized finding with no target size asks for a smaller size, with no empty quotes', () => {
+  const finding = { title: 'Over-Sized Warehouse', resource_type: 'sql_warehouse', resource_id: 'wh-1', resource_name: 'Classic', monthly_min: 10, monthly_max: 20, evidence: { kind: 'over_sized', current_size: 'SMALL' } }
+  const request = fixRequest(finding as any)
+  expect(request).not.toContain('""')
+  expect(request).toContain('resize it to a smaller size its queries still fit (the check named no size)')
+})
+
+test('a source build is refused though a runtime note on stderr names a version', async ($, on) => {
+  const { clock, runs, toasts } = await start($, on, { version: 'local', versionStderr: 'warning: node v22.1.0 is deprecated\n' })
+  await savings($)
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(toasts.at(-1)).toContain('It is a source build')
+})
+
+test('a databricks command inside quoted text offers nothing', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Bash', command: 'git commit -m "x; databricks bundle deploy"' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a size that fits but costs more says how much more', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const choice = answer.metadata.report.what_if[0].choices[1]
+  choice.monthly_cost = 150
+  choice.monthly_saving = -31.95
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'whatif-0-1' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^At X-SMALL: \$150\.00 a month instead of \$118\.05, \$31\.95 more\. / })).toBeDefined()
+  await ui.unmount()
 })
