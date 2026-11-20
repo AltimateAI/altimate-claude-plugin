@@ -86,9 +86,11 @@ let generation = 0
 // the conversation (the prompt box, the band, a toast) is dropped once it moved on. A run starting does not move it.
 let conversation = 0
 let lastConnection: string | null = null
-// The generation of the check running now, until it ends. Kept here as well as in the running flag: a command's
-// read of that flag can answer as it was when the command started, before a press's run that began meanwhile.
-let checking: number | null = null
+// The check claimed or running, with the connection it reads: from the moment /savings or a press decides to start
+// one, with no await between that decision and this claim, until its run ends or a /clear drops it. Starting a run
+// is decided here, not from the running flag in `$.state`, which only draws the pane: a hook's read of that flag
+// can answer as it was when the hook started.
+let claim: { connection: string | null } | null = null
 // The press that starts a run (Run again, the band's Run /savings), from the press until that run ends. Only that
 // press clears it, so one from before a /clear cannot free the guard for a later press.
 let pressQueued: object | null = null
@@ -639,14 +641,14 @@ async function openPane($: EngineInterface) {
 }
 
 /**
- * One check. `asked` is the generation when it was asked for: a /clear or a session end since then (even in
- * the same tick, before this scheduled run started) drops it, so a late run never lands in the new conversation.
+ * One check, for the claim it was started under: a /clear or a session end since then (even in the same tick,
+ * before this scheduled run started) dropped that claim, so a late run never lands in the new conversation.
  */
-async function runCheck($: EngineInterface, connection: string | null, asked: number) {
-  if (asked !== generation) return
-  const mine = ++generation
-  checking = mine
-  const live = () => mine === generation
+async function runCheck($: EngineInterface, mine: { connection: string | null }) {
+  if (claim !== mine) return
+  const connection = mine.connection
+  const at = ++generation
+  const live = () => at === generation
   // Every write of this run lands only while it is current, checked inside the write: a /clear at any await
   // below leaves the new conversation's state as the clear left it.
   const say = (text: string) => {
@@ -723,8 +725,9 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
     say(`Databricks savings check: ${why.text} ${why.recovery}`)
   } finally {
     // A dropped run leaves the running flag as the /clear left it: cleared, or set by the new conversation's run.
-    if (checking === mine) checking = null
-    if (live()) await update($, busyAtom, () => null)
+    // The claim is let go only once the flag is cleared, so a run claimed next never has its flag cleared by this one.
+    await update($, busyAtom, now => (live() ? null : now))
+    if (claim === mine) claim = null
   }
 }
 
@@ -809,30 +812,23 @@ export function register(on: On, _context: FeatureContext) {
     if (asked && !CONNECTION_NAME.test(asked)) {
       return { text: `"${asked}" is not a connection name. Run /savings, or /savings <connection> with an altimate-code Databricks connection.` }
     }
-    // The generation and conversation the run is asked in, before anything waits: a /clear from here on drops the
-    // run. A run a press starts meanwhile moves the generation too, but not the conversation.
-    const at = generation
-    const inConversation = conversation
-    const running = async () => {
+    // One check at a time, decided before anything waits.
+    const going = claim
+    if (going) {
       await openPane($)
-      return { text: 'The Databricks savings check is already running in the side pane.' }
+      const other = asked && asked !== going.connection ? ` Run /savings ${asked} again when it finishes.` : ''
+      return { text: `The Databricks savings check is already running in the side pane.${other}` }
     }
-    // A /clear while the busy state was read, the write or the pane open: no pane, no run, and no claim that one
-    // is running. A press's run that started meanwhile is the one running.
-    const stopped = async () => {
-      if (inConversation !== conversation) return { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
-      if (checking !== null) return running()
-      await openPane($)
-      return { text: 'The Databricks savings check just ran: its result is in the side pane.' }
-    }
-    // A running flag read before a /clear, or before a run that has since ended, is not taken as it is.
-    if (await read($, busyAtom)) return at === generation && inConversation === conversation ? running() : stopped()
-    if (at !== generation) return stopped()
-    await update($, busyAtom, now => (at === generation ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
-    if (at !== generation) return stopped()
+    const mine = { connection: asked || null }
+    claim = mine
+    // A /clear during the write or while the pane opens dropped the claim: no pane, no run, and no claim that one
+    // is running.
+    const cleared = { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
+    await update($, busyAtom, now => (claim === mine ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
+    if (claim !== mine) return cleared
     const opened = await openPane($)
-    if (at !== generation) return stopped()
-    later($, () => runCheck($, asked || null, at))
+    if (claim !== mine) return cleared
+    later($, () => runCheck($, mine))
     if (opened && opened.isPlaced === false) {
       return { text: 'Running the Databricks savings check. The terminal is too narrow for the side pane, so the result comes as a notice; widen the window to see the details.' }
     }
@@ -996,7 +992,7 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   generation += 1
   conversation += 1
-  checking = null
+  claim = null
   lastConnection = null
   offered = false
   pressQueued = null
@@ -1041,9 +1037,11 @@ function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<u
       const live = () => at === generation
       if (!live()) return
       await first?.(live)
-      if (!live() || (await read($, busyAtom)) || !live()) return
-      await update($, busyAtom, now => (live() ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
-      await runCheck($, lastConnection, at)
+      if (!live() || claim) return
+      const mine = { connection: lastConnection }
+      claim = mine
+      await update($, busyAtom, now => (claim === mine ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
+      await runCheck($, mine)
     } finally {
       if (pressQueued === mine) pressQueued = null
     }

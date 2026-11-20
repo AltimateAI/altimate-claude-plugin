@@ -623,23 +623,7 @@ test('Hide whose write is under way when a /clear lands leaves the new conversat
   await band.unmount()
 })
 
-test('/savings typed while a band press starts its run says that run is going, not that the conversation was cleared', async ($, on) => {
-  // The command's read of the running flag answers "not running", and is held: the band's run starts, moving the
-  // check's generation, before the command goes on with that answer.
-  let armed = false
-  let reached = () => {}
-  const reading = new Promise<void>(resolve => (reached = resolve))
-  let release = () => {}
-  const released = new Promise<void>(resolve => (release = resolve))
-  const hook = on as any
-  hook('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
-    if (!armed || e.key !== 'savingsBusy') return next(e)
-    armed = false
-    const before = await next(e)
-    reached()
-    await released
-    return before
-  })
+test('/savings typed while a band press\'s run is going says it is running, and asks again for a connection it is not reading', async ($, on) => {
   let finish = () => {}
   const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
   const { clock, runs } = await start($, on, { files, hold: new Promise<void>(resolve => (finish = resolve)) })
@@ -648,33 +632,33 @@ test('/savings typed while a band press starts its run says that run is going, n
   const band = await $.ui.mount(BAND)
   await band.press({ key: 'savings-run' })
   await band.unmount()
-  armed = true
-  const said = savings($)
-  await reading
   await clock.settle()
   expect(runs.length).toBe(1)
-  release()
-  expect((await said).text).toBe('The Databricks savings check is already running in the side pane.')
+  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
+  expect((await savings($, 'prod_dbx')).text).toBe('The Databricks savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
   expect(runs.length).toBe(1)
   finish()
   await clock.settle()
+  // Once it ends, the next /savings runs.
+  await savings($, 'prod_dbx')
+  await clock.settle()
+  expect(runs.length).toBe(2)
 })
 
-test('/savings typed while a band press runs its check to the end says the check just ran', async ($, on) => {
-  // As above, but the band's run also ends before the command goes on: nothing is running by then.
+test('/savings <connection> typed after a band press decided to run is told that run is going, and to ask again', async ($, on) => {
+  // Holds the press's write of the running flag, made once it has decided to run: /savings prod_dbx is typed then.
   let armed = false
   let reached = () => {}
-  const reading = new Promise<void>(resolve => (reached = resolve))
+  const writing = new Promise<void>(resolve => (reached = resolve))
   let release = () => {}
   const released = new Promise<void>(resolve => (release = resolve))
   const hook = on as any
-  hook('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+  hook('state.set', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
     if (!armed || e.key !== 'savingsBusy') return next(e)
     armed = false
-    const before = await next(e)
     reached()
     await released
-    return before
+    return next(e)
   })
   const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
   const { clock, runs } = await start($, on, { files })
@@ -684,46 +668,15 @@ test('/savings typed while a band press runs its check to the end says the check
   await band.press({ key: 'savings-run' })
   await band.unmount()
   armed = true
-  const said = savings($)
-  await reading
-  await clock.settle()
-  expect(runs.length).toBe(1)
+  const settling = clock.settle()
+  await writing
+  const said = await savings($, 'prod_dbx')
+  expect(said.text).toBe('The Databricks savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
   release()
-  expect((await said).text).toBe('The Databricks savings check just ran: its result is in the side pane.')
+  await settling
   await clock.settle()
+  // One check ran, the press's; prod_dbx was not said to be running.
   expect(runs.length).toBe(1)
-})
-
-test('/savings typed as a /clear lands during its read of a running check says the conversation was cleared', async ($, on) => {
-  // The command's read of the running flag answers "running", and is held while the conversation is cleared: that
-  // answer belongs to the old conversation, where the check was running.
-  let armed = false
-  let reached = () => {}
-  const reading = new Promise<void>(resolve => (reached = resolve))
-  let release = () => {}
-  const released = new Promise<void>(resolve => (release = resolve))
-  const hook = on as any
-  hook('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
-    if (!armed || e.key !== 'savingsBusy') return next(e)
-    armed = false
-    const before = await next(e)
-    reached()
-    await released
-    return before
-  })
-  let finish = () => {}
-  const { clock, runs } = await start($, on, { hold: new Promise<void>(resolve => (finish = resolve)) })
-  await savings($)
-  await clock.settle()
-  expect(runs.length).toBe(1)
-  armed = true
-  const said = savings($)
-  await reading
-  await $.session.end({ reason: 'clear' } as any)
-  release()
-  expect((await said).text).toBe('The conversation was cleared before the Databricks savings check started. Run /savings again.')
-  finish()
-  await clock.settle()
 })
 
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
