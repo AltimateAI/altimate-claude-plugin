@@ -568,6 +568,23 @@ test('editing Databricks compute config offers /savings once a session, and Hide
   expect(runs).toEqual([])
 })
 
+test('Hide pressed just before a /clear leaves the new conversation\'s own offer', async ($, on) => {
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  const { clock } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  let band = await $.ui.mount(BAND)
+  await band.press({ key: 'savings-hide' })
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  await band.unmount()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Medium', new_string: 'Large' })
+  await clock.settle()
+  band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+  await band.unmount()
+})
+
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const { clock } = await start($, on, { files })
