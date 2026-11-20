@@ -403,7 +403,8 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
             cores: choice.cores,
             coresNeeded: choice.cores_needed,
           })),
-      })),
+      }))
+      .filter(one => one.choices.length > 0),
     changes: [],
   }
 }

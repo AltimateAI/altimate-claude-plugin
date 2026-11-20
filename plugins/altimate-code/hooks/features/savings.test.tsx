@@ -1223,7 +1223,8 @@ test('an over-sized finding with no target size asks for a smaller size, with no
 })
 
 test('a source build is refused though a runtime note on stderr names a version', async ($, on) => {
-  const { clock, runs, toasts } = await start($, on, { version: 'local', versionStderr: 'warning: node v22.1.0 is deprecated\n' })
+  // A version before `local` on stdout too: only the source-build check refuses this one.
+  const { clock, runs, toasts } = await start($, on, { version: `${SAVINGS_MIN_ALTIMATE_CODE}\nlocal`, versionStderr: 'warning: node v22.1.0 is deprecated\n' })
   await savings($)
   await clock.settle()
   expect(runs).toEqual([])
@@ -1421,5 +1422,17 @@ test('the checked line says one warehouse, cluster or job in the singular', asyn
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^1 SQL warehouse, 0 all-purpose clusters and 1 job · / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a what-if row whose every choice lacks its figures is left out, not drawn with no buttons', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  for (const choice of answer.metadata.report.what_if[0].choices) delete choice.monthly_cost
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^What if Classic / })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Press a size to see/ })).toBeUndefined()
   await ui.unmount()
 })
