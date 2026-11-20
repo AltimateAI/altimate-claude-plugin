@@ -635,6 +635,16 @@ test('a password inside a JSON string that is itself JSON-escaped is cut whole',
   expect(redactSecrets(JSON.stringify({ message: JSON.stringify({ message: JSON.stringify({ api_key: 'deep-secret-value' }) }) }))).not.toContain('deep-secret')
 })
 
+test('a multi-word password inside JSON strings escaped one, two or three times is cut whole', () => {
+  let value = JSON.stringify({ password: 'correct horse battery staple', user: 'bob' })
+  for (let depth = 0; depth < 3; depth++) {
+    const out = redactSecrets(value)
+    expect(out).not.toMatch(/correct|horse|battery|staple/)
+    expect(out).toContain('bob')
+    value = JSON.stringify({ message: value })
+  }
+})
+
 test('ADO.NET doubled quotes inside a quoted password are part of it, and a profile value that is also a key name does not hide the key', () => {
   const out = redactSecrets('Server=db;Password="alpha""omega-secret";Encrypt=yes')
   expect(out).not.toMatch(/alpha|omega/)
