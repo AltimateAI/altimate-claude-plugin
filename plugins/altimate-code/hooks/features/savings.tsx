@@ -694,7 +694,7 @@ export function register(on: On, _context: FeatureContext) {
     }
     // A /clear while the busy state was read: nothing is marked running for the new conversation.
     if (at !== generation) return { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
-    await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
+    await update($, busyAtom, now => (at === generation ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
     const opened = await openPane($)
     later($, () => runCheck($, asked || null, at))
     if (opened && opened.isPlaced === false) {
@@ -903,7 +903,7 @@ function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<u
       if (!live()) return
       await first?.(live)
       if (!live() || (await read($, busyAtom)) || !live()) return
-      await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
+      await update($, busyAtom, now => (live() ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
       await runCheck($, lastConnection, at)
     } finally {
       pressQueued = false
