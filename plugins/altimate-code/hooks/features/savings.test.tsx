@@ -660,6 +660,40 @@ test('/savings typed while a band press starts its run says that run is going, n
   await clock.settle()
 })
 
+test('/savings typed while a band press runs its check to the end says the check just ran', async ($, on) => {
+  // As above, but the band's run also ends before the command goes on: nothing is running by then.
+  let armed = false
+  let reached = () => {}
+  const reading = new Promise<void>(resolve => (reached = resolve))
+  let release = () => {}
+  const released = new Promise<void>(resolve => (release = resolve))
+  const hook = on as any
+  hook('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    if (!armed || e.key !== 'savingsBusy') return next(e)
+    armed = false
+    const before = await next(e)
+    reached()
+    await released
+    return before
+  })
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  const { clock, runs } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  await band.press({ key: 'savings-run' })
+  await band.unmount()
+  armed = true
+  const said = savings($)
+  await reading
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  release()
+  expect((await said).text).toBe('The Databricks savings check just ran: its result is in the side pane.')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+})
+
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const { clock } = await start($, on, { files })
