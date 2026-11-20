@@ -629,7 +629,7 @@ test('a size too small for the queries is marked, and pressing it says they woul
 
 test('a flagged warehouse is remembered, and a later run that finds it resized shows its observed spend, not a saving', async ($, on) => {
   // A run on 2026-11-10 flagged Classic as a SMALL CLASSIC that cost $27.54 over its week.
-  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } }
   const resized = JSON.parse(JSON.stringify(ANSWER))
   const classic = resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
   classic.size = 'X_SMALL'
@@ -648,7 +648,7 @@ test('a flagged warehouse is remembered, and a later run that finds it resized s
 })
 
 test('a resized warehouse that costs more in its later week shows both amounts the same way', async ($, on) => {
-  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } }
   const resized = JSON.parse(JSON.stringify(ANSWER))
   const classic = resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
   classic.size = 'X_SMALL'
@@ -666,7 +666,7 @@ test('the first run that flags a warehouse keeps what it is, and an unflagged on
   const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z') })
   await savings($)
   await clock.settle()
-  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375, days: 7 })
+  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.544375, days: 7 })
   expect(store.has('savings-baseline:dbxmega:wh-xs')).toBe(false)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: / since / })).toBeUndefined()
@@ -833,7 +833,7 @@ test('the band never starts a second run while one is going', async ($, on) => {
 })
 
 test('the first baseline stays: a second run after a resize still says what changed since then', async ($, on) => {
-  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } }
   const resized = JSON.parse(JSON.stringify(ANSWER))
   const classic = resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
   classic.size = 'X_SMALL'
@@ -1108,14 +1108,14 @@ test('the same warehouse id in two workspaces keeps two baselines, and only the 
   const { clock, store } = await start($, on, { answer, now: Date.parse('2026-11-18T10:00:00Z') })
   await savings($)
   await clock.settle()
-  expect(store.get('savings-baseline:dbxmega:111:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375, days: 7 })
+  expect(store.get('savings-baseline:dbxmega:111:wh-classic')).toEqual({ date: '2026-11-18', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.544375, days: 7 })
   expect(store.has('savings-baseline:dbxmega:222:wh-classic')).toBe(false)
   expect(store.has('savings-baseline:dbxmega:wh-classic')).toBe(false)
 })
 
 test('a baseline in one workspace is read for that workspace only, though another has a warehouse with its id', async ($, on) => {
   // Workspace 111's Classic was SMALL and is X-SMALL now; workspace 222 has a LARGE warehouse with the same id.
-  const store = { 'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const store = { 'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } }
   const answer = JSON.parse(JSON.stringify(ANSWER))
   answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111', size: one.id === 'wh-classic' ? 'X_SMALL' : one.size }))
   const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
@@ -1131,24 +1131,58 @@ test('a baseline in one workspace is read for that workspace only, though anothe
   await ui.unmount()
 })
 
-for (const [was, now, type, line] of [
-  [null, 'X_SMALL', 'CLASSIC', null],
-  ['SMALL', null, 'CLASSIC', null],
-  [null, 'X_SMALL', 'PRO', 'Classic: CLASSIC → X-SMALL PRO since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'],
-] as const) {
-  test(`a size read on one side only is no resize, and is left out of a type change line: ${was ?? 'unread'} ${'CLASSIC'} then ${now ?? 'unread'} ${type}`, async ($, on) => {
-    const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: was, windowCost: 27.54 } }
-    const answer = JSON.parse(JSON.stringify(ANSWER))
-    Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: now, type })
-    const { clock } = await start($, on, { answer, store })
-    await savings($)
-    await clock.settle()
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-    const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
-    expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(line ? [line] : [])
-    await ui.unmount()
-  })
+// Each setting, known or not before and after, the same or not: what the baseline keeps, and the line the pane draws.
+// The other setting is known and the same on both sides, so the line can always name it.
+const SETTING_CASES = [
+  { setting: 'size', a: 'SMALL', b: 'X_SMALL', other: { type: 'CLASSIC' } },
+  { setting: 'type', a: 'CLASSIC', b: 'PRO', other: { size: 'SMALL' } },
+] as const
+for (const { setting, a, b, other } of SETTING_CASES) {
+  for (const before of ['known', 'unknown'] as const) {
+    for (const after of ['known', 'unknown'] as const) {
+      for (const same of [true, false]) {
+        test(`baseline ${setting}: ${before} before, ${after} after, ${same ? 'same' : 'different'} value`, async ($, on) => {
+          const was = { ...other, [setting]: before === 'known' ? a : null } as Record<string, string | null>
+          const now = { ...other, [setting]: after === 'known' ? (same ? a : b) : null } as Record<string, string | null>
+          const key = 'savings-baseline:dbxmega:wh-classic'
+          const store = { [key]: { date: '2026-11-10', config: { size: was.size ?? null, type: was.type ?? null }, windowCost: 27.54 } }
+          const answer = JSON.parse(JSON.stringify(ANSWER))
+          Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: now.size ?? null, type: now.type ?? null })
+          const started = await start($, on, { answer, store })
+          await savings($)
+          await started.clock.settle()
+          // Merge: a known setting is never overwritten; an unknown one takes what this run read.
+          const merged = before === 'known' ? a : after === 'known' ? (same ? a : b) : null
+          expect((started.store.get(key) as any).config[setting]).toBe(merged)
+          // Changed: only a setting known on both sides, with different values.
+          const changed = before === 'known' && after === 'known' && !same
+          const label = (config: Record<string, string | null>) => [config.size?.replace(/_/g, '-'), config.type].filter(Boolean).join(' ')
+          const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+          const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+          expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(
+            changed ? [`Classic: ${label(was)} → ${label(now)} since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.`] : [],
+          )
+          expect(texts.filter(text => /\?|null|undefined/.test(text) && / since /.test(text))).toEqual([])
+          await ui.unmount()
+        })
+      }
+    }
+  }
 }
+
+test('a baseline an older version kept as strings loads as fully unknown: no line, and this run fills it', async ($, on) => {
+  const key = 'savings-baseline:dbxmega:wh-classic'
+  const store = { [key]: { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
+  const { clock, store: kept } = await start($, on, { answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: / since 2026-11-10\./ })).toBeUndefined()
+  await ui.unmount()
+  expect(kept.get(key)).toEqual({ date: '2026-11-10', config: { size: 'X_SMALL', type: 'CLASSIC' }, windowCost: 27.54 })
+})
 
 test('after a run that failed, the band does not quote the answer the pane no longer shows', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
@@ -1168,8 +1202,8 @@ test('after a run that failed, the band does not quote the answer the pane no lo
 
 test('two resized warehouses draw the observed-spend note once, after both lines', async ($, on) => {
   const store = {
-    'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 },
-    'savings-baseline:dbxmega:wh-xs': { date: '2026-11-10', type: 'SERVERLESS', size: 'SMALL', windowCost: 300 },
+    'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 },
+    'savings-baseline:dbxmega:wh-xs': { date: '2026-11-10', config: { size: 'SMALL', type: 'SERVERLESS' }, windowCost: 300 },
   }
   const resized = JSON.parse(JSON.stringify(ANSWER))
   resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
@@ -1237,7 +1271,7 @@ test('Run again pressed twice starts one run', async ($, on) => {
 
 test('a baseline read over a longer window is scaled by its own length, not this run\'s', async ($, on) => {
   // Two weeks at $55.08 is the same $118.03 a month as one week at $27.54.
-  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 55.08, days: 14 } }
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 55.08, days: 14 } }
   const resized = JSON.parse(JSON.stringify(ANSWER))
   resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
   const { clock } = await start($, on, { answer: resized, store })
@@ -1390,7 +1424,7 @@ test('across several workspaces a warehouse with no workspace id is not compared
   answer.metadata.report.findings.forEach((one: any) => (one.workspace_id = undefined))
   const xs = answer.metadata.warehouses.find((one: any) => one.id === 'wh-xs')
   answer.metadata.warehouses.push({ ...xs })
-  const store = { 'savings-baseline:dbxmega:111:wh-xs': { date: '2026-11-10', type: 'SERVERLESS', size: 'SMALL', windowCost: 300 } }
+  const store = { 'savings-baseline:dbxmega:111:wh-xs': { date: '2026-11-10', config: { size: 'SMALL', type: 'SERVERLESS' }, windowCost: 300 } }
   const { clock, store: kept } = await start($, on, { answer, store, now: Date.parse('2026-11-18T10:00:00Z') })
   await savings($)
   await clock.settle()
@@ -1543,7 +1577,7 @@ test('in one workspace a warehouse without the workspace id its finding carries 
   const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer })
   await savings($)
   await clock.settle()
-  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375, days: 7 })
+  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.544375, days: 7 })
 })
 
 test('an answer without its connection name keeps no baselines, so two unnamed connections never share one', async ($, on) => {

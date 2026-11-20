@@ -632,6 +632,9 @@ export interface CteProfileState {
   message?: string
 }
 
+/** A warehouse's settings as the CLI listed them: each its value, or null where the CLI did not read it. */
+export type WarehouseConfig = { size: string | null; type: string | null }
+
 /** One /savings run's answer, as the pane draws it. */
 export type SavingsView = {
   /** The altimate-code connection that ran the check. */

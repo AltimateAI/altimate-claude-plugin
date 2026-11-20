@@ -8,8 +8,9 @@
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
-import type { SavingsView } from '../../types'
+import type { SavingsView, WarehouseConfig } from '../../types'
 import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
+import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig } from '../savings-config'
 import { SHELLS, leaderEnd, shellScript, simpleCommands } from '../shell'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -244,9 +245,6 @@ export function evidenceLines(evidence: Record<string, unknown> | undefined, day
   }
 }
 
-/** A warehouse's size and type as the change line shows them; a size the CLI did not read is left out, not drawn as "?". */
-const configOf = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSize) ? size(warehouseSize) : '', oneLine(type)].filter(Boolean).join(' ')
-
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
   return oneLine(value)
@@ -437,9 +435,16 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
 /**
  * What a warehouse was when a run first flagged it, kept across sessions to show its spend before and after a
  * change. `days` is the length of the window `windowCost` covers; a baseline kept before it was stored is read
- * as this run's.
+ * as this run's. `config` holds each setting as read; one kept by an older version, without it, is fully unknown.
  */
-type Baseline = { date: string; type: string; size: string | null; windowCost: number; days?: number }
+type Baseline = { date: string; config: WarehouseConfig; windowCost: number; days?: number }
+
+/** A kept baseline back from the store, or undefined when there is none it can read. */
+function loadBaseline(value: unknown): Baseline | undefined {
+  const one = value as Partial<Baseline> | null | undefined
+  if (!one || typeof one !== 'object' || typeof one.date !== 'string' || typeof one.windowCost !== 'number') return undefined
+  return { date: one.date, config: loadConfig(one.config), windowCost: one.windowCost, ...(typeof one.days === 'number' ? { days: one.days } : {}) }
+}
 
 // One connection can read several workspaces, where warehouse ids can repeat: the workspace is part of the key.
 const baselineKey = (connection: string, warehouse: Pick<ToolWarehouse, 'id' | 'workspace_id'>) =>
@@ -474,18 +479,19 @@ export async function trackChanges(
     // A warehouse listed twice is compared once, not with the baseline its first listing just wrote.
     if (seen.has(key)) continue
     seen.add(key)
-    const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
+    const stored = loadBaseline(await $.store.get(key).catch(() => undefined))
     // A /clear while the baselines were read: this run keeps nothing.
     if (!live()) return []
-    // A size read on one side only is no resize: the other run did not read it. The type still tells a change.
-    const resized = stored?.size != null && warehouse.size != null && stored.size !== warehouse.size
-    const changed = stored && (resized || stored.type !== warehouse.type)
-    if (stored && changed) {
+    const now = configOf(warehouse)
+    // Only a setting both runs read can have changed, and the line names only those.
+    const changed = stored ? changedSettings(stored.config, now) : []
+    if (stored && changed.length > 0) {
+      const named = comparable(stored.config, now)
       changes.push({
         // Names repeat across workspaces, so with several read the line names its own.
         name: `${shownName(warehouse.name, warehouse.id)}${several ? ` (workspace ${oneLine(warehouse.workspace_id)})` : ''}`,
-        from: configOf(stored.size, stored.type),
-        to: configOf(warehouse.size, warehouse.type),
+        from: configLabel(stored.config, named),
+        to: configLabel(now, named),
         since: stored.date,
         monthlyBefore: (stored.windowCost * 30) / (stored.days ?? windowDays(view.window)),
         monthlyNow: (warehouse.window_cost * 30) / windowDays(view.window),
@@ -494,9 +500,12 @@ export async function trackChanges(
     // In one workspace an id is unambiguous, so it is matched alone: the finding or the warehouse may lack the workspace id.
     const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flaggedIds.has(warehouse.id))
     if (!stored && isFlagged) {
-      await $.store
-        .set(key, { date: today, type: warehouse.type, size: warehouse.size, windowCost: warehouse.window_cost, days: windowDays(view.window) } satisfies Baseline)
-        .catch(() => undefined)
+      await $.store.set(key, { date: today, config: now, windowCost: warehouse.window_cost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
+    }
+    // A setting the baseline did not know is filled from the first run that reads it, and a known one is never
+    // overwritten, so a later change of it shows.
+    if (stored && changed.length === 0 && learns(stored.config, now)) {
+      await $.store.set(key, { ...stored, config: mergeConfig(stored.config, now) } satisfies Baseline).catch(() => undefined)
     }
   }
   return changes
