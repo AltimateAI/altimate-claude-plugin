@@ -69,10 +69,14 @@ test('days count from the first run that saw the change, not from the draft', ()
   expect(fixProgress(fix(), view('X_SMALL', 7)).text).toBe('Classic: fix drafted 2026-11-01 · measuring (0 of 7 days)')
 })
 
-test('with the whole window after the change, the saving is the measured daily gap over the window', () => {
+test('with the whole window after the change, the line gives the observed spend before and after, never a saving', () => {
   const line = fixProgress(fix({ changedSeen: '2026-11-10' }), view('X_SMALL', 7))
-  expect(line.state).toBe('saved')
-  expect(line.text).toBe('Classic: saved since 2026-11-10: $21.00 over the 7 days to 2026-11-18 ($4.00 a day before, $1.00 now, measured from Databricks billing).')
+  expect(line.state).toBe('lower')
+  // The two amounts are billed in different weeks: a quieter week lowers the bill whether or not the change did.
+  expect(line.text).toBe(
+    'Classic: changed to X-SMALL CLASSIC since 2026-11-10: observed spend $4.00 a day before, $1.00 a day now (measured from Databricks billing). Billed in different weeks, so a change in workload moves these too: not a measured saving.',
+  )
+  expect(line.text).not.toMatch(/saved/i)
 })
 
 test('a fix that changes no size never earns a saving: its finding clearing may be usage falling', () => {
@@ -159,7 +163,7 @@ test('the same id in another workspace is another resource', () => {
 test('a Snowflake warehouse with no usage, listed under its name, is still found', () => {
   const idle = fix({ platform: 'snowflake', checkId: 'downsize_warehouse', resourceId: '7', resourceName: 'BI_WH', config: 'Large STANDARD', changedSeen: '2026-11-10' })
   const listed = { platform: 'snowflake', window: WINDOW, findings: [], skipped: [], limited: [], pricing: 'list price', inventory: [{ id: 'BI_WH', name: 'BI_WH', type: 'STANDARD', size: 'Medium', windowCost: 0 }] } as unknown as SavingsView
-  expect(fixProgress(idle, listed).state).toBe('saved')
+  expect(fixProgress(idle, listed).state).toBe('lower')
 })
 
 test('a recreated Snowflake warehouse, with a new id and the same finding, is still flagged', () => {

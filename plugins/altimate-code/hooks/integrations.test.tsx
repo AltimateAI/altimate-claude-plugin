@@ -662,8 +662,9 @@ async function startWithVersion($: any, on: any, answer: (argv: readonly string[
   on('command.register', () => ({ value: { command: 'integrations' } }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   const runs: string[][] = []
-  on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
-    runs.push([...e.argv])
+  on('process.run', (_: unknown, e: { readonly argv: readonly string[]; init?: { env?: Record<string, string> } }) => {
+    // /savings asks the version for itself, in assessment mode, before listing connections: not this check.
+    if (e.init?.env?.ALTIMATE_ASSESSMENT_MODE !== 'true') runs.push([...e.argv])
     const got = answer(e.argv)
     return got === 'missing' ? { deny: 'spawn ENOENT' } : { value: { stderr: '', ...got } }
   })

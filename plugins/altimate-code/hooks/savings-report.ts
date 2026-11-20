@@ -2,7 +2,7 @@
 // remote asset, no upload: it is a file on this machine until the person sends it to someone.
 import type { SavingsKept, SavingsPlatform } from '../types'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT } from './savings-checks'
-import { amount, cleanText, combinedTotal, compared, dollars, limitedText, PLATFORM_NAME, range, windowDays } from './savings-format'
+import { amount, cleanText, combinedTotal, compared, dollars, limitedText, OBSERVED_NOTE, PLATFORM_NAME, range, windowDays } from './savings-format'
 
 const escape = (value: unknown) =>
   cleanText(String(value ?? '')).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!)
@@ -14,7 +14,7 @@ const STYLE = `
 main{max-width:860px;margin:0 auto;padding:40px 24px 64px}h1{font-size:24px;margin:0 0 4px}h2{font-size:19px;margin:36px 0 2px}h3{font-size:15px;margin:0}
 .dim{color:var(--dim)}.total{font-size:30px;font-weight:650;color:var(--good);margin:18px 0 0}.card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin:12px 0}
 ul{margin:6px 0 0;padding-left:18px}table{border-collapse:collapse;width:100%;margin-top:8px}th,td{text-align:left;padding:5px 8px;border-bottom:1px solid var(--line);font-size:14px}th{color:var(--dim);font-weight:500}
-td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}a{color:inherit}.saved{color:var(--good)}.gap{color:var(--dim)}`
+td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}a{color:inherit}.gap{color:var(--dim)}`
 
 /** The page, from the kept answers. `builtAt` is written on it as given. */
 export function savingsReportHtml(kept: readonly SavingsKept[], builtAt: string, signupUrl: string, failed: readonly { platform: SavingsPlatform; text: string }[] = []): string {
@@ -35,11 +35,11 @@ export function savingsReportHtml(kept: readonly SavingsKept[], builtAt: string,
 <div class="dim">${view.connection ? `Connection ${escape(view.connection)} · ` : ''}the ${days} days to ${escape(view.window.end)} · ${LOCAL_CHECK_COUNT} of Altimate's ${HOSTED_CHECK_COUNT[view.platform]} ${escape(name)} checks · priced at ${escape(view.pricing)} · checked ${escape(new Date(savedAt).toISOString().slice(0, 10))}</div>
 ${view.skipped.length > 0 ? `<p class="gap">Not checked: ${escape(view.skipped.join('; '))}.</p>` : ''}
 ${limited ? `<p class="gap">${escape(limited)}</p>` : ''}
-${view.fixes.map(one => `<p class="${one.state === 'saved' ? 'saved' : 'gap'}">${escape(one.text)}</p>`).join('\n')}
+${view.fixes.map(one => (one.state === 'lower' ? `<p>${escape(one.text)}</p>` : `<p class="gap">${escape(one.text)}</p>`)).join('\n')}
 ${view.changes
   .map(one => {
     const costs = compared(one.monthlyBefore, one.monthlyNow)
-    return `<p class="${one.monthlyBefore > one.monthlyNow ? 'saved' : 'gap'}">${escape(`${one.name}: ${one.from} → ${one.to} since ${one.since}. ${costs.was} a month then, ${costs.now} now.`)}</p>`
+    return `<p>${escape(`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${costs.was} a month before, ${costs.now} after. ${OBSERVED_NOTE}`)}</p>`
   })
   .join('\n')}
 ${view.findings.length === 0 ? `<p>${verdict}</p>` : ''}

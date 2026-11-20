@@ -18,7 +18,7 @@ import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT } from '../savings-checks'
 import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from '../savings-fixes'
-import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, limitedText, oneLine, PLATFORM_NAME, PLATFORMS, range, size, windowDays } from '../savings-format'
+import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
   type ConnectionFacts,
@@ -1158,16 +1158,17 @@ export function register(on: On, _context: FeatureContext) {
                 {savedOn !== today ? <Text dimColor>{`Kept from ${savedOn}: nothing is checked again until you run /savings.`}</Text> : null}
               </Box>
               {view.fixes.map((one, at) => (
-                <Text key={`fix-line-${section}-${at}`} color={one.state === 'saved' ? 'success' : one.state === 'measuring' ? undefined : 'warning'} dimColor={one.state === 'measuring'}>
+                <Text key={`fix-line-${section}-${at}`} color={one.state === 'measuring' || one.state === 'lower' ? undefined : 'warning'} dimColor={one.state === 'measuring'}>
                   {one.text}
                 </Text>
               ))}
               {view.changes.map((one, at) => {
                 const amounts = compared(one.monthlyBefore, one.monthlyNow)
                 return (
-                  <Text key={`change-${section}-${at}`} color="success">
-                    {`${one.name}: ${one.from} → ${one.to} since ${one.since}. ${amounts.was} a month then, ${amounts.now} now${one.monthlyBefore > one.monthlyNow ? `: ${amounts.gap} a month saved` : ''}.`}
-                  </Text>
+                  <Box key={`change-${section}-${at}`} flexDirection="column">
+                    <Text>{`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${amounts.was} a month before, ${amounts.now} after.`}</Text>
+                    <Text dimColor>{OBSERVED_NOTE}</Text>
+                  </Box>
                 )
               })}
               {view.total.resources > 0 ? (
@@ -1301,8 +1302,12 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   await update($, messagesAtom, () => [])
   await update($, sharedAtom, () => null)
   await update($, rowsAtom, () => ({}))
-  await loadKept($)
-  await drawStatus($)
+  // The kept answers outlive the conversation. Reading them back waits on the session's root and the
+  // store, so it runs after the end hook returns: a /clear never waits on it.
+  later($, async () => {
+    await loadKept($)
+    await drawStatus($)
+  })
 }
 
 export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderElement | null> {

@@ -5,6 +5,9 @@ export const PLATFORM_NAME: Record<SavingsPlatform, string> = { databricks: 'Dat
 export const PLATFORMS: readonly SavingsPlatform[] = ['databricks', 'snowflake']
 export const DAY_MS = 86_400_000
 
+/** Said beside any before-and-after amounts: the two come from different billing weeks, so they are observed spend, not a saving. */
+export const OBSERVED_NOTE = 'Billed in different weeks, so a change in workload moves these too: not a measured saving.'
+
 function money(value: number, cents: boolean): string {
   const rounded = cents ? Math.round(value * 100) / 100 : Math.round(value)
   const [whole, fraction] = rounded.toFixed(cents ? 2 : 0).split('.')

@@ -183,7 +183,10 @@ test('two platforms priced differently are not run together in one phrase', () =
 
 test('a resize the run saw is on the page too', () => {
   const html = savingsReportHtml([kept(view({ changes: [{ name: 'Classic', from: 'SMALL CLASSIC', to: 'X-SMALL CLASSIC', since: '2026-11-10', monthlyBefore: 118, monthlyNow: 59 }] }))], 'now', URL)
-  expect(html).toContain('Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10.')
+  expect(html).toContain(
+    '<p>Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.00 a month before, $59.00 after. Billed in different weeks, so a change in workload moves these too: not a measured saving.</p>',
+  )
+  expect(html).not.toMatch(/saved/i)
 })
 
 test('nothing from the answer can put a control character on the page', () => {
@@ -204,11 +207,12 @@ test('each section says when it was checked', () => {
   expect(savingsReportHtml([{ savedAt: Date.parse('2026-11-12T08:00:00Z'), view: view() }], 'now', URL)).toContain('checked 2026-11-12')
 })
 
-test('only a measured saving is drawn as one', () => {
-  const lines = view({ fixes: [{ resourceId: 'a', resourceName: 'A', state: 'saved', text: 'A saved' }, { resourceId: 'b', resourceName: 'B', state: 'unchanged', text: 'B unchanged' }] })
+test('a change whose observed spend fell is plain text, never drawn as a saving; other states are dimmed', () => {
+  const lines = view({ fixes: [{ resourceId: 'a', resourceName: 'A', state: 'lower', text: 'A lower' }, { resourceId: 'b', resourceName: 'B', state: 'unchanged', text: 'B unchanged' }] })
   const html = savingsReportHtml([kept(lines)], 'now', URL)
-  expect(html).toContain('<p class="saved">A saved</p>')
+  expect(html).toContain('<p>A lower</p>')
   expect(html).toContain('<p class="gap">B unchanged</p>')
+  expect(html).not.toContain('class="saved"')
 })
 
 test('a clean result says so, and both platforms get a section', () => {

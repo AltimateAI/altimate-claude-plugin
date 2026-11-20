@@ -16,7 +16,7 @@ All notable changes to this plugin will be documented in this file.
 - `/savings` asks `altimate --version` first and does not start an altimate-code older than 0.12.12, or a source build, for the check: before assessment mode, its `tool run` would send the one-time telemetry opt-out event.
 - A status-line entry: the platforms your altimate-code connections cover plus `/savings`, then the monthly range of the kept answer. The answer is kept on this machine for 7 days, and nothing runs the check but `/savings` or a button you press.
 - One line under a tool call that runs on a warehouse with a kept finding: altimate-code's SQL tools by connection, `dbt run` and `dbt build` by their target.
-- Saved since: Draft the fix keeps the resource, its daily cost and the date; later runs say it is unchanged, `measuring (n of 7 days)`, or what it saved, from billing.
+- After a drafted fix: Draft the fix keeps the resource, its daily cost and the date; later runs say it is unchanged, `measuring (n of 7 days)`, or its observed spend a day before and after, from billing (different weeks, so never called saved).
 - The pane names the hosted product's checks that did not run, with counts from your own run and one button to Altimate; Share report writes a self-contained local HTML page.
 - Snowflake: with both kinds of connection, `/savings` runs `finops_snowflake_savings` too and the pane has a section for each.
 - A finished check raises no notice while Claude is working; it comes when the turn ends.

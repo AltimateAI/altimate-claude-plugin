@@ -686,7 +686,8 @@ export type SavingsFinding = {
 export type SavingsFixLine = {
   resourceId: string
   resourceName: string
-  state: 'measuring' | 'saved' | 'no_saving' | 'unchanged' | 'unmeasured'
+  /** `lower`: the change was seen and billed spend fell; amounts from different weeks, so not a measured saving. */
+  state: 'measuring' | 'lower' | 'no_saving' | 'unchanged' | 'unmeasured'
   text: string
 }
 

@@ -330,7 +330,8 @@ async function start($: any, on: any, options: Options = {}) {
     }
     if (command === '--version') {
       if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
-      versionRuns.push({ env: e.init?.env })
+      // The status line's own version check at session start runs without the switches: not the savings check's.
+      if (e.init?.env?.ALTIMATE_ASSESSMENT_MODE === 'true') versionRuns.push({ env: e.init?.env })
       return { value: { exitCode: 0, stdout: `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: '' } }
     }
     if (command === 'tool' && tool === 'warehouse_list') {
@@ -757,7 +758,7 @@ test('a resized warehouse that costs more in its later week shows both amounts t
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. Observed spend: \$118\.03 a month before, \$177\.04 after\.$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /saved|more/i })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /saved|a month more/i })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -1538,13 +1539,19 @@ test('a changed warehouse is measured while the window still reaches back before
   await ui.unmount()
 })
 
-test('once the whole window is after the change, the saving is stated from billing, and replaces the older line', async ($, on) => {
+test('once the whole window is after the change, its observed spend is stated from billing, never as saved, and replaces the older line', async ($, on) => {
   const store = { [FIX_KEY]: FIX, 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-01', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
   const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer: resizedAnswer('2026-11-18', 14), store })
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^Classic: saved since 2026-11-10: \$13\.58 over the 7 days to 2026-11-18 \(\$3\.94 a day before, \$2\.00 now, measured from Databricks billing\)\.$/ })).toBeDefined()
+  expect(
+    await ui.find({
+      type: 'Text',
+      text: /^Classic: changed to X-SMALL CLASSIC since 2026-11-10: observed spend \$3\.94 a day before, \$2\.00 a day now \(measured from Databricks billing\)\. Billed in different weeks, so a change in workload moves these too: not a measured saving\.$/,
+    }),
+  ).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /saved/i })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /→ X-SMALL CLASSIC since/ })).toBeUndefined()
   await ui.unmount()
 })

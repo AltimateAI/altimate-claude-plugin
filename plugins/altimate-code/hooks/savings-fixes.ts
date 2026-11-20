@@ -1,10 +1,12 @@
 // What became of a fix drafted from /savings: kept when "Draft the fix" is pressed, read against each
 // later run. A draft changes nothing by itself, and the date a change lands is not known, so until a run
-// sees a change the line says none has been seen, and a saving is counted only from the first run that
-// saw a new size or type, once a whole window of billing lies after it. A fix that changes neither leaves
-// nothing to see but its finding clearing, which usage falling can do too, so it never earns a saving.
+// sees a change the line says none has been seen, and spend after it is read only from the first run that
+// saw a new size or type, once a whole window of billing lies after it. The before and after amounts are
+// billed in different weeks, so a change in workload moves them too: the line shows them as observed spend
+// and never calls the difference saved. A fix that changes neither leaves nothing to see but its finding
+// clearing, which usage falling can do too.
 import type { SavingsFinding, SavingsFixLine, SavingsPlatform, SavingsView } from '../types'
-import { cents, DAY_MS, dollars, PLATFORM_NAME, size, windowDays } from './savings-format'
+import { cents, DAY_MS, OBSERVED_NOTE, PLATFORM_NAME, size, windowDays } from './savings-format'
 
 /** What is kept when a fix is drafted. */
 export type FixRecord = {
@@ -122,5 +124,5 @@ export function fixProgress(fix: FixRecord, view: SavingsView): SavingsFixLine {
   if (fix.config === null) return line('no_saving', `${what} since ${since}: ${costs}. The answer does not show whether your change did that, so no saving is claimed.`)
   const gap = fix.dailyCost - dailyNow
   if (gap <= 0) return line('no_saving', `${what} since ${since}, but its cost did not fall: ${costs}.`)
-  return line('saved', `saved since ${since}: ${dollars(gap * days)} over the ${days} days to ${view.window.end} (${cents(fix.dailyCost)} a day before, ${cents(dailyNow)} now, ${billing}).`)
+  return line('lower', `${what} since ${since}: observed spend ${costs}. ${OBSERVED_NOTE}`)
 }
