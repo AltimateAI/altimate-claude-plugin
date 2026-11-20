@@ -652,17 +652,18 @@ export function register(on: On, context: FeatureContext) {
             <Button
               key="docs-apply"
               label={`Apply to ${plural(picked, 'column')}`}
-              onPress={() =>
-                later($, async () => {
+              onPress={() => {
+                // The conversation the press was made in: a /clear while the offers are read starts another.
+                const pressedIn = conversation
+                return later($, async () => {
                   if (applying) return
                   // What is ticked now, not what was drawn: a tick or a withdrawn offer may have landed since the render.
                   const state = (await read($, docsAtom)) ?? empty()
                   // An offer that arrived after the draw waits for the next Apply: it was never shown.
                   const groups = state.groups.filter(group => group.candidates.length > 0 && drawn.has(offerKey(group)))
                   const prompt = applyPrompt(groups, state.skipped)
-                  if (!prompt || applying) return
+                  if (!prompt || applying || pressedIn !== conversation) return
                   applying = true
-                  const pressedIn = conversation
                   const marks: string[] = []
                   const sent = new Set(sentGroups(groups, state.skipped).map(group => offerKey(group)))
                   try {
@@ -697,7 +698,7 @@ export function register(on: On, context: FeatureContext) {
                     applying = false
                   }
                 })
-              }
+              }}
             />
             <Button
               key="docs-dismiss"

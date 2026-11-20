@@ -192,6 +192,8 @@ type Options = {
   holdEdit?: Promise<void>
   /** dbt debug answers once this settles. */
   holdDebug?: Promise<void>
+  /** dbt deps answers once this settles. */
+  holdDeps?: Promise<void>
   /** A stat of this path answers what it read only once `until` settles (an older read finishing late). */
   statAfter?: { path: string; until: () => Promise<void> | undefined }
   /** Collects what the plugin writes to the debug log. */
@@ -417,6 +419,7 @@ async function start($: any, on: any, options: Options = {}) {
     }
     if (verb === 'ls' && options.listFails) return { value: { exitCode: 1, stdout: '', stderr: 'ls failed' } }
     if (verb === 'ls') return { value: { exitCode: 0, stdout: `${(options.listed ?? []).map(one => JSON.stringify(typeof one === 'string' ? { name: one } : one)).join('\n')}\n`, stderr: '' } }
+    if (verb === 'deps' && options.holdDeps) await options.holdDeps
     if (verb === 'deps' && options.depsFails) return { value: { exitCode: options.depsExit ?? 1, stdout: '', stderr: options.depsFails } }
     if (verb === 'parse') {
       mtimes['target/manifest.json'] = 10_000
@@ -4418,6 +4421,53 @@ test('of two manifest reads after edits, the older finishing last does not put "
   await $.tool.call({ tool: 'Bash', command: 'touch models/orders.sql' } as any)
   await clock.settle()
   release!()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an older manifest read whose state write lands after a newer one\'s does not put "current" back', async ($, on) => {
+  let holdWrite = false
+  let release!: () => void
+  const gate = new Promise<void>(resolve => (release = resolve))
+  on('state.set', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    if (holdWrite && e.key === 'dbtDoctor') {
+      holdWrite = false
+      await gate
+    }
+    return next(e)
+  })
+  const { clock, mtimes } = await start($, on, { interactive: true, now: 200_000, show: { rows: [{ order_id: 1, amount: 10 }] } })
+  await clock.settle()
+  // The first read sees nothing changed; its write waits.
+  holdWrite = true
+  void $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  // A change, and a second read that lands first.
+  mtimes['models/orders.sql'] = 150_000
+  await $.tool.call({ tool: 'Bash', command: 'touch models/orders.sql' } as any)
+  await clock.settle()
+  release()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a change while dbt deps runs and fails is read once it is done: the doctor does not keep saying current', async ($, on) => {
+  let release!: () => void
+  const holdDeps = new Promise<void>(resolve => (release = resolve))
+  const { clock, mtimes } = await start($, on, { interactive: true, now: 200_000, files: { 'packages.yml': 'packages: []' }, depsFails: 'could not reach the hub', holdDeps })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  await band.unmount()
+  mtimes['models/orders.sql'] = 150_000
+  await $.tool.call({ tool: 'Bash', command: 'touch models/orders.sql' } as any)
+  await clock.settle()
+  release()
   await clock.settle()
   const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()

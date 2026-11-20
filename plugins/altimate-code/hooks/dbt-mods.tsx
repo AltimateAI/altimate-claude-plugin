@@ -1539,11 +1539,19 @@ async function recheckDoctorManifest($: EngineInterface) {
   if (check.fix) check.fix = redactValues(check.fix)
   let landed = false
   await update($, doctorAtom, prev => {
-    if (!prev || prev.root !== view.root || prev.busy) return prev
+    // Checked again here: a newer read may have landed while this update waited its turn.
+    if (!prev || prev.root !== view.root || prev.busy || seq !== manifestSeq) return prev
     landed = true
     return { ...prev, checks: prev.checks.map(one => (one.id === 'manifest' ? check : one)), staleFiles }
   })
   if (!landed && (await read($, doctorAtom))?.busy) recheckWhenIdle = true
+}
+
+/** When the doctor is idle again: a change made while it was busy has its manifest line read now. */
+function drainDoctorRecheck($: EngineInterface) {
+  if (!recheckWhenIdle) return
+  recheckWhenIdle = false
+  later($, () => recheckDoctorManifest($))
 }
 
 // Each read of the manifest's freshness, by the doctor or after a change: only the newest one is shown.
@@ -1644,10 +1652,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   const view: DoctorView = { root, checks, at: await $.clock.now(), staleFiles, busy: null }
   await update($, doctorAtom, () => view)
   // A change while it ran (the connection test can take minutes): its manifest line is read again.
-  if (recheckWhenIdle) {
-    recheckWhenIdle = false
-    later($, () => recheckDoctorManifest($))
-  }
+  drainDoctorRecheck($)
   return view
 }
 
@@ -1798,6 +1803,7 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
               // Parsing without the packages would only fail again: say what deps said and stop.
               if (deps === SKIPPED || deps.exitCode !== 0) {
                 await update($, doctorAtom, view => (view ? { ...view, busy: null } : view))
+                drainDoctorRecheck($)
                 if (deps !== SKIPPED) $.ui.toast(`✖ dbt deps failed · ${dbtTail(deps, 1).slice(0, 160)}`, { timeoutMs: 8000 })
                 return
               }

@@ -805,3 +805,4 @@ test('the count /propagate gives of what Apply sent starts again after a /clear'
   const out: any = await $.command.run({ command: 'propagate', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
   expect(out.text).toMatch(/^No column description has been written yet/)
 })
+
