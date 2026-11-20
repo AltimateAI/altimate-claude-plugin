@@ -91,6 +91,13 @@ let lastConnection: string | null = null
 // is decided here, not from the running flag in `$.state`, which only draws the pane: a hook's read of that flag
 // can answer as it was when the hook started.
 let claim: { connection: string | null } | null = null
+/**
+ * Lets go of the claim if `mine` still holds it: when its run ends, and when a step before its run fails, since no
+ * run was started to let go of it then.
+ */
+const letGo = (mine: object) => {
+  if (claim === mine) claim = null
+}
 // The press that starts a run (Run again, the band's Run /savings), from the press until that run ends. Only that
 // press clears it, so one from before a /clear cannot free the guard for a later press.
 let pressQueued: object | null = null
@@ -730,7 +737,7 @@ async function runCheck($: EngineInterface, mine: { connection: string | null })
     try {
       await update($, busyAtom, now => (live() ? null : now))
     } finally {
-      if (claim === mine) claim = null
+      letGo(mine)
     }
   }
 }
@@ -832,12 +839,10 @@ export function register(on: On, _context: FeatureContext) {
     }
     const mine = { connection: asked || null }
     claim = mine
-    // A running-flag write that fails lets the claim go: no run was scheduled to let go of it.
-    const release = (error: unknown): never => {
-      if (claim === mine) claim = null
+    await update($, busyAtom, now => (claim === mine ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now)).catch((error: unknown) => {
+      letGo(mine)
       throw error
-    }
-    await update($, busyAtom, now => (claim === mine ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now)).catch(release)
+    })
     if (claim !== mine) return cleared
     const opened = await openPane($)
     if (claim !== mine) return cleared
@@ -1055,13 +1060,10 @@ function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<u
       if (!live() || claim) return
       const run = { connection: lastConnection }
       claim = run
-      // A running-flag write that fails lets the claim go, as /savings does: no run was started to let go of it.
-      await update($, busyAtom, now => (claim === run ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now)).catch(
-        (error: unknown) => {
-          if (claim === run) claim = null
-          throw error
-        },
-      )
+      await update($, busyAtom, now => (claim === run ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now)).catch((error: unknown) => {
+        letGo(run)
+        throw error
+      })
       await runCheck($, run)
     } finally {
       if (pressQueued === mine) pressQueued = null
