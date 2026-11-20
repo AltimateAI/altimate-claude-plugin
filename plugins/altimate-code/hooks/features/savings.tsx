@@ -1074,12 +1074,12 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
     if (!live()) return null
     view.fixes = await fixesFor($, view, today, live)
     if (!live()) return null
-    // A drafted fix says what became of that warehouse; the older "since first flagged" line would repeat it.
-    // Across workspaces a fix matches its own warehouse's line by id and workspace; in one workspace by id,
-    // since a finding (and so its fix) can lack the workspace id its warehouse carries.
+    // A drafted fix says what became of that warehouse; the older "since first flagged" line would repeat it. A fix
+    // matches its own warehouse's line by id and workspace (`sameWorkspace`): one that names another workspace is
+    // another warehouse, whose line stays.
     const several = view.checked.workspaces > 1
     view.changes = view.changes.filter(
-      change => !view.fixes.some(fix => isWarehouse(fix.resourceType) && fix.resourceId === change.resourceId && (!several || (fix.workspaceId ?? null) === change.workspaceId)),
+      change => !view.fixes.some(fix => isWarehouse(fix.resourceType) && fix.resourceId === change.resourceId && sameWorkspace(change.workspaceId, fix.workspaceId, several)),
     )
     return live() ? { view } : null
   } catch (error) {

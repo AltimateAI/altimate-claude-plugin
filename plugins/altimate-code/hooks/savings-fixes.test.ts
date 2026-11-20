@@ -99,6 +99,12 @@ test('a run that reads one setting but not another keeps what the record knew, s
   expect(fixChanged({ ...drafted, config: merged }, rowView({ size: 'X_SMALL', type: 'PRO' }))).toBe(true)
 })
 
+test('with one workspace read, a finding that names a workspace the fix did not is still the fix\'s finding', () => {
+  const drafted = fix({ checkId: 'high_idle_time', config: null, workspaceId: null })
+  const withId = { ...view('SMALL', 7, [{ ...flagged[0]!, checkId: 'high_idle_time', workspaceId: 'w1' }]), checked: { workspaces: 1 } } as unknown as SavingsView
+  expect(fixChanged(drafted, withId)).toBe(false)
+})
+
 test('only whole days after the date count, and never more than the window', () => {
   expect(daysAfter('2026-11-10', WINDOW)).toBe(7)
   // The day itself is partly before any change, so the window is not yet all after it.

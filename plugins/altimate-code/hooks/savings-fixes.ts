@@ -87,7 +87,7 @@ const isFlagged = (fix: FixRecord, view: SavingsView, sameCheck: boolean) =>
     one =>
       (one.resourceId === fix.resourceId || (fix.platform === 'snowflake' && one.resourceName === fix.resourceName)) &&
       one.resourceType === fix.resourceType &&
-      (one.workspaceId ?? null) === (fix.workspaceId ?? null) &&
+      sameWorkspace(one.workspaceId, fix.workspaceId, severalWorkspaces(view)) &&
       (!sameCheck || !fix.checkId || one.checkId === fix.checkId),
   )
 

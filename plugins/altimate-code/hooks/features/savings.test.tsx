@@ -2737,6 +2737,36 @@ test('a warehouse the answer gives no cost for draws no change line', async ($, 
   await ui.unmount()
 })
 
+test('a cost kept unknown is not filled from a run after a change: the line stays unremarked and the baseline keeps no cost', async ($, on) => {
+  const key = 'savings-baseline:dbxmega:wh-classic'
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: 'X_SMALL', window_cost: 100 })
+  const { clock, store } = await start($, on, { answer, store: { [key]: { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: null } } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(key) as any).windowCost).toBeNull()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: / since 2026-11-10\./ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('in one workspace, a fix that names another workspace does not hide this workspace\'s change line', async ($, on) => {
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.workspaces_checked = 1
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const store = {
+    [`savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`]: { ...FIX, workspaceId: '222' },
+    'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 },
+  }
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
+  await ui.unmount()
+})
+
 test('a baseline an older version kept as strings loads as fully unknown: no line, and this run fills it', async ($, on) => {
   const key = 'savings-baseline:dbxmega:wh-classic'
   const store = { [key]: { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
