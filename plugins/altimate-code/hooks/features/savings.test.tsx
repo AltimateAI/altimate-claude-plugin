@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { SNOWFLAKE_CAPTURE } from './savings-snowflake-capture.test-data'
 import { skippedChecks } from '../savings-checks'
-import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, evidenceLines, explain, fitLine, fixRequest, mentions, slimTitle, statusText, supportsSavings, toView } from './savings'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, evidenceLines, explain, fitLine, fixRequest, mentions, runsDatabricksCompute, slimTitle, statusText, supportsSavings, toView } from './savings'
 
 const ROOT = '/repo'
 
@@ -227,8 +227,8 @@ type Options = {
   error?: unknown
   /** What `tool run` prints and exits with, as is (no answer object). */
   output?: { exitCode: number; stdout: string; stderr: string }
-  /** What `altimate --version` prints; the first release with the check unless a test says otherwise. */
-  version?: string
+  /** What `altimate --version` prints; the first release with the check unless a test says otherwise, nothing at all for null. */
+  version?: string | null
   missingCli?: boolean
   hold?: Promise<void>
   isPlaced?: boolean
@@ -261,6 +261,8 @@ type Options = {
   versionRejects?: string
   /** What `altimate --version` prints on stderr. */
   versionStderr?: string
+  /** How `altimate --version` exits; 0 unless a test says otherwise. */
+  versionExit?: number
 }
 
 // The clock of the test that is running: tests in a file run one at a time.
@@ -356,7 +358,7 @@ async function start($: any, on: any, options: Options = {}) {
       if (options.versionRejects) return { deny: options.versionRejects }
       // The status line's own version check at session start runs without the switches: not the savings check's.
       if (e.init?.env?.ALTIMATE_ASSESSMENT_MODE === 'true') versionRuns.push({ env: e.init?.env })
-      return { value: { exitCode: 0, stdout: `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: options.versionStderr ?? '' } }
+      return { value: { exitCode: options.versionExit ?? 0, stdout: options.version === null ? '' : `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: options.versionStderr ?? '' } }
     }
     if (command === 'tool' && tool === 'warehouse_list') {
       listRuns.push({ argv: [...e.argv], env: e.init?.env })
@@ -2460,7 +2462,7 @@ test('a job whose evidence lacks its trigger, host cluster, hours or DBUs reads 
 test('when no check could run, the pane, the notice and the status line say nothing was checked, not that nothing was found', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   const checks = ['Migrate Classic/Pro to Serverless', 'Over-Sized Warehouse', 'Idle Cluster Detection', 'Job Running on All-Purpose Compute']
-  // One check listed twice (one per workspace) is still one check.
+  // A check listed twice is still one check.
   answer.metadata.skipped = [...checks, checks[3]].map(check => ({ check, reason: 'INSUFFICIENT_PERMISSIONS' }))
   answer.metadata.report = { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
   const { clock, toasts, statuses } = await start($, on, { answer })
@@ -2476,7 +2478,7 @@ test('when no check could run, the pane, the notice and the status line say noth
   }
 })
 
-test('a check skipped in two workspaces counts once in the verdict', () => {
+test('a check listed for two reasons counts once in the verdict', () => {
   expect(skippedChecks({ skipped: ['Idle Cluster Detection (refused)', 'Idle Cluster Detection (time limit)'] })).toBe(1)
 })
 
@@ -2737,4 +2739,119 @@ test('a size that fits but costs more says how much more', async ($, on) => {
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /^At X-SMALL: \$150\.00 a month instead of \$118\.05, \$31\.95 more\. / })).toBeDefined()
   await ui.unmount()
+})
+
+for (const command of [
+  'time databricks warehouses list',
+  'nohup databricks bundle deploy',
+  'if [ -f x ]; then databricks jobs list; fi',
+  'for x in a; do databricks bundle deploy; done',
+  'sudo -E databricks warehouses list',
+  '! databricks jobs list',
+  '{ databricks clusters list; }',
+  'databricks --profile=prod clusters list',
+]) {
+  test(`a shell keyword or wrapper before the CLI (${command}) still offers the check`, async ($, on) => {
+    const { clock } = await start($, on)
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount(BAND)
+    expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+    await band.unmount()
+  })
+}
+
+test('the command reader takes only the CLI running a compute command', () => {
+  for (const line of ['echo "x; databricks bundle deploy"', "echo 'databricks jobs list'", 'databricks auth login', 'cat databricks.yml', 'mydatabricks jobs list']) {
+    expect(runsDatabricksCompute(line)).toBe(false)
+  }
+  expect(runsDatabricksCompute('cd infra && DATABRICKS_HOST=https://x databricks bundle deploy')).toBe(true)
+})
+
+test('a runtime note on stderr does not stand in for a stdout that names no version', async ($, on) => {
+  const { clock, runs, toasts } = await start($, on, { version: 'altimate-code', versionStderr: 'node v22.1.0\n' })
+  await savings($)
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(toasts.at(-1)).toContain("altimate-code's version could not be read")
+})
+
+test('a version printed only on stderr, with nothing on stdout, is read', async ($, on) => {
+  const { clock, runs } = await start($, on, { version: null, versionStderr: `${SAVINGS_MIN_ALTIMATE_CODE}\n` })
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+})
+
+test('a --version that exits non-zero is no version, whatever it printed', async ($, on) => {
+  const { clock, runs, toasts } = await start($, on, { versionExit: 1 })
+  await savings($)
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(toasts.at(-1)).toContain("altimate-code's version could not be read")
+})
+
+test('a press queued when the session ends does not hold the next session\'s Run again', async ($, on) => {
+  const options: any = {}
+  const { clock, runs } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  // A run that does not finish before the session ends.
+  options.hold = new Promise<void>(() => {})
+  const ui = await mountFull($)
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  await ui.unmount()
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  options.hold = undefined
+  await savings($)
+  await clock.settle()
+  const again = await mountFull($)
+  await again.press({ key: 'again' })
+  await clock.settle()
+  expect(runs.length).toBe(4)
+  await again.unmount()
+})
+
+test('across several workspaces a warehouse with no workspace id is not compared, and one listed twice is compared once', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.workspaces_checked = 2
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: one.id === 'wh-classic' ? undefined : '111' }))
+  answer.metadata.report.findings.forEach((one: any) => (one.workspace_id = undefined))
+  const xs = answer.metadata.warehouses.find((one: any) => one.id === 'wh-xs')
+  answer.metadata.warehouses.push({ ...xs })
+  const store = { 'savings-baseline:dbxmega:111:wh-xs': { date: '2026-11-10', type: 'SERVERLESS', size: 'SMALL', windowCost: 300 } }
+  const { clock, store: kept } = await start($, on, { answer, store, now: Date.parse('2026-11-18T10:00:00Z') })
+  await savings($)
+  await clock.settle()
+  // Classic has no workspace id in a two-workspace answer: no baseline is kept for it under any key.
+  expect([...kept.keys()].filter(key => key.includes('wh-classic'))).toEqual([])
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  expect(texts.filter(text => / since 2026-11-10\. Observed spend: /.test(text))).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a what-if row without its choices, or a choice without its figures, is left out instead of breaking the report', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const row = answer.metadata.report.what_if[0]
+  answer.metadata.report.what_if.push({ ...row, resource_id: 'wh-other', resource_name: 'Other', choices: undefined })
+  row.choices[1].cores_needed = null
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^What if Classic / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^What if Other / })).toBeUndefined()
+  expect(await ui.find({ key: 'whatif-0-2' })).toBeUndefined()
+  expect(((await ui.find({ key: 'whatif-0-1' })) as any)?.props.label).toBe('2X-SMALL $39.35')
+  await ui.unmount()
+})
+
+test('a cluster whose auto-termination the answer does not give reads "?", not "off"', () => {
+  const evidence = { kind: 'idle_cluster', idle_ratio: 0.9, active_days: 3, total_cost: 12 }
+  expect(evidenceLines(evidence)[1]).toMatch(/^Auto-termination \?; /)
+  expect(evidenceLines({ ...evidence, auto_termination_minutes: 0 })[1]).toMatch(/^Auto-termination off; /)
+  expect(evidenceLines({ ...evidence, auto_termination_minutes: 120 })[1]).toMatch(/^Auto-termination 120 minutes; /)
 })

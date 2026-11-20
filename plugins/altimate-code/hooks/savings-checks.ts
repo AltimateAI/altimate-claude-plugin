@@ -13,8 +13,9 @@ export const HOSTED_CHECK_COUNT: Record<SavingsPlatform, number> = { databricks:
 export const LOCAL_CHECK_COUNT = 4
 
 /**
- * How many of the local checks did not run, each once: an entry is "Check name (reason)", and one check can be
- * listed once per workspace. Databricks only: a Snowflake entry can cover several checks, or be about warehouses.
+ * How many of the local checks did not run, each once: an entry is "Check name (reason)". The run lists a check
+ * once (one query reads every workspace); each name is still taken once, in case one is listed for two reasons.
+ * Databricks only: a Snowflake entry can cover several checks, or be about warehouses.
  */
 export function skippedChecks(view: Pick<SavingsView, 'skipped'>): number {
   return Math.min(LOCAL_CHECK_COUNT, new Set(view.skipped.map(one => one.replace(/ \(.*$/s, ''))).size)

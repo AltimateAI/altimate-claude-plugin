@@ -136,11 +136,42 @@ const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/[^/]+\.ya?ml|[^/]
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 // What marks a file as Databricks config at all: a Terraform `databricks_` resource, or a bundle.
 const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
-// Only a command the shell runs: at the start, or after `;`, `&&`, `||`, `|`, `(` or a newline, with any
-// environment assignments before it. `echo databricks bundle deploy` only names it.
-// Before it: `env`, `sudo` or assignments (a quoted value whole); a path to the binary; global flags such as `-p prod`.
-const DATABRICKS_COMMAND =
-  /(?:^|[;&|(\n])\s*(?:(?:env|sudo)\s+|[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)*(?:\S*\/)?databricks(?:\s+-\S+(?:\s+(?!-|warehouses\b|clusters\b|bundle\b|jobs\b)[^\s;&|]+)?)*\s+(?:warehouses|clusters|bundle|jobs)\b/
+const DATABRICKS_SUBCOMMANDS = new Set(['warehouses', 'clusters', 'bundle', 'jobs'])
+// Words the shell runs another command after: keywords, and wrappers whose own flags come before it.
+const SHELL_LEADS = new Set(['then', 'do', 'else', '!', 'time', 'nohup', 'env', 'sudo', 'command', 'exec'])
+
+/**
+ * Whether a shell line runs the Databricks CLI's `warehouses`, `clusters`, `bundle` or `jobs` command,
+ * rather than only naming it (`echo databricks bundle deploy`, a commit message). Quoted text is data;
+ * the line is split into its simple commands, and each is read past assignments, shell keywords and
+ * wrappers with their flags (`sudo -E`, `time`, `then`) to the program it runs. That program must be
+ * `databricks` (or a path to it); its own global flags (`-p prod`, `--profile=x`) come before the command.
+ */
+export function runsDatabricksCompute(line: string): boolean {
+  const unquoted = line.replace(/"[^"]*"|'[^']*'/g, '""')
+  for (const simple of unquoted.split(/&&|\|\||[;&|(){}\n]/)) {
+    const words = simple.trim().split(/\s+/).filter(Boolean)
+    let at = 0
+    while (at < words.length) {
+      const word = words[at]!
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) at++
+      else if (SHELL_LEADS.has(word)) {
+        at++
+        while (words[at]?.startsWith('-')) at++
+      } else break
+    }
+    if (!/(^|\/)databricks$/.test(words[at] ?? '')) continue
+    at++
+    while (words[at]?.startsWith('-')) {
+      const flag = words[at]!
+      at++
+      // A flag's value, when it is not given with `=` and the next word is not a command or a flag.
+      if (!flag.includes('=') && words[at] && !words[at]!.startsWith('-') && !DATABRICKS_SUBCOMMANDS.has(words[at]!)) at++
+    }
+    if (DATABRICKS_SUBCOMMANDS.has(words[at] ?? '')) return true
+  }
+  return false
+}
 const BAND_READ_LIMIT = 200_000
 
 /** A figure the answer gave: not missing, empty or something that reads as NaN. */
@@ -184,7 +215,7 @@ export function evidenceLines(evidence: Record<string, unknown>, days = 7): stri
     case 'idle_cluster':
       return [
         `All-purpose cluster ${percent(evidence.idle_ratio)} idle across ${count(evidence.active_days)} active days${oneLine(evidence.idle_pattern) ? ` (${oneLine(evidence.idle_pattern).replace(/_/g, ' ')})` : ''}, average worker CPU ${percentOf(evidence.avg_cpu_active_pct)}, peak ${percentOf(evidence.peak_cpu_active_pct)}`,
-        `Auto-termination ${evidence.auto_termination_minutes ? `${oneLine(evidence.auto_termination_minutes)} minutes` : 'off'}; $${fixed(evidence.total_cost, 2)} billed on all-purpose compute over ${days} days`,
+        `Auto-termination ${known(evidence.auto_termination_minutes) ? (Number(evidence.auto_termination_minutes) > 0 ? `${count(evidence.auto_termination_minutes)} minutes` : 'off') : '?'}; $${fixed(evidence.total_cost, 2)} billed on all-purpose compute over ${days} days`,
       ]
     case 'job_on_all_purpose': {
       // A trigger or host cluster the answer does not name is left out, not printed as "undefined" or "".
@@ -484,19 +515,25 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
         fixRequest: fixRequest(one, days, platform, pricing),
       }
     }),
-    whatIf: (report.what_if ?? []).map(one => ({
-      resourceId: one.resource_id,
-      resourceName: shownName(one.resource_name, one.resource_id),
-      currentMonthly: one.current_monthly_cost,
-      choices: one.choices.map(choice => ({
-        label: size(choice.label),
-        monthlyCost: choice.monthly_cost,
-        monthlySaving: choice.monthly_saving,
-        fits: choice.fits,
-        cores: choice.cores,
-        coresNeeded: choice.cores_needed,
+    // A what-if row without its choices, or a choice without its figures, is left out rather than drawn wrong.
+    whatIf: (report.what_if ?? [])
+      .filter(one => Array.isArray(one.choices) && known(one.current_monthly_cost))
+      .map(one => ({
+        resourceId: one.resource_id,
+        resourceName: shownName(one.resource_name, one.resource_id),
+        currentMonthly: one.current_monthly_cost,
+        choices: one.choices
+          // Serverless is priced without a size, so only a sized choice needs the cores its queries need.
+          .filter(choice => known(choice.monthly_cost) && known(choice.monthly_saving) && (choice.label === 'SERVERLESS' || known(choice.cores_needed)))
+          .map(choice => ({
+            label: size(choice.label),
+            monthlyCost: choice.monthly_cost,
+            monthlySaving: choice.monthly_saving,
+            fits: choice.fits,
+            cores: choice.cores,
+            coresNeeded: choice.cores_needed,
+          })),
       })),
-    })),
     changes: [],
     inventory,
     queryCount: queries.size > 0 ? [...queries.values()].reduce((sum, one) => sum + one, 0) : null,
@@ -505,10 +542,10 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
   }
 }
 
-/** What a warehouse was when a run first flagged it, kept across sessions to show its spend before and after a change. */
 /**
- * `windowCost` is null when the answer gave the warehouse no cost: no amount is claimed from it. `days` is the
- * length of the window it covers; a baseline kept before `days` was stored is read as this run's.
+ * What a warehouse was when a run first flagged it, kept across sessions to show its spend before and after a
+ * change. `windowCost` is null when the answer gave the warehouse no cost: no amount is claimed from it. `days`
+ * is the length of the window it covers; a baseline kept before `days` was stored is read as this run's.
  */
 type Baseline = { date: string; type: string; size: string | null; windowCost: number | null; days?: number }
 
@@ -526,9 +563,16 @@ const sizeOrNull = (value: string | null | undefined) => value ?? null
 export async function trackChanges($: EngineInterface, view: SavingsView, warehouses: ToolWarehouse[], today: string): Promise<SavingsView['changes']> {
   const connection = view.connection ?? 'default'
   const flagged = new Set(view.findings.filter(one => isWarehouse(one.resourceType)).map(one => `${one.workspaceId ?? ''}/${one.resourceId}`))
+  const several = view.checked.workspaces > 1
   const changes: SavingsView['changes'] = []
+  const seen = new Set<string>()
   for (const warehouse of warehouses) {
+    // Across several workspaces an id is only unique with its workspace: without one, nothing is compared.
+    if (several && !warehouse.workspace_id) continue
     const key = baselineKey(view.platform === 'snowflake' ? keyOf(view) : connection, warehouse)
+    // A warehouse listed twice is compared once, not with the baseline its first listing just wrote.
+    if (seen.has(key)) continue
+    seen.add(key)
     const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
     const windowCost = typeof warehouse.window_cost === 'number' ? warehouse.window_cost : null
     const changed = stored && (stored.size !== sizeOrNull(warehouse.size) || stored.type !== warehouse.type)
@@ -545,7 +589,9 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
         monthlyNow: (windowCost * 30) / windowDays(view.window),
       })
     }
-    if (!stored && flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`)) {
+    // A finding that names no workspace is matched by id alone, which is unambiguous only in one workspace.
+    const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flagged.has(`/${warehouse.id}`))
+    if (!stored && isFlagged) {
       await $.store
         .set(key, { date: today, type: warehouse.type, size: sizeOrNull(warehouse.size), windowCost, days: windowDays(view.window) } satisfies Baseline)
         .catch(() => undefined)
@@ -725,8 +771,12 @@ async function listConnections($: EngineInterface): Promise<SavingsConnection[] 
   return connections
 }
 
-/** The version `altimate --version` printed, read as the status line reads it: on stdout, else on stderr. */
-const versionOf = (printed: { stdout?: unknown; stderr?: unknown }) => parseVersion(String(printed.stdout ?? '')) ?? parseVersion(String(printed.stderr ?? ''))
+/** The version `altimate --version` printed: on stdout, or on stderr when stdout printed nothing. */
+const versionOf = (printed: { stdout?: unknown; stderr?: unknown }) => {
+  // stderr is read only when stdout printed nothing, so a runtime note there never stands in for a version.
+  const stdout = String(printed.stdout ?? '').trim()
+  return stdout ? parseVersion(stdout) : parseVersion(String(printed.stderr ?? ''))
+}
 /** A source build prints `local` instead of a version. */
 const isSourceBuild = (printed: { stdout?: unknown }) => String(printed.stdout ?? '').trim().split('\n').pop()?.trim() === 'local'
 
@@ -957,9 +1007,11 @@ async function runCheck($: EngineInterface, asked: string | null) {
       return { stdout: '', stderr: '' }
     })
     if (!live()) return
-    // A source build prints `local`, whatever version a runtime note on stderr names.
+    // A source build prints `local`, whatever version a runtime note on stderr names; a probe that failed
+    // reads as no version.
     const source = isSourceBuild(printed)
-    const version = source ? null : versionOf(printed)
+    const failed = typeof (printed as { exitCode?: unknown }).exitCode === 'number' && (printed as { exitCode: number }).exitCode !== 0
+    const version = source || failed ? null : versionOf(printed)
     if (source || !version || !supportsSavings(version)) {
       const targets = targetsFor(asked, known)
       const noCheck = `This altimate-code has no ${checkName(targets)}.`
@@ -1539,6 +1591,7 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   offered = false
   turnRunning = false
   heldNotices = []
+  pressStarting = false
   await update($, bandAtom, () => null)
   await update($, whatIfAtom, () => null)
   await update($, busyAtom, () => null)
@@ -1592,8 +1645,7 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 }
 
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
-  // Quoted text (a commit message, an echo) is data: its `;` or `&&` separates no command.
-  if (!DATABRICKS_COMMAND.test(e.command.replace(/"[^"]*"|'[^']*'/g, '""'))) return
+  if (!runsDatabricksCompute(e.command)) return
   // A databricks warehouses, clusters, bundle or jobs command is about compute whatever its words.
   const band = await bandFor($, e.command, true)
   if (band) await update($, bandAtom, () => band)
