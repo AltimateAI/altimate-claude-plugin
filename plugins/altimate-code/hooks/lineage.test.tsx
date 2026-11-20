@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void> }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -225,7 +225,8 @@ async function start($: any, on: any, options: Options = {}) {
     if (options.cliCutOff?.(tool)) return { value: { exitCode: options.cliCutOffExit ?? 0, stdout: '{"status":"ok","out', stderr: '' } }
     if (options.cliStdout !== undefined) return { value: { exitCode: 0, stdout: options.cliStdout, stderr: '' } }
     // altimate-code's dbt_lineage with include_graph returns the subgraph the pane would build itself.
-    const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
+    const sub = subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders')
+    const graph = args.include_graph ? { graph: options.cliGraph ? options.cliGraph(sub) : sub } : {}
     const body =
       tool === 'dbt_lineage'
         ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...graph } : (options.cliLineage ?? { model_name: 'fct_orders', confidence: 'high' }) }
@@ -2095,6 +2096,23 @@ test("a schema.yml edited after the manifest was written says so: the pane's tes
   const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then r/
   expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
   // Claude removes the model's tests from its schema.yml.
+  ymlMtime = 5
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/${YML}`, old_string: 'tests:', new_string: '' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a manifest over 4 MiB: the schema.yml altimate-code's graph names is checked too", async ($, on) => {
+  const YML = 'models/marts/schema.yml'
+  let ymlMtime = 1
+  const cliGraph = (graph: any) => ({ ...graph, nodes: { ...graph.nodes, 'model.shop.fct_orders': { ...graph.nodes['model.shop.fct_orders'], yml: YML } } })
+  const { clock } = await start($, on, { size: 6 * 1024 * 1024, cliGraph, mtime: () => 2, fileMtime: path => (path === `${ROOT}/${YML}` ? ymlMtime : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then r/
+  expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
   ymlMtime = 5
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/${YML}`, old_string: 'tests:', new_string: '' })
   await clock.settle()

@@ -4292,7 +4292,7 @@ test('the model-context toast counts the columns schema.yml lists as such, in th
   const { clock, toasts } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(one) } })
   const result: any = await $.tool.call({ tool: 'Read', file_path: ORDERS })
   await clock.settle()
-  expect(toasts.find(one => one.startsWith('◆ model context · orders'))).toMatch(/^◆ model context · orders: table · 1 column in schema\.yml · \d+ tests? · depth/)
+  expect(toasts.find(one => one.startsWith('◆ model context · orders'))).toBe('◆ model context · orders: table · 1 column in schema.yml · 1 test · depth 2↑ 1↓')
   expect(result.context[0]).toContain('- columns schema.yml lists (1; the model may return more):')
 })
 
