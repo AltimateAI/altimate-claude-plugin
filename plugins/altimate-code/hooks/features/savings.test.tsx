@@ -679,6 +679,31 @@ test('/savings <connection> typed after a band press decided to run is told that
   expect(runs.length).toBe(1)
 })
 
+test('the band\'s Run /savings pressed while a typed /savings check is going starts no second check', async ($, on) => {
+  const options: any = { files: { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" { name = "Classic" }' } }
+  const { clock, runs } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  // A typed check that does not finish yet: no press is queued, so only its claim keeps the band from starting one.
+  let finish = () => {}
+  options.hold = new Promise<void>(done => (finish = done))
+  await savings($, 'prod_dbx')
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'Classic', new_string: 'Classic' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Classic: / })).toBeDefined()
+  await band.press({ key: 'savings-run' })
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  await band.unmount()
+  // A bare /savings meanwhile asks for the first connection, which the running check is not reading.
+  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane. Run /savings again when it finishes.')
+  finish()
+  await clock.settle()
+})
+
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const { clock } = await start($, on, { files })

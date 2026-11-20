@@ -816,7 +816,8 @@ export function register(on: On, _context: FeatureContext) {
     const going = claim
     if (going) {
       await openPane($)
-      const other = asked && asked !== going.connection ? ` Run /savings ${asked} again when it finishes.` : ''
+      // One asked for a connection the running check is not reading, typed or not, is to be asked again.
+      const other = (asked || null) !== going.connection ? ` Run /savings${asked ? ` ${asked}` : ''} again when it finishes.` : ''
       return { text: `The Databricks savings check is already running in the side pane.${other}` }
     }
     const mine = { connection: asked || null }
@@ -975,7 +976,9 @@ export function register(on: On, _context: FeatureContext) {
 
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, _e: Args<'session.start'>) {
-  // A run that was going when the last session ended can never finish, so it must not block this one.
+  // A run that was going when the last session ended can never finish, so neither its claim nor its running
+  // flag may block this one.
+  claim = null
   await update($, busyAtom, () => null)
   await $.command.register({
     name: COMMAND,
@@ -1038,10 +1041,10 @@ function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<u
       if (!live()) return
       await first?.(live)
       if (!live() || claim) return
-      const mine = { connection: lastConnection }
-      claim = mine
-      await update($, busyAtom, now => (claim === mine ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
-      await runCheck($, mine)
+      const run = { connection: lastConnection }
+      claim = run
+      await update($, busyAtom, now => (claim === run ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
+      await runCheck($, run)
     } finally {
       if (pressQueued === mine) pressQueued = null
     }
