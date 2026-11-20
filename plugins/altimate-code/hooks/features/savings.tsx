@@ -441,7 +441,13 @@ const baselineKey = (connection: string, warehouse: Pick<ToolWarehouse, 'id' | '
  * cost. The windows are different weeks, so a change in workload moves the amounts too: they are not a
  * saving measured with the workload held constant.
  */
-export async function trackChanges($: EngineInterface, view: SavingsView, warehouses: ToolWarehouse[], today: string): Promise<SavingsView['changes']> {
+export async function trackChanges(
+  $: EngineInterface,
+  view: SavingsView,
+  warehouses: ToolWarehouse[],
+  today: string,
+  live: () => boolean = () => true,
+): Promise<SavingsView['changes']> {
   // Without the connection's name one connection's baselines could be read as another's, so none are kept.
   const connection = view.connection
   if (!connection) return []
@@ -459,6 +465,8 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
     if (seen.has(key)) continue
     seen.add(key)
     const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
+    // A /clear while the baselines were read: this run keeps nothing.
+    if (!live()) return []
     const changed = stored && (stored.size !== warehouse.size || stored.type !== warehouse.type)
     if (stored && changed) {
       changes.push({
@@ -561,12 +569,18 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
   if (asked !== generation) return
   const mine = ++generation
   const live = () => mine === generation
+  // Every write of this run lands only while it is current, checked inside the write: a /clear at any await
+  // below leaves the new conversation's state as the clear left it.
+  const say = (text: string) => {
+    if (live()) $.ui.toast(text)
+  }
   lastConnection = connection
   offered = true
   try {
-    await update($, messageAtom, () => null)
-    await update($, bandAtom, () => null)
+    await update($, messageAtom, now => (live() ? null : now))
+    await update($, bandAtom, now => (live() ? null : now))
     const until = (await $.clock.now()) + RUN_BUDGET_MS
+    if (!live()) return
     // A CLI that cannot be started at all goes to the install message below; one that does not answer is unreadable.
     const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY).catch(error => {
       if (MISSING_BINARY.test(String(error))) throw error
@@ -596,8 +610,8 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
               text: "altimate-code's version could not be read, so the savings check was not started.",
               recovery: `Run \`altimate --version\` in a terminal: if it prints no version, or one older than ${SAVINGS_MIN_ALTIMATE_CODE}, update altimate-code (\`altimate upgrade\`), then run /savings again.`,
             }
-      await update($, messageAtom, () => why)
-      $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
+      await update($, messageAtom, now => (live() ? why : now))
+      say(`Databricks savings check: ${why.text} ${why.recovery}`)
       return
     }
     // Typing /savings is the user's go-ahead, which the tool asks for before it queries the warehouse.
@@ -610,25 +624,27 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
       const raw = ('raw' in result ? result.raw : '') || ''
       const error = metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)
       const why = explain(error || 'no answer', connection)
-      await update($, messageAtom, () => why)
-      $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
+      await update($, messageAtom, now => (live() ? why : now))
+      say(`Databricks savings check: ${why.text} ${why.recovery}`)
       return
     }
     const today = new Date(await $.clock.now()).toISOString().slice(0, 10)
-    view.changes = await trackChanges($, view, metadata?.warehouses ?? [], today)
     if (!live()) return
-    await update($, whatIfAtom, () => null)
-    await update($, reportAtom, () => view)
-    $.ui.toast(summary(view))
+    view.changes = await trackChanges($, view, metadata?.warehouses ?? [], today, live)
+    if (!live()) return
+    await update($, whatIfAtom, now => (live() ? null : now))
+    await update($, reportAtom, now => (live() ? view : now))
+    say(summary(view))
   } catch (error) {
     if (!live()) return
     const missing = MISSING_BINARY.test(String(error))
     const why = missing
       ? { text: 'altimate-code is not installed.', recovery: 'Install it (`npm install -g altimate-code`), add a Databricks connection, then run /savings again.' }
       : explain(String(error), connection)
-    await update($, messageAtom, () => why)
-    $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
+    await update($, messageAtom, now => (live() ? why : now))
+    say(`Databricks savings check: ${why.text} ${why.recovery}`)
   } finally {
+    // A dropped run leaves the running flag as the /clear left it: cleared, or set by the new conversation's run.
     if (live()) await update($, busyAtom, () => null)
   }
 }
