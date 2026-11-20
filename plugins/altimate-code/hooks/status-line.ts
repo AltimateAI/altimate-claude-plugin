@@ -22,15 +22,45 @@ export function statusLineOf(current: Record<string, string>): string | undefine
   return shown.join(' · ')
 }
 
+// The parts as last drawn: a /clear empties the session's state, and the line is the process's, so they are put back.
+let drawnParts: Record<string, string> = {}
+// The parts drawn when a /clear ended the conversation, until the next one has them back.
+let beforeClear: Record<string, string> | null = null
+
 /** Sets one part (null or empty removes it) and draws the status line again. */
 export async function setStatusPart($: EngineInterface, id: StatusPartId, text: string | null) {
+  // A part its owner removes after a /clear is not brought back with the parts kept from before it.
+  if (beforeClear && !text) delete beforeClear[id]
   await update($, parts, prev => {
     const next = { ...prev }
     if (text) next[id] = text
     else delete next[id]
     return next
   })
-  $.ui.status(statusLineOf(await read($, parts)))
+  drawnParts = await read($, parts)
+  $.ui.status(statusLineOf(drawnParts))
+}
+
+// The parts that describe the machine rather than the conversation: they hold after a /clear. A feature's part
+// comes from its session state, which a /clear empties; the feature draws it again when it has it back.
+const KEPT_ACROSS_CLEAR: readonly StatusPartId[] = ['integrations', 'altimateCode']
+
+/** At a /clear: keeps the machine's parts drawn now, which a part set before restoreStatusParts must not replace. */
+export function keepStatusParts() {
+  const kept = Object.fromEntries(KEPT_ACROSS_CLEAR.filter(id => drawnParts[id]).map(id => [id, drawnParts[id]!]))
+  beforeClear = { ...(beforeClear ?? {}), ...kept }
+}
+
+/** After a /clear: the parts drawn before it, under any the new conversation has set already. */
+export async function restoreStatusParts($: EngineInterface) {
+  const kept = beforeClear
+  if (!kept) return
+  // Read when the write applies, so a part removed while it waits stays removed; let go only once written, and only
+  // if no later /clear kept a snapshot of its own meanwhile.
+  await update($, parts, prev => ({ ...kept, ...prev }))
+  if (beforeClear === kept) beforeClear = null
+  drawnParts = await read($, parts)
+  $.ui.status(statusLineOf(drawnParts))
 }
 
 /**
@@ -38,6 +68,8 @@ export async function setStatusPart($: EngineInterface, id: StatusPartId, text: 
  * set is not drawn again before its owner has set it in this one.
  */
 export async function clearStatusParts($: EngineInterface) {
+  drawnParts = {}
+  beforeClear = null
   await update($, parts, () => ({}))
   $.ui.status(undefined)
 }

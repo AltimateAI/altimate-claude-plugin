@@ -160,7 +160,7 @@ export function register(on: On, context: FeatureContext) {
     const target = e.args.trim()
     if (!target) {
       const last = (await read($, costAtom))?.lastEstimate
-      return { text: last ? `Last estimate: ${last.target} would scan ${last.display}. Run /scan-cost <model> for another.` : 'Run /scan-cost <model> to estimate the scan of a model.' }
+      return { text: last ? `Last estimate: ${last.target} would scan ${last.display}${basisOf(last)}. Run /scan-cost <model> for another.` : 'Run /scan-cost <model> to estimate the scan of a model.' }
     }
     const began = await $.clock.now()
     // The wait is short (the user is looking at the screen); the estimate's own budget starts when the wait ends, at the latest.
@@ -171,7 +171,7 @@ export function register(on: On, context: FeatureContext) {
     const answer = await started.answer
     if (answer.kind === 'bytes') {
       await forgetUnsupported($)
-      await rememberEstimate($, target, answer.bytes, answer.display)
+      await rememberEstimate($, target, answer.bytes, answer.display, answer.planner)
       return { text: `${target} would scan ${answer.display}${basisOf(answer)}${verdict(answer.maxBytes)}` }
     }
     return { text: answer.kind === 'unsupported' ? `No estimate: ${unsupportedWhy(answer.adapter)}.` : `No estimate: ${answer.reason}` }
@@ -358,7 +358,7 @@ async function gate($: EngineInterface, e: BashCall, mine: { note?: object }): P
       mine.note = { label, bytes: answer.maxBytes, display: answer.display, planner: answer.planner }
       overNow.set(e.command, mine.note as { label: string; bytes: number; display: string; planner?: string })
     }
-    await rememberEstimate($, label, answer.bytes, answer.display)
+    await rememberEstimate($, label, answer.bytes, answer.display, answer.planner)
     if (answer.maxBytes <= limitBytes) lines.push(`cost · ${label} would scan ${answer.display}${basisOf(answer)}`)
     else over.push({ label, bytes: answer.maxBytes, point: answer.bytes, display: answer.display, planner: answer.planner })
   }
@@ -768,10 +768,10 @@ async function estimateWithin($: EngineInterface, args: { model?: string; sql?: 
   return done.answer
 }
 
-async function rememberEstimate($: EngineInterface, target: string, bytes: number, display: string) {
+async function rememberEstimate($: EngineInterface, target: string, bytes: number, display: string, planner?: string) {
   // What is shown never decides the gate: a failure here must not let a scan the gate knows is over the limit through.
   try {
-    await update($, costAtom, prev => ({ ...(prev ?? FRESH), lastEstimate: { target, bytes, display } }))
+    await update($, costAtom, prev => ({ ...(prev ?? FRESH), lastEstimate: { target, bytes, display, ...(planner && { planner }) } }))
     await setStatusPart($, 'cost', `scan ≈ ${display}`)
   } catch {}
 }

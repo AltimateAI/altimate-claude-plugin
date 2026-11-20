@@ -12,6 +12,7 @@ export type PaneSizes = Record<PaneSize, { columns: number; rows: number }>
 export const SIZE_ORDER: PaneSize[] = ['min', 'default', 'max']
 const SIZE_LABEL: Record<PaneSize, string> = { min: 'Min', default: 'Default', max: 'Max' }
 const SIZES_KEY = 'pane-sizes'
+export const INLINE_SIZE_NOTE = 'Above the prompt the pane is as tall as Claude Code lets it be; Min, Default and Max size it when it docks beside a fullscreen chat.'
 
 const sizeAtom = atom({ plugin: 'altimate-code', key: 'paneSizes' } as const, {} as Record<string, PaneSize>)
 
@@ -91,10 +92,21 @@ async function choose($: EngineInterface, id: string, title: string, spec: PaneS
   await $.ui.open({ id, title, ...paneSizes(spec)[size], closeOnEscape: true })
 }
 
-/** The Min / Default / Max row of a pane, the pane's current size marked. */
-export async function sizeControls($: EngineInterface, ui: { Box: any; Button: any; Text: any }, pane: { id: string; title: string; spec: PaneSpec; keyPrefix: string; terminal?: number }, later: (work: () => Promise<unknown>) => void) {
+/**
+ * The Min / Default / Max row of a pane, the pane's current size marked. Seated inline above the prompt (a
+ * terminal under 110 columns, or not fullscreen), the pane is as tall as the layout spares whatever it asks
+ * for, so the three would look the same: a line says so in their place.
+ */
+export async function sizeControls($: EngineInterface, ui: { Box: any; Button: any; Text: any }, pane: { id: string; title: string; spec: PaneSpec; keyPrefix: string; terminal?: number; placement?: string }, later: (work: () => Promise<unknown>) => void) {
   const { Box, Button, Text } = ui
   noteTerminal(pane.terminal)
+  if (pane.placement === 'inline') {
+    return (
+      <Box key={`${pane.keyPrefix}-size`}>
+        <Text dimColor>{INLINE_SIZE_NOTE}</Text>
+      </Box>
+    )
+  }
   const current = (await read($, sizeAtom))[pane.id] ?? 'default'
   return (
     <Box key={`${pane.keyPrefix}-size`} gap={1}>

@@ -1,6 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { effective, rewriteDeferCommand, runsHere, runsInProject, statusText } from './defer'
+import { PHASE_TIMEOUT_MS } from '../tool-chain'
+import { effective, rewriteDefer, rewriteDeferCommand, runsHere, runsInProject, statusText } from './defer'
 
 const on = { stateDir: '/work/prod-state' }
 
@@ -224,6 +225,9 @@ test('the override decides, and the status text shows target and defer', () => {
 const ROOT = '/repo'
 /** The session's folder, answered by the fake host. */
 let cwd = ROOT
+/** Held while set: the project's defer setting read, and the Bash command itself. */
+let holdRead: Promise<void> | null = null
+let holdBash: Promise<void> | null = null
 
 /** A dbt project at /repo whose defer setting the CLI reports as `answer`; Bash commands are recorded. */
 function start($: any, on: any, answer: Record<string, unknown>, fail: { times: number } = { times: 0 }, projects: string[] = [ROOT]) {
@@ -235,11 +239,14 @@ function start($: any, on: any, answer: Record<string, unknown>, fail: { times: 
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
   cwd = ROOT
+  holdRead = null
+  holdBash = null
   on('session.cwd', () => ({ value: cwd }))
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: projects.some(dir => e.path === `${dir}/dbt_project.yml`) }))
-  on('process.run', (_: unknown, e: { readonly argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { readonly argv: readonly string[] }) => {
     if (!e.argv.includes('dbt_defer_state')) return { value: { exitCode: 0, stdout: '{}', stderr: '' } }
     reads.push(e.argv.join(' '))
+    await holdRead
     if (fail.times-- > 0) return { value: { exitCode: 1, stdout: '', stderr: 'not ready' } }
     return {
     value: { exitCode: 0, stdout: JSON.stringify({ status: 'success', output: '', metadata: { success: true, ...answer } }), stderr: '' },
@@ -249,8 +256,9 @@ function start($: any, on: any, answer: Record<string, unknown>, fail: { times: 
     statuses.push(e.text)
     return { value: undefined }
   })
-  on('tool.call', (_: unknown, e: any) => {
+  on('tool.call', async (_: unknown, e: any) => {
     bash.push(e.command)
+    await holdBash
     return { result: { ok: true } }
   })
   return { bash, statuses, reads, clock }
@@ -410,4 +418,67 @@ test('a flag that takes no value before --project-dir leaves it a real option, a
   expect(rewriteDeferCommand('DBT_FAVOR_STATE=false command dbt run', options)).toBe('DBT_FAVOR_STATE=false command dbt run --defer --state /work/prod-state')
   expect(rewriteDeferCommand('DBT_FAVOR_STATE=false env dbt run', options)).toBe('DBT_FAVOR_STATE=false env dbt run --defer --state /work/prod-state')
   expect(rewriteDeferCommand('echo hi; dbt run', options)).toBe('echo hi; dbt run --defer --state /work/prod-state --favor-state')
+})
+
+test('the flags the plugin adds are told: rewriteDefer names each invocation\'s, the state folder relative to the project', () => {
+  const { command, added } = rewriteDefer('dbt build -s x && dbt test', { stateDir: `${ROOT}/prod`, favorState: true, target: 'dev' }, ROOT)
+  expect(command).toBe(`dbt build --defer --state ${ROOT}/prod --favor-state --target dev -s x && dbt test --defer --state ${ROOT}/prod --favor-state --target dev`)
+  expect(added).toEqual(['dbt build --defer --state prod --favor-state --target dev', 'dbt test --defer --state prod --favor-state --target dev'])
+  expect(rewriteDefer('ls', { stateDir: `${ROOT}/prod` }, ROOT).added).toEqual([])
+})
+
+const BAND = {
+  plugin: 'altimate-code',
+  component: 'AbovePrompt',
+  props: { hasSurvey: false, isCollapsed: false, isWorking: false, maxRows: 10, bodyColumns: 120, scroll: { offset: 0, bodyRows: 10 }, view: {} },
+} as const
+
+test('Claude is told in the result, and the person in the band until the next prompt, the flags its dbt command ran with', async ($, on) => {
+  start($, on, DEFER)
+  on('ui.render', ($$: any, e: any) => {
+    const { Box } = $$.ui.resolve(e)
+    return h(Box, { key: 'engine' }) as any
+  })
+  on('turn.start', (_: unknown, e: { turnId: string }) => ({ turnId: e.turnId }))
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  const ran: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s x' })
+  expect(ran.context).toContain('◆ dbt · this command ran as dbt build --defer --state /work/prod-state --favor-state: /defer and /target added those flags (the command shown is as written), so its results are from that target and state')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: 'dbt build --defer --state /work/prod-state --favor-state' })).toBeDefined()
+  await band.unmount()
+  // A command the plugin left as written says nothing.
+  const own: any = await $.tool.call({ tool: 'Bash', command: 'dbt build --state ./mine' })
+  expect((own.context ?? []).some((line: string) => line.startsWith('◆ dbt · this command ran as'))).toBe(false)
+  await $.turn.start({ turnId: 't2', prompt: 'next' } as any)
+  const after = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await after.find({ type: 'Text', text: /ran as/ })).toBeUndefined()
+  await after.unmount()
+})
+
+test('each call gets the flags added to it: a concurrent call that wrote the same flags itself takes none of them', async ($, on) => {
+  start($, on, DEFER)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  // Claude's own command already names the flags the rewrite would add, so it is not rewritten.
+  const own: any = await $.tool.call({ tool: 'Bash', command: 'dbt build --defer --state /work/prod-state --favor-state -s x', tool_use_id: 'own' })
+  expect((own.context ?? []).some((line: string) => line.startsWith('◆ dbt · this command ran as'))).toBe(false)
+  const ran: any = await $.tool.call({ tool: 'Bash', command: 'dbt build -s x', tool_use_id: 'rewritten' })
+  expect(ran.context).toContain('◆ dbt · this command ran as dbt build --defer --state /work/prod-state --favor-state: /defer and /target added those flags (the command shown is as written), so its results are from that target and state')
+})
+
+test('a rewrite the chain gave up on, which finishes while the command runs as written, tells Claude nothing about flags it never added', async ($, on) => {
+  const seen = start($, on, DEFER)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  let releaseRead!: () => void
+  let releaseBash!: () => void
+  holdRead = new Promise<void>(resolve => (releaseRead = resolve))
+  holdBash = new Promise<void>(resolve => (releaseBash = resolve))
+  const call = $.tool.call({ tool: 'Bash', command: 'dbt build -s x', tool_use_id: 'late' })
+  // Past the phase deadline the command runs as written; the settings read then finishes while it runs.
+  await seen.clock.advance(PHASE_TIMEOUT_MS + 100)
+  releaseRead()
+  await seen.clock.advance(10)
+  releaseBash()
+  const ran: any = await call
+  expect(seen.bash.at(-1)).toBe('dbt build -s x')
+  expect((ran.context ?? []).some((line: string) => line.startsWith('◆ dbt · this command ran as'))).toBe(false)
 })

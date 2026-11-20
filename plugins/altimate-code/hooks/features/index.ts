@@ -9,6 +9,8 @@
 // A function that throws, at once or as a rejection, is logged and skipped: one feature's failure never stops another or the call. A `register` failure is silent (`$` is not available at load).
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallInput, ToolCallResult } from 'claude-code'
 
+import { later } from '../altimate-cli'
+import { keepStatusParts, restoreStatusParts } from '../status-line'
 import type { BashCall, EditedFile, FileCall } from '../tool-chain'
 import {
   CHECK_HOLD_MS as dbtModsCheckHoldMs,
@@ -47,6 +49,7 @@ import {
   bashRewrite as deferBashRewrite,
   bashGate as deferBashGate,
   bashAfter as deferBashAfter,
+  bashDropped as deferBashDropped,
   editAfter as deferEditAfter,
   readOrEditAfter as deferReadOrEditAfter,
   editReadsBefore as deferEditReadsBefore,
@@ -68,6 +71,7 @@ import {
 import {
   register as commentsRegister,
   sessionStart as commentsSessionStart,
+  clearStart as commentsClearStart,
   turnStart as commentsTurnStart,
   turnComplete as commentsTurnComplete,
   sessionEnd as commentsSessionEnd,
@@ -96,6 +100,7 @@ import {
 import {
   register as healthRegister,
   sessionStart as healthSessionStart,
+  clearStart as healthClearStart,
   turnStart as healthTurnStart,
   turnComplete as healthTurnComplete,
   sessionEnd as healthSessionEnd,
@@ -246,6 +251,37 @@ export async function featuresSessionStart($: EngineInterface, e: Args<'session.
   await attempt($, 'dbtMods', 'sessionStart', () => sessionStartDbtMods($, e))
 }
 
+/**
+ * A conversation that a /clear started: no `session.start` comes for it, and its `$.state` starts empty, so the
+ * features whose state describes the project rather than the conversation fill it again.
+ */
+export async function featuresClearStart($: EngineInterface) {
+  await attempt($, 'statusLine', 'clearStart', () => restoreStatusParts($))
+  await attempt($, 'comments', 'clearStart', () => commentsClearStart($))
+  await attempt($, 'health', 'clearStart', () => healthClearStart($))
+}
+
+// How often, and how many times, the session's id is read for the one a /clear starts.
+const CLEAR_POLL_MS = 200
+const CLEAR_POLLS = 50
+
+/**
+ * After a /clear: the conversation that follows runs under a new session id, and its state is that id's. Once
+ * the id has changed, featuresClearStart fills it; an engine that cannot say its id gets nothing.
+ */
+async function whenCleared($: EngineInterface, ended: string) {
+  for (let i = 0; i < CLEAR_POLLS; i++) {
+    let id: string
+    try {
+      id = await $.session.id()
+    } catch {
+      return
+    }
+    if (id !== ended) return featuresClearStart($)
+    await $.clock.sleep(CLEAR_POLL_MS)
+  }
+}
+
 export async function featuresTurnStart($: EngineInterface, e: Args<'turn.start'>) {
   await attempt($, 'runs', 'turnStart', () => runsTurnStart($, e))
   await attempt($, 'defer', 'turnStart', () => deferTurnStart($, e))
@@ -274,6 +310,11 @@ export async function featuresTurnComplete($: EngineInterface, e: Args<'turn.com
 }
 
 export async function featuresSessionEnd($: EngineInterface, e: Args<'session.end'>) {
+  // Taken before the features end: a /clear goes on under another id once they have.
+  if (e.reason === 'clear' && typeof e.sessionId === 'string') {
+    keepStatusParts()
+    later($, () => whenCleared($, e.sessionId))
+  }
   await attempt($, 'runs', 'sessionEnd', () => runsSessionEnd($, e))
   await attempt($, 'defer', 'sessionEnd', () => deferSessionEnd($, e))
   await attempt($, 'toModel', 'sessionEnd', () => toModelSessionEnd($, e))
@@ -356,6 +397,7 @@ export async function featuresCallStart($: EngineInterface, e: ToolCallInput): P
 /** A Bash call that a gate refused, or whose result is a refusal, never reaches bashAfter: the features that kept it let go. */
 export async function featuresBashDropped($: EngineInterface, e: BashCall): Promise<void> {
   await attempt($, 'runs', 'bashDropped', () => runsBashDropped($, e))
+  await attempt($, 'defer', 'bashDropped', () => deferBashDropped($, e))
 }
 
 /** The context lines every feature adds after a Bash call ran. */

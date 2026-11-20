@@ -152,6 +152,10 @@ Opening a dbt folder runs two programs the repository supplies, with no action f
 
 Compile and validate runs a query on your warehouse after every model edit (`dbt show --limit 1`). On a warehouse that bills by bytes scanned or wakes a suspended warehouse for it, that costs money. Set the plugin's `dbt_mods` option to false (in `/config`) to turn all of the helpers off.
 
+### altimate-dbt
+
+When Claude mentions `altimate-dbt`, it is the dbt command line that comes with altimate-code (`npm i -g @altimateai/altimate-code`, the same install as the plugin's engine). It finds your dbt project folder, Python environment and warehouse adapter by itself, and altimate-code's agent uses it instead of the raw dbt tool for better error messages. Its commands include `init`, `doctor`, `compile`, `build`, `run`, `test`, `deps`, `columns <model>`, `graph` (lineage) and `execute "<sql>"` (a query through the dbt adapter). You do not need to run it yourself: Claude and the altimate-code agent call it when a task needs it, and the plugin's own dbt helpers above do not depend on it. See [altimate-dbt in the altimate-code docs](https://docs.altimate.sh/data-engineering/tools/dbt-tools/#altimate-dbt-cli).
+
 ## Warehouse savings check
 
 `/savings [connection]` checks your Databricks and Snowflake connections for savings, each with four of the checks Altimate's hosted product runs. On Databricks: Classic or Pro SQL warehouses that would cost less as serverless, warehouses larger than their queries need, idle all-purpose clusters, and scheduled or continuous jobs running on all-purpose clusters. On Snowflake: high idle time, warehouses that could be downsized, underutilized clusters and frequent restarts. With both kinds of connection, one `/savings` checks both. A pane beside the chat shows each finding with what it rests on and a monthly range (at list price, or at your Snowflake account's own credit price when the check can read it), each resource counted once at its largest saving.

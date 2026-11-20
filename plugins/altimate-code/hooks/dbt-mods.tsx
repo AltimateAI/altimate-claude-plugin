@@ -46,6 +46,7 @@ import {
   dbtVerdict,
   RUN_VERBS,
   targetPath,
+  SCRATCH_TARGET,
   showPreview,
   stripAnsi,
   textTable,
@@ -186,6 +187,10 @@ async function dbtBinary($: EngineInterface, root: string): Promise<string> {
   return 'dbt'
 }
 
+// A run's process result, with what `read` gave of its artifacts while the queue was held (null when that failed).
+type Artifact = { manifest: any; mtimeMs: number } | null
+type ProcessDone = { exitCode: number; stdout: string; stderr: string; isStdoutTruncated?: boolean; artifact?: Artifact }
+
 // What a run that was no longer wanted when its turn came answers: it never started.
 const SKIPPED = { exitCode: -2, stdout: '', stderr: 'skipped: a newer check replaced it' }
 
@@ -193,7 +198,7 @@ const SKIPPED = { exitCode: -2, stdout: '', stderr: 'skipped: a newer check repl
  * Runs a command in a project, after any dbt this plugin already started there. `wanted` is asked
  * when its turn comes: a check a newer edit replaced runs no warehouse query.
  */
-function runQueued($: EngineInterface, root: string, argv: () => Promise<string[]>, options: { cwd?: string; timeoutMs?: number; wanted?: () => boolean } = {}) {
+function runQueued($: EngineInterface, root: string, argv: () => Promise<string[]>, options: { cwd?: string; timeoutMs?: number; wanted?: () => boolean; scratch?: boolean; read?: () => Promise<Artifact> } = {}): Promise<ProcessDone> {
   const before = queues.get(root) ?? Promise.resolve()
   const run = before
     .catch(() => {})
@@ -203,16 +208,22 @@ function runQueued($: EngineInterface, root: string, argv: () => Promise<string[
       // The values of the profile dbt may echo in its errors are known before any of its output is read.
       await ensureRedactions($, root)
       // The artifact's invocation right before the plugin's dbt runs and right after it exits: it is the plugin's
-      // own only when it changed across the process, and when dbt printed its own id, only that one is.
-      const tracked = command.some(word => word === 'show' || word === 'ls')
+      // own only when it changed across the process, and when dbt printed its own id, only that one is. A run in
+      // the plugin's own folder leaves the project's artifact alone, unless the command names a folder itself.
+      const ownFolder = options.scratch && !command.some(word => word === '--target-path' || word.startsWith('--target-path='))
+      const tracked = !ownFolder && command.some(word => word === 'show' || word === 'ls')
       const before = tracked ? await seenInvocation($, root).catch(() => null) : null
-      const done = await $.process.run(command, { cwd: options.cwd ?? root, timeoutMs: options.timeoutMs ?? DBT_TIMEOUT_MS })
+      // A run the plugin starts by itself writes its artifacts to its own folder (a --target-path the command
+      // names still wins): the project's manifest keeps every model's compiled SQL.
+      const env = options.scratch ? { DBT_TARGET_PATH: await scratchOf($, root) } : undefined
+      const done = await $.process.run(command, { cwd: options.cwd ?? root, timeoutMs: options.timeoutMs ?? DBT_TIMEOUT_MS, ...(env && { env }) })
       if (tracked) {
         const after = await seenInvocation($, root).catch(() => null)
         const own = printedInvocation(done.stdout) ?? (after !== null && after !== before ? after : null)
         if (own) ownInvocation.set(root, own)
       }
-      return done
+      // What the run wrote is read before the next queued run can write over it.
+      return options.read ? { ...done, artifact: await options.read().catch(() => null) } : done
     })
   queues.set(root, run.catch(() => {}))
   return run
@@ -251,8 +262,8 @@ function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): b
 }
 
 /** Runs the project's dbt in the project, after any dbt this plugin already started there. */
-function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DBT_TIMEOUT_MS, wanted?: () => boolean) {
-  return runQueued($, root, async () => [await dbtBinary($, root), ...args], { timeoutMs, wanted }).then(
+function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DBT_TIMEOUT_MS, wanted?: () => boolean, scratch = false, read?: () => Promise<Artifact>) {
+  return runQueued($, root, async () => [await dbtBinary($, root), ...args], { timeoutMs, wanted, scratch, read }).then(
     done => {
       if (done !== SKIPPED) {
         if (cannotRun(done)) unrunnable.add(root)
@@ -355,6 +366,11 @@ async function targetOf($: EngineInterface, root: string): Promise<string> {
   return normalize(path.startsWith('/') ? path : `${root}/${path}`)
 }
 
+/** Where the plugin's own dbt runs in the project write their artifacts (SCRATCH_TARGET): never the project's own. */
+async function scratchOf($: EngineInterface, root: string): Promise<string> {
+  return `${await targetOf($, root)}/${SCRATCH_TARGET}`
+}
+
 /** The interpreter dbt's own launcher names on its first line (`#!/x/bin/python`); undefined for a native binary or an `env` launcher. */
 async function dbtShebang($: EngineInterface, dbt: string): Promise<string | undefined> {
   const launcher = dbt === 'dbt' ? await $.process.run(['which', 'dbt'], { timeoutMs: 5_000 }).then(one => one.stdout.trim()).catch(() => '') : dbt
@@ -380,8 +396,8 @@ async function pythonFor($: EngineInterface, root: string): Promise<string> {
  * manifest over 4 MiB (more than $.fs.read takes) is read for one file's node only, `rel`, through the
  * project's Python, as the lineage half reads one through altimate-code.
  */
-async function readManifest($: EngineInterface, root: string, rel?: string): Promise<{ manifest: any; mtimeMs: number } | null> {
-  const path = `${await targetOf($, root)}/manifest.json`
+async function readManifest($: EngineInterface, root: string, rel?: string, dir?: string): Promise<{ manifest: any; mtimeMs: number } | null> {
+  const path = `${dir ?? (await targetOf($, root))}/manifest.json`
   const stat = await $.fs.stat(path).catch(() => null)
   if (!stat || stat.kind !== 'file') return null
   try {
@@ -469,8 +485,10 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // name (`defined_in`) is still previewed, and the path keeps it to that one version.
   const pkg = await projectName($, root)
   const selectorFor = (name: string | null) => [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(name ? [name] : [])].join(',')
-  const run1 = (args: string[]) => runDbt($, root, args, DBT_TIMEOUT_MS, current).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
-  const show = (select: string) => run1(['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
+  const scratch = await scratchOf($, root)
+  const run1 = (args: string[], read?: () => Promise<Artifact>): Promise<ProcessDone> => runDbt($, root, args, DBT_TIMEOUT_MS, current, true, read).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  // The manifest the show wrote is read while the plugin's dbt queue is still held, so no other run of it replaces it first.
+  const show = (select: string) => run1(['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], () => readManifest($, root, rel, scratch))
   // A newer edit replaced this check before its turn: nothing ran, nothing to report.
   const replaced = () => notChecked('a newer check replaced this one').then(one => ({ ...one, note: '' }))
   const knownName = typeof known?.node?.name === 'string' ? known.node.name : null
@@ -488,8 +506,8 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   let run = await show(selector)
   if (run === SKIPPED) return replaced()
   if (cannotRun(run)) return notChecked(NO_DBT)
-  // dbt show re-parsed the project: the manifest now holds the model and schema.yml as they are.
-  let after = await readManifest($, root, rel)
+  // dbt show re-parsed the project: the manifest it wrote (in the plugin's own folder) holds the model and schema.yml as they are.
+  let after = run.artifact ?? null
   let node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
   let named = typeof node?.node?.name === 'string' ? node.node.name : null
   let preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
@@ -500,7 +518,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
     const again = await show(selectorFor(named))
     if (again === SKIPPED) return replaced()
     run = again
-    after = await readManifest($, root, rel)
+    after = run.artifact ?? null
     node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
     named = typeof node?.node?.name === 'string' ? node.node.name : null
     preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
@@ -512,7 +530,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // list (a model just disabled, not a model at all) was not checked.
   const nothingShown = run.exitCode === 0 && !preview
   // A manifest that is there but could not be read (too big to slice, no interpreter) says nothing about this file.
-  const manifestUnread = !after && (await $.fs.stat(`${await targetOf($, root)}/manifest.json`).catch(() => null))?.kind === 'file'
+  const manifestUnread = !after && (await $.fs.stat(`${scratch}/manifest.json`).catch(() => null))?.kind === 'file'
   if (nothingShown && node) errors.push(`dbt show selected nothing for ${rel} (the model ${named ?? model}), so nothing was compiled or run. ${scrubDbt(stripAnsi(run.stdout)).split('\n').map(line => line.trim()).filter(Boolean).slice(-1)[0] ?? ''}`.trim())
   const documentedColumns = node ? Object.values<any>(node.node.columns ?? {}) : []
   const documented = documentedColumns.map(column => String(column.name))
@@ -535,6 +553,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   const status: CheckView['status'] = errors.length ? 'error' : reason ? 'partial' : drift.missing.length || drift.undocumented.length ? 'warn' : 'ok'
   const view: CheckView = { ...blank, model: named ?? model, schema: node ? schemaOf(node.node) : blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
   await setCheck($, view, newest)
+  if (current()) checkEnded(`${root}/${rel}`, mine, view.ran && after ? { root, file: `${root}/${rel}`, manifest: `${scratch}/manifest.json`, mtimeMs: after.mtimeMs } : null)
   // An edit of a schema file or macro that came while this ran checks it again now.
   if (forcedWhileBusy && current() && !rechecking) {
     const waiting = forcedWhileBusy
@@ -544,6 +563,43 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // A problem opens the whole answer beside the chat: the band has room for one line of dbt's error.
   if ((view.status === 'warn' || view.status === 'error') && newest()) await openCheck($, false).catch(() => null)
   return { view, note: checkNote(view), current, newest }
+}
+
+/** A check that ran its model: the model's file, and the manifest its dbt show wrote (in the plugin's own folder) with its time. */
+export type CheckLanded = { root: string; file: string; manifest: string; mtimeMs: number }
+type Waiter = { after: number; resolve: (landed: CheckLanded | null) => void }
+// Who waits for a check of a file, by the file's normalized path, with the last check started when they asked.
+const landedWaiters = new Map<string, Waiter[]>()
+
+/**
+ * Resolves when the newest check of `file` that starts after this call ends: with its manifest when it compiled
+ * and ran the model (that manifest holds the model's SQL as it is now, where the project's own may hold it as it
+ * was at the last dbt compile), else null. A check already running when this is called is from before the edit,
+ * and does not answer it. Never rejects; `cancel` stops the wait (the caller's own deadline).
+ */
+export function nextCheckOf(file: string): { landed: Promise<CheckLanded | null>; cancel: () => void } {
+  const key = normalize(file)
+  let waiter!: Waiter
+  const landed = new Promise<CheckLanded | null>(resolve => (waiter = { after: seq, resolve }))
+  landedWaiters.set(key, [...(landedWaiters.get(key) ?? []), waiter])
+  const cancel = () => {
+    const left = (landedWaiters.get(key) ?? []).filter(one => one !== waiter)
+    if (left.length) landedWaiters.set(key, left)
+    else landedWaiters.delete(key)
+    waiter.resolve(null)
+  }
+  return { landed, cancel }
+}
+
+/** The check numbered `mine` of `file` ended: the waiters that asked before it started get its answer. */
+function checkEnded(file: string, mine: number, landed: CheckLanded | null) {
+  const key = normalize(file)
+  const waiting = landedWaiters.get(key) ?? []
+  const answered = waiting.filter(one => one.after < mine)
+  const left = waiting.filter(one => one.after >= mine)
+  if (left.length) landedWaiters.set(key, left)
+  else landedWaiters.delete(key)
+  for (const one of answered) one.resolve(landed)
 }
 
 async function setCheck($: EngineInterface, view: CheckView, current: () => boolean) {
@@ -803,7 +859,7 @@ async function runShowWith($: EngineInterface, base: Omit<QueryResult, 'columns'
 /** /dbt-show's query: a model or SQL, 50 rows, with the project's dbt and default target. */
 function runShow($: EngineInterface, root: string, select: string | null, inline: string | null, limit = SHOW_LIMIT, asked = generation) {
   const args = ['show', ...(select ? ['--select', select, '--indirect-selection', 'empty'] : ['--inline', inline ?? '']), '--limit', String(limit), '--output', 'json', '--log-format', 'json']
-  return runShowWith($, { id: queryId(root, select, inline, []), title: titleOf(select, inline), root, select, inline, options: [], argv: null, cwd: null, limit, by: 'you' }, () => runDbt($, root, args), asked)
+  return runShowWith($, { id: queryId(root, select, inline, []), title: titleOf(select, inline), root, select, inline, options: [], argv: null, cwd: null, limit, by: 'you' }, () => runDbt($, root, args, DBT_TIMEOUT_MS, undefined, true), asked)
 }
 
 /**
@@ -821,7 +877,7 @@ async function rerun($: EngineInterface, query: QueryResult, asked = generation)
   const executable = written && (await $.fs.exists(written).catch(() => false)) ? written : await dbtBinary($, query.root)
   // The profile the replayed command reads is the one its own flags name, from the folder it runs in.
   await ensureRedactions($, query.root, { dir: cwd, profilesDir: profilesDirOf(query.argv), profile: flagOf(query.argv, '--profile') })
-  return runShowWith($, query, () => runQueued($, query.root, async () => [executable, ...args], { cwd }), asked)
+  return runShowWith($, query, () => runQueued($, query.root, async () => [executable, ...args], { cwd, scratch: true }), asked)
 }
 
 // ─── 12 · Model context, before Claude guesses ───────────────────────────────────────────────────────
@@ -1725,6 +1781,9 @@ export async function dbtModsReadOrEditAfter($: EngineInterface, e: { tool: stri
  */
 export async function endDbtMods($: EngineInterface) {
   generation++
+  // A check of the conversation that ended answers nobody in the next.
+  for (const waiting of landedWaiters.values()) for (const one of waiting) one.resolve(null)
+  landedWaiters.clear()
   forgetRedactions()
   slices.clear()
   parsed = null
@@ -1815,7 +1874,7 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
     const recent = history.filter(one => !one.bookmarked && one.id !== result?.id).slice(0, HISTORY_SHOWN)
     // Clear history is offered while any query that is not bookmarked is kept, the one shown included.
     const clearable = history.some(one => !one.bookmarked)
-    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, spec: RESULTS_SIZES, keyPrefix: 'results', terminal: paneTerminalColumns(e) }, work => later($, work))
+    const sizes = await sizeControls($, { Box, Button, Text }, { id: RESULTS_PANE, title: RESULTS_TITLE, spec: RESULTS_SIZES, keyPrefix: 'results', terminal: paneTerminalColumns(e), placement: (e.props as { placement?: string } | undefined)?.placement }, work => later($, work))
 
     const table = (() => {
       if (!result) return <Text dimColor>Run /dbt-show &lt;model&gt;, or ask Claude to `dbt show` a model.</Text>

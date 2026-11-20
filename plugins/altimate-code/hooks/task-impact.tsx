@@ -227,11 +227,14 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
         const answer = answerOf(meta)
         // An answer that never reached the column (no hop 0) traced nothing: it could not be traced.
         const down = answer && answer.columns.some(one => one.hop === 0) ? answer : null
-        const lacks = typeof (meta as any)?.column_answer_error === 'string' || (!!answer && !down)
+        // The manifest from before the task has no such model (one the task created): impact_analysis says so with
+        // success false, and no column answer to give.
+        const noModel = (meta as any)?.success === false
+        const lacks = noModel || typeof (meta as any)?.column_answer_error === 'string' || (!!answer && !down)
         // Only a column the SQL from before the task did not name, which the manifest lacks too, is called new.
         const unchecked = col.before === null && !!meta && lacks
         // An altimate-code from before the column answer gives neither the answer nor its error.
-        const stale = !answer && !!meta && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
+        const stale = !noModel && !answer && !!meta && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
         return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
       })
     }
