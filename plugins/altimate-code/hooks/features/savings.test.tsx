@@ -1052,3 +1052,25 @@ test('a version printed with the CLI name in front still starts the check', asyn
   await clock.settle()
   expect(runs.length).toBe(1)
 })
+
+for (const command of ['echo databricks bundle deploy', 'grep databricks clusters notes.txt', 'git commit -m "databricks jobs"']) {
+  test(`a command that only names databricks (${command}) offers nothing`, async ($, on) => {
+    const { clock } = await start($, on)
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount(BAND)
+    expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+    await band.unmount()
+  })
+}
+
+for (const command of ['databricks jobs list', 'ls; databricks clusters list', 'make build || databricks bundle validate', 'A=1 B=2 databricks warehouses list']) {
+  test(`a command that runs databricks (${command}) offers the check`, async ($, on) => {
+    const { clock } = await start($, on)
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount(BAND)
+    expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+    await band.unmount()
+  })
+}

@@ -85,7 +85,9 @@ const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/[^/]+\.ya?ml|[^/]
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 // What marks a file as Databricks config at all: a Terraform `databricks_` resource, or a bundle.
 const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
-const DATABRICKS_COMMAND = /(?:^|[\s;&|(])databricks\s+(?:warehouses|clusters|bundle|jobs)\b/
+// Only a command the shell runs: at the start, or after `;`, `&&`, `||`, `|`, `(` or a newline, with any
+// environment assignments before it. `echo databricks bundle deploy` only names it.
+const DATABRICKS_COMMAND = /(?:^|[;&|(\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*databricks\s+(?:warehouses|clusters|bundle|jobs)\b/
 const BAND_READ_LIMIT = 200_000
 
 function money(value: number, cents: boolean): string {
