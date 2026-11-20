@@ -174,7 +174,9 @@ assert names == ["orders", "revenue", "stg", "unique_orders_id"], names
 assert "model.shop.unrelated" not in s["nodes"]
 orders = s["nodes"]["model.shop.orders"]
 assert orders["description"] == "One row per order" and orders["columns"]["id"]["name"] == "id"
-assert set(s["nodes"]["model.shop.stg"]) == {"name", "resource_type"}
+assert set(s["nodes"]["model.shop.stg"]) == {"name", "resource_type", "config"}
+# A neighbour carries only its materialization of its config (ephemeral parents are read through).
+assert set(s["nodes"]["model.shop.stg"]["config"]) == {"materialized"}
 ' || fail "manifest slice ($file): the slice is not the file's node, its test and its neighbours by name"
 done
 out="$(script MANIFEST_SLICE "$TMP/manifest-broken.json" models/orders.sql shop 2>&1)"; code=$?

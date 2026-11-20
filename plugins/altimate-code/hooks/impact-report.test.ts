@@ -623,6 +623,11 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   // The words on the lines the change added, comments, strings and Jinja left out; the manifest says which are columns.
   expect(valueCandidates(before, after)).toEqual(['paid_amount'])
   expect(valueCandidates('select a\nfrom t -- cents', 'select a\nfrom t -- dollars')).toEqual([])
+  // The report keeps the uncertainty: a name on a rewritten line may change, not "expect it to".
+  const valueTrace = { model: 'core__medical_claim', column: 'paid_amount', down: { version: 1, nodes: [{ id: 'model.t.c', name: 'c' }, { id: 'model.t.f', name: 'fact_claims' }], columns: [{ model: 0, column: 'paid_amount', hop: 0 }, { model: 1, column: 'paid_amount', hop: 1, end: true }], counts: { columns: 1, models: 1, ends: 1, hops: 1, may_carry_models: 0, model_level: 1 } }, up: null, modelLevel: 1, failed: false, value: true } as any
+  const said = JSON.stringify(impactWords('core__medical_claim', 'paid_amount', valueTrace))
+  expect(said).toContain('may change with it')
+  expect(said).not.toContain('Expect those to change')
   expect(valueCandidates('select id, units + 1 as total from t', 'select id, units + 2 as total from t')).toEqual(['id', 'units', 'total'])
   // A line that filters or joins names no value.
   expect(valueCandidates("select a\nfrom t\nwhere status = 'ok'", "select a\nfrom t\nwhere status in ('ok', 'settled')")).toEqual([])

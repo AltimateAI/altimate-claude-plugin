@@ -334,7 +334,7 @@ out = {'nodes': {}, 'parent_map': {}, 'child_map': {}, 'metadata': {'project_nam
 for k in keep:
     n = nodes.get(k)
     if n is not None:
-        out['nodes'][k] = {f: n.get(f) for f in fields} if k in full else {'name': n.get('name'), 'resource_type': n.get('resource_type')}
+        out['nodes'][k] = {f: n.get(f) for f in fields} if k in full else {'name': n.get('name'), 'resource_type': n.get('resource_type'), 'config': {'materialized': (n.get('config') or {}).get('materialized')}}
     out['parent_map'][k] = pm.get(k, [])
     out['child_map'][k] = cm.get(k, [])
 print(json.dumps(out))
@@ -544,16 +544,20 @@ async function builtColumns($: EngineInterface, place: string, run: (args: strin
   return preview && preview.rows.length > 0 ? preview.columns : null
 }
 
-/** Every node upstream of a node in a manifest (or its slice), by its parent map or its nodes' depends_on. */
-function ancestorsOf(manifest: any, id: string): string[] {
+/**
+ * The nodes a model reads through its own refs and sources: its direct parents, and through an ephemeral parent (which
+ * dbt inlines into the compiled SQL) that parent's parents, and so on. A table read past a materialized parent is not.
+ */
+function readThroughRefs(manifest: any, id: string): string[] {
   const parents = (one: string): string[] => manifest?.parent_map?.[one] ?? manifest?.nodes?.[one]?.depends_on?.nodes ?? []
+  const ephemeral = (one: string) => manifest?.nodes?.[one]?.config?.materialized === 'ephemeral'
   const seen = new Set<string>()
   const todo = [...parents(id)]
   while (todo.length && seen.size < 20_000) {
     const one = todo.pop()!
     if (seen.has(one)) continue
     seen.add(one)
-    todo.push(...parents(one))
+    if (ephemeral(one)) todo.push(...parents(one))
   }
   return [...seen]
 }
@@ -561,7 +565,7 @@ function ancestorsOf(manifest: any, id: string): string[] {
 /**
  * The relations a model's compiled SQL reads that are a dbt model, seed, snapshot or source but not among the model's
  * dependencies: altimate-code's dbt_map_relations reads the tables of the SQL and matches each to the manifest; only
- * one matched to a single node, other than the model and not upstream of it, counts. None when the tool is missing or fails.
+ * one matched to a single node, other than the model and not read through its refs, counts. None when the tool is missing or fails.
  */
 async function hardcodedReads($: EngineInterface, manifest: string, sql: string, self: string, upstream: string[]): Promise<{ relation: string; use: string }[]> {
   const result = await within($, 15_000, runTool($, 'dbt_map_relations', { sql, manifest_path: manifest }, { cliOnly: true }).catch(() => null))
@@ -742,8 +746,8 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // dependencies (no ref() or source()): dbt and lineage cannot follow it. Read by altimate-code from the compiled SQL.
   // The compiled SQL is the file dbt show just wrote (target/compiled/<package>/<path>), read here and handed to the CLI only.
   const compiled = !errors.length && node ? await $.fs.read(`${scratch}/compiled/${node.node.package_name ?? pkg}/${node.node.original_file_path ?? rel}`).catch(() => null) : null
-  // Every node upstream of the model counts as known: dbt inlines an ephemeral parent's SQL, which reads its own parents.
-  const hardcoded = compiled && node && after ? await hardcodedReads($, `${scratch}/manifest.json`, compiled, node.id, ancestorsOf(after.manifest, node.id)) : []
+  // The model's parents count as known, and through an ephemeral parent (inlined by dbt) that parent's own.
+  const hardcoded = compiled && node && after ? await hardcodedReads($, `${scratch}/manifest.json`, compiled, node.id, readThroughRefs(after.manifest, node.id)) : []
   // A gap this session's edit made stays the edit's on the next check, until schema.yml or the model closes it.
   if (returned && current()) lastReturned.set(fileKey, returned.filter(one => !gaps.fresh.includes(one)))
   const said = oldGapsSaid.has(fileKey)

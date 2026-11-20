@@ -916,13 +916,23 @@ test('a table the compiled SQL reads that is a dbt node but not a dependency is 
   await band.unmount()
 })
 
-test('a table an ephemeral parent reads (inlined into the compiled SQL) is upstream, not hardcoded', async ($, on) => {
-  // orders refs the ephemeral stg_orders, which reads raw_orders: dbt inlines it, so the compiled SQL names raw_orders.
+test('a table an ephemeral parent reads (inlined into the compiled SQL) is read through refs; one past a materialized parent is hardcoded', async ($, on) => {
+  // orders refs stg_orders, which reads raw_orders. Ephemeral, dbt inlines it, so the compiled SQL names raw_orders.
   const mapRelations = [{ raw: '"shop"."main"."raw_orders"', match: 'exact', candidates: [{ uniqueId: 'seed.shop.raw_orders', replaceWith: "{{ ref('raw_orders') }}", match: 'exact' }] }]
-  const { clock } = await start($, on, { files: { 'target/.altimate-plugin/compiled/shop/models/orders.sql': 'with __dbt__cte__stg_orders as (select * from "shop"."main"."raw_orders") select * from __dbt__cte__stg_orders' }, mapRelations })
+  const withStg = (materialized: string) => ({ ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.stg_orders': { ...(MANIFEST.nodes as any)['model.shop.stg_orders'], config: { materialized } } } })
+  const compiledSql = { 'target/.altimate-plugin/compiled/shop/models/orders.sql': 'with __dbt__cte__stg_orders as (select * from "shop"."main"."raw_orders") select * from __dbt__cte__stg_orders' }
+  const { clock } = await start($, on, { manifestAfterShow: withStg('ephemeral'), files: { 'target/manifest.json': JSON.stringify(withStg('ephemeral')), ...compiledSql }, mapRelations })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
   expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).not.toContain('hardcoded')
+})
+
+test('a table read past a materialized parent (a view) is hardcoded, though it is upstream', async ($, on) => {
+  const mapRelations = [{ raw: 'main.raw_orders', match: 'partial', candidates: [{ uniqueId: 'seed.shop.raw_orders', replaceWith: "{{ ref('raw_orders') }}", match: 'partial' }] }]
+  const { clock } = await start($, on, { files: { 'target/.altimate-plugin/compiled/shop/models/orders.sql': 'select * from "shop"."main"."stg_orders" join main.raw_orders using (id)' }, mapRelations })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain("- hardcoded main.raw_orders: use {{ ref('raw_orders') }}")
 })
 
 test('an ephemeral model has no built relation to compare with: its undocumented columns are the edit\'s, and nothing is asked', async ($, on) => {

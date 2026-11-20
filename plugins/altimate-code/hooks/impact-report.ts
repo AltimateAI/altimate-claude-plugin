@@ -520,7 +520,7 @@ export function impactWords(model: string, column: string | null, trace: ColumnT
   const r = reachOf(down)
   const lines: Words[] = []
   const value = [...new Set(down.columns.filter(one => one.hop > 0).map(one => one.model))].map(index => down.nodes[index]).filter(Boolean)
-  if (r.models > 0) lines.push([...downstream, 'The value of ', { code: column }, ` flows into ${r.models} of them, in ${count(r.columns, 'column')}. ${lookup ? 'A wrong value here shows up there too' : 'Expect those to change with it'}: `, ...namesList(carriersOf(down).map(one => one.name)), '.'])
+  if (r.models > 0) lines.push([...downstream, 'The value of ', { code: column }, ` flows into ${r.models} of them, in ${count(r.columns, 'column')}. ${lookup ? 'A wrong value here shows up there too' : trace?.value ? 'If its values changed (it is named on a line the change rewrote), those may change with it' : 'Expect those to change with it'}: `, ...namesList(carriersOf(down).map(one => one.name)), '.'])
   else if (level !== 0) lines.push([...downstream, 'The value of ', { code: column }, " doesn't flow into any column of theirs."])
   else lines.push(downstream)
   const them = r.mayCarry === 1 ? 'it' : 'them'
