@@ -2737,6 +2737,36 @@ test('a warehouse the answer gives no cost for draws no change line', async ($, 
   await ui.unmount()
 })
 
+test('a cost sent as a numeric string is a cost: the change line is drawn', async ($, on) => {
+  const key = 'savings-baseline:dbxmega:wh-classic'
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: 'X_SMALL', window_cost: '27.544375' })
+  const { clock } = await start($, on, { answer, store: { [key]: { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(['Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'])
+  await ui.unmount()
+})
+
+test('a warehouse cost sent as a numeric string is the cost a draft keeps', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost = '27.544375'
+  const view = toView(answer.metadata)!
+  expect(view.inventory.find(one => one.id === 'wh-classic')?.windowCost).toBe(27.544375)
+  expect(Math.abs(view.findings.find(one => one.resourceId === 'wh-classic')!.dailyCost! - 27.544375 / 7)).toBeLessThan(1e-9)
+})
+
+test('a flagged warehouse whose cost is a numeric string keeps a baseline with that cost', async ($, on) => {
+  const fresh = JSON.parse(JSON.stringify(ANSWER))
+  fresh.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost = '27.544375'
+  const { clock, store } = await start($, on, { answer: fresh })
+  await savings($)
+  await clock.settle()
+  expect((store.get('savings-baseline:dbxmega:wh-classic') as any)?.windowCost).toBe(27.544375)
+})
+
 test('a cost kept unknown is not filled from a run after a change: the line stays unremarked and the baseline keeps no cost', async ($, on) => {
   const key = 'savings-baseline:dbxmega:wh-classic'
   const answer = JSON.parse(JSON.stringify(ANSWER))
@@ -2781,7 +2811,7 @@ test('a baseline an older version kept as strings loads as fully unknown: no lin
   expect(kept.get(key)).toEqual({ date: '2026-11-10', config: { size: 'X_SMALL', type: 'CLASSIC' }, windowCost: 27.54 })
 })
 
-test('after a run that failed, the band does not quote the answer the pane no longer shows', async ($, on) => {
+test('after a run that failed, the pane keeps the earlier answer beside why, and the band quotes that answer', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const answer: { value: unknown } = { value: ANSWER }
   const started = await start($, on, { files, get answer() { return answer.value } } as any)

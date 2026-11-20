@@ -498,7 +498,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
     name: shownName(one.name, one.id),
     type: one.type,
     size: one.size ?? null,
-    windowCost: typeof one.window_cost === 'number' ? one.window_cost : null,
+    windowCost: known(one.window_cost) ? Number(one.window_cost) : null,
   }))
   // The CLI counts every workspace it read facts from; one without that count lists only the warehouses'
   // and the findings' workspaces, which misses one with only clusters or jobs and nothing found.
@@ -654,7 +654,7 @@ export async function trackChanges(
     if (!live()) return []
     const now = configOf(warehouse)
     // A cost the answer did not give is no amount: no line is drawn from it, and a baseline keeps it unknown.
-    const windowCost = typeof warehouse.window_cost === 'number' && Number.isFinite(warehouse.window_cost) ? warehouse.window_cost : null
+    const windowCost = known(warehouse.window_cost) ? Number(warehouse.window_cost) : null
     // Only a setting both runs read can have changed, and the line names only those.
     const changed = stored ? changedSettings(stored.config, now) : []
     // Per setting, a later read fills what the baseline did not know, whatever else changed, and never overwrites
