@@ -4217,32 +4217,51 @@ test('two unnamed warehouses a file names by id, in two workspaces, are not one 
   await band.unmount()
 })
 
-test('Databricks config is a Terraform databricks_ resource, a top-level bundle:, or a top-level resources: block holding compute', () => {
-  const yes = [
-    'resources:\n  jobs:\n    nightly: {}\n',
-    'resources: # every job\n  jobs: # nightly\n    nightly:\n      job_clusters: []\n',
-    'resources:\n\n  # the BI warehouse\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n',
-    'resources:\r\n  clusters:\r\n    shared: {}\r\n',
-    'targets:\n  dev: {}\nresources:\n  pipelines:\n    p: {}\n',
-    'bundle:\n  name: x\n',
-    'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n',
+test('Databricks config is decided by the file: a bundle root, a Terraform databricks_ block, or a resources/ YAML block holding compute', () => {
+  const yes: [string, string][] = [
+    ['databricks.yml', 'bundle:\n  name: x\n'],
+    ['proj/databricks.yaml', 'include:\n  - resources/*.yml\n'],
+    ['infra/bi.tf', 'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n'],
+    ['infra/bi.tf', 'data "databricks_sql_warehouse" "bi" {\n  name = "bi"\n}\n'],
+    ['resources/jobs.yml', 'resources:\n  jobs:\n    nightly: {}\n'],
+    ['resources/jobs/nightly.job.yml', 'resources: # every job\n  jobs: # nightly\n    nightly:\n      job_clusters: []\n'],
+    ['resources/bi.yml', 'resources:\n\n  # the BI warehouse\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n'],
+    ['resources/c.yml', 'resources:\r\n  clusters:\r\n    shared: {}\r\n'],
+    ['resources/bom.yml', '﻿resources:\n  jobs:\n    a: {}\n'],
+    ['resources/p.yml', 'targets:\n  dev: {}\nresources:\n  pipelines:\n    p: {}\n'],
   ]
-  const no = [
-    '',
-    'resources:\n  limits:\n    cpu: 1\nkafka:\n  clusters:\n    - a\n',
-    'spec:\n  resources:\n    jobs:\n      a: {}\n',
-    'resources:\n  limits:\n    jobs: 1\n',
-    'myresources:\n  jobs:\n    a: {}\n',
-    '# resources:\n#   jobs:\n',
-    'resources:\n  jobs_extra:\n    a: {}\n',
+  const no: [string, string][] = [
+    ['resources/empty.yml', ''],
+    ['deploy/resources/values.yaml', 'resources:\n  limits:\n    cpu: 1\nkafka:\n  clusters:\n    - a\n'],
+    ['deploy/resources/values.yaml', 'resources:\n  limits:\n    cpu: 1\nenv:\n  - name: DATABRICKS_HOST\n    value: x\n# shared warehouse\n'],
+    ['k8s/resources/app.yml', 'spec:\n  resources:\n    jobs:\n      a: {}\n'],
+    ['resources/limits.yml', 'resources:\n  limits:\n    jobs: 1\n'],
+    ['resources/other.yml', 'myresources:\n  jobs:\n    a: {}\n'],
+    ['resources/commented.yml', '# resources:\n#   jobs:\n'],
+    ['resources/near.yml', 'resources:\n  jobs_extra:\n    a: {}\n'],
+    ['infra/eks.tf', 'variable "databricks_account_id" {}\nresource "aws_eks_cluster" "main" {\n  name = var.databricks_account_id\n}\n'],
+    ['config/jobs.yml', 'resources:\n  jobs:\n    a: {}\n'],
   ]
-  expect(yes.filter(text => !isDatabricksConfig(text))).toEqual([])
-  expect(no.filter(text => isDatabricksConfig(text))).toEqual([])
+  expect(yes.filter(([path, text]) => !isDatabricksConfig(path, text)).map(([path]) => path)).toEqual([])
+  expect(no.filter(([path, text]) => isDatabricksConfig(path, text)).map(([path]) => path)).toEqual([])
+})
+
+test('a lookback the answer sends as a string is still the window\'s length', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.window = { start: answer.metadata.window.start }
+  answer.metadata.report.lookback_days = '30'
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => /the last \d+ days' rate/.test(text)).map(text => /the last (\d+) days/.exec(text)![1])).toEqual(['30'])
+  await ui.unmount()
 })
 
 test('a Helm or Kubernetes file under a resources/ folder is not Databricks config, whatever its words', async ($, on) => {
   const files = {
-    [`${ROOT}/deploy/resources/values.yaml`]: 'resources:\n  limits:\n    cpu: 1\n  requests:\n    memory: 1Gi\n# runs on the shared cluster\nkafka:\n  clusters:\n    - main\n',
+    [`${ROOT}/deploy/resources/values.yaml`]: 'resources:\n  limits:\n    cpu: 1\n  requests:\n    memory: 1Gi\n# runs on the shared cluster\nkafka:\n  clusters:\n    - main\nenv:\n  - name: DATABRICKS_HOST\n    value: x\n',
     [`${ROOT}/k8s/resources/app.yml`]: 'spec:\n  containers:\n    - name: app\n      resources:\n        limits:\n          cpu: 1\n# cluster: prod\n',
   }
   const { clock } = await start($, on, { files })
