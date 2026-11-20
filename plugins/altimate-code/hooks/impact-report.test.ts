@@ -650,6 +650,9 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   // Two items on the changed line: which changed is not said, so no candidate.
   const two = "{% set cols %}\npaid_amount + allowed_amount as total_amount, units as units\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
   expect(valueCandidates(two, two.replace('allowed_amount as', 'allowed_amount * 2 as'))).toEqual([])
+  // An operand on its own line inside a multi-line CASE is part of an item, not an output.
+  const cased = "{% set cols %}\npaid_amount,\nunits,\ncase\n  when units > 0 then\n    paid_amount\n  else\n    units\nend as total\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
+  expect(valueCandidates(cased, cased.replace('    units\nend', '    paid_amount\nend'))).toEqual([])
   const inline = 'select\n  paid_amount /* cents */\nfrom raw'
   expect(valueCandidates(inline, inline.replace('cents', 'dollars'))).toEqual([])
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')

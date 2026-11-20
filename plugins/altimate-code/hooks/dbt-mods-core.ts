@@ -1007,7 +1007,7 @@ function topItems(list: string): [number, number][] {
 /** An item's output name: its alias, or the column it is (`t.col`); quotes removed. Null for an expression with no alias. */
 function itemName(item: string): string | null {
   // Comments are not part of the item: `amount -- in cents` is named amount.
-  const bare = item.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ').replace(/\s+/g, ' ').trim()
+  const bare = item.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (/^['"]/.test(one) ? one : ' ')).replace(/\s+/g, ' ').trim()
   const name = /\bas\s+(?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/i.exec(bare) ?? /[\s)](?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/.exec(bare) ?? /^(?:(?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*)\.)*(?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/.exec(bare)
   const found = name?.[1] ?? name?.[2] ?? name?.[3]
   return found ? found.toLowerCase() : null
@@ -1083,8 +1083,9 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
     const next = selects.find(at => at > select) ?? code.length
     const from = topLevel(code, 'from', select + 6)
     // The list ends at its FROM, or at a set operation when it has none (`select 1 as id union all …`).
-    const setOp = topLevel(code.slice(0, next), '(?:union|intersect|except|minus)', select + 6)
-    const listEnd = Math.min(...[from, setOp].filter(at => at >= 0 && at < next), next)
+    // With no FROM, it ends at the next clause (`select 1 as id order by id`).
+    const ends = ['(?:union|intersect|except|minus)', 'where', 'group', 'having', 'qualify', 'order', 'limit', 'window'].map(word => topLevel(code.slice(0, next), word, select + 6))
+    const listEnd = Math.min(...[from, ...ends].filter(at => at >= 0 && at < next), next)
     out.spans.push([base + select, base + listEnd])
     const list = code.slice(select + 6, listEnd)
     const lead = /^\s*(?:distinct|all)\b/i.exec(list)?.[0].length ?? 0

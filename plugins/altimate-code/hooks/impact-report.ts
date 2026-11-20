@@ -108,10 +108,11 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
   const parts = (text: string): { key: string; names: string[]; inside: boolean }[] => {
     const code = text.replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}|\{\{[\s\S]*?\}\}|'(?:[^']|'')*'|--[^\n]*/g, one => one.replace(/[^\n]/g, ' '))
     const clauses: string[] = ['']
+    let cases = 0
     const out: { key: string; names: string[]; inside: boolean }[] = []
     for (const line of code.split('\n')) {
-      // A line that starts inside parentheses (a function's argument) is part of an item, never an item of its own.
-      const inside = clauses.length > 1
+      // A line that starts inside parentheses (a function's argument) or a CASE is part of an item, never an item of its own.
+      const inside = clauses.length > 1 || cases > 0
       const words: string[] = []
       const names: string[] = []
       for (const token of line.matchAll(/\(|\)|(?<![\w.])((?:[A-Za-z_]\w*\.)*)([A-Za-z_]\w*)\b(\s*\()?|[^\s\w()]+|\d+(?:\.\d+)?/g)) {
@@ -126,6 +127,8 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
           continue
         }
         const word = token[2]?.toLowerCase()
+        if (word === 'case' && !token[1]) cases++
+        else if (word === 'end' && !token[1] && cases > 0) cases--
         if (word && !token[1] && CLAUSE_WORDS.has(word)) {
           clauses[clauses.length - 1] = word
           // `from (`, `in (`: the parenthesis opens a level in that clause.
