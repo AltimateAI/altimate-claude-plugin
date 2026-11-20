@@ -843,7 +843,7 @@ function inQuery(code: string, at: number): boolean {
 /** SQL with its comments gone and its string literals emptied, so neither is read as code. */
 function sqlCode(sql: string): string {
   // The same length, so positions in it are positions in the SQL.
-  return sql.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (one.startsWith("'") ? `'${' '.repeat(one.length - 2)}'` : one.replace(/[^\n]/g, ' ')))
+  return sql.replace(/\$(\w*)\$[\s\S]*?\$\1\$|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (one.startsWith("'") ? `'${' '.repeat(one.length - 2)}'` : one.replace(/[^\n]/g, ' ')))
 }
 
 // The use the model's own relation gets in the index: it is never advice.
@@ -866,7 +866,10 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   const hidden = text.replace(/"(?:[^"]|"")*"|`[^`]*`/g, one => `${one[0]}${'_'.repeat(Math.max(0, one.length - 2))}${one[one.length - 1]}`)
   // Text inside Jinja control flow, a macro, a `{% set %}` block, a call, raw or filter block may not be rendered here
   // (out of what is read): nothing there is flagged.
-  const controlled = [...jinjaControlled(sql), ...jinjaBlocks(sql)]
+  const structure = jinjaStructure(sql)
+  // Blocks inside blocks are not followed: no advice at all rather than a guess.
+  if (structure.nested) return []
+  const controlled = [...jinjaControlled(sql), ...structure.blocks]
   const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   // A spelling two relations share (a bare name in two schemas) is ambiguous: null, never flagged.
@@ -911,6 +914,8 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
     // only one at the top level or in a subquery's own parentheses does.
     if (!inQuery(hidden, match.index!) || controlled.some(([a, b]) => match.index! >= a && match.index! < b)) continue
     const start = match.index! + match[0].indexOf(match[1]!)
+    // A table-valued function (`from main.orders(…)`) is no table.
+    if (/^\s*\(/.test(hidden.slice(start + match[1]!.length))) continue
     const written = text.slice(start, start + match[1]!.length)
     const sqlParts = identifierParts(written)
     const parts = sqlParts.map(one => one.text.toLowerCase())
@@ -929,7 +934,7 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
 
 /** The text with Jinja, comments and string literals blanked out, the same length, so positions still line up. */
 function masked(sql: string): string {
-  return sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"]|"")*"|`[^`]*`/g, one =>
+  return sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}|\$(\w*)\$[\s\S]*?\$\1\$|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\/|"(?:[^"]|"")*"|`[^`]*`/g, one =>
     // A quoted identifier keeps its quotes and length, its letters hidden, so a keyword inside it is no keyword.
     /^["`]/.test(one) ? `${one[0]}${'_'.repeat(Math.max(0, one.length - 2))}${one[one.length - 1]}` : one.replace(/[^\n]/g, ' '),
   )
@@ -1051,14 +1056,24 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
     out.spans.push([base + select, base + listEnd])
     const list = code.slice(select + 6, listEnd)
     const lead = /^\s*(?:distinct|all)\b/i.exec(list)?.[0].length ?? 0
-    for (const one of sql.slice(select + 6, listEnd).matchAll(/\{\{-?\s*([A-Za-z_]\w*)\s*-?\}\}/g)) out.vars.add(one[1]!)
+
     let here = false
+    // A list that is only Jinja renders (`{{ core }} {{ extra }}`, no comma between): each renders a `{% set %}` list.
+    const whole = sql.slice(select + 6 + lead, listEnd)
+    if (!list.slice(lead).trim() && /^\s*(?:\{\{-?\s*[A-Za-z_]\w*\s*-?\}\}\s*)+$/.test(whole)) for (const one of whole.matchAll(/\{\{-?\s*([A-Za-z_]\w*)\s*-?\}\}/g)) out.vars.add(one[1]!)
     for (const [a, b] of topItems(list.slice(lead))) {
       const bare = list.slice(lead + a, lead + b).replace(/\s+/g, ' ').trim()
       // `*`, `t.*`, and `* exclude (…)` / `* replace (…)`: columns the SQL does not name.
       if (/^(?:[\w"`]+\.)?\*(?:$|\s)/.test(bare)) {
         here = true
         if (/^(?:[\w"`]+\.)?\*\s+\S/.test(bare)) modified = true
+        continue
+      }
+      // A bare `{{ cols }}` item renders a `{% set %}` list as items of its own; aliased or wrapped, it is one value.
+      // (Several renders side by side, `{{ core }} {{ extra }}`, are each such a list.)
+      const item = sql.slice(select + 6 + lead + a, select + 6 + lead + b)
+      if (/^\s*(?:\{\{-?\s*[A-Za-z_]\w*\s*-?\}\}\s*)+$/.test(item)) {
+        for (const one of item.matchAll(/\{\{-?\s*([A-Za-z_]\w*)\s*-?\}\}/g)) out.vars.add(one[1]!)
         continue
       }
       // Where the item's own text starts (past whitespace and masked Jinja tags before it).
@@ -1092,9 +1107,33 @@ type Outputs = { names: Set<string>; maybe: Set<string>; star: boolean; vars: Se
 
 /** Where Jinja blocks whose body may not be rendered in place are (`macro`, `set`…`endset`, `call`, `raw`, `filter`), as offsets. */
 function jinjaBlocks(sql: string): [number, number][] {
-  const out: [number, number][] = []
-  for (const block of sql.matchAll(/\{%-?\s*(macro|set|call|raw|filter)\b(?:(?!%\})[\s\S])*%\}[\s\S]*?\{%-?\s*end\1\s*-?%\}/g)) out.push([block.index!, block.index! + block[0].length])
-  return out
+  return jinjaStructure(sql).blocks
+}
+
+/**
+ * A model's Jinja block tags read in order: the outermost `macro`/`set`(capture)/`call`/`raw`/`filter` blocks as
+ * offsets, and whether any block (those, `if` or `for`) sits inside another, which this reading does not follow.
+ */
+function jinjaStructure(sql: string): { blocks: [number, number][]; nested: boolean } {
+  const blocks: [number, number][] = []
+  const stack: { kind: string; at: number }[] = []
+  let nested = false
+  for (const tag of sql.matchAll(/\{%-?\s*(end)?(macro|set|call|raw|filter|if|for)\b((?:(?!%\})[\s\S])*)%\}/g)) {
+    const [, end, kind, rest] = tag
+    // `{% set x = … %}` assigns; only `{% set x %}` opens a block.
+    if (!end && kind === 'set' && /=/.test(rest!)) continue
+    if (!end) {
+      if (stack.length) nested = true
+      stack.push({ kind: kind!, at: tag.index! })
+      continue
+    }
+    const open = stack.pop()
+    if (!open) continue
+    if (!stack.length && !['if', 'for'].includes(open.kind)) blocks.push([open.at, tag.index! + tag[0].length])
+  }
+  // An unclosed block runs to the end.
+  if (stack.length && !['if', 'for'].includes(stack[0]!.kind)) blocks.push([stack[0]!.at, sql.length])
+  return { blocks, nested }
 }
 
 /** The identifiers of a dotted name, each with whether it was quoted; a quoted one keeps its text (dots and case). */
@@ -1138,7 +1177,7 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   const returned = new Set(earlier ?? [])
   const folded = new Set((earlier ?? []).map(one => one.toLowerCase()))
   const mine = new Set(ours.map(one => one.toLowerCase()))
-  const conditionalJinja = [before, after].some(text => text !== null && (jinjaControlled(text).length > 0 || /\{%-?\s*(?:macro|call|raw|filter)\b/.test(text)))
+  const conditionalJinja = [before, after].some(text => text !== null && (jinjaControlled(text).length > 0 || /\{%-?\s*(?:macro|call|raw|filter)\b/.test(text) || jinjaStructure(text).nested || /\$\w*\$/.test(text)))
   const quotedIdentifiers = [before, after].some(text => text !== null && /"_*"|`_*`/.test(masked(text)))
   // Whether the edit only rewrote named outputs' items and column-less clauses: one diff for the whole edit.
   let itemsOnly: boolean | null = null

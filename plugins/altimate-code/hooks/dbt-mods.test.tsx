@@ -743,7 +743,7 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   expect(undocumentedByEdit(['amount'], 'select * exclude (amount) from raw', 'select * from raw', ['id'])).toEqual({ fresh: ['amount'], old: [] })
   // Columns a macro fills, with no Jinja changed (Tuva's passthrough columns), are not the edit's; one added to a
   // `{% set %}` column list is.
-  const tuva = "{%- set core -%}\n      med.claim_id\n    , med.paid_amount\n{%- endset -%}\nselect {{ core }} {{ extension_columns(ref('x')) }} from {{ ref('x') }} as med"
+  const tuva = "{%- set core -%}\n      med.claim_id\n    , med.paid_amount\n{%- endset -%}\n{%- set ext -%}\n    {{ extension_columns(ref('x')) }}\n{%- endset -%}\nselect\n    {{ core }}\n    {{ ext }}\nfrom {{ ref('x') }} as med"
   expect(undocumentedByEdit(['x_temp_payer'], tuva, tuva.replace('    , med.paid_amount', '    , greatest(med.paid_amount, 0) as paid_amount'), null)).toEqual({ fresh: [], old: ['x_temp_payer'] })
   expect(undocumentedByEdit(['paid_cents'], tuva, tuva.replace('    , med.paid_amount', '    , med.paid_amount\n    , med.paid_amount * 100 as paid_cents'), null)).toEqual({ fresh: ['paid_cents'], old: [] })
   // A `* exclude (…)` over a CTE stays unresolved: dropping the exclusion exposes a new column.
@@ -807,6 +807,10 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   expect(undocumentedByEdit(['amount'], unused, unused.replace('select id from raw', 'select id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
   const setQuery = '{% set q %}\nselect id, amount from raw\n{% endset %}\nselect id from raw'
   expect(undocumentedByEdit(['amount'], setQuery, setQuery.replace('\nselect id from raw', '\nselect id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // Blocks inside blocks, dollar quotes, and a rendered list given an alias are outside what is read.
+  const nested = '{% set outer %}\n{% set inner %}id{% endset %}\nselect id, amount from s.orders\n{% endset %}\nselect id from raw'
+  expect(undocumentedByEdit(['amount'], nested, nested.replace('\nselect id from raw', '\nselect id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  expect(undocumentedByEdit(['amount'], '{% set cols %}amount{% endset %}\nselect {{ cols }} as total from raw', '{% set cols %}amount{% endset %}\nselect {{ cols }} as total, amount from raw', ['total'])).toEqual({ fresh: ['amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -1090,6 +1094,10 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   expect(hardcodedRelations('select id from s.orders4', cased('"d"."s"."Orders4"'), self)).toEqual([])
   expect(hardcodedRelations('select id from raw.orders4', cased('"d"."s"."raw.orders4"'), self)).toEqual([])
   expect(hardcodedRelations('select id from s.orders4', cased('"d"."s"."orders4"'), self)).toEqual([{ relation: 's.orders4', use: "{{ ref('orders4') }}" }])
+  // A table-valued function, dollar-quoted text, and blocks inside blocks are not relations.
+  expect(hardcodedRelations('select * from main.stg_orders(1)', manifest, self)).toEqual([])
+  expect(hardcodedRelations('select $$ from main.stg_orders $$ as note from raw', manifest, self)).toEqual([])
+  expect(hardcodedRelations('{% set outer %}\n{% set inner %}id{% endset %}\nselect id from main.stg_orders\n{% endset %}\nselect id from raw', manifest, self)).toEqual([])
   // A macro, or a `{% set %}` block, that may not be rendered here is not read.
   expect(hardcodedRelations('{% macro unused() %}\nselect id from main.stg_orders\n{% endmacro %}\nselect id from raw', manifest, self)).toEqual([])
   // The model itself takes part: its own bare name shared with another relation is ambiguous, and never advice.

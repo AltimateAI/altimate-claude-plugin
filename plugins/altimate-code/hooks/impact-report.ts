@@ -149,10 +149,12 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
       left.set(one.key, n - 1)
       continue
     }
-    // A changed item's own alias first (`… as total_amount`): the output whose value changed, over its operands.
-    const alias = /\bas\s+([A-Za-z_]\w*)\s*,?\s*$/i.exec(one.key)?.[1]?.toLowerCase()
-    if (alias && one.names.includes(alias)) counts.set(alias, (counts.get(alias) ?? 0) + 1000)
-    for (const name of one.names) counts.set(name, (counts.get(name) ?? 0) + 1)
+    // The output a changed item makes: its alias (`… as total_amount`, quoted or not), or the column it is when it is a
+    // bare column (`, med.paid_amount`). An unaliased expression names no output; its operands are inputs, not outputs.
+    const alias = /\bas\s+["`]?\s*([A-Za-z_]\w*)\s*["`]?\s*,?\s*$/i.exec(one.key)?.[1]?.toLowerCase()
+    const bare = /^,?\s*(?:[A-Za-z_]\w*\s*\.\s*)*([A-Za-z_]\w*)\s*,?$/.exec(one.key)?.[1]?.toLowerCase()
+    const output = alias ?? bare
+    if (output && !NOT_COLUMNS.has(output)) counts.set(output, (counts.get(output) ?? 0) + 1)
   }
   return [...counts].sort((a, b) => b[1] - a[1]).slice(0, max).map(([name]) => name)
 }
