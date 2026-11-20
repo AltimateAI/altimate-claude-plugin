@@ -100,6 +100,38 @@ const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses'])
 
 /**
+ * A Terraform file's code: line comments, block comments and heredoc bodies dropped, a quoted string kept whole so a
+ * slash and star in it (an S3 path) do not open a comment.
+ */
+function terraformCode(source: string): string {
+  const text = source.replace(/^\uFEFF/, '')
+  let code = ''
+  let i = 0
+  while (i < text.length) {
+    const rest = text.slice(i)
+    const heredoc = /^<<-?([A-Za-z_]\w*)[ \t]*\r?\n/.exec(rest)
+    if (heredoc) {
+      const end = new RegExp(`^[ \\t]*${heredoc[1]}[ \\t]*$`, 'm').exec(rest.slice(heredoc[0].length))
+      i += end ? heredoc[0].length + end.index + end[0].length : rest.length
+    } else if (text[i] === '"') {
+      let j = i + 1
+      while (j < text.length && text[j] !== '"' && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1
+      code += text.slice(i, j + 1)
+      i = j + 1
+    } else if (text[i] === '#' || rest.startsWith('//')) {
+      i += (/^[^\n]*/.exec(rest) as RegExpExecArray)[0].length
+    } else if (rest.startsWith('/*')) {
+      const end = rest.indexOf('*/', 2)
+      i += end === -1 ? rest.length : end + 2
+    } else {
+      code += text[i]
+      i += 1
+    }
+  }
+  return code
+}
+
+/**
  * Whether an edited file is Databricks config, decided by its kind first:
  * - a bundle's `databricks.yml` always is;
  * - a Terraform file is when it declares a `databricks_` resource or data source (its label quoted or not);
@@ -116,8 +148,7 @@ export function isDatabricksPath(path: string): boolean {
 export function isDatabricksConfig(path: string, text: string): boolean {
   const file = path.replace(/\\/g, '/')
   if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
-  // A block commented out with /* */ from the start of a line declares nothing; a /* inside a string is not one.
-  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, ''))
+  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(terraformCode(text))
   if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null
@@ -545,15 +576,18 @@ export async function trackChanges(
     }
     // In one workspace an id is unambiguous, so it is matched alone: the finding or the warehouse may lack the workspace id.
     const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flaggedIds.has(warehouse.id))
-    const baseline = { date: today, config: now, windowCost, days: windowDays(view.window) }
-    if (!stored && isFlagged && windowCost !== null) {
-      await $.store.set(key, baseline satisfies Baseline).catch(() => undefined)
-    }
-    // The baseline is one run's read: its settings, date and cost all come from that run, so a setting is never
-    // paired with another run's spend. A run that reads every setting it knew, finds none changed and reads one
-    // more replaces it whole; a run that saw a change, or missed a setting, leaves it as it was.
-    if (stored && windowCost !== null && learns(stored.config, now) && covers(stored.config, now)) {
-      await $.store.set(key, baseline satisfies Baseline).catch(() => undefined)
+    // A cost the answer did not give keeps no baseline: both writes need it.
+    if (windowCost !== null) {
+      const baseline: Baseline = { date: today, config: now, windowCost, days: windowDays(view.window) }
+      if (!stored && isFlagged) {
+        await $.store.set(key, baseline).catch(() => undefined)
+      }
+      // The baseline is one run's read: its settings, date and cost all come from that run, so a setting is never
+      // paired with another run's spend. A run that reads every setting it knew, finds none changed and reads one
+      // more replaces it whole; a run that saw a change, or missed a setting, leaves it as it was.
+      if (stored && learns(stored.config, now) && covers(stored.config, now)) {
+        await $.store.set(key, baseline).catch(() => undefined)
+      }
     }
   }
   return changes

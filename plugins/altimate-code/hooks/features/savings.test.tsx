@@ -2175,6 +2175,8 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['infra/bi.tf', 'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n'],
     ['infra/bi.tf', 'data "databricks_sql_warehouse" "bi" {\n  name = "bi"\n}\n'],
     ['infra/job.tf', 'resource databricks_job nightly {\n  name = "nightly"\n}\n'],
+    ['infra/bom.tf', '\uFEFFresource "databricks_job" "nightly" {\n}\n'],
+    ['infra/heredoc-then.tf', 'resource "aws_iam_policy" "p" {\n  policy = <<EOT\n/*\nEOT\n}\nresource "databricks_job" "nightly" {\n}\n'],
     ['infra/logs.tf', 'locals {\n  prefix = "s3://logs/*"\n}\nresource "databricks_sql_endpoint" "wh" {\n  name = "wh"\n}\nlocals {\n  pattern = "a/*/b"\n}\n'],
     ['resources/jobs.yml', 'resources:\n  jobs:\n    nightly: {}\n'],
     ['resources/jobs/nightly.job.yml', 'resources: # every job\n  jobs: # nightly\n    nightly:\n      job_clusters: []\n'],
@@ -2195,6 +2197,8 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['resources/dash.yml', 'resources:\n  dashboards:\n    jobs:\n      a: {}\n'],
     ['infra/eks.tf', 'variable "databricks_account_id" {}\nresource "aws_eks_cluster" "main" {\n  name = var.databricks_account_id\n}\n'],
     ['infra/old.tf', '/*\nresource "databricks_job" "x" {\n}\n*/\nresource "aws_s3_bucket" "b" {}\n'],
+    ['infra/after-code.tf', 'locals { a = 1 } /*\nresource "databricks_job" "removed" {\n}\n*/\nresource "aws_s3_bucket" "b" {}\n'],
+    ['infra/heredoc.tf', 'resource "aws_iam_policy" "p" {\n  policy = <<-EOT\n/*\nEOT\n}\nresource "aws_s3_bucket" "b" {}\n# resource "databricks_job" "x" {}\n// resource "databricks_job" "y" {}\n'],
     ['config/jobs.yml', 'resources:\n  jobs:\n    a: {}\n'],
   ]
   expect(yes.filter(([path, text]) => !isDatabricksConfig(path, text)).map(([path]) => path)).toEqual([])
