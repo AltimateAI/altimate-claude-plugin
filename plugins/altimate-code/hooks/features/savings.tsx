@@ -134,8 +134,11 @@ let offered = false
 // and a notice waits for the turn's end.
 let turnRunning = false
 let heldNotices: string[] = []
-// A press of Run again is under way, from its first moment.
-let pressStarting: object | null = null
+// The check claimed or running, with what it was asked for: from the moment /savings or a press decides to start
+// one, with no await between that decision and this claim, until its run ends or a /clear drops it. Starting a run
+// is decided here, not from the running flag in `$.state`, which only draws the pane and the status line: a hook's
+// read of that flag can answer as it was when the hook started.
+let claim: { asked: string | null } | null = null
 
 // Files that define Databricks compute: bundles, their resources, Terraform. Read only when one is edited.
 const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/(?:[^/]+\/)*[^/]+\.ya?ml|[^/]+\.tf)$/i
@@ -148,8 +151,8 @@ const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses
  * Whether an edited file is Databricks config, decided by its kind first:
  * - a bundle's `databricks.yml` always is;
  * - a Terraform file is when a line starts with a `databricks` provider, resource or data source (its label quoted or
- *   not). It is read line by line, not parsed: a commented line (`#`, `//`) does not start with the keyword, and a wrong
- *   guess only shows or hides the offer;
+ *   not). It is read line by line, not parsed: a commented line (`#`, `//`) does not start with the keyword, while a
+ *   declaration line inside a block comment or a heredoc still counts. A wrong guess only shows or hides the offer;
  * - a YAML file under `resources/` is when its top-level `resources:` block, in the block style bundles are written
  *   in, lists jobs, pipelines, clusters or SQL warehouses. The block is read line by line, comments dropped, and
  *   ends at the next top-level key, so a container's `resources:` limits in a Kubernetes or Helm file, or a
@@ -1183,14 +1186,15 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
 }
 
 /**
- * Runs the check the person asked for. Only `/savings` and the buttons they press come here. `at` is the
- * generation when it was asked for: a /clear or a session end since then (even in the same tick, before this
- * scheduled run started) drops it, so a late run never lands in the new conversation.
+ * Runs the check the person asked for, under the claim it was started with. Only `/savings` and the buttons they
+ * press come here. A /clear or a session end since the claim (even in the same tick, before this scheduled run
+ * started) dropped it, so a late run never lands in the new conversation.
  */
-async function runCheck($: EngineInterface, asked: string | null, at: number) {
-  if (at !== generation) return
-  const mine = ++generation
-  const live = () => mine === generation
+async function runCheck($: EngineInterface, mine: { asked: string | null }) {
+  if (claim !== mine) return
+  const asked = mine.asked
+  const at = ++generation
+  const live = () => at === generation
   lastAsked = asked
   offered = true
   // Every write of this run lands only while it is current, checked inside the write, and every notice only
@@ -1287,33 +1291,26 @@ async function runCheck($: EngineInterface, asked: string | null, at: number) {
       : explain(String(error), asked, platform)
     await refuse(platform, checkName([{ platform, connection: null }]), why)
   } finally {
-    if (live()) {
-      await update($, busyAtom, () => null)
-      await drawStatus($)
-    }
+    // A dropped run leaves the running flag as the /clear left it. The claim is let go only once the flag is
+    // cleared, so a run claimed next never has its flag cleared by this one.
+    await update($, busyAtom, now => (live() ? null : now))
+    if (live()) await drawStatus($)
+    if (claim === mine) claim = null
   }
 }
 
 /**
- * A run a button asked for. It can start the warehouse, which bills, so of presses that land together only
- * the first starts one; the guard lasts only until the run is marked busy.
+ * A run a button asked for. It can start the warehouse, which bills, so of presses that land together, and of a
+ * press and a typed /savings, only the first to claim starts one.
  */
 async function startPressedRun($: EngineInterface, asked: string | null, at: number) {
-  // A /clear since the press drops it before anything is marked running.
-  if (pressStarting || at !== generation) return
-  // Only this press clears the guard: one from before a /clear must not free it for a later press.
-  const mine = {}
-  pressStarting = mine
-  try {
-    if (await read($, busyAtom)) return
-    const connections = await read($, connectionsAtom)
-    // Checked again after the reads: a /clear meanwhile must not leave the check marked running.
-    if (at !== generation) return
-    await update($, busyAtom, now => (at === generation ? busyOf(asked, connections) : now))
-  } finally {
-    if (pressStarting === mine) pressStarting = null
-  }
-  await runCheck($, asked, at)
+  // A /clear since the press drops it; a check claimed or running starts nothing more.
+  if (claim || at !== generation) return
+  const mine = { asked }
+  claim = mine
+  const connections = await read($, connectionsAtom)
+  await update($, busyAtom, now => (claim === mine ? busyOf(asked, connections) : now))
+  await runCheck($, mine)
 }
 
 /** Keeps what "saved since" needs: the resource, what it cost a day, and the date. False when it could not be kept. */
@@ -1528,25 +1525,29 @@ export function register(on: On, _context: FeatureContext) {
     if (asked && !CONNECTION_NAME.test(asked)) {
       return { text: `"${asked}" is not a connection name. Run /savings, or /savings <connection> with an altimate-code connection.` }
     }
-    // The generation the run is asked in, before anything waits: a /clear from here on drops the run.
-    const at = generation
+    // One check at a time, decided before anything waits.
+    const going = claim
+    const mine = { asked: asked || null }
+    if (!going) claim = mine
     const connections = await read($, connectionsAtom)
     const targets = targetsFor(asked || null, connections)
     // Until the list is read (a run reads it first) no platform is named: it could be the wrong one.
     const name = connections ? checkName(targets) : 'savings check'
-    if (await read($, busyAtom)) {
+    if (going) {
       await openPane($)
-      return { text: `The ${name} is already running in the side pane.` }
+      // One asked for a connection the running check is not reading, typed or not, is to be asked again.
+      const other = (asked || null) !== going.asked ? ` Run /savings${asked ? ` ${asked}` : ''} again when it finishes.` : ''
+      return { text: `The ${name} is already running in the side pane.${other}` }
     }
-    // A /clear while the list or the busy state was read: nothing is marked running for the new conversation.
+    // A /clear while the list was read, during the write or while the pane opens dropped the claim: no pane, no
+    // run, and no claim that one is running.
     const cleared = { text: `The conversation was cleared before the ${name} started. Run /savings again.` }
-    if (at !== generation) return cleared
-    await update($, busyAtom, now => (at === generation ? busyOf(asked || null, connections) : now))
-    // A /clear during the write or while the pane opens: no pane, no run, and no claim that one is running.
-    if (at !== generation) return cleared
+    if (claim !== mine) return cleared
+    await update($, busyAtom, now => (claim === mine ? busyOf(asked || null, connections) : now))
+    if (claim !== mine) return cleared
     const opened = await openPane($)
-    if (at !== generation) return cleared
-    later($, () => runCheck($, asked || null, at))
+    if (claim !== mine) return cleared
+    later($, () => runCheck($, mine))
     if (opened && opened.isPlaced === false) {
       return { text: `Running the ${name}. The terminal is too narrow for the side pane, so the result comes as a notice; widen the window to see the details.` }
     }
@@ -1845,7 +1846,9 @@ export function register(on: On, _context: FeatureContext) {
 
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
-  // A run that was going when the last session ended can never finish, so it must not block this one.
+  // A run that was going when the last session ended can never finish, so neither its claim nor its running
+  // flag may block this one.
+  claim = null
   await update($, busyAtom, () => null)
   await $.command.register({
     name: COMMAND,
@@ -1881,7 +1884,7 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   offered = false
   turnRunning = false
   heldNotices = []
-  pressStarting = null
+  claim = null
   await update($, bandAtom, () => null)
   await update($, whatIfAtom, () => null)
   await update($, busyAtom, () => null)
