@@ -86,6 +86,9 @@ let generation = 0
 // the conversation (the prompt box, the band, a toast) is dropped once it moved on. A run starting does not move it.
 let conversation = 0
 let lastConnection: string | null = null
+// The generation of the check running now, until it ends. Kept here as well as in the running flag: a command's
+// read of that flag can answer as it was when the command started, before a press's run that began meanwhile.
+let checking: number | null = null
 // The press that starts a run (Run again, the band's Run /savings), from the press until that run ends. Only that
 // press clears it, so one from before a /clear cannot free the guard for a later press.
 let pressQueued: object | null = null
@@ -642,6 +645,7 @@ async function openPane($: EngineInterface) {
 async function runCheck($: EngineInterface, connection: string | null, asked: number) {
   if (asked !== generation) return
   const mine = ++generation
+  checking = mine
   const live = () => mine === generation
   // Every write of this run lands only while it is current, checked inside the write: a /clear at any await
   // below leaves the new conversation's state as the clear left it.
@@ -719,6 +723,7 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
     say(`Databricks savings check: ${why.text} ${why.recovery}`)
   } finally {
     // A dropped run leaves the running flag as the /clear left it: cleared, or set by the new conversation's run.
+    if (checking === mine) checking = null
     if (live()) await update($, busyAtom, () => null)
   }
 }
@@ -804,20 +809,28 @@ export function register(on: On, _context: FeatureContext) {
     if (asked && !CONNECTION_NAME.test(asked)) {
       return { text: `"${asked}" is not a connection name. Run /savings, or /savings <connection> with an altimate-code Databricks connection.` }
     }
-    // The generation the run is asked in, before anything waits: a /clear from here on drops the run.
+    // The generation and conversation the run is asked in, before anything waits: a /clear from here on drops the
+    // run. A run a press starts meanwhile moves the generation too, but not the conversation.
     const at = generation
-    if (await read($, busyAtom)) {
+    const inConversation = conversation
+    const running = async () => {
       await openPane($)
       return { text: 'The Databricks savings check is already running in the side pane.' }
     }
-    // A /clear while the busy state was read: nothing is marked running for the new conversation.
-    const cleared = { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
-    if (at !== generation) return cleared
+    if (await read($, busyAtom)) return running()
+    // A /clear while the busy state was read, the write or the pane open: no pane, no run, and no claim that one
+    // is running. A press's run that started meanwhile is the one running.
+    const stopped = async () => {
+      if (inConversation !== conversation) return { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
+      if (checking !== null) return running()
+      await openPane($)
+      return { text: 'The Databricks savings check just ran: its result is in the side pane.' }
+    }
+    if (at !== generation) return stopped()
     await update($, busyAtom, now => (at === generation ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
-    // A /clear during the write or while the pane opens: no pane, no run, and no claim that one is running.
-    if (at !== generation) return cleared
+    if (at !== generation) return stopped()
     const opened = await openPane($)
-    if (at !== generation) return cleared
+    if (at !== generation) return stopped()
     later($, () => runCheck($, asked || null, at))
     if (opened && opened.isPlaced === false) {
       return { text: 'Running the Databricks savings check. The terminal is too narrow for the side pane, so the result comes as a notice; widen the window to see the details.' }
@@ -982,6 +995,7 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   generation += 1
   conversation += 1
+  checking = null
   lastConnection = null
   offered = false
   pressQueued = null
