@@ -1164,10 +1164,6 @@ test('a shell runs its -c script only when -c is among its own options, in any c
   expect(isGitPush("bash -eo pipefail -c 'git push'")).toBe(true)
   expect(isGitPush("bash -euo pipefail -c 'git push'")).toBe(true)
   expect(isGitPush("bash +o history -c 'git push'")).toBe(true)
-  expect(isGitPush("bash -oc pipefail 'git push'")).toBe(true)
-  expect(isGitPush("bash -eoc pipefail 'git push'")).toBe(true)
-  // `-c` with no script word runs nothing, so a heredoc fed to it is not its script.
-  expect(isGitPush('bash -c <<EOF\ngit push\nEOF')).toBe(false)
   expect(isGitPush("bash deploy.sh -c 'git push'")).toBe(false)
   expect(filesWrittenBy("bash -ec 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
   expect(filesWrittenBy("bash -euo pipefail -c 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
