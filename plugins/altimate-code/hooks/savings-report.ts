@@ -2,7 +2,7 @@
 // remote asset, no upload: it is a file on this machine until the person sends it to someone.
 import type { SavingsKept, SavingsPlatform } from '../types'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan } from './savings-checks'
-import { amount, cleanText, combinedTotal, compared, dollars, limitedText, OBSERVED_NOTE, PLATFORM_NAME, range, windowDays } from './savings-format'
+import { amount, cleanText, combinedTotal, compared, distinctFindingCount, dollars, limitedText, OBSERVED_NOTE, PLATFORM_NAME, range, windowDays } from './savings-format'
 
 const escape = (value: unknown) =>
   cleanText(String(value ?? '')).replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]!)
@@ -20,7 +20,9 @@ td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}a{color:inherit}.ga
 export function savingsReportHtml(kept: readonly SavingsKept[], builtAt: string, signupUrl: string, failed: readonly { platform: SavingsPlatform; text: string }[] = []): string {
   const views = kept.map(one => one.view)
   const total = combinedTotal(views)
-  const findings = views.reduce((sum, view) => sum + view.findings.length, 0)
+  const findings = distinctFindingCount(views)
+  // Each answer's own window: the rate the total is at, as the pane says it.
+  const windows = [...new Set(views.map(view => windowDays(view.window)))].sort((a, b) => a - b)
   const partial = failed.length > 0 || views.some(view => view.skipped.length > 0 || view.limited.length > 0)
   const nothingChecked = views.length > 0 && views.every(nothingRan)
   const prices = [...new Set(views.map(view => view.pricing))]
@@ -72,7 +74,7 @@ ${one.choices.map(c => `<tr><td>${escape(c.label)}</td><td class="n">${escape(do
 <h1>Warehouse savings report</h1>
 <div class="dim">Built ${escape(builtAt)} on this machine from read-only checks on your own connections. Nothing was sent to Altimate.</div>
 <p class="total">${total.resources > 0 ? `${escape(range(total.min, total.max))} a month` : findings > 0 ? `${findings} finding${findings === 1 ? '' : 's'}, no dollar estimate` : nothingChecked ? 'Nothing was checked' : 'No savings found'}</p>
-<div class="dim">${total.resources > 0 ? `on ${total.resources} resource${total.resources === 1 ? '' : 's'}, ${priced} and the measured week's rate, each counted once at its largest saving` : findings > 0 ? 'see each finding below' : nothingChecked ? 'none of the checks could run: see why below' : 'by the checks that ran'}${partial && !nothingChecked ? '. Some checks did not run in full: see below.' : ''}</div>
+<div class="dim">${total.resources > 0 ? `on ${total.resources} resource${total.resources === 1 ? '' : 's'}, ${priced} and the last ${windows.join(' and ')} days' rate, each counted once at its largest saving` : findings > 0 ? 'see each finding below' : nothingChecked ? 'none of the checks could run: see why below' : 'by the checks that ran'}${partial && !nothingChecked ? '. Some checks did not run in full: see below.' : ''}</div>
 ${failed.map(one => `<p class="gap">The last ${escape(PLATFORM_NAME[one.platform])} check did not finish: ${escape(one.text)}</p>`).join('\n')}
 ${sections.join('\n')}
 <p><a href="${escape(signupUrl)}">See every check in Altimate</a></p>

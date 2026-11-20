@@ -66,7 +66,8 @@ export function daysAfter(date: string, window: { start: string; end: string }):
   return Number.isFinite(days) ? Math.min(Math.max(days, 0), windowDays(window)) : 0
 }
 
-const severalWorkspaces = (view: SavingsView) => (view.checked?.workspaces ?? 1) > 1
+/** Whether the run read several workspaces, so an id alone does not name one resource. */
+export const severalWorkspaces = (view: SavingsView) => (view.checked?.workspaces ?? 1) > 1
 /**
  * Whether a warehouse row is in the workspace a fix or finding names. An id repeats across workspaces: with several
  * read, the two must name the same one (an answer kept without row workspaces matches none). With one read, a side
@@ -122,7 +123,8 @@ export function readsAllKnown(fix: FixRecord, view: SavingsView): boolean {
 
 /**
  * The settings a kept fix holds after this run: each one it did not know is filled from what this run read, and
- * none it knew is overwritten. Null when the run teaches it nothing.
+ * none it knew is overwritten. A run that saw a setting it knew change fills nothing: its other values are the
+ * warehouse after the change, not what the fix was drafted against. Null when the run teaches it nothing.
  */
 export function mergedConfig(fix: FixRecord, view: SavingsView): WarehouseConfig | null {
   const was = keptConfig(fix)

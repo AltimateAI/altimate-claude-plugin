@@ -253,3 +253,18 @@ test('when no check could run, the subtitle says so rather than "by the checks t
   expect(html).not.toContain('by the checks that ran')
   expect(html).not.toContain('Some checks did not run in full')
 })
+
+test('the report gives the rate of each answer\'s own window, as the pane does, not a week', () => {
+  const month = view({ window: { start: '2026-10-19', end: '2026-11-18' } })
+  expect(savingsReportHtml([kept(month)], 'now', URL)).toContain("at list price and the last 30 days' rate, each counted once at its largest saving")
+  const both = savingsReportHtml([kept(view()), kept({ ...month, connection: 'dbx2', identity: 'databricks:h2' })], 'now', URL)
+  expect(both).toContain("the last 7 and 30 days' rate")
+  expect(both).not.toContain('week')
+})
+
+test('two connections that read one workspace count its findings once in the report\'s headline', () => {
+  const free = (connection: string) =>
+    view({ connection, total: { min: 0, max: 0, resources: 0 }, findings: view().findings.map(one => ({ ...one, monthlyMin: 0, monthlyMax: 0 })) })
+  const html = savingsReportHtml([kept(free('dbx')), kept(free('dbx2'))], 'now', URL)
+  expect(html).toContain('<p class="total">1 finding, no dollar estimate</p>')
+})

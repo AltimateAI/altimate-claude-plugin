@@ -97,6 +97,13 @@ export function limitedText(view: Pick<SavingsView, 'platform' | 'limited'>): st
 export const resourceKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: Pick<SavingsFinding, 'workspaceId' | 'resourceType' | 'resourceId'>) =>
   `${view.platform}:${view.scope ?? ''}:${one.workspaceId ?? ''}:${one.resourceType}:${one.resourceId}`
 
+/** The key a finding is counted once under: its resource's and its check's. Two connections that read one workspace list it twice. */
+export const findingKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: Pick<SavingsFinding, 'workspaceId' | 'resourceType' | 'resourceId' | 'checkId'>) =>
+  `${resourceKey(view, one)}:${one.checkId}`
+
+/** How many findings the answers hold, each counted once (`findingKey`). */
+export const distinctFindingCount = (views: readonly SavingsView[]) => new Set(views.flatMap(view => view.findings.map(one => findingKey(view, one)))).size
+
 /** Whether a finding's range is larger than another's: by its high end, then its low end. */
 export const largerSaving = (a: { min: number; max: number }, b: { min: number; max: number }) => a.max > b.max || (a.max === b.max && a.min > b.min)
 

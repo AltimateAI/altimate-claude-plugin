@@ -18,8 +18,8 @@ import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig } from '../savings-config'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
-import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, mergedConfig, readsAllKnown, sameWorkspace, type FixRecord } from '../savings-fixes'
-import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
+import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, mergedConfig, readsAllKnown, sameWorkspace, severalWorkspaces, type FixRecord } from '../savings-fixes'
+import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, distinctFindingCount, dollars, findingKey, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
   type ConnectionFacts,
@@ -324,9 +324,18 @@ function factOf(evidence: Record<string, unknown>, title: string): string {
   }
 }
 
-/** A finding and a fix line about one resource: the same id in the same workspace. */
-const sameResource = (finding: Pick<SavingsFinding, 'resourceType' | 'resourceId' | 'workspaceId'>, line: Pick<SavingsFixLine, 'resourceType' | 'resourceId' | 'workspaceId'>) =>
-  finding.resourceType === line.resourceType && finding.resourceId === line.resourceId && (finding.workspaceId ?? null) === (line.workspaceId ?? null)
+/**
+ * A finding and a fix line about one resource, matched as the fix's own line matches its finding: the same id, or on
+ * Snowflake the same name (a warehouse with no usage has its name for an id), in the same workspace (`sameWorkspace`).
+ */
+const sameResource = (
+  view: SavingsView,
+  finding: Pick<SavingsFinding, 'resourceType' | 'resourceId' | 'resourceName' | 'workspaceId'>,
+  line: Pick<SavingsFixLine, 'resourceType' | 'resourceId' | 'resourceName' | 'workspaceId'>,
+) =>
+  finding.resourceType === line.resourceType &&
+  (finding.resourceId === line.resourceId || (view.platform === 'snowflake' && finding.resourceName === line.resourceName)) &&
+  sameWorkspace(finding.workspaceId, line.workspaceId, severalWorkspaces(view))
 
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
@@ -657,9 +666,10 @@ export async function trackChanges(
     const windowCost = known(warehouse.window_cost) ? Number(warehouse.window_cost) : null
     // Only a setting both runs read can have changed, and the line names only those.
     const changed = stored ? changedSettings(stored.config, now) : []
-    // Per setting, a later read fills what the baseline did not know, whatever else changed, and never overwrites
-    // what it knew. A cost kept unknown takes the first one a later run gives while nothing changed. A later change
-    // then shows.
+    // Per setting, a later read fills what the baseline did not know and never overwrites what it knew, but only a
+    // read in which nothing known changed: after a change it reads the warehouse as it is now (`mergeConfig`). A
+    // cost kept unknown likewise takes the first one a later run gives while nothing changed. A later change then
+    // shows.
     const fillCost = stored && changed.length === 0 && stored.windowCost === null && windowCost !== null
     if (stored && (fillCost || learns(stored.config, now))) {
       const filled: Baseline = { ...stored, config: mergeConfig(stored.config, now), ...(fillCost ? { windowCost, days: windowDays(view.window) } : {}) }
@@ -814,7 +824,7 @@ export function statusText(kept: Record<string, SavingsKept>, connections: reado
   if (held.length > 0) {
     const views = held.map(one => one.view)
     const total = combinedTotal(views)
-    const findings = views.reduce((sum, view) => sum + view.findings.length, 0)
+    const findings = distinctFindingCount(views)
     const age = Math.floor((now - Math.min(...held.map(one => one.savedAt))) / DAY_MS)
     const when = age >= 1 ? ` (${age}d ago)` : ''
     const said =
@@ -939,13 +949,24 @@ export function rankFindings(views: readonly SavingsView[]): RankedFinding[] {
   )
 }
 
+/** Every finding across the answers, largest first, each once: two connections that read one workspace list its findings twice. */
+export function distinctFindings(views: readonly SavingsView[]): RankedFinding[] {
+  const seen = new Set<string>()
+  return rankFindings(views).filter(one => {
+    const key = findingKey(one.view, one.finding)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 /**
  * What the slim view shows, counted the way the total is: each resource once, at its largest finding. The
  * top resources by that finding are shown; every other finding is behind Show all. `adds` is what the
  * resources not shown add to the total, so the shown amounts plus `adds` are the total.
  */
 export function slimFindings(views: readonly SavingsView[]): { top: RankedFinding[]; hidden: number; hiddenPriced: number; adds: { min: number; max: number } } {
-  const ranked = rankFindings(views)
+  const ranked = distinctFindings(views)
   const seen = new Set<string>()
   const largest = ranked.filter(one => {
     const key = resourceKey(one.view, one.finding)
@@ -1253,10 +1274,24 @@ async function rememberFix($: EngineInterface, view: SavingsView, finding: Savin
   return $.store.set(key, fix).then(() => true, () => false)
 }
 
+/**
+ * A press runs on the clock after the event that delivered it, so one landing just before a /clear would act in the
+ * new conversation: it runs only if no /clear came since, and is given that conversation's generation.
+ */
+function whenPressed($: EngineInterface, work: (at: number) => Promise<unknown>) {
+  const at = generation
+  later($, async () => {
+    if (at === generation) await work(at)
+  })
+}
+
 /** Puts the finding's fix request in the prompt box; nothing is sent until the person presses Enter. */
-async function draftFix($: EngineInterface, view: SavingsView, finding: SavingsFinding) {
+async function draftFix($: EngineInterface, view: SavingsView, finding: SavingsFinding, at: number) {
   const filled = await $.prompt.fill({ text: finding.fixRequest }).catch(() => null)
+  // A /clear while the box was filled replaced its text: the request is not followed and nothing is said.
+  if (at !== generation) return
   const remembered = filled?.isFilled ? await rememberFix($, view, finding) : true
+  if (at !== generation) return
   notify(
     $,
     filled?.isFilled
@@ -1266,29 +1301,31 @@ async function draftFix($: EngineInterface, view: SavingsView, finding: SavingsF
 }
 
 /** Writes the kept answers as a local page and opens it. Nothing is uploaded. */
-async function shareReport($: EngineInterface) {
+async function shareReport($: EngineInterface, at: number) {
+  // The page is written whatever happens; what it says about it goes only to the conversation it was asked in.
+  const say = (text: string) => update($, sharedAtom, now => (at === generation ? { text } : now))
   const kept = keptViews(liveKept(await read($, reportsAtom), await $.clock.now()))
   if (kept.length === 0) return
   const project = await findProject($).catch(() => null)
   const home = await $.env.get('HOME').catch(() => undefined)
   const dir = project ? `${project}/target/.altimate-lineage` : home ? `${home}/.altimate-code` : null
-  if (!dir) return void (await update($, sharedAtom, () => ({ text: 'The report could not be written: no project or home folder is known here.' })))
+  if (!dir) return void (await say('The report could not be written: no project or home folder is known here.'))
   const path = `${dir}/savings-report.html`
   const builtAt = `${new Date(await $.clock.now()).toISOString().slice(0, 16).replace('T', ' ')} UTC`
   try {
     await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5_000 }).catch(() => null)
     await $.fs.write(path, savingsReportHtml(kept, builtAt, SIGNUP_URL, await read($, messagesAtom)))
   } catch (error) {
-    return void (await update($, sharedAtom, () => ({ text: `The report could not be written: ${oneLine(error).slice(0, 200)}` })))
+    return void (await say(`The report could not be written: ${oneLine(error).slice(0, 200)}`))
   }
   const opened = await openReport($, path).catch(() => false)
-  await update($, sharedAtom, () => ({ text: `${opened ? 'Report opened' : 'No browser could be opened. Report'}: ${path}. It stays on this machine until you send it.` }))
+  await say(`${opened ? 'Report opened' : 'No browser could be opened. Report'}: ${path}. It stays on this machine until you send it.`)
 }
 
 /** Opens Altimate's sign-up page; the address alone, with nothing from this run in it. */
-async function openAltimate($: EngineInterface) {
+async function openAltimate($: EngineInterface, at: number) {
   const opened = await openReport($, SIGNUP_URL).catch(() => false)
-  if (!opened) await update($, sharedAtom, () => ({ text: `No browser could be opened. Altimate is at ${SIGNUP_URL}` }))
+  if (!opened) await update($, sharedAtom, now => (at === generation ? { text: `No browser could be opened. Altimate is at ${SIGNUP_URL}` } : now))
 }
 
 /** Whether `text` names `name` as a whole word: `dev` is not in `devices`. */
@@ -1299,7 +1336,7 @@ export function mentions(text: string, name: string | null | undefined): boolean
 }
 
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
-async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
+async function bandFor($: EngineInterface, text: string, at: number, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
   const kept = keptViews(liveKept(await read($, reportsAtom), await $.clock.now()))
   // An id only counts where it is long enough to mean something: a Snowflake id is a small number, a job's too.
   const matches = kept
@@ -1318,6 +1355,8 @@ async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_
   }
   if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${named.monthlyMax > 0 ? `${range(named.monthlyMin, named.monthlyMax)} a month to save` : 'no dollar estimate'}. /savings shows why.` }
   if (kept.length > 0 || offered || !aboutCompute) return null
+  // A /clear while the answer was read: the new conversation keeps its own once-a-session offer.
+  if (at !== generation) return null
   offered = true
   return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection; it starts the SQL warehouse if it is stopped, which bills).' }
 }
@@ -1454,11 +1493,11 @@ export function register(on: On, _context: FeatureContext) {
       later($, () => startPressedRun($, lastAsked, at))
     }
     const close = () => later($, () => $.ui.close({ id: PANE }))
-    const share = () => later($, () => shareReport($))
-    const altimate = () => later($, () => openAltimate($))
+    const share = () => whenPressed($, at => shareReport($, at))
+    const altimate = () => whenPressed($, at => openAltimate($, at))
     const buttons = (
       <Box gap={1} key="buttons" flexWrap="wrap">
-        {kept.length > 0 ? <Button key="fewer" label="Show fewer" onPress={() => later($, () => update($, expandedAtom, () => false))} /> : null}
+        {kept.length > 0 ? <Button key="fewer" label="Show fewer" onPress={() => whenPressed($, () => update($, expandedAtom, () => false))} /> : null}
         <Button key="again" label="Run again" onPress={again} />
         {kept.length > 0 ? <Button key="share" label="Share report" onPress={share} /> : null}
         {kept.length > 0 ? <Button key="altimate" label="See every check in Altimate" onPress={altimate} /> : null}
@@ -1508,7 +1547,7 @@ export function register(on: On, _context: FeatureContext) {
       // A drafted fix's line goes under its resource; one whose resource has no finding now (the fix may
       // have cleared it) is shown on its own, after the top findings.
       // A fix whose resource is not among the findings shown (not flagged now, or below the top few) is listed on its own.
-      const unflagged = views.flatMap(view => view.fixes.filter(line => !top.some(one => one.view === view && sameResource(one.finding, line))))
+      const unflagged = views.flatMap(view => view.fixes.filter(line => !top.some(one => one.view === view && sameResource(view, one.finding, line))))
       return cleanTree(
         <Box flexDirection="column" gap={1}>
           {refusals}
@@ -1540,14 +1579,18 @@ export function register(on: On, _context: FeatureContext) {
               <Box flexDirection="column" paddingLeft={2}>
                 {finding.evidence[0] ? <Text dimColor>{fitLine(finding.evidence[0], SLIM_WIDTH - 2)}</Text> : null}
                 {view.fixes
-                  .filter(line => sameResource(finding, line))
+                  .filter(line => sameResource(view, finding, line))
                   .map((line, row) => (
                     <Text key={`fix-line-${at}-${row}`} color={line.state === 'measuring' || line.state === 'lower' ? undefined : 'warning'} dimColor={line.state === 'measuring'}>
                       {line.text}
                     </Text>
                   ))}
                 <Box>
-                  <Button key={`fix-${at}`} label="Draft the fix" onPress={() => later($, () => draftFix($, view, finding))} />
+                  <Button
+                    key={`fix-${at}`}
+                    label="Draft the fix"
+                    onPress={() => whenPressed($, conversation => draftFix($, view, finding, conversation))}
+                  />
                 </Box>
               </Box>
             </Box>
@@ -1566,7 +1609,7 @@ export function register(on: On, _context: FeatureContext) {
           })}
           <Box gap={2} key="more">
             {smaller ? <Text>{smaller}</Text> : null}
-            <Button key="more" label="Show all" onPress={() => later($, () => update($, expandedAtom, () => true))} />
+            <Button key="more" label="Show all" onPress={() => whenPressed($, () => update($, expandedAtom, () => true))} />
           </Box>
           <Box gap={2} key="pitch">
             <Text dimColor>{`Altimate runs ${checksNotRunCount(views)} more checks on ${platforms === 1 ? 'this platform' : 'these platforms'}.`}</Text>
@@ -1646,7 +1689,7 @@ export function register(on: On, _context: FeatureContext) {
                         </Text>
                       ))}
                       <Box>
-                        <Button key={`fix-${at}`} label="Draft the fix" onPress={() => later($, () => draftFix($, view, one))} />
+                        <Button key={`fix-${at}`} label="Draft the fix" onPress={() => whenPressed($, conversation => draftFix($, view, one, conversation))} />
                       </Box>
                     </Box>
                   </Box>
@@ -1667,7 +1710,7 @@ export function register(on: On, _context: FeatureContext) {
                         <Button
                           key={`whatif-${at}-${k}`}
                           label={`${c.label} ${dollars(c.monthlyCost)}${c.fits === false ? ' ⚠' : ''}`}
-                          onPress={() => later($, () => update($, whatIfAtom, () => ({ connection: view.connection, workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label })))}
+                          onPress={() => whenPressed($, () => update($, whatIfAtom, () => ({ connection: view.connection, workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label })))}
                         />
                       ))}
                     </Box>
@@ -1784,7 +1827,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
           })
         }}
       />
-      <Button key="savings-hide" label="Hide" onPress={() => later($, () => update($, bandAtom, () => null))} />
+      <Button key="savings-hide" label="Hide" onPress={() => whenPressed($, () => update($, bandAtom, () => null))} />
     </Box>,
   )
 }
@@ -1797,25 +1840,32 @@ export async function bashRewrite($: EngineInterface, e: BashCall): Promise<stri
 export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny: string } | null> {
   const invocation = dbtRunOf(e.command)
   if (!invocation || !e.tool_use_id) return null
+  // The conversation the run was asked in: a /clear from here on keeps its note out of the new one.
+  const at = generation
   if (!Object.values(await read($, reportsAtom)).some(one => one.view.findings.length > 0)) return null
   const ref = await refOfDbtRun($, e.command, invocation)
-  if (ref) await update($, rowsAtom, rows => Object.fromEntries([...Object.entries(rows), [e.tool_use_id, ref] as const].slice(-ROWS_KEPT)))
+  const id = e.tool_use_id
+  if (ref) await update($, rowsAtom, rows => (at === generation ? Object.fromEntries([...Object.entries(rows), [id, ref] as const].slice(-ROWS_KEPT)) : rows))
   return null
 }
 
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   if (!runsDatabricksCompute(e.command)) return
+  // The conversation the command ran in: a /clear from here on keeps its line out of the new one.
+  const at = generation
   // A databricks warehouses, clusters, bundle or jobs command is about compute whatever its words.
-  const band = await bandFor($, e.command, true)
-  if (band) await update($, bandAtom, () => band)
+  const band = await bandFor($, e.command, at, true)
+  if (band) await update($, bandAtom, now => (at === generation ? band : now))
 }
 
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
   if (!DATABRICKS_CONFIG.test(file.path.replace(/\\/g, '/'))) return
+  // The conversation the edit was made in: a /clear from here on keeps its line out of the new one.
+  const at = generation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
-  if (!DATABRICKS_TEXT.test(text)) return
-  const band = await bandFor($, text)
-  if (band) await update($, bandAtom, () => band)
+  if (!DATABRICKS_TEXT.test(text) || at !== generation) return
+  const band = await bandFor($, text, at)
+  if (band) await update($, bandAtom, now => (at === generation ? band : now))
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}
