@@ -116,9 +116,18 @@ const percent = (share: unknown) => `${Math.round(Number(share) * 100)}%`
 const percentOf = (value: unknown) => `${Math.round(Number(value))}%`
 const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
 const count = (value: unknown) => Math.round(Number(value) || 0).toLocaleString('en-US')
-/** One decimal; a figure that would round to 0.0 reads "under 0.1". */
-const tenths = (value: unknown) =>
-  Number(value) < 0.05 ? 'under 0.1' : Number(value).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+const UNDER_TENTH = 'under 0.1'
+/** One decimal; a figure that would round to 0.0 reads "under 0.1", and one the answer lacks reads "?". */
+const tenths = (value: unknown) => {
+  const number = Number(value)
+  if (value === null || value === undefined || value === '' || !Number.isFinite(number)) return '?'
+  return number < 0.05 ? UNDER_TENTH : number.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+}
+/** `tenths` for an estimate: "about 1.2", "under 0.1" or "?". */
+const approxTenths = (value: unknown) => {
+  const shown = tenths(value)
+  return shown === UNDER_TENTH || shown === '?' ? shown : `about ${shown}`
+}
 /** Free text from the workspace on one line, with control and invisible characters gone: one of them can blank the pane. */
 const oneLine = (value: unknown) =>
   String(value ?? '')
@@ -156,11 +165,15 @@ export function evidenceLines(evidence: Record<string, unknown>, days = 7): stri
         `All-purpose cluster ${percent(evidence.idle_ratio)} idle across ${count(evidence.active_days)} active days (${String(evidence.idle_pattern).replace(/_/g, ' ')}), average worker CPU ${percentOf(evidence.avg_cpu_active_pct)}, peak ${percentOf(evidence.peak_cpu_active_pct)}`,
         `Auto-termination ${evidence.auto_termination_minutes ? `${evidence.auto_termination_minutes} minutes` : 'off'}; $${Number(evidence.total_cost).toFixed(2)} billed on all-purpose compute over ${days} days`,
       ]
-    case 'job_on_all_purpose':
+    case 'job_on_all_purpose': {
+      // A trigger or host cluster the answer does not name is left out, not printed as "undefined" or "".
+      const trigger = oneLine(evidence.trigger_type).toLowerCase()
+      const cluster = shownName(evidence.host_cluster_name, evidence.host_cluster_id)
       return [
-        `${count(evidence.task_runs)} task ${Number(evidence.task_runs) === 1 ? 'run' : 'runs'} (${String(evidence.trigger_type).toLowerCase()}), ${tenths(evidence.task_hours)} hours on all-purpose compute, ${Number(evidence.estimated_dbus) < 0.05 ? 'under 0.1' : `about ${tenths(evidence.estimated_dbus)}`} DBUs, most on cluster ${quoted(shownName(evidence.host_cluster_name, evidence.host_cluster_id))}`,
+        `${count(evidence.task_runs)} task ${Number(evidence.task_runs) === 1 ? 'run' : 'runs'}${trigger ? ` (${trigger})` : ''}, ${tenths(evidence.task_hours)} hours on all-purpose compute, ${approxTenths(evidence.estimated_dbus)} DBUs${cluster ? `, most on cluster ${quoted(cluster)}` : ''}`,
         `$${Number(evidence.all_purpose_rate_per_dbu).toFixed(3)} a DBU now; a job cluster would be about $${Number(evidence.jobs_rate_per_dbu).toFixed(3)}${evidence.jobs_rate_estimated ? ' (estimated: the workspace billed no jobs compute)' : ''}`,
       ]
+    }
     default:
       return []
   }
@@ -218,7 +231,7 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
     case 'job_on_all_purpose':
       return {
         noun: 'Job',
-        change: `run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster each task uses now (most of the job's DBUs are on id ${oneLine(e.host_cluster_id)})`,
+        change: `run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster each task uses now${oneLine(e.host_cluster_id) ? ` (most of the job's DBUs are on id ${oneLine(e.host_cluster_id)})` : ''}`,
         defines: "the job's bundle resource, Terraform databricks_job, or JSON",
         // A task listed in `jobs update` replaces that whole task, so the draft starts from the job as it is.
         otherwise: `write the JSON for \`databricks jobs update --json\`: start from \`databricks jobs get ${id}\` and give each task you change whole, with only its cluster changed`,

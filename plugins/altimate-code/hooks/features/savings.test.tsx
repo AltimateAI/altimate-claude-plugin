@@ -994,3 +994,15 @@ for (const counted of [undefined, 1, 0, -3, 1.5, 'two']) {
     await ui.unmount()
   })
 }
+
+test('a job whose evidence lacks its trigger, host cluster, hours or DBUs reads without "NaN", "undefined", empty quotes or "(id )"', () => {
+  const evidence = { kind: 'job_on_all_purpose', task_runs: 3, all_purpose_rate_per_dbu: 0.55, jobs_rate_per_dbu: 0.15 }
+  const [line] = evidenceLines(evidence)
+  expect(line).toBe('3 task runs, ? hours on all-purpose compute, ? DBUs')
+  const request = fixRequest({ ...JOB, evidence })
+  expect(request).not.toMatch(/NaN|undefined|""|\(id \)/)
+  expect(request).toContain('sized like the cluster each task uses now.')
+  // Present values still read as before, and a tiny DBU figure is "under 0.1" without "about".
+  expect(evidenceLines({ ...JOB.evidence, estimated_dbus: 0.01 })[0]).toContain(', under 0.1 DBUs, most on cluster "shared analytics"')
+  expect(evidenceLines(JOB.evidence)[0]).toContain('(periodic), 181.8 hours on all-purpose compute, about 1,818.2 DBUs')
+})
