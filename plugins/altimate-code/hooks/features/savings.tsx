@@ -812,19 +812,22 @@ export function register(on: On, _context: FeatureContext) {
     if (asked && !CONNECTION_NAME.test(asked)) {
       return { text: `"${asked}" is not a connection name. Run /savings, or /savings <connection> with an altimate-code Databricks connection.` }
     }
+    // A /clear at any await from here on: no run, and no claim that one is running.
+    const cleared = { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
     // One check at a time, decided before anything waits.
     const going = claim
     if (going) {
+      const inConversation = conversation
       await openPane($)
+      // While the pane opened, a /clear dropped that check, or it ended.
+      if (conversation !== inConversation) return cleared
+      if (claim !== going) return { text: 'The Databricks savings check just finished: its result is in the side pane.' }
       // One asked for a connection the running check is not reading, typed or not, is to be asked again.
       const other = (asked || null) !== going.connection ? ` Run /savings${asked ? ` ${asked}` : ''} again when it finishes.` : ''
       return { text: `The Databricks savings check is already running in the side pane.${other}` }
     }
     const mine = { connection: asked || null }
     claim = mine
-    // A /clear during the write or while the pane opens dropped the claim: no pane, no run, and no claim that one
-    // is running.
-    const cleared = { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
     await update($, busyAtom, now => (claim === mine ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
     if (claim !== mine) return cleared
     const opened = await openPane($)
@@ -976,10 +979,10 @@ export function register(on: On, _context: FeatureContext) {
 
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, _e: Args<'session.start'>) {
-  // A run that was going when the last session ended can never finish, so it must not block this one. Its claim
-  // is not dropped here: it lives in this module, which a reload starts afresh, and while the module stays loaded
-  // its run may still be going.
-  await update($, busyAtom, () => null)
+  // A run that was going when the last session ended can never finish, so its running flag must not block this one.
+  // A claim still held here is a run that is still going (the module, where it lives, starts afresh on its own
+  // reload), so its flag stays and the pane still shows it running.
+  await update($, busyAtom, now => (claim ? now : null))
   await $.command.register({
     name: COMMAND,
     description: "Check a Databricks workspace's warehouses, clusters and jobs for savings with Altimate's rules: read-only, on your own connection; starts its SQL warehouse if stopped, which bills",
