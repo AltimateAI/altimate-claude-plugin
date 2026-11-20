@@ -1131,19 +1131,39 @@ test('a baseline in one workspace is read for that workspace only, though anothe
   await ui.unmount()
 })
 
-test('a size the CLI did not read is left out of the change line, not drawn as "?"', async ($, on) => {
-  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: null, windowCost: 27.54 } }
-  const answer = JSON.parse(JSON.stringify(ANSWER))
-  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
-  const { clock } = await start($, on, { answer, store })
+for (const [was, now, type, line] of [
+  [null, 'X_SMALL', 'CLASSIC', null],
+  ['SMALL', null, 'CLASSIC', null],
+  [null, 'X_SMALL', 'PRO', 'Classic: CLASSIC → X-SMALL PRO since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'],
+] as const) {
+  test(`a size read on one side only is no resize, and is left out of a type change line: ${was ?? 'unread'} ${'CLASSIC'} then ${now ?? 'unread'} ${type}`, async ($, on) => {
+    const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: was, windowCost: 27.54 } }
+    const answer = JSON.parse(JSON.stringify(ANSWER))
+    Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: now, type })
+    const { clock } = await start($, on, { answer, store })
+    await savings($)
+    await clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+    expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(line ? [line] : [])
+    await ui.unmount()
+  })
+}
+
+test('after a run that failed, the band does not quote the answer the pane no longer shows', async ($, on) => {
+  const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
+  const answer: { value: unknown } = { value: ANSWER }
+  const started = await start($, on, { files, get answer() { return answer.value } } as any)
   await savings($)
-  await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
-  expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual([
-    'Classic: CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
-  ])
-  await ui.unmount()
+  await started.clock.settle()
+  answer.value = failure('[INSUFFICIENT_PERMISSIONS] no access to system.billing')
+  await savings($)
+  await started.clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'Small', new_string: 'Medium' })
+  await started.clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Classic: .*a month to save/ })).toBeUndefined()
+  await band.unmount()
 })
 
 test('two resized warehouses draw the observed-spend note once, after both lines', async ($, on) => {

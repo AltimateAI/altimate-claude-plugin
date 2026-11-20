@@ -168,7 +168,7 @@ function range(min: number, max: number): string {
 const fixed = (value: unknown, digits: number) => (known(value) ? Number(value).toFixed(digits) : '?')
 const percent = (share: unknown) => (known(share) ? `${Math.round(Number(share) * 100)}%` : '?')
 const percentOf = (value: unknown) => (known(value) ? `${Math.round(Number(value))}%` : '?')
-const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
+const size = (value: unknown) => (oneLine(value) || '?').replace(/_/g, '-')
 /** A figure the answer gave: not missing, empty or something that reads as NaN. */
 const known = (value: unknown) =>
   typeof value === 'number' ? Number.isFinite(value) : typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))
@@ -249,7 +249,7 @@ const configOf = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSi
 
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
-  return String(value ?? '')
+  return oneLine(value)
     .split(/[_-]/)
     .map(part => (/^\d*X$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()))
     .join('-')
@@ -477,7 +477,9 @@ export async function trackChanges(
     const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
     // A /clear while the baselines were read: this run keeps nothing.
     if (!live()) return []
-    const changed = stored && (stored.size !== warehouse.size || stored.type !== warehouse.type)
+    // A size read on one side only is no resize: the other run did not read it. The type still tells a change.
+    const resized = stored?.size != null && warehouse.size != null && stored.size !== warehouse.size
+    const changed = stored && (resized || stored.type !== warehouse.type)
     if (stored && changed) {
       changes.push({
         // Names repeat across workspaces, so with several read the line names its own.
@@ -679,7 +681,8 @@ export function mentions(text: string, name: string | null | undefined): boolean
 
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
 async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
-  const report = await read($, reportAtom)
+  // After a run that failed, the pane shows only why: the band does not quote the answer the pane hides.
+  const report = (await read($, messageAtom)) ? null : await read($, reportAtom)
   const matches = (report?.findings ?? []).filter(one => mentions(text, one.matchName) || (one.resourceType !== 'job' && mentions(text, one.resourceId)))
   const named = matches[0]
   // A file does not say which workspace it deploys to: a name flagged in several is not pinned on one of them.
