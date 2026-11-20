@@ -341,8 +341,10 @@ export function summaryLines(view: TaskSummaryView): string[] {
   const lines = [`◆ Lineage after this task · ${plural(view.models.length, 'model')} changed`]
   for (const model of view.models) {
     lines.push(`${model.name}${model.modelLevel !== null ? ` · ${plural(model.modelLevel, 'downstream model')} at model level` : ''}`)
-    // No output column changed, and none whose values change could be named: the values may still change.
-    if (model.columns.length === 0) lines.push(model.modelLevel === 0 ? '  no model reads it downstream' : '  values may change downstream; the model-level count stands')
+    // No output column changed: while the names it rewrote are traced, nothing that reads as the answer.
+    if (model.columns.length === 0 && view.state === 'tracing') lines.push('  tracing…')
+    // None whose values change could be named: the values may still change.
+    else if (model.columns.length === 0) lines.push(model.modelLevel === 0 ? '  no model reads it downstream' : '  values may change downstream; the model-level count stands')
     for (const col of model.columns) {
       // A column named by its values changing, not by its select item: said so.
       const name = col.value ? `values may change in ${col.name} →` : `${col.name} `

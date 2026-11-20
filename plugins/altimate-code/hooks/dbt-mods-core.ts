@@ -767,7 +767,7 @@ export function modelContextNote(context: ModelContext, stale: boolean): string 
   ]
   if (context.description) lines.push(`- description: ${context.description.replace(/\s+/g, ' ')}`)
   if (context.columns.length) {
-    lines.push(`- columns (${context.columns.length}):`)
+    lines.push(`- columns schema.yml lists (${context.columns.length}; the model may return more):`)
     for (const column of context.columns.slice(0, 40)) {
       const facts = [column.type, column.tests.length ? `tests: ${column.tests.join(', ')}` : null, column.description?.replace(/\s+/g, ' ')].filter(Boolean)
       lines.push(`  - ${column.name}${facts.length ? ` — ${facts.join(' · ')}` : ''}`)

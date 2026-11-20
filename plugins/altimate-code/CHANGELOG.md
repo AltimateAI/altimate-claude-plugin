@@ -20,6 +20,10 @@ All notable changes to this plugin will be documented in this file.
 - With `show_edit_impact` on, a model Claude changes through a shell command (`python3 …`, `sed -i`, `cat > …`) gets the same per-edit impact note as an Edit: the model files under the project's model folders modified since the command started are found after it ends, and their change from the last commit is traced. The note goes to Claude's context too.
 - The lineage pane moves to the model Claude is editing as the edit starts (before its impact lookup and the edit itself), and to the model a writing shell command names as it starts, instead of after the edit lands.
 - At its default size the lineage pane draws a graph wider than the pane as its ends only (which fit, dashboards included), saying so; `v` shows the whole graph. Dashboards (exposures) downstream that the drawing leaves out are named under it.
+- While the end-of-task band traces a change that names no output column, it says "tracing…" instead of "values may change downstream; the model-level count stands", which read as the answer before the trace of `paid_amount` came back.
+- `/profile-ctes` times a CTE that reads none of the CTEs before it (a sibling) on its own, instead of as its time less the slower CTE before it (which showed `payments +0 ms` after `order_items` in `customer_revenue`): with an altimate-code that lists the CTEs each one reads, a CTE's own part is its count's time less the own parts of the CTEs it reads, directly or through another. An older altimate-code keeps the previous rule.
+- The lineage pane says when the model's schema.yml changed after the manifest was written ("run `dbt parse`, then r"): its test count comes from there, and removing a model's tests left it counting them with no warning.
+- The model-context toast says "N columns in schema.yml" (those listed there, not the columns the model returns) and "1 column", "1 test"; Claude's note says the same. The lineage pane's log line says "read by 1 model".
 
 ## [1.8.3] — 2026-11-19
 

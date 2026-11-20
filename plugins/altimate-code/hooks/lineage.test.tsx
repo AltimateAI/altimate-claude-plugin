@@ -2075,3 +2075,29 @@ test('a shell command that fails after rewriting a model (python3 … && dbt tes
   await clock.settle()
   expect(result.context?.some((one: string) => one.startsWith('Altimate lineage for'))).toBe(true)
 })
+
+test('the log line for a column one model reads says "1 model", not "1 models"', async ($, on) => {
+  const one = { ...REACH, column_reach: { ...REACH.column_reach, models: [REACH.column_reach.models[0]] } }
+  const { clock, logs } = await start($, on, { reach: one })
+  await $.command.run({ command: 'lineage', args: 'fct_orders.revenue', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
+  await clock.settle()
+  expect(logs.some(line => line.endsWith('impact_analysis(fct_orders, column: revenue) · read by 1 model'))).toBe(true)
+})
+
+test("a schema.yml edited after the manifest was written says so: the pane's test count comes from it", async ($, on) => {
+  const YML = 'models/marts/schema.yml'
+  const nodes: Record<string, any> = { ...MANIFEST.nodes, 'model.shop.fct_orders': { ...(MANIFEST.nodes as any)['model.shop.fct_orders'], patch_path: `shop://${YML}` } }
+  let ymlMtime = 1
+  const { clock } = await start($, on, { manifest: { ...MANIFEST, nodes }, mtime: () => 2, fileMtime: path => (path === `${ROOT}/${YML}` ? ymlMtime : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then r/
+  expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
+  // Claude removes the model's tests from its schema.yml.
+  ymlMtime = 5
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/${YML}`, old_string: 'tests:', new_string: '' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  await ui.unmount()
+})

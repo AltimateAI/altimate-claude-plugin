@@ -1114,9 +1114,12 @@ async function modelNote($: EngineInterface, file: string, agentId?: string): Pr
   const tests = context.tests.length + context.columns.reduce((sum, one) => sum + one.tests.length, 0)
   return {
     note: modelContextNote(context, stale),
-    toast: `◆ model context · ${context.name}: ${context.materialized ?? 'model'} · ${context.columns.length} columns · ${tests} tests · depth ${context.upstreamDepth}↑ ${context.downstreamDepth}↓`,
+    // The columns schema.yml lists, not the columns the model returns: said so, so a short list never reads as the model's.
+    toast: `◆ model context · ${context.name}: ${context.materialized ?? 'model'} · ${count(context.columns.length, 'column')} in schema.yml · ${count(tests, 'test')} · depth ${context.upstreamDepth}↑ ${context.downstreamDepth}↓`,
   }
 }
+
+const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
 // ─── 15 · An environment doctor at session start ───────────────────────────────────────────────────
 

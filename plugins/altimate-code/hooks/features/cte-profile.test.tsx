@@ -62,6 +62,8 @@ type Setup = {
   hold?: { cte: string; until: Promise<void> }
   holdList?: Promise<void>
   times?: Record<string, number>
+  /** Per CTE, the positions of the CTEs it reads, as a newer altimate-code lists them. */
+  reads?: Record<string, number[]>
   missing?: boolean
   fail?: string
   failText?: string
@@ -106,7 +108,7 @@ async function start($: any, on: any, setup: Setup = {}) {
     if (setup.missing) return reply({ status: 'error', output: `Unknown tool: ${tool}. Run \`altimate-code tool list\` to see the available tools.`, metadata: {} }, 1)
     if (!args.cte) {
       if (setup.holdList) await setup.holdList
-      return reply({ status: 'ok', output: '', metadata: { success: true, ctes: ctes.map((name, index) => ({ name, line: index + 2, index, clause: 0, position: index })) } })
+      return reply({ status: 'ok', output: '', metadata: { success: true, ctes: ctes.map((name, index) => ({ name, line: index + 2, index, clause: 0, position: index, ...(setup.reads && { reads: setup.reads[name] ?? [] }) })) } })
     }
     if (setup.timeout === args.cte) return reply({ status: 'error', output: 'timed out and may still be running', metadata: { success: false, timedOut: true } }, 1)
     if (setup.crash === args.cte) return { value: { exitCode: 1, stdout: '', stderr: 'killed at the deadline' } }
@@ -365,5 +367,41 @@ test('Tell Claude sends the profile as a prompt and the next tool result does no
   expect(prompts.some(text => text.includes('CTE profile of "customers"'))).toBe(true)
   const next: any = await $.tool.call({ tool: 'Read', file_path: '/repo/models/other.md' } as any)
   expect(JSON.stringify(next.context ?? [])).not.toContain('CTE profile')
+  await ui.unmount()
+})
+
+test("with the CTEs each reads, a sibling CTE gets its own time, not 0 for following a slower one", () => {
+  // customer_revenue on DuckDB: order_items and payments are siblings; customer_orders reads orders, order_items and payments.
+  const rows = withTiers([
+    row('customers', { queryMs: 10, reads: [] }),
+    row('orders', { queryMs: 2155, reads: [] }),
+    row('order_items', { queryMs: 15070, reads: [] }),
+    row('payments', { queryMs: 4350, reads: [] }),
+    row('customer_orders', { queryMs: 22000, reads: [1, 2, 3] }),
+    row('ranked', { queryMs: 22050, reads: [4] }),
+  ])
+  expect(rows.map(one => one.marginalMs)).toEqual([10, 2155, 15070, 4350, 425, 50])
+  expect(slowestFirst(rows).map(one => one.name)).toEqual(['order_items', 'payments', 'orders', 'customer_orders', 'ranked', 'customers'])
+  expect(summaryOf({ model: 'customer_revenue', status: 'done', rows })).toContain("minus the own parts of the CTEs it reads")
+})
+
+test('with reads, a CTE that reads a failed one, directly or through another, gets no own time; one that does not keeps it', () => {
+  const rows = withTiers([
+    row('a', { status: 'failed', reads: [] }),
+    row('b', { queryMs: 300, reads: [] }),
+    row('c', { queryMs: 500, reads: [0] }),
+    row('d', { queryMs: 900, reads: [2] }),
+    row('e', { queryMs: 350, reads: [1] }),
+  ])
+  expect(rows.map(one => one.marginalMs)).toEqual([undefined, 300, undefined, undefined, 50])
+})
+
+test('/profile-ctes uses the reads altimate-code lists: a sibling after a slower CTE shows its own time in the pane', async ($, on) => {
+  const { clock, run } = await start($, on, { ctes: ['order_items', 'payments', 'final'], times: { order_items: 15000, payments: 4000, final: 19500 }, reads: { final: [0, 1] } })
+  await run('customer_revenue')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^payments .*\+4,000 ms/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^final .*\+500 ms/ })).toBeDefined()
   await ui.unmount()
 })

@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { MIN_ALTIMATE_CODE } from './altimate-cli'
 import { DOWN, UP, embedded } from './impact-report.test'
 import { nothingToReport } from './inert-features'
+import { TUVA_MEDICAL_CLAIM_SQL, TUVA_MODEL_LEVEL, TUVA_PAID_AMOUNT } from './tuva-answer.fixture'
 
 const ROOT = '/repo'
 const MANIFEST = `${ROOT}/target/manifest.json`
@@ -49,8 +50,9 @@ type Options = {
   conversation?: () => number
   turns?: () => number
   /** The CLI's whole answer for a call, in place of the usual one. */
-  answer?: (args: Record<string, any>) => { status: string; output: string; metadata: Record<string, unknown> } | undefined
+  answer?: (args: Record<string, any>) => Answer | undefined | Promise<Answer | undefined>
 }
+type Answer = { status: string; output: string; metadata: Record<string, unknown> }
 
 /**
  * A dbt project at /repo in a git repo, its files held in memory (edits apply to them), altimate-code
@@ -139,7 +141,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
   on('session.usage', () => ({ value: { startedAt: options.conversation?.() ?? 1_000 } }))
   on('session.turns', () => ({ value: options.turns?.() ?? 1 }))
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const argv = [...e.argv]
     const inert = nothingToReport(argv)
     if (inert) return { value: inert }
@@ -150,7 +152,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin === 'altimate') {
       const args = JSON.parse(String(argv[argv.indexOf('--args') + 1] ?? '{}'))
       if (options.cliFails) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'no', metadata: {} }), stderr: '' } }
-      const own = options.answer?.(args)
+      const own = await options.answer?.(args)
       if (own) {
         tools.push(args)
         return ok(JSON.stringify(own))
@@ -1000,5 +1002,38 @@ test('a value change names the columns the manifest has that reach downstream; o
   expect(await band.find({ type: 'Text', text: /values may change in total_amount → reaches 1 column in 1 model/ })).toBeDefined()
   expect(await band.find({ type: 'Text', text: /values may change in (paid_amount|units)/ })).toBeUndefined()
   expect(await band.find({ type: 'Text', text: /reaches 0 column/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a value change on Tuva: the band says tracing until the trace answers, never that the model-level count stands, then the reach impact-first gave', async ($, on) => {
+  const CLAIM = `${ROOT}/models/core/final/core__medical_claim.sql`
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const ok = (metadata: Record<string, unknown>) => ({ status: 'ok', output: 'Impact', metadata })
+  const { files, clock } = await start($, on, {
+    answer: async args => {
+      if (args.model !== 'core__medical_claim' || !args.direction) return undefined
+      if (!args.column) return ok(TUVA_MODEL_LEVEL)
+      if (args.column !== 'paid_amount') return ok({ ...TUVA_MODEL_LEVEL, column_answer_error: `no column ${args.column}` })
+      await held
+      return ok(TUVA_PAID_AMOUNT)
+    },
+  })
+  files[CLAIM] = TUVA_MEDICAL_CLAIM_SQL
+  await $.turn.start({ text: 'treat negative paid_amount as 0', turnId: 't1' })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: CLAIM, old_string: '    , med.paid_amount\n', new_string: '    , case when med.paid_amount < 0 then 0 else med.paid_amount end as paid_amount\n' })
+  await clock.settle()
+  await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // While paid_amount is traced: no line that reads as the answer.
+  expect(await band.find({ type: 'Text', text: /model-level count stands/ })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: '  tracing…' })).toBeDefined()
+  release()
+  await clock.settle()
+  expect(await band.find({ type: 'Text', text: 'core__medical_claim · 97 downstream models at model level' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^  values may change in paid_amount → reaches 124 columns in 13 models/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /model-level count stands/ })).toBeUndefined()
   await band.unmount()
 })

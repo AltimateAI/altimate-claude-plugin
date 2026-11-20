@@ -712,7 +712,7 @@ async function loadReach($: EngineInterface) {
   const reach = result?.ok ? reachFromMetadata(result.metadata, node.name, column) : null
   await update($, reachAtom, prev => (mine() ? reach : prev))
   if (!result?.ok) await update($, messageAtom, prev => (mine() ? `impact_analysis failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}` : prev))
-  else if (reach) $.ui.log(`lineage-pane · column ${column} · impact_analysis(${node.name}, column: ${column}) · read by ${reach.models.length} models`)
+  else if (reach) $.ui.log(`lineage-pane · column ${column} · impact_analysis(${node.name}, column: ${column}) · read by ${reach.models.length} model${reach.models.length === 1 ? '' : 's'}`)
   else if (result.metadata?.column_reach_error) await update($, messageAtom, prev => (mine() ? `Column reach failed: ${firstLine(String(result.metadata.column_reach_error))}` : prev))
   else if (result.metadata && result.metadata.severity === undefined) await update($, messageAtom, prev => (mine() ? `impact_analysis: ${firstLine(result.text) ?? 'no answer'}` : prev))
   else await update($, messageAtom, prev => (mine() ? 'Column reach needs an altimate-code build whose impact_analysis reports column_reach.' : prev))
@@ -754,14 +754,20 @@ async function loadWarehouse($: EngineInterface) {
 }
 
 /**
- * Whether the model's SQL file changed after the manifest was written (one stat): the pane's columns and
- * reach come from the manifest's compiled SQL, so they may be out of date until the next `dbt compile`.
+ * Whether the model's SQL file, or the schema.yml that describes it, changed after the manifest was written: the
+ * pane's columns and reach come from the manifest's compiled SQL, its tests from the yml, so they may be out of date.
  */
 async function staleSql($: EngineInterface, root: string, node: GraphNode | undefined, manifestMtimeMs: number): Promise<string | null> {
   if (!node?.path || !manifestMtimeMs) return null
-  const stat = await $.fs.stat(`${root}/${node.path}`).catch(() => null)
-  if (!stat || stat.mtimeMs <= manifestMtimeMs) return null
-  return `${node.path.split(/[\\/]/).pop()} changed after the manifest was written: run \`dbt compile\`, then r`
+  const newer = async (path: string) => {
+    const stat = await $.fs.stat(`${root}/${path}`).catch(() => null)
+    return !!stat && stat.mtimeMs > manifestMtimeMs
+  }
+  const base = (path: string) => path.split(/[\\/]/).pop()
+  if (await newer(node.path)) return `${base(node.path)} changed after the manifest was written: run \`dbt compile\`, then r`
+  // Its schema.yml: the tests and documented columns the pane counts come from there.
+  if (node.yml && (await newer(node.yml))) return `${base(node.yml)} changed after the manifest was written: run \`dbt parse\`, then r`
+  return null
 }
 
 /** The shown model's file may have changed since the pane read it (an edit, a shell command): checked again. */

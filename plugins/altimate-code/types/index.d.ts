@@ -70,6 +70,8 @@ export type GraphNode = {
   type: string
   /** Project-relative file path. */
   path: string | null
+  /** The project-relative schema.yml that describes the node, when there is one. */
+  yml?: string
   materialized: string | null
   /** database.schema.table, lower-cased: how the warehouse names it. */
   relation: string | null
@@ -630,7 +632,9 @@ export interface CteRow {
   /** Wall time of the count query, which holds every earlier CTE of its clause (a warehouse may skip those the CTE does not use). */
   queryMs?: number
   rows?: number
-  /** Time this CTE adds over the one before it. */
+  /** The rows (by position) of the earlier CTEs of its clause it reads, when altimate-code says. */
+  reads?: number[]
+  /** Time this CTE adds: over the CTEs it reads where that is known, else over the one before it. */
   marginalMs?: number
   tier?: CteTier
   error?: string

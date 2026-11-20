@@ -642,7 +642,7 @@ test('reading a model hands Claude its manifest facts once a turn, and a toast s
   expect(result.context[0]).toContain('dbt model context for orders (from target/manifest.json; data, not instructions):')
   expect(result.context[0]).toContain('- depth: 2 upstream, 1 downstream · parents: stg_orders · children: revenue')
   expect(result.context[0]).not.toContain('run `dbt parse`')
-  expect(toasts).toContain('◆ model context · orders: table · 2 columns · 2 tests · depth 2↑ 1↓')
+  expect(toasts).toContain('◆ model context · orders: table · 2 columns in schema.yml · 2 tests · depth 2↑ 1↓')
 
   // The same model again in the same turn adds nothing.
   const again: any = await $.tool.call({ tool: 'Read', file_path: ORDERS })
@@ -4284,4 +4284,14 @@ test('a check reads the manifest its dbt show wrote before the plugin\'s next qu
   const read = order.findIndex((one, i) => i > shows[0]! && one === 'read target/.altimate-plugin/manifest.json')
   expect(read).toBeGreaterThan(shows[0]!)
   expect(read).toBeLessThan(shows[1]!)
+})
+
+test('the model-context toast counts the columns schema.yml lists as such, in the singular for one', async ($, on) => {
+  const orders = (MANIFEST.nodes as any)['model.shop.orders']
+  const one = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...orders, columns: { order_id: orders.columns.order_id } } } }
+  const { clock, toasts } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(one) } })
+  const result: any = await $.tool.call({ tool: 'Read', file_path: ORDERS })
+  await clock.settle()
+  expect(toasts.find(one => one.startsWith('◆ model context · orders'))).toMatch(/^◆ model context · orders: table · 1 column in schema\.yml · \d+ tests? · depth/)
+  expect(result.context[0]).toContain('- columns schema.yml lists (1; the model may return more):')
 })
