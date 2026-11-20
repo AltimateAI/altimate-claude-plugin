@@ -75,7 +75,7 @@ async function readOrMakeId($: EngineInterface): Promise<string> {
 let ownVersion: string | null = null
 
 /** This plugin's version from its manifest, or `unknown`. */
-async function pluginVersion($: EngineInterface): Promise<string> {
+export async function pluginVersion($: EngineInterface): Promise<string> {
   if (ownVersion) return ownVersion
   const version = await $.fs
     .read(`${$.plugin.root}/.claude-plugin/plugin.json`)

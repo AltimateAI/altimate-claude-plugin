@@ -1,7 +1,7 @@
 # Privacy Policy — Altimate Code plugin for Claude Code
 
 **Effective date:** November 2, 2026
-**Last revised:** November 19, 2026
+**Last revised:** November 20, 2026
 **Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) MCP server and CLI.
 
 This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai/privacy) and [Terms](https://www.altimate.ai/terms), which govern Altimate services generally. Where this document is silent, the master policy applies. Questions: **info@altimate.ai**.
@@ -17,6 +17,7 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
 - In a project linked to an Altimate workspace, the plugin copies the workspace's team skills into the project's `.claude/skills/` and refreshes them from Altimate in the background at session start and at most hourly. Their text loads into the Claude Code conversation like any project skill. `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns this off and removes the copies at the next session start.
 - The plugin counts its own use anonymously, through the altimate-code CLI's usage telemetry: one event at each session start (plugin and altimate-code versions, OS, a random install id) and one each time a panel or command opens or a gate holds or allows a command (its name and outcome). No session id, project, model, column or file names, SQL or session text, and nothing that links them to your account or to the CLI's other telemetry. `ALTIMATE_TELEMETRY_DISABLED=true` turns it off. See [Plugin usage events](#plugin-usage-events).
+- `/altimate-code:feedback` only drafts a GitHub issue and shows it to you; nothing is sent unless you then confirm with `--confirm` (see [Feedback](#feedback)).
 - Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
@@ -107,6 +108,14 @@ To learn whether the report gets used, the plugin asks the local altimate-code C
 - the report was built, failed to build, or found no browser.
 
 Each event carries the step and the Claude Code session id (`claude:<id>`) only: no model, column, file or project names. It goes through Altimate's usage telemetry, described in [Usage telemetry](#usage-telemetry), and that section's opt-out turns it off; with `ALTIMATE_TELEMETRY_DISABLED` set, the plugin does not start the CLI for it. With an altimate-code that predates the command, nothing is sent.
+
+## Feedback
+
+`/altimate-code:feedback` drafts a GitHub issue for this plugin's repository. **Nothing is sent when you run it**: it shows you the exact title and body, and only `/altimate-code:feedback --confirm` sends them. The draft is kept in memory until then and is dropped when you discard or replace it, or the session ends. The plugin does not start `gh` or open a browser before you confirm.
+
+The issue holds your own words (with secrets and home-folder paths cut out) and these facts: the plugin's version, altimate-code's version and binary name (not its path), the Claude Code version, the OS, dbt-core, adapter and Python versions when the dbt doctor has run, and the plugin's on/off settings. With `--with-error` it also holds the last error the plugin met, redacted: the dbt profile's secret values, tokens, passwords, connection-string credentials, file paths, lines that look like SQL, and relation and model names are removed, and the text is cut to a few short lines. No file paths, SQL, or project, model or column names are collected; if you write them in your description they are included, so check the draft.
+
+After you confirm, the text goes to GitHub: through `gh issue create`, signed in as you, or through a prefilled link you open and submit yourself. The issue is public on [AltimateAI/altimate-claude-plugin](https://github.com/AltimateAI/altimate-claude-plugin/issues) and subject to GitHub's terms and privacy statement. Altimate receives it as any public issue; the plugin sends nothing to Altimate's services for this command. Before creating the issue with `gh`, the plugin runs `gh auth status` and `gh label list` for that repository, which contact GitHub with your sign-in but carry none of the draft. The plugin never signs you in to `gh`.
 
 ## Plugin usage events
 
