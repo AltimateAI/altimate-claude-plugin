@@ -633,6 +633,9 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   expect(valueCandidates("select a\nfrom t\nwhere status = 'ok'", "select a\nfrom t\nwhere status in ('ok', 'settled')")).toEqual([])
   // A function named like a join word (`left(…)`) is a value, not a join.
   expect(valueCandidates('select\n  id,\n  zip_code\nfrom t', 'select\n  id,\n  left(zip_code, 3) as zip3\nfrom t')).toEqual(['zip_code', 'zip3'])
+  // A parenthesised predicate or join condition is still a filter.
+  expect(valueCandidates("select a\nfrom t\nwhere (status = 'ok')", "select a\nfrom t\nwhere (status in ('ok', 'settled'))")).toEqual([])
+  expect(valueCandidates('select a\nfrom t join u\non (t.order_id = u.order_id)', 'select a\nfrom t join u\non (t.order_id = u.id)')).toEqual([])
   const answer = {
     version: 1, focus: { model: 'model.t.core__medical_claim', column: 'paid_amount' }, direction: 'downstream',
     nodes: [{ id: 'model.t.core__medical_claim', name: 'core__medical_claim' }, { id: 'model.t.fact_claims', name: 'fact_claims' }],
