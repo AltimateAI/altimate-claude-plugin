@@ -1618,6 +1618,7 @@ test('the program is found past every leader the push check knows, and past xarg
     "bash -Ec 'databricks jobs list'",
     "bash -o pipefail -c 'databricks jobs list'",
     "bash -euo pipefail -c 'databricks bundle deploy'",
+    "bash -oc pipefail 'databricks bundle deploy'",
     'ls | xargs -J % databricks clusters get %',
     'xargs --max-args 1 databricks clusters get',
   ]) {
