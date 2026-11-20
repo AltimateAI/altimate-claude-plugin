@@ -969,3 +969,36 @@ test('a model the task created, which the manifest from before it lacks, has its
   expect(line).toContain('region  not in the manifest from before the task (new in it?): its reach is unknown, not zero')
   expect(line).not.toContain('update altimate-code')
 })
+
+test('a value change names the output whose value changed; a rewritten name that reaches nothing is left out, never shown as 0', async ($, on) => {
+  const answerFor = (column: string, reach: number) => ({
+    status: 'ok',
+    output: 'Impact',
+    metadata: {
+      model_level: 2,
+      column_answer: {
+        version: 1, focus: { model: 'model.shop.fct_orders', column }, direction: 'downstream',
+        nodes: [{ id: 'model.shop.fct_orders', name: 'fct_orders' }, { id: 'model.shop.rpt', name: 'rpt' }],
+        columns: [{ model: 0, column, hop: 0 }, ...(reach ? [{ model: 1, column, hop: 1, end: true }] : [])],
+        counts: { columns: reach, models: reach ? 1 : 0, ends: reach, hops: reach ? 1 : 0, may_carry_models: 0, model_level: 2 },
+        unresolved: [], may_carry: [],
+      },
+    },
+  })
+  const { turn, clock } = await start($, on, {
+    answer: args => (args.direction === 'downstream' && args.column ? answerFor(args.column, args.column === 'total_amount' ? 1 : 0) : undefined),
+  })
+  const sql = (expr: string) => `{% set cols %}\npaid_amount,\nunits,\n${expr} as total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}`
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: MODEL, content: sql('paid_amount + units') })
+  })
+  await turn('t2', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'paid_amount + units as', new_string: 'paid_amount + units * 2 as' })
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /values change in total_amount → reaches 1 column in 1 model/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /values change in (paid_amount|units)/ })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /reaches 0 column/ })).toBeUndefined()
+  await band.unmount()
+})

@@ -25,6 +25,7 @@ import {
   reportHtml,
   summaryLines,
   summaryOf,
+  reachOf,
   unknownReach,
   valueCandidates,
   WINDOWS_EXPLORER,
@@ -233,6 +234,9 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
           const meta = await ask($, done, change, name, 'downstream')
           const answer = answerOf(meta)
           if (!answer || !answer.columns.some(one => one.hop === 0)) return null
+          // A name the change rewrote that reaches nothing is no evidence (an operand, not the output that changed):
+          // left out, so the band never reads as a value change reaching 0.
+          if (!unknownReach(answer) && reachOf(answer).columns === 0) return null
           return { model: change.model, column: name, down: answer, up: null, modelLevel: modelLevelOf(meta), failed: false, value: true, ...unknownOf(answer), consumers: consumersOf(meta) }
         })
       }

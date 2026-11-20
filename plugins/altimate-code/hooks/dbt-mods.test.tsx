@@ -797,6 +797,9 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // A `{% set %}` variable set twice: which value renders is not read, so the column is the edit's.
   const twice = '{% set cols %}id, amount{% endset %}\n{% set cols %}id{% endset %}\nselect {{ cols }} from raw'
   expect(undocumentedByEdit(['amount'], twice, twice.replace('{% set cols %}id{% endset %}', '{% set cols %}id, amount{% endset %}'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A trailing comment is not an item's name; quoted (case-sensitive) names are outside what is compared.
+  expect(undocumentedByEdit(['new_col'], 'select\n  id,\n  amount -- note\nfrom raw', 'select\n  id,\n  amount, -- note\n  x as new_col -- note\nfrom raw', null)).toEqual({ fresh: ['new_col'], old: [] })
+  expect(undocumentedByEdit(['Amount'], 'select id, "amount" from raw', 'select id, "amount", "Amount" from raw', null)).toEqual({ fresh: ['Amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -871,8 +874,6 @@ test('only the columns an edit left undocumented are its gaps; ones undocumented
   const pane = await $.ui.mount({ ...CHECK, surface: 'terminal' })
   expect(await pane.find({ type: 'Text', text: '  not documented, from before this edit' })).toBeDefined()
   await pane.unmount()
-  // A check that found only older gaps does not claim the columns match.
-  show.rows = [{ order_id: 1, amount: 10, status: 'placed', amount_cents: 1000 }]
 
   // A later edit that rewrites the new column, still undocumented, still warns about it.
   files['models/orders.sql'] = 'select order_id, amount, status, amount * 101 as amount_cents from {{ ref("stg_orders") }}'
@@ -1071,6 +1072,13 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   // A keyword inside a quoted alias, and text inside Jinja control flow, are not read as relations.
   expect(hardcodedRelations('select 1 as "from stg_orders"', manifest, self)).toEqual([])
   expect(hardcodedRelations("{% if false %}select * from main.stg_orders{% else %}select * from {{ ref('stg_orders') }}{% endif %}", manifest, self)).toEqual([])
+  // A quoted name is that identifier exactly: another case, or one quoted name holding a dot, is not the relation.
+  const quoted = { nodes: { 'model.d.orders3': { resource_type: 'model', name: 'orders3', relation_name: '"d"."s"."orders3"' } } }
+  expect(hardcodedRelations('select id from "s"."ORDERS3"', quoted, self)).toEqual([])
+  expect(hardcodedRelations('select id from "s.orders3"', quoted, self)).toEqual([])
+  expect(hardcodedRelations('select id from "s"."orders3"', quoted, self)).toEqual([{ relation: '"s"."orders3"', use: "{{ ref('orders3') }}" }])
+  // A macro, or a `{% set %}` block, that may not be rendered here is not read.
+  expect(hardcodedRelations('{% macro unused() %}\nselect id from main.stg_orders\n{% endmacro %}\nselect id from raw', manifest, self)).toEqual([])
   // The model itself takes part: its own bare name shared with another relation is ambiguous, and never advice.
   const own = { nodes: { 'model.s.orders': { resource_type: 'model', name: 'orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
   expect(hardcodedRelations('select * from orders', own, 'model.s.orders')).toEqual([])

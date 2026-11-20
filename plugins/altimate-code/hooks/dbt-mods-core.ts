@@ -864,21 +864,24 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   const text = sqlCode(sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, one => `_j${'_'.repeat(Math.max(0, one.length - 2))}`.slice(0, one.length)))
   // Keywords inside quoted identifiers (`as "from x"`) are no keywords: matched on a copy with their letters hidden.
   const hidden = text.replace(/"(?:[^"]|"")*"|`[^`]*`/g, one => `${one[0]}${'_'.repeat(Math.max(0, one.length - 2))}${one[one.length - 1]}`)
-  // Text inside Jinja control flow may not run (out of what is read): nothing there is flagged.
-  const controlled = jinjaControlled(sql)
+  // Text inside Jinja control flow, a macro, a `{% set %}` block, a call, raw or filter block may not be rendered here
+  // (out of what is read): nothing there is flagged.
+  const controlled = [...jinjaControlled(sql), ...jinjaBlocks(sql)]
   const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   // A spelling two relations share (a bare name in two schemas) is ambiguous: null, never flagged.
-  const known = new Map<string, { relation: string; use: string } | null>()
+  const known = new Map<string, { relation: string; use: string; exact: string[] } | null>()
   // The model itself takes part (a bare name it shares with another relation is ambiguous) but is never flagged.
   const add = (id: string, node: any, given: string) => {
     const use = id === selfId ? SELF : given
-    const parts = typeof node?.relation_name === 'string' ? node.relation_name.split('.').map(unquote) : [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(Boolean).map((one: string) => String(one).toLowerCase())
-    if (!parts.length) return
+    // Each part as the warehouse stores it (a quoted part keeps its case), and folded for the index.
+    const exact = typeof node?.relation_name === 'string' ? identifierParts(node.relation_name).map(one => one.text) : [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(Boolean).map((one: string) => String(one))
+    if (!exact.length) return
+    const parts = exact.map(one => one.toLowerCase())
     for (let i = 0; i < parts.length; i++) {
       const key = parts.slice(i).join('.')
       const had = known.get(key)
-      known.set(key, had === undefined || had?.use === use ? { relation: key, use } : null)
+      known.set(key, had === undefined || had?.use === use ? { relation: key, use, exact: exact.slice(i) } : null)
     }
   }
   // A manifest too big to read here comes as a slice of the model's graph, with every relation listed apart.
@@ -906,11 +909,14 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
     if (!inQuery(hidden, match.index!) || controlled.some(([a, b]) => match.index! >= a && match.index! < b)) continue
     const start = match.index! + match[0].indexOf(match[1]!)
     const written = text.slice(start, start + match[1]!.length)
-    const parts = written.split(/\s*\.\s*/).map(unquote)
+    const pieces = identifierParts(written)
+    const parts = pieces.map(one => one.text.toLowerCase())
     if (parts.some(one => /^_j_*$/.test(one)) || (parts.length === 1 && ctes.has(parts[0]!))) continue
     const hit = known.get(parts.join('.'))
-    if (hit?.use === SELF) continue
-    if (hit && !found.has(hit.use)) found.set(hit.use, { relation: written.replace(/\s+/g, ''), use: hit.use })
+    if (!hit || hit.use === SELF) continue
+    // A quoted part names exactly that identifier, case and all: only an exact match is the relation.
+    if (pieces.some((one, i) => one.quoted && one.text !== hit.exact[i])) continue
+    if (!found.has(hit.use)) found.set(hit.use, { relation: written.replace(/\s+/g, ''), use: hit.use })
   }
   return [...found.values()]
 }
@@ -959,7 +965,8 @@ function topItems(list: string): [number, number][] {
 
 /** An item's output name: its alias, or the column it is (`t.col`); quotes removed. Null for an expression with no alias. */
 function itemName(item: string): string | null {
-  const bare = item.replace(/\s+/g, ' ').trim()
+  // Comments are not part of the item: `amount -- in cents` is named amount.
+  const bare = item.replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ').replace(/\s+/g, ' ').trim()
   const name = /\bas\s+(?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/i.exec(bare) ?? /[\s)](?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/.exec(bare) ?? /^(?:(?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*)\.)*(?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/.exec(bare)
   const found = name?.[1] ?? name?.[2] ?? name?.[3]
   return found ? found.toLowerCase() : null
@@ -1075,6 +1082,20 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
  * Jinja variables they render, and where they are in the SQL (offsets). */
 type Outputs = { names: Set<string>; maybe: Set<string>; star: boolean; vars: Set<string>; spans: [number, number][] }
 
+/** Where Jinja blocks whose body may not be rendered in place are (`macro`, `set`…`endset`, `call`, `raw`, `filter`), as offsets. */
+function jinjaBlocks(sql: string): [number, number][] {
+  const out: [number, number][] = []
+  for (const block of sql.matchAll(/\{%-?\s*(macro|set|call|raw|filter)\b(?:(?!%\})[\s\S])*%\}[\s\S]*?\{%-?\s*end\1\s*-?%\}/g)) out.push([block.index!, block.index! + block[0].length])
+  return out
+}
+
+/** The identifiers of a dotted name, each with whether it was quoted; a quoted one keeps its text (dots and case). */
+function identifierParts(name: string): { text: string; quoted: boolean }[] {
+  return [...name.matchAll(/"((?:[^"]|"")*)"|`([^`]*)`|\[([^\]]*)\]|([A-Za-z_][\w$]*)/g)].map(one =>
+    one[4] !== undefined ? { text: one[4], quoted: false } : { text: (one[1] ?? one[2] ?? one[3] ?? '').replace(/""/g, '"'), quoted: true },
+  )
+}
+
 /** Where Jinja control blocks (`{% if %}…{% endif %}`, `{% for %}…{% endfor %}`) are in a model's SQL, as offsets. */
 function jinjaControlled(sql: string): [number, number][] {
   const out: [number, number][] = []
@@ -1108,6 +1129,7 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
   const mine = new Set(ours.map(one => one.toLowerCase()))
   const conditionalJinja = [before, after].some(text => text !== null && jinjaControlled(text).length > 0)
+  const quotedIdentifiers = [before, after].some(text => text !== null && /"_*"|`_*`/.test(masked(text)))
   // Whether the edit only rewrote named outputs' items and column-less clauses: one diff for the whole edit.
   let itemsOnly: boolean | null = null
   const onlyItems = (b: { names: Set<string>; spans: [number, number][] }, a: { names: Set<string>; spans: [number, number][] }) => (itemsOnly ??= onlyNamedItems(before!, after!, b, a))
@@ -1116,6 +1138,8 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     if (mine.has(key)) return false
     if (returned.has(key)) return true
     if (!was || !now || !wasSet || !nowSet || wasSet.reassigned || nowSet.reassigned) return false
+    // Quoted identifiers (case-sensitive names) are outside what this reading compares: the column is the edit's.
+    if (quotedIdentifiers) return false
     // A Jinja expression or tag changed (a flag that turns on a column, a macro's arguments): what the SQL names before
     // may not have run, so nothing but the last check's columns counts as there before.
     if (jinjaOf(before!) !== jinjaOf(after!)) return false
