@@ -146,6 +146,8 @@ test('an error is kept as its type, code and fixed phrases only: no part of its 
 test('the plugin host-call names and error codes are kept, and a lookalike that is not on the list is not', () => {
   expect(errorKinds('HooksError: altimate-code: $.process.run(dbt) failed to start: ENOENT: Executable not found in $PATH')).toBe('HooksError, $.process.run, failed to start, ENOENT, not found')
   expect(errorKinds('AcmePayrollError EXYZ 12345 (hello) $.acme.thing')).toBe('')
+  // A JSON path in a SQL error is not a host call, and a host call's name only counts whole.
+  expect(errorKinds("JSON_VALUE(data, '$.store.payroll') $.session.customersecret $.store.getpayroll")).toBe('')
   expect(errorKinds('TypeError TypeError ENOENT ENOENT')).toBe('TypeError, ENOENT')
   expect(errorKinds('x'.repeat(100_000) + ' ENOENT')).toBe('')
   expect(errorKinds(Array.from({ length: 30 }, (_, i) => `SQLSTATE ${10000 + i}`).join(' ')).split(', ').length).toBe(8)
@@ -222,7 +224,7 @@ type Gh = {
   createTimesOut?: boolean
 }
 
-async function start($: any, on: any, options: { holdVersion?: Promise<void>; registerError?: string; gh?: Gh; env?: Record<string, string>; platform?: string; claude?: string } = {}) {
+async function start($: any, on: any, options: { holdVersion?: () => Promise<void> | undefined; registerError?: string; gh?: Gh; env?: Record<string, string>; platform?: string; claude?: string } = {}) {
   const clock = mock.clock(on)
   mock.env(on, { HOME, ...(options.env ?? {}) })
   const gh = options.gh ?? {}
@@ -231,7 +233,7 @@ async function start($: any, on: any, options: { holdVersion?: Promise<void>; re
   on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
   on('session.info', () => ({ value: { platform: options.platform ?? 'macos', isHosted: false } }))
   on('session.version', async () => {
-    await options.holdVersion
+    await options.holdVersion?.()
     return { value: { version: options.claude ?? '2.1.329' } }
   })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
@@ -487,13 +489,59 @@ test('the last plugin error is attached only with --with-error, as its type and 
 test('a draft still being built when it is discarded, or when the session ends, is not kept and cannot be sent', async ($, on) => {
   let release!: () => void
   const held = new Promise<void>(resolve => (release = resolve))
-  const { run, creates } = await start($, on, { holdVersion: held })
+  const { run, creates } = await start($, on, { holdVersion: () => held })
   const building = run('slow draft')
   await run('--cancel')
   release()
   expect(await building).toContain('replaced or discarded before it was ready')
   expect(await run('--confirm')).toContain('no draft to send')
   expect(creates()).toEqual([])
+})
+
+test('a confirmation while a replacement draft is being built sends nothing: the draft it replaces is gone, and the new one is sent only when confirmed', async ($, on) => {
+  let hold = false
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const { run, creates } = await start($, on, { holdVersion: () => (hold ? held : undefined) })
+  await run('first draft')
+  hold = true
+  const replacing = run('second draft')
+  expect(await run('--confirm')).toContain('no draft to send')
+  expect(creates()).toEqual([])
+  release()
+  const preview = await replacing
+  expect(shownTitle(preview)).toBe('Feedback: second draft')
+  await run('--confirm')
+  expect(creates()).toHaveLength(1)
+  expect(creates()[0]!.argv).toContain('Feedback: second draft')
+})
+
+test('a description over the read limit is refused, not cut: no secret is split before it is redacted', async ($, on) => {
+  const { run, calls } = await start($, on)
+  const text = await run(`${'1'.repeat(100_000)} ghp_abcdefghijklmnopqrstuvwxyz0123456789`)
+  expect(text).toContain('too long')
+  expect(text).not.toContain('ghp_')
+  expect(calls).toEqual([])
+})
+
+test('a description at the read limit is redacted whole and quickly, whatever shrinks before it', () => {
+  const started = Date.now()
+  const out = cleanDescription(`${'Authorization: Basic dXNlcjpodW50ZXIy\n'.repeat(2600)}${'1'.repeat(99_000 - 2600 * 37)} ghp_abcdefghijklmnopqrstuvwxyz0123456789`.slice(0, 100_000), [HOME])
+  expect(out).not.toMatch(/ghp_|dXNl/)
+  expect(Date.now() - started).toBeLessThan(3000)
+  const worst = Date.now()
+  cleanDescription(`${'a-1'.repeat(33_000)}${' x/'.repeat(1000)}${HOME}/${'a '.repeat(30_000)}`, [HOME])
+  expect(Date.now() - worst).toBeLessThan(3000)
+})
+
+test('a Windows home path as JSON or a Python repr writes it, with doubled backslashes or escaped slashes, is replaced whole', () => {
+  const home = 'C:\\Users\\Alice'
+  const json = JSON.stringify({ path: 'C:\\Users\\Alice\\work\\orders.sql', posix: `${HOME}/work/orders.sql` })
+  expect(json).toContain('C:\\\\Users')
+  const out = withoutHome(json, [home, HOME])
+  expect(out).toBe('{"path":"<path under home>","posix":"<path under home>"}')
+  expect(withoutHome('{"p":"\\/Users\\/alice\\/work\\/a.sql"}', [HOME])).not.toContain('work')
+  expect(cleanDescription(json, [home, HOME])).not.toMatch(/Alice|orders/)
 })
 
 test('a new session starts with no draft', async ($, on) => {

@@ -10,7 +10,7 @@ const KNOWN_TOKENS = [
   String.raw`\bE(?:NOENT|ACCES|PERM|EXIST|NOTDIR|ISDIR|TIMEDOUT|CONNREFUSED|CONNRESET|PIPE|MFILE|NOTEMPTY|AGAIN)\b`,
   String.raw`\b\d{5,6} \([0-9A-Z]{5}\)`,
   String.raw`\bSQLSTATE[ =:]*[0-9A-Z]{5}\b`,
-  String.raw`\$\.(?:command|process|session|ui|fs|env|store|state|prompt|clock|plugin|mcp|tool)\.[a-z]+`,
+  String.raw`\$\.(?:command\.(?:register|run)|process\.run|session\.(?:start|end|info|version|id|root|cwd|send)|ui\.(?:render|toast|log|open|status|resolve)|fs\.(?:read|write|exists|stat|list)|env\.get|store\.(?:get|set)|state\.(?:get|set)|prompt\.submit|clock\.(?:now|sleep))(?![\w])`,
   String.raw`\b(?:[Tt]imed out|[Nn]ot found|no implementation|[Pp]ermission denied|[Cc]onnection refused|[Nn]ot authorized|does not exist|[Ss]yntax error|SQL compilation error|could not be parsed|failed to start)\b`,
 ]
 const KNOWN = new RegExp(KNOWN_TOKENS.join('|'), 'g')
