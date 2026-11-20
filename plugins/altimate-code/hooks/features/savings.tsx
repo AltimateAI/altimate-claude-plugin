@@ -97,13 +97,6 @@ const isAssignment = (word: string) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)
 const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
 
 /**
- * Whether a shell line runs the Databricks CLI's `warehouses`, `clusters`, `bundle` or `jobs` command,
- * rather than only naming it (`echo databricks bundle deploy`, a commit message). Quoted text is data;
- * the line is split into its simple commands, and each is read past assignments, shell keywords and
- * wrappers with their flags (`sudo -E`, `time`, `then`) to the program it runs. That program must be
- * `databricks` (or a path to it); its own global flags (`-p prod`, `--profile=x`) come before the command.
- */
-/**
  * The line without its heredoc bodies: data written somewhere, not commands the line runs. A body ends at
  * its own terminator line (after leading tabs for `<<-`); a heredoc without one drops nothing.
  */
@@ -120,6 +113,13 @@ function withoutHeredocs(line: string): string {
   return kept.join('\n')
 }
 
+/**
+ * Whether a shell line runs the Databricks CLI's `warehouses`, `clusters`, `bundle` or `jobs` command,
+ * rather than only naming it (`echo databricks bundle deploy`, a commit message). Quoted text is data;
+ * the line is split into its simple commands, and each is read past assignments, shell keywords and
+ * wrappers with their flags (`sudo -E`, `time`, `then`) to the program it runs. That program must be
+ * `databricks` (or a path to it); its own global flags (`-p prod`, `--profile=x`) come before the command.
+ */
 export function runsDatabricksCompute(line: string): boolean {
   const unquoted = withoutHeredocs(line).replace(/"[^"]*"|'[^']*'/g, '""')
   // Backticks run a command too, so they end one as `(` does.
@@ -158,6 +158,7 @@ const BAND_READ_LIMIT = 200_000
 const roundMoney = (value: number, cents: boolean) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
 
 function money(value: number, cents: boolean): string {
+  if (!Number.isFinite(value)) return '?'
   const rounded = roundMoney(value, cents)
   const [whole, fraction] = rounded.toFixed(cents ? 2 : 0).split('.')
   return `$${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fraction ? `.${fraction}` : ''}`
@@ -366,6 +367,7 @@ type ToolMetadata = {
 export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const report = metadata?.report
   if (!metadata?.success || !report || !Array.isArray(report.findings) || !report.total || !metadata.window) return null
+  if (![report.total.monthly_min, report.total.monthly_max, report.total.resources].every(known)) return null
   const days = report.lookback_days || windowDays(metadata.window)
   // The CLI counts every workspace it read facts from; one without that count lists only the warehouses'
   // and the findings' workspaces, which misses one with only clusters or jobs and nothing found.
@@ -387,7 +389,7 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
       resourceId: one.resource_id,
       resourceName: shownName(one.resource_name, one.resource_id),
       // As the workspace spells it, to recognise it in files and commands.
-      matchName: one.resource_name,
+      matchName: one.resource_name ?? '',
       workspace: workspaces > 1 ? oneLine(one.workspace_id) || null : null,
       workspaceId: one.workspace_id ?? null,
       monthlyMin: one.monthly_min,
@@ -442,8 +444,12 @@ const baselineKey = (connection: string, warehouse: Pick<ToolWarehouse, 'id' | '
  * saving measured with the workload held constant.
  */
 export async function trackChanges($: EngineInterface, view: SavingsView, warehouses: ToolWarehouse[], today: string): Promise<SavingsView['changes']> {
-  const connection = view.connection ?? 'default'
-  const flagged = new Set(view.findings.filter(one => one.resourceType === 'sql_warehouse').map(one => `${one.workspaceId ?? ''}/${one.resourceId}`))
+  // Without the connection's name one connection's baselines could be read as another's, so none are kept.
+  const connection = view.connection
+  if (!connection) return []
+  const flaggedWarehouses = view.findings.filter(one => one.resourceType === 'sql_warehouse')
+  const flagged = new Set(flaggedWarehouses.map(one => `${one.workspaceId ?? ''}/${one.resourceId}`))
+  const flaggedIds = new Set(flaggedWarehouses.map(one => one.resourceId))
   const several = view.checked.workspaces > 1
   const changes: SavingsView['changes'] = []
   const seen = new Set<string>()
@@ -466,8 +472,8 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
         monthlyNow: (warehouse.window_cost * 30) / windowDays(view.window),
       })
     }
-    // A finding that names no workspace is matched by id alone, which is unambiguous only in one workspace.
-    const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flagged.has(`/${warehouse.id}`))
+    // In one workspace an id is unambiguous, so it is matched alone: the finding or the warehouse may lack the workspace id.
+    const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flaggedIds.has(warehouse.id))
     if (!stored && isFlagged) {
       await $.store
         .set(key, { date: today, type: warehouse.type, size: warehouse.size, windowCost: warehouse.window_cost, days: windowDays(view.window) } satisfies Baseline)
@@ -635,8 +641,8 @@ async function draftFix($: EngineInterface, finding: SavingsView['findings'][num
 }
 
 /** Whether `text` names `name` as a whole word: `dev` is not in `devices`. */
-export function mentions(text: string, name: string): boolean {
-  if (!name.trim()) return false
+export function mentions(text: string, name: string | null | undefined): boolean {
+  if (typeof name !== 'string' || !name.trim()) return false
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   return new RegExp(`(?<![\\w-])${escaped}(?![\\w-])`).test(text)
 }
@@ -772,13 +778,13 @@ export function register(on: On, _context: FeatureContext) {
                 {one.choices.map((c, k) => (
                   <Button
                     key={`whatif-${at}-${k}`}
-                    label={`${c.label} ${dollars(c.monthlyCost)}${c.fits ? '' : ' ⚠'}`}
+                    label={`${c.label} ${dollars(c.monthlyCost)}${c.label === 'SERVERLESS' || c.fits ? '' : ' ⚠'}`}
                     onPress={() => later($, () => update($, whatIfAtom, () => ({ resourceId: one.resourceId, label: c.label })))}
                   />
                 ))}
               </Box>
               {choice && amounts ? (
-                <Text color={choice.fits && choice.monthlySaving > 0 ? 'success' : 'warning'}>
+                <Text color={(choice.label === 'SERVERLESS' || choice.fits) && choice.monthlySaving > 0 ? 'success' : 'warning'}>
                   {choice.label === 'SERVERLESS'
                     ? choice.monthlySaving > 0
                       ? `As serverless: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} less: it bills only while queries run.`

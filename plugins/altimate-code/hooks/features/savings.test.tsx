@@ -1390,11 +1390,79 @@ test('the command reader reads past every wrapper, its flags\' values and assign
   expect(runsDatabricksCompute("cat <<'EOF'\ndatabricks jobs list\nEOF\ndatabricks bundle deploy")).toBe(true)
 })
 
-test('an answer without a total, or a finding without evidence, is no report rather than a failed run', () => {
+test('an answer without a total, or with one missing its amounts or count, is no report rather than a failed run', () => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   delete answer.metadata.report.total
   expect(toViewOf(answer.metadata)).toBeNull()
+  for (const field of ['monthly_min', 'monthly_max', 'resources']) {
+    const partial = JSON.parse(JSON.stringify(ANSWER))
+    delete partial.metadata.report.total[field]
+    expect(toViewOf(partial.metadata)).toBeNull()
+  }
+})
+
+test('a finding without evidence, amounts or a name is still drawn, with ? for what it lacks', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const finding = answer.metadata.report.findings[0]
+  delete finding.evidence
+  delete finding.monthly_min
+  delete finding.monthly_max
   expect(evidenceLines(undefined)).toEqual([])
+  const view = toViewOf(answer.metadata)
+  expect(view?.findings[0]?.evidence).toEqual([])
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.some(text => text.includes('NaN'))).toBe(false)
+  expect(texts.some(text => /^Classic · .* · \? a month$/.test(text))).toBe(true)
+  await ui.unmount()
+})
+
+test('a finding without its name is matched in a command by its id, and does not stop the band', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.findings[0].resource_name
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Bash', command: 'databricks warehouses get wh-classic' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^wh-classic: Migrate Classic\/Pro to Serverless, / })).toBeDefined()
+  await band.unmount()
+})
+
+test('a serverless choice without a fit is not marked as one that does not fit', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.what_if[0].choices[0].fits
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(((await ui.find({ key: 'whatif-0-0' })) as any)?.props.label).toBe('SERVERLESS $17.24')
+  await ui.press({ key: 'whatif-0-0' })
+  await clock.settle()
+  expect(((await ui.find({ type: 'Text', text: /^As serverless: / })) as any)?.props.color).toBe('success')
+  await ui.unmount()
+})
+
+test('in one workspace a warehouse without the workspace id its finding carries is still kept as flagged', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.report.findings = answer.metadata.report.findings.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer })
+  await savings($)
+  await clock.settle()
+  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375, days: 7 })
+})
+
+test('an answer without its connection name keeps no baselines, so two unnamed connections never share one', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.warehouse
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer })
+  await savings($)
+  await clock.settle()
+  expect([...store.keys()].filter(key => key.startsWith('savings-baseline:'))).toEqual([])
 })
 
 test('a sized what-if choice without its cores or fit is left out', async ($, on) => {
