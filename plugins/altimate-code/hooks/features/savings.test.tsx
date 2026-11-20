@@ -897,6 +897,55 @@ test('a check from before a /clear that ends after it does not free the new conv
   await clock.settle()
 })
 
+test('a session start while a check runs, with no /clear before it, keeps that check running and the only one', async ($, on) => {
+  let finish = () => {}
+  const { clock, runs } = await start($, on, { hold: new Promise<void>(resolve => (finish = resolve)) })
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  // As when the plugin is enabled, or another of its modules reloads, while this one stays loaded.
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Checking the workspace/ })).toBeDefined()
+  await ui.unmount()
+  expect((await savings($)).text).toBe('The savings check is already running in the side pane.')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  finish()
+  await clock.settle()
+})
+
+test('/savings that finds a check running, with a /clear while its pane opens, says the conversation was cleared', async ($, on) => {
+  let finish = () => {}
+  const options: any = { hold: new Promise<void>(resolve => (finish = resolve)) }
+  const { clock } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  options.onOpen = async () => {
+    options.onOpen = undefined
+    await $.session.end({ reason: 'clear' } as any)
+  }
+  expect((await savings($)).text).toBe('The conversation was cleared before the savings check started. Run /savings again.')
+  finish()
+  await clock.settle()
+})
+
+test('/savings that finds a check running, which ends while its pane opens, says it just finished', async ($, on) => {
+  let finish = () => {}
+  const options: any = { hold: new Promise<void>(resolve => (finish = resolve)) }
+  const { clock } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  options.onOpen = async () => {
+    options.onOpen = undefined
+    finish()
+    await clock.settle()
+  }
+  expect((await savings($)).text).toBe('The savings check just finished: its result is in the side pane.')
+  await clock.settle()
+})
+
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const { clock } = await start($, on, { files })

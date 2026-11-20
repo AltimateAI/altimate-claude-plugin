@@ -1527,21 +1527,24 @@ export function register(on: On, _context: FeatureContext) {
     }
     // One check at a time, decided before anything waits.
     const going = claim
+    const inConversation = conversation
     const mine = { asked: asked || null }
     if (!going) claim = mine
     const connections = await read($, connectionsAtom)
     const targets = targetsFor(asked || null, connections)
     // Until the list is read (a run reads it first) no platform is named: it could be the wrong one.
     const name = connections ? checkName(targets) : 'savings check'
+    // A /clear at any await from here on: no run, and no claim that one is running.
+    const cleared = { text: `The conversation was cleared before the ${name} started. Run /savings again.` }
     if (going) {
       await openPane($)
+      // While the list was read or the pane opened, a /clear dropped that check, or it ended.
+      if (conversation !== inConversation) return cleared
+      if (claim !== going) return { text: `The ${name} just finished: its result is in the side pane.` }
       // One asked for a connection the running check is not reading, typed or not, is to be asked again.
       const other = (asked || null) !== going.asked ? ` Run /savings${asked ? ` ${asked}` : ''} again when it finishes.` : ''
       return { text: `The ${name} is already running in the side pane.${other}` }
     }
-    // A /clear while the list was read, during the write or while the pane opens dropped the claim: no pane, no
-    // run, and no claim that one is running.
-    const cleared = { text: `The conversation was cleared before the ${name} started. Run /savings again.` }
     if (claim !== mine) return cleared
     await update($, busyAtom, now => (claim === mine ? busyOf(asked || null, connections) : now))
     if (claim !== mine) return cleared
@@ -1846,10 +1849,10 @@ export function register(on: On, _context: FeatureContext) {
 
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, e: Args<'session.start'>) {
-  // A run that was going when the last session ended can never finish, so it must not block this one. Its claim
-  // is not dropped here: it lives in this module, which a reload starts afresh, and while the module stays loaded
-  // its run may still be going.
-  await update($, busyAtom, () => null)
+  // A run that was going when the last session ended can never finish, so its running flag must not block this one.
+  // A claim still held here is a run that is still going (the module, where it lives, starts afresh on its own
+  // reload), so its flag stays and the pane still shows it running.
+  await update($, busyAtom, now => (claim ? now : null))
   await $.command.register({
     name: COMMAND,
     description: "Check your Databricks and Snowflake connections for savings with Altimate's rules: read-only, on your own connections; starts a stopped warehouse, which bills",
