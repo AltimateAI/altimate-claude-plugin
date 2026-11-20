@@ -535,23 +535,38 @@ const schemaOf = (node: any): string | null => (typeof node?.patch_path === 'str
  * one row): what the model returned before an edit that has not been built yet. Null when dbt could not show it (never
  * built, no row).
  */
-async function builtColumns($: EngineInterface, place: string, run: (args: string[]) => Promise<ProcessDone>, pkg: string | null, name: string, version: unknown, viaRunner: boolean): Promise<string[] | null> {
+async function builtColumns($: EngineInterface, place: string, run: (args: string[]) => Promise<ProcessDone>, pkg: string | null, name: string, version: unknown, viaRunner: boolean, targetPath: string): Promise<string[] | null> {
   const args = [...(viaRunner && pkg ? [`'${pkg}'`] : []), `'${name}'`, ...(version !== undefined && version !== null && version !== '' ? [`v=${JSON.stringify(version)}`] : [])].join(', ')
-  const done = await run(['show', '--inline', `select * from {{ ref(${args}) }}`, '--limit', '1', '--output', 'json', '--log-format', 'json']).catch(() => null)
+  // Its artifacts go to a folder of their own: the manifest the check's show wrote stays the one it reports.
+  const done = await run(['show', '--inline', `select * from {{ ref(${args}) }}`, '--limit', '1', '--output', 'json', '--log-format', 'json', '--target-path', targetPath]).catch(() => null)
   if (!done || done === SKIPPED || done.exitCode !== 0) return null
   const preview = showPreview(done.stdout)
   return preview && preview.rows.length > 0 ? preview.columns : null
 }
 
+/** Every node upstream of a node in a manifest (or its slice), by its parent map or its nodes' depends_on. */
+function ancestorsOf(manifest: any, id: string): string[] {
+  const parents = (one: string): string[] => manifest?.parent_map?.[one] ?? manifest?.nodes?.[one]?.depends_on?.nodes ?? []
+  const seen = new Set<string>()
+  const todo = [...parents(id)]
+  while (todo.length && seen.size < 20_000) {
+    const one = todo.pop()!
+    if (seen.has(one)) continue
+    seen.add(one)
+    todo.push(...parents(one))
+  }
+  return [...seen]
+}
+
 /**
  * The relations a model's compiled SQL reads that are a dbt model, seed, snapshot or source but not among the model's
  * dependencies: altimate-code's dbt_map_relations reads the tables of the SQL and matches each to the manifest; only
- * one matched to a single node, other than the model, counts. None when the tool is missing or fails.
+ * one matched to a single node, other than the model and not upstream of it, counts. None when the tool is missing or fails.
  */
-async function hardcodedReads($: EngineInterface, manifest: string, sql: string, self: string, dependsOn: string[]): Promise<{ relation: string; use: string }[]> {
+async function hardcodedReads($: EngineInterface, manifest: string, sql: string, self: string, upstream: string[]): Promise<{ relation: string; use: string }[]> {
   const result = await within($, 15_000, runTool($, 'dbt_map_relations', { sql, manifest_path: manifest }, { cliOnly: true }).catch(() => null))
   const mappings: any[] = result?.ok && Array.isArray((result.metadata as any)?.mappings) ? (result.metadata as any).mappings : []
-  const known = new Set(dependsOn)
+  const known = new Set(upstream)
   const out: { relation: string; use: string }[] = []
   for (const one of mappings) {
     const candidates = Array.isArray(one?.candidates) ? one.candidates : []
@@ -716,7 +731,9 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // What the model returned before this edit, from the warehouse: the last check's columns, else (its first check this
   // conversation) the columns dbt shows of the model's relation as it was built. No SQL is read for it.
   // Asked only when there is an undocumented column to tell apart.
-  const earlier = lastReturned.get(fileKey) ?? (drift.undocumented.length && returned && named && !errors.length ? await builtColumns($, place, run1, pkg, named, node?.node?.version ?? known?.node?.version, viaRunner) : null)
+  // (An ephemeral model has no relation of its own: dbt would inline its edited SQL, so there is nothing from before.)
+  const ephemeral = (node?.node?.config?.materialized ?? known?.node?.config?.materialized) === 'ephemeral'
+  const earlier = lastReturned.get(fileKey) ?? (drift.undocumented.length && returned && named && !errors.length && !ephemeral ? await builtColumns($, place, run1, pkg, named, node?.node?.version ?? known?.node?.version, viaRunner, `${scratch}/baseline`) : null)
   // Only the columns this edit left undocumented are its gaps; ones undocumented before it are said once, quietly.
   const gaps = undocumentedByEdit(drift.undocumented, earlier, editGaps.get(fileKey) ?? [])
   // Only the newest check of this file records what it found: an older one finishing late does not erase a newer edit's gaps.
@@ -725,7 +742,8 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // dependencies (no ref() or source()): dbt and lineage cannot follow it. Read by altimate-code from the compiled SQL.
   // The compiled SQL is the file dbt show just wrote (target/compiled/<package>/<path>), read here and handed to the CLI only.
   const compiled = !errors.length && node ? await $.fs.read(`${scratch}/compiled/${node.node.package_name ?? pkg}/${node.node.original_file_path ?? rel}`).catch(() => null) : null
-  const hardcoded = compiled && node ? await hardcodedReads($, `${scratch}/manifest.json`, compiled, node.id, node.node.depends_on?.nodes ?? []) : []
+  // Every node upstream of the model counts as known: dbt inlines an ephemeral parent's SQL, which reads its own parents.
+  const hardcoded = compiled && node && after ? await hardcodedReads($, `${scratch}/manifest.json`, compiled, node.id, ancestorsOf(after.manifest, node.id)) : []
   // A gap this session's edit made stays the edit's on the next check, until schema.yml or the model closes it.
   if (returned && current()) lastReturned.set(fileKey, returned.filter(one => !gaps.fresh.includes(one)))
   const said = oldGapsSaid.has(fileKey)

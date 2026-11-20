@@ -332,6 +332,8 @@ let drawnCache: { key: string; drawn: Drawn | null } | null = null
 let sliceCache: { key: string; rows: Segment[][] } | null = null
 // Graph drawings too big for a pane, by drawing and width: shown as folders without drawing them again.
 const tooBigCache = new Map<string, { elements: number; chars: number }>()
+// Graph drawings wider than their pane, by drawing and width, with that width: drawn as their ends without drawing the whole graph again.
+const tooWideCache = new Map<string, number>()
 // What a pane may hold, under Claude Code's limits (20,000 elements, 100,000 characters) with room for the rest of it.
 // drawingSize undercounts Claude Code's elements (a 600-box graph it counted past 20,000 sizes at about 12,000 here).
 const MAX_DRAWN_ELEMENTS = 8_000
@@ -1546,6 +1548,9 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     // A graph already found too big for this pane is not drawn again: the pane shows folders.
     const graphWindowKey = `${keyOf('graph')}\u0000${width}`
     let tooBig = view === 'graph' ? (tooBigCache.get(graphWindowKey) ?? null) : null
+    // Already found wider than this pane (and the person has not picked a view): straight to its ends.
+    const knownWide = !viewChosen && view === 'graph' && !tooBig ? tooWideCache.get(graphWindowKey) : undefined
+    if (knownWide !== undefined) view = 'ends'
     if (tooBig) view = 'folders'
     const draw = () => {
       const drawKey = keyOf(view)
@@ -1601,9 +1606,12 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     }
     // The whole graph is wider than the pane and the person has not picked a view: its ends, which fit, with the
     // dashboards at the end, rather than a window with edges running off the right.
-    const fitted = !viewChosen && view === 'graph' && !!drawn && drawn.canvas > room
-    const wide = fitted ? drawn!.canvas : 0
-    if (fitted) {
+    const fitting = !viewChosen && view === 'graph' && !!drawn && drawn.canvas > room
+    const fitted = fitting || knownWide !== undefined
+    const wide = fitting ? drawn!.canvas : (knownWide ?? 0)
+    if (fitting) {
+      if (tooWideCache.size >= 8) tooWideCache.delete(tooWideCache.keys().next().value!)
+      tooWideCache.set(graphWindowKey, drawn!.canvas)
       view = 'ends'
       ;({ drawn, room, maxPan, from, shownRows } = draw())
     }

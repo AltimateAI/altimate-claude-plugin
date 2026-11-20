@@ -728,7 +728,8 @@ test('only the columns an edit left undocumented are its gaps, from what the war
   const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
   // dbt shows the model's built relation: the columns it returned before the edit. No SQL is read for it.
-  expect(runs.find(argv => argv.includes('--inline'))).toEqual([DBT, 'show', '--inline', "select * from {{ ref('orders') }}", '--limit', '1', '--output', 'json', '--log-format', 'json'])
+  // In a folder of its own, so the manifest the check's show wrote stays the one it reports.
+  expect(runs.find(argv => argv.includes('--inline'))).toEqual([DBT, 'show', '--inline', "select * from {{ ref('orders') }}", '--limit', '1', '--output', 'json', '--log-format', 'json', '--target-path', `${ROOT}/target/.altimate-plugin/baseline`])
   const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(note).toContain('- returned but not documented in schema.yml: amount_cents\n')
   expect(note).toContain("- already undocumented before this edit (not this edit's doing; nothing to fix for it): status")
@@ -899,7 +900,7 @@ test('a project whose packages are not installed gets a one-line note, not a fai
 
 test('a table the compiled SQL reads that is a dbt node but not a dependency is flagged, from altimate-code\'s dbt_map_relations', async ($, on) => {
   // dbt compiled the edited model: it reads stg_orders by its table, so dbt no longer lists it among the model's parents.
-  const compiled = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], depends_on: { nodes: [] } } } }
+  const compiled = { ...MANIFEST, parent_map: { ...(MANIFEST as any).parent_map, 'model.shop.orders': [] }, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], depends_on: { nodes: [] } } } }
   const mapRelations = [{ raw: 'main.stg_orders', replaceWith: "{{ ref('stg_orders') }}", match: 'partial', candidates: [{ uniqueId: 'model.shop.stg_orders', replaceWith: "{{ ref('stg_orders') }}", kind: 'model', name: 'stg_orders', relationName: '"shop"."main"."stg_orders"', match: 'partial' }] }]
   const { clock, toasts, mapAsked } = await start($, on, { manifestAfterShow: compiled, files: { 'target/manifest.json': JSON.stringify(MANIFEST), 'target/.altimate-plugin/compiled/shop/models/orders.sql': 'select * from main.stg_orders' }, mapRelations })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
@@ -913,6 +914,24 @@ test('a table the compiled SQL reads that is a dbt node but not a dependency is 
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: /hardcoded main\.stg_orders: use \{\{ ref\('stg_orders'\) \}\} — lineage can't follow it/ })).toBeDefined()
   await band.unmount()
+})
+
+test('a table an ephemeral parent reads (inlined into the compiled SQL) is upstream, not hardcoded', async ($, on) => {
+  // orders refs the ephemeral stg_orders, which reads raw_orders: dbt inlines it, so the compiled SQL names raw_orders.
+  const mapRelations = [{ raw: '"shop"."main"."raw_orders"', match: 'exact', candidates: [{ uniqueId: 'seed.shop.raw_orders', replaceWith: "{{ ref('raw_orders') }}", match: 'exact' }] }]
+  const { clock } = await start($, on, { files: { 'target/.altimate-plugin/compiled/shop/models/orders.sql': 'with __dbt__cte__stg_orders as (select * from "shop"."main"."raw_orders") select * from __dbt__cte__stg_orders' }, mapRelations })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).not.toContain('hardcoded')
+})
+
+test('an ephemeral model has no built relation to compare with: its undocumented columns are the edit\'s, and nothing is asked', async ($, on) => {
+  const ephemeral = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], config: { materialized: 'ephemeral' } } } }
+  const { clock, runs } = await start($, on, { show: { rows: [{ order_id: 1, amount: 10, status: 'placed' }] }, built: () => [{ order_id: 1, amount: 10, status: 'placed' }], files: { 'target/manifest.json': JSON.stringify(ephemeral) } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  expect(runs.some(argv => argv.includes('--inline'))).toBe(false)
+  expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: status')
 })
 
 test('a table read through ref() (a dependency), the model itself, or an unclear match is never flagged; without the tool, nothing is', async ($, on) => {
