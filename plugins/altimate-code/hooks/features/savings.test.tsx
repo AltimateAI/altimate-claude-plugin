@@ -1626,7 +1626,8 @@ test('the program is found past every leader the push check knows, and past xarg
   }
   expect(runsDatabricksCompute('nice -n 10 echo databricks bundle deploy')).toBe(false)
   expect(runsDatabricksCompute("bash -c 'echo databricks bundle deploy'")).toBe(false)
-  expect(runsDatabricksCompute("zsh --emulate sh -c 'databricks bundle deploy'")).toBe(true)
+  // The shell runs deploy.sh; the `-c` after it is that script's own argument.
+  expect(runsDatabricksCompute("bash deploy.sh -c 'databricks bundle deploy'")).toBe(false)
 })
 
 test('a job figure the answer leaves blank reads ?, not "under 0.1"', () => {
