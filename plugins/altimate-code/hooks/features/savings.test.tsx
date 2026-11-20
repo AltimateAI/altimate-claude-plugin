@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, evidenceLines, explain, fixRequest, mentions, runsDatabricksCompute, supportsSavings } from './savings'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, evidenceLines, explain, fixRequest, mentions, runsDatabricksCompute, supportsSavings, toView as toViewOf } from './savings'
 
 const ROOT = '/repo'
 
@@ -1367,4 +1367,59 @@ test('a cluster whose auto-termination the answer does not give reads "?", not "
   expect(evidenceLines(evidence)[1]).toMatch(/^Auto-termination \?; /)
   expect(evidenceLines({ ...evidence, auto_termination_minutes: 0 })[1]).toMatch(/^Auto-termination off; /)
   expect(evidenceLines({ ...evidence, auto_termination_minutes: 120 })[1]).toMatch(/^Auto-termination 120 minutes; /)
+})
+
+test('the command reader reads past every wrapper, its flags\' values and assignments, and the remaining keywords', () => {
+  for (const line of [
+    'env FOO=1 databricks bundle deploy',
+    'sudo VAR=1 databricks bundle deploy',
+    'sudo -u root databricks warehouses list',
+    'env -u VAR databricks clusters list',
+    'nohup env FOO=1 databricks jobs list',
+    'sudo env databricks warehouses list',
+    'if databricks jobs list; then echo ok; fi',
+    'while databricks jobs list; do sleep 1; done',
+    'echo `databricks bundle deploy`',
+    'xargs databricks clusters get',
+  ]) {
+    expect(runsDatabricksCompute(line)).toBe(true)
+  }
+  // A heredoc that only writes the command somewhere runs nothing.
+  expect(runsDatabricksCompute('cat > deploy.sh <<EOF\ndatabricks bundle deploy\nEOF')).toBe(false)
+  expect(runsDatabricksCompute("cat <<'EOF'\ndatabricks jobs list\nEOF\ndatabricks bundle deploy")).toBe(true)
+})
+
+test('an answer without a total, or a finding without evidence, is no report rather than a failed run', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.total
+  expect(toViewOf(answer.metadata)).toBeNull()
+  expect(evidenceLines(undefined)).toEqual([])
+})
+
+test('a sized what-if choice without its cores or fit is left out', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const choices = answer.metadata.report.what_if[0].choices
+  delete choices[1].cores
+  delete choices[2].fits
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(((await ui.find({ key: 'whatif-0-0' })) as any)?.props.label).toBe('SERVERLESS $17.24')
+  expect(await ui.find({ key: 'whatif-0-1' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /undefined/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the checked line says one warehouse, cluster or job in the singular', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses_checked = 1
+  answer.metadata.clusters_checked = 0
+  answer.metadata.jobs_checked = 1
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^1 SQL warehouse, 0 all-purpose clusters and 1 job · / })).toBeDefined()
+  await ui.unmount()
 })
