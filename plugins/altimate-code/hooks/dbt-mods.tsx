@@ -5,13 +5,12 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
-import { later } from './altimate-cli'
+import { later, runTool } from './altimate-cli'
 import { openTracked } from './usage'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
   cellText,
   columnDrift,
-  hardcodedRelations,
   undocumentedByEdit,
   columnWidths,
   dbtCommands,
@@ -332,10 +331,6 @@ for graph in (pm, cm):
 full = set(hit) | (set(tests) & keep)
 fields = ('name', 'package_name', 'resource_type', 'original_file_path', 'relation_name', 'description', 'config', 'tags', 'columns', 'column_name', 'test_metadata', 'depends_on', 'patch_path', 'version')
 out = {'nodes': {}, 'parent_map': {}, 'child_map': {}, 'metadata': {'project_name': project or (m.get('metadata') or {}).get('project_name')}}
-# Every model, seed, snapshot and source by its relation, whatever the graph reaches: a table a model names
-# instead of ref() or source() is no longer in its graph.
-rk = ('name', 'resource_type', 'relation_name', 'source_name', 'version', 'latest_version', 'package_name')
-out['relations'] = [dict({'id': k}, **{f: n.get(f) for f in rk if n.get(f) is not None}) for group in ((m.get('nodes') or {}), (m.get('sources') or {})) for k, n in group.items() if n.get('resource_type') in ('model', 'seed', 'snapshot', 'source') and n.get('relation_name')]
 for k in keep:
     n = nodes.get(k)
     if n is not None:
@@ -535,7 +530,40 @@ function addContext<T extends { context?: string[] }>(result: T, note: string | 
 const schemaOf = (node: any): string | null => (typeof node?.patch_path === 'string' ? node.patch_path.replace(/^[^:]*:\/\//, '') : null)
 
 /** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
-async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation, sqlBefore: string | null = null): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
+/**
+ * The columns of a model's relation as it is built in the warehouse (`dbt show --inline "select * from {{ ref() }}"`,
+ * one row): what the model returned before an edit that has not been built yet. Null when dbt could not show it (never
+ * built, no row).
+ */
+async function builtColumns($: EngineInterface, place: string, run: (args: string[]) => Promise<ProcessDone>, pkg: string | null, name: string, version: unknown, viaRunner: boolean): Promise<string[] | null> {
+  const args = [...(viaRunner && pkg ? [`'${pkg}'`] : []), `'${name}'`, ...(version !== undefined && version !== null && version !== '' ? [`v=${JSON.stringify(version)}`] : [])].join(', ')
+  const done = await run(['show', '--inline', `select * from {{ ref(${args}) }}`, '--limit', '1', '--output', 'json', '--log-format', 'json']).catch(() => null)
+  if (!done || done === SKIPPED || done.exitCode !== 0) return null
+  const preview = showPreview(done.stdout)
+  return preview && preview.rows.length > 0 ? preview.columns : null
+}
+
+/**
+ * The relations a model's compiled SQL reads that are a dbt model, seed, snapshot or source but not among the model's
+ * dependencies: altimate-code's dbt_map_relations reads the tables of the SQL and matches each to the manifest; only
+ * one matched to a single node, other than the model, counts. None when the tool is missing or fails.
+ */
+async function hardcodedReads($: EngineInterface, manifest: string, sql: string, self: string, dependsOn: string[]): Promise<{ relation: string; use: string }[]> {
+  const result = await within($, 15_000, runTool($, 'dbt_map_relations', { sql, manifest_path: manifest }, { cliOnly: true }).catch(() => null))
+  const mappings: any[] = result?.ok && Array.isArray((result.metadata as any)?.mappings) ? (result.metadata as any).mappings : []
+  const known = new Set(dependsOn)
+  const out: { relation: string; use: string }[] = []
+  for (const one of mappings) {
+    const candidates = Array.isArray(one?.candidates) ? one.candidates : []
+    if (one?.match === 'none' || candidates.length !== 1) continue
+    const hit = candidates[0]
+    if (typeof hit?.uniqueId !== 'string' || hit.uniqueId === self || known.has(hit.uniqueId) || typeof hit.replaceWith !== 'string') continue
+    if (!out.some(seen => seen.use === hit.replaceWith)) out.push({ relation: String(one.raw), use: hit.replaceWith })
+  }
+  return out
+}
+
+async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
   const rel = relative(root, file)
   // A check from a conversation that has ended takes no place in the order: it can neither land nor push a
   // current check out. Within this conversation, `current` is the newest check of its file (an older one of the
@@ -685,13 +713,19 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
             : documented.length === 0
               ? 'schema.yml documents no columns for this model'
               : null
+  // What the model returned before this edit, from the warehouse: the last check's columns, else (its first check this
+  // conversation) the columns dbt shows of the model's relation as it was built. No SQL is read for it.
+  // Asked only when there is an undocumented column to tell apart.
+  const earlier = lastReturned.get(fileKey) ?? (drift.undocumented.length && returned && named && !errors.length ? await builtColumns($, place, run1, pkg, named, node?.node?.version ?? known?.node?.version, viaRunner) : null)
   // Only the columns this edit left undocumented are its gaps; ones undocumented before it are said once, quietly.
-  const sqlNow = await $.fs.read(file).catch(() => null)
-  const gaps = undocumentedByEdit(drift.undocumented, sqlBefore, sqlBefore === null ? null : sqlNow, lastReturned.get(fileKey) ?? null, editGaps.get(fileKey) ?? [])
+  const gaps = undocumentedByEdit(drift.undocumented, earlier, editGaps.get(fileKey) ?? [])
   // Only the newest check of this file records what it found: an older one finishing late does not erase a newer edit's gaps.
   if (returned && current()) editGaps.set(fileKey, gaps.fresh)
-  // A model, seed, snapshot or source named by its table instead of ref() or source(): dbt and lineage cannot follow it.
-  const hardcoded = sqlNow !== null && !errors.length ? hardcodedRelations(sqlNow, after?.manifest ?? before?.manifest, node?.id ?? known?.id ?? null) : []
+  // A model, seed, snapshot or source the compiled SQL reads by its table, which dbt does not list among the model's
+  // dependencies (no ref() or source()): dbt and lineage cannot follow it. Read by altimate-code from the compiled SQL.
+  // The compiled SQL is the file dbt show just wrote (target/compiled/<package>/<path>), read here and handed to the CLI only.
+  const compiled = !errors.length && node ? await $.fs.read(`${scratch}/compiled/${node.node.package_name ?? pkg}/${node.node.original_file_path ?? rel}`).catch(() => null) : null
+  const hardcoded = compiled && node ? await hardcodedReads($, `${scratch}/manifest.json`, compiled, node.id, node.node.depends_on?.nodes ?? []) : []
   // A gap this session's edit made stays the edit's on the next check, until schema.yml or the model closes it.
   if (returned && current()) lastReturned.set(fileKey, returned.filter(one => !gaps.fresh.includes(one)))
   const said = oldGapsSaid.has(fileKey)
@@ -1872,11 +1906,8 @@ function pendingLines(agentId: string | null): string[] {
   return withPending({ context: [] as string[] }, agentId).context
 }
 
-/** Compile and validate reads a model's text from before an edit, to tell the columns the edit left undocumented from older gaps. */
-export const DBT_MODS_EDIT_READS_BEFORE = true
-
 /** After a model Claude edited: compile it and run it against the warehouse, then check its columns. */
-export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string; before?: string | null }): Promise<string[]> {
+export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string }): Promise<string[]> {
   if (!enabled || !EDIT_TOOLS.has(e.tool)) return []
   const path = normalize(file.path)
   // The conversation this edit belongs to, taken before the edit ran, so a /clear during it is seen.
@@ -1888,7 +1919,7 @@ export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; ag
     const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
     const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
     if (root && inModels) {
-      const check = compileAndValidate($, root, path, asked, file.before ?? null)
+      const check = compileAndValidate($, root, path, asked)
       const landed = await within($, CHECK_HOLD_MS, check)
       // Landed, and still the newest check of this file in this conversation.
       if (landed && landed.current()) {

@@ -620,48 +620,12 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   const before = "{%- set cols -%}\n      med.claim_id\n    , med.paid_amount\n    , med.allowed_amount\n{%- endset -%}\nselect {{ cols }} from {{ ref('x') }} as med\nwhere med.claim_id is not null"
   const after = before.replace('    , med.paid_amount', '    , case when med.paid_amount < 0 then 0 else med.paid_amount end as paid_amount')
   expect(changedColumns(before, after)).toEqual([])
+  // The words on the lines the change added, comments, strings and Jinja left out; the manifest says which are columns.
   expect(valueCandidates(before, after)).toEqual(['paid_amount'])
-  // A filter names no column whose value changes.
-  expect(valueCandidates(before, before.replace('is not null', 'is not null and med.paid_amount > 0'))).toEqual([])
-  // Nor does a predicate on the line below its WHERE, or a reworded comment.
-  const filtered = `${before}\n  and med.paid_amount > 0`
-  expect(valueCandidates(filtered, filtered.replace('> 0', '> 100'))).toEqual([])
-  const split = 'select paid_amount from raw where\n paid_amount > 0'
-  expect(valueCandidates(split, split.replace('> 0', '> 100'))).toEqual([])
-  // A predicate beside a subquery, on one line with its select, or after a string that reads like a keyword.
-  for (const sql of ['select {{ cols }} from raw where exists (select 1 from t) and\n  paid_amount > 0', 'select {{ cols }} from {{ ref("x") }} where paid_amount > 0', "select a from t where status = 'select'\n and paid_amount > 0"]) {
-    expect(valueCandidates(sql, sql.replace('> 0', '> 100'))).toEqual([])
-  }
-  // A threshold changed beside an unchanged select, a predicate after `exists (…)`, an inline comment reworded.
-  const single = 'select paid_amount from raw where paid_amount > 0'
-  expect(valueCandidates(single, single.replace('> 0', '> 100'))).toEqual([])
-  const exists = 'select {{ cols }} from raw\nwhere exists (select 1) and\n  paid_amount > 0'
-  expect(valueCandidates(exists, exists.replace('> 0', '> 100'))).toEqual([])
-  // A subquery right after FROM keeps the levels balanced: a predicate after it is still a filter.
-  const sub = 'select {{ cols }} from (select * from raw) r where\n  paid_amount > 0'
-  expect(valueCandidates(sub, sub.replace('> 0', '> 100'))).toEqual([])
-  // A changed item's own alias comes before its operands.
-  const totals = '{% set cols %}\npaid_amount,\nallowed_amount,\nunits,\npaid_amount + allowed_amount + units as total_amount\n{% endset %}\nselect {{ cols }} from x'
-  expect(valueCandidates(totals, totals.replace('+ units as', '+ units * 2 as'))).toEqual(['total_amount'])
-  expect(valueCandidates(totals.replace('as total_amount', 'as "total_amount"'), totals.replace('as total_amount', 'as "total_amount"').replace('+ units as', '+ units * 2 as'))).toEqual(['total_amount'])
-  // A function's argument on its own line is part of an item, not an output: no candidate rather than a wrong one.
-  const coalesced = "{% set cols %}\npaid_amount,\nallowed_amount,\nunits,\ncoalesce(\n  paid_amount,\n  allowed_amount\n) as total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
-  expect(valueCandidates(coalesced, coalesced.replace('  allowed_amount\n)', '  units\n)'))).toEqual([])
-  // Two items on the changed line: which changed is not said, so no candidate.
-  const two = "{% set cols %}\npaid_amount + allowed_amount as total_amount, units as units\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
-  expect(valueCandidates(two, two.replace('allowed_amount as', 'allowed_amount * 2 as'))).toEqual([])
-  // An operand on its own line inside a multi-line CASE is part of an item, not an output.
-  const cased = "{% set cols %}\npaid_amount,\nunits,\ncase\n  when units > 0 then\n    paid_amount\n  else\n    units\nend as total\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
-  expect(valueCandidates(cased, cased.replace('    units\nend', '    paid_amount\nend'))).toEqual([])
-  // An arithmetic continuation line is part of an item; a leading-comma item with a function call is one item.
-  const arith = "{% set cols %}\npaid_amount,\nunits,\npaid_amount +\n  units\nas total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('raw') }}"
-  expect(valueCandidates(arith, arith.replace('  units\nas', '  paid_amount\nas'))).toEqual([])
-  const leading = "{%- set cols -%}\n      med.claim_id\n    , med.paid_amount\n    , med.allowed_amount\n{%- endset -%}\nselect {{ cols }} from {{ ref('x') }} as med"
-  expect(valueCandidates(leading, leading.replace('    , med.paid_amount', '    , greatest(med.paid_amount, 0) as paid_amount'))).toEqual(['paid_amount'])
-  const inline = 'select\n  paid_amount /* cents */\nfrom raw'
-  expect(valueCandidates(inline, inline.replace('cents', 'dollars'))).toEqual([])
-  const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')
-  expect(valueCandidates(commented, commented.replace('in cents', 'in dollars'))).toEqual([])
+  expect(valueCandidates('select a\nfrom t -- cents', 'select a\nfrom t -- dollars')).toEqual([])
+  expect(valueCandidates('select id, units + 1 as total from t', 'select id, units + 2 as total from t')).toEqual(['id', 'units', 'total'])
+  // A line that filters or joins names no value.
+  expect(valueCandidates("select a\nfrom t\nwhere status = 'ok'", "select a\nfrom t\nwhere status in ('ok', 'settled')")).toEqual([])
   const answer = {
     version: 1, focus: { model: 'model.t.core__medical_claim', column: 'paid_amount' }, direction: 'downstream',
     nodes: [{ id: 'model.t.core__medical_claim', name: 'core__medical_claim' }, { id: 'model.t.fact_claims', name: 'fact_claims' }],
@@ -676,7 +640,7 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   expect(summaryLines(summaryOf([change], traces, null))).toEqual([
     '◆ Lineage after this task · 1 model changed',
     'core__medical_claim · 97 downstream models at model level',
-    '  values change in paid_amount → reaches 1 column in 1 model (1 end column) · 3 more may change',
+    '  values may change in paid_amount → reaches 1 column in 1 model (1 end column) · 3 more may change',
     '✓ Every downstream model was read',
   ])
   // None the manifest has: the values may still change, said without a count of 0.

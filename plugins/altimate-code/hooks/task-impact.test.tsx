@@ -970,7 +970,7 @@ test('a model the task created, which the manifest from before it lacks, has its
   expect(line).not.toContain('update altimate-code')
 })
 
-test('a value change names the output whose value changed; a rewritten name that reaches nothing is left out, never shown as 0', async ($, on) => {
+test('a value change names the columns the manifest has that reach downstream; one that reaches nothing is left out, never shown as 0', async ($, on) => {
   const answerFor = (column: string, reach: number) => ({
     status: 'ok',
     output: 'Impact',
@@ -997,8 +997,8 @@ test('a value change names the output whose value changed; a rewritten name that
   })
   await clock.settle()
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /values change in total_amount → reaches 1 column in 1 model/ })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: /values change in (paid_amount|units)/ })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /values may change in total_amount → reaches 1 column in 1 model/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /values may change in (paid_amount|units)/ })).toBeUndefined()
   expect(await band.find({ type: 'Text', text: /reaches 0 column/ })).toBeUndefined()
   await band.unmount()
 })

@@ -93,92 +93,34 @@ const NOT_COLUMNS = new Set(
     'set endset if endif for endfor macro endmacro ref source config var this dbt type_string type_numeric ' +
     'type_int type_float type_timestamp type_boolean quote_column int integer numeric decimal varchar text float double boolean').split(' '),
 )
-// The clauses that filter, join, group or order rather than compute a value.
-const CLAUSE_WORDS = new Set(['select', 'from', 'where', 'join', 'on', 'group', 'having', 'qualify', 'order', 'limit', 'union', 'using'])
-const FILTERS = new Set(['where', 'join', 'on', 'having', 'qualify', 'group', 'order', 'from', 'using', 'limit'])
 
 /**
- * When no output column changed: names on the lines the change rewrote or added (not filters or joins) that may
- * be the model's columns, the ones named most often first. Whether each is a column is the manifest's to say.
+ * When no output column changed: the words on the lines the change added (comments, strings and Jinja left out) that
+ * may name the model's columns, the most named first. Nothing here reads SQL structure: the manifest (impact_analysis)
+ * says which are the model's columns, and the band says their values *may* change.
  */
 export function valueCandidates(original: string, current: string, max = MAX_TASK_COLUMNS * 2): string[] {
-  // The value parts of the SQL, one per line: the words outside any filtering, joining, grouping or ordering clause at
-  // every paren depth, carried across lines. Comments, string literals and Jinja expressions are left out, so a
-  // reworded comment or a changed threshold changes no value part.
-  const parts = (text: string): { key: string; names: string[]; inside: boolean; several: boolean }[] => {
-    const code = text.replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}|\{\{[\s\S]*?\}\}|'(?:[^']|'')*'|--[^\n]*/g, one => one.replace(/[^\n]/g, ' '))
-    const clauses: string[] = ['']
-    let cases = 0
-    const out: { key: string; names: string[]; inside: boolean; several: boolean }[] = []
-    const all = code.split('\n')
-    const near = (from: number, step: number) => {
-      for (let k = from + step; k >= 0 && k < all.length; k += step) if (all[k]!.trim()) return all[k]!.trim()
-      return null
-    }
-    for (const [n, line] of all.entries()) {
-      // A line is one whole item only when the item starts and ends on it: after a comma, a SELECT or a Jinja tag, and
-      // before a comma, the FROM, a clause or a tag. Else (an arithmetic or CASE continuation) it is part of an item.
-      const prev = near(n, -1)
-      const next = near(n, 1)
-      const whole = (!prev || /,\s*$/.test(prev) || /\b(?:select|distinct)\s*$/i.test(prev) || /%\}\s*$/.test(prev) || /^\s*,/.test(line)) &&
-        (/,\s*$/.test(line) || !next || /^(?:,|from\b|where\b|group\b|order\b|limit\b|union\b|\{%|\))/i.test(next))
-      // A line that starts inside parentheses (a function's argument) or a CASE is part of an item, never an item of its own.
-      const inside = clauses.length > 1 || cases > 0 || !whole
-      const words: string[] = []
-      const names: string[] = []
-      // Commas at the line's own level, not inside its parentheses or CASE (a second item on the line).
-      const level = clauses.length
-      const caseLevel = cases
-      const commas: number[] = []
-      for (const token of line.matchAll(/\(|\)|(?<![\w.])((?:[A-Za-z_]\w*\.)*)([A-Za-z_]\w*)\b(\s*\()?|[^\s\w()]+|\d+(?:\.\d+)?/g)) {
-        const text = token[0]
-        if (text === '(') {
-          clauses.push(clauses[clauses.length - 1]!)
-          continue
-        }
-        if (text === ')') {
-          if (clauses.length > 1) clauses.pop()
-          if (!clauses.some(one => FILTERS.has(one))) words.push(')')
-          continue
-        }
-        const word = token[2]?.toLowerCase()
-        if (word === 'case' && !token[1]) cases++
-        else if (word === 'end' && !token[1] && cases > 0) cases--
-        if (word && !token[1] && CLAUSE_WORDS.has(word)) {
-          clauses[clauses.length - 1] = word
-          // `from (`, `in (`: the parenthesis opens a level in that clause.
-          if (token[3]) clauses.push(word)
-          continue
-        }
-        const filtering = clauses.some(one => FILTERS.has(one))
-        if (text.includes(',') && clauses.length === level && cases === caseLevel) commas.push(words.length)
-        if (!filtering) words.push(text.replace(/\s+/g, ''))
-        // A function's name (`sum(`) opens its arguments, in the same clause.
-        if (token[3]) clauses.push(clauses[clauses.length - 1]!)
-        if (!filtering && word && !token[3] && !NOT_COLUMNS.has(word) && word.length >= 2) names.push(word)
-      }
-      // One item: no top-level comma but a leading or trailing one.
-      const several = commas.some(at => at > 0 && at < words.length - 1)
-      if (words.length) out.push({ key: words.join(' '), names, inside, several })
-    }
-    return out
-  }
+  const lines = (text: string) =>
+    text
+      .replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}|\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|'(?:[^']|'')*'|--[^\n]*/g, ' ')
+      .split('\n')
+      .map(line => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
   const left = new Map<string, number>()
-  for (const one of parts(original)) left.set(one.key, (left.get(one.key) ?? 0) + 1)
+  for (const line of lines(original)) left.set(line, (left.get(line) ?? 0) + 1)
   const counts = new Map<string, number>()
-  for (const one of parts(current)) {
-    const n = left.get(one.key) ?? 0
+  for (const line of lines(current)) {
+    const n = left.get(line) ?? 0
     if (n > 0) {
-      left.set(one.key, n - 1)
+      left.set(line, n - 1)
       continue
     }
-    // The output a changed item makes: its alias (`… as total_amount`, quoted or not), or the column it is when it is a
-    // bare column (`, med.paid_amount`). An unaliased expression names no output; its operands are inputs, not outputs.
-    const alias = /\bas\s+["`]?\s*([A-Za-z_]\w*)\s*["`]?\s*,?\s*$/i.exec(one.key)?.[1]?.toLowerCase()
-    const bare = one.inside ? undefined : /^,?\s*(?:[A-Za-z_]\w*\s*\.\s*)*([A-Za-z_]\w*)\s*,?$/.exec(one.key)?.[1]?.toLowerCase()
-    // A line with more than one item (a comma between values) does not say which item changed: no candidate from it.
-    const output = one.several ? undefined : (alias ?? bare)
-    if (output && !NOT_COLUMNS.has(output)) counts.set(output, (counts.get(output) ?? 0) + 1)
+    // A line that filters or joins (by its first word) names no value.
+    if (/^(?:where|and|or|on|join|left|right|inner|full|cross|group|order|having|qualify|limit|from)\b/i.test(line)) continue
+    for (const match of line.matchAll(/(?<![\w.])(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\b(?!\s*\()/g)) {
+      const name = match[1]!.toLowerCase()
+      if (!NOT_COLUMNS.has(name) && name.length > 1) counts.set(name, (counts.get(name) ?? 0) + 1)
+    }
   }
   return [...counts].sort((a, b) => b[1] - a[1]).slice(0, max).map(([name]) => name)
 }
@@ -403,7 +345,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
     if (model.columns.length === 0) lines.push(model.modelLevel === 0 ? '  no model reads it downstream' : '  values may change downstream; the model-level count stands')
     for (const col of model.columns) {
       // A column named by its values changing, not by its select item: said so.
-      const name = col.value ? `values change in ${col.name} →` : `${col.name} `
+      const name = col.value ? `values may change in ${col.name} →` : `${col.name} `
       if (view.state === 'tracing' && !col.reach) lines.push(`  ${col.name}  tracing…`)
       else if (col.note) lines.push(`  ${name} ${col.note}`)
       else if (!col.reach) lines.push(`  ${name} ${col.failed ? 'could not be traced' : `no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later`}`)

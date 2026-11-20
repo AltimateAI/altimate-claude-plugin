@@ -2,7 +2,6 @@ import { expect, mock, test as kitTest } from 'claude-code/testing'
 
 import {
   columnDrift,
-  hardcodedRelations,
   undocumentedByEdit,
   columnWidths,
   dbtCommand,
@@ -213,10 +212,10 @@ type Options = {
   listFails?: boolean
   /** A file whose stat waits for `until` while it is set. */
   statGate?: { path: string; until?: Promise<void> }
-  /** Runs as an Edit lands, beneath the plugin: the test writes the file's new text there. */
-  onEdit?: () => void
-  /** The first read of this project file after `shows` dbt shows have run waits for `until`. */
-  holdReadAfterShows?: { path: string; shows: number; until: Promise<void> }
+  /** The rows `dbt show --inline "select * from {{ ref(…) }}"` gives of the model's relation as built; unset, dbt cannot show it (never built). */
+  built?: () => Record<string, unknown>[] | null
+  /** What altimate-code's dbt_map_relations answers (its mappings); unset, the tool is not there. */
+  mapRelations?: unknown[]
   /** The project's artifact folder, when not `target`. */
   target?: string
   /** Where Claude's shell is, when not the session folder. */
@@ -267,6 +266,7 @@ async function start($: any, on: any, options: Options = {}) {
   const registered: string[] = []
   const storeGets: string[] = []
   const redactSent: { argv: string[]; stdin: string | undefined }[] = []
+  const mapAsked: Record<string, unknown>[] = []
   on('command.register', (_: unknown, e: { name: string }) => {
     registered.push(e.name)
     return { value: { command: e.name } }
@@ -338,15 +338,9 @@ async function start($: any, on: any, options: Options = {}) {
     const size = /(^|\/)manifest\.json$/.test(rel) && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
     return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: false } }
   })
-  let readHeld = false
-  on('fs.read', async (_: unknown, e: { path: string }) => {
+  on('fs.read', (_: unknown, e: { path: string }) => {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
     const rel = e.path.slice(ROOT.length + 1)
-    const hold = options.holdReadAfterShows
-    if (hold && !readHeld && rel === hold.path && showsRun === hold.shows) {
-      readHeld = true
-      await hold.until
-    }
     if (rel.endsWith('manifest.json')) order.push(`read ${rel}`)
     if (!(rel in files)) throw new Error('ENOENT')
     if (rel === 'target/run_results.json' && (options.runResultsSize ?? 0) > 4 * 1024 * 1024) throw new Error('file is larger than 4 MiB')
@@ -365,7 +359,6 @@ async function start($: any, on: any, options: Options = {}) {
   })
   let held = false
   let shows = 0
-  let showsRun = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string; env?: Record<string, string> } }) => {
     runs.push([...e.argv])
     envs.push(e.init?.env ?? {})
@@ -405,6 +398,11 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin === python && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
     if (bin === python && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
     if (bin === python) return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
+    if (e.argv.includes('dbt_map_relations')) {
+      if (!options.mapRelations) return { value: { exitCode: 1, stdout: '', stderr: 'unknown tool: dbt_map_relations' } }
+      mapAsked.push(JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1])))
+      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, mappings: options.mapRelations } }), stderr: '' } }
+    }
     if (bin !== (options.pathDbtPython ? 'dbt' : DBT)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
     if (verb === 'debug') return { value: { ...(options.debug ?? { exitCode: 0, stdout: DEBUG }), stderr: '' } }
@@ -415,8 +413,11 @@ async function start($: any, on: any, options: Options = {}) {
       mtimes['target/manifest.json'] = 10_000
       return { value: { exitCode: 0, stdout: 'Performance info: target/perf_info.json', stderr: '' } }
     }
+    if (verb === 'show' && e.argv.includes('--inline') && /select \* from \{\{ ref\(/.test(e.argv[e.argv.indexOf('--inline') + 1] ?? '')) {
+      const rows = options.built?.()
+      return { value: rows ? { exitCode: 0, stdout: showLog(rows, null as any), stderr: '' } : { exitCode: 1, stdout: errorLog('Catalog Error: Table with name orders does not exist!'), stderr: '' } }
+    }
     if (verb === 'show') {
-      showsRun++
       const show = options.show ?? { rows: [{ order_id: 1, amount: 10 }] }
       // A dbt show writes run_results.json to its own artifact folder; a run of Claude's that ends meanwhile writes the project's.
       if (show.writes) files[`${out}/run_results.json`] = JSON.stringify({ ...RUN_RESULTS, metadata: { invocation_id: show.writes, generated_at: 'x' } })
@@ -451,7 +452,6 @@ async function start($: any, on: any, options: Options = {}) {
   let bash: { stdout: string; isError?: boolean } = { stdout: '' }
   on('tool.call', async (_: unknown, e: { tool: string }) => {
     if (e.tool === 'Bash' && options.duringBash) await options.duringBash()
-    if (e.tool === 'Edit') options.onEdit?.()
     if (e.tool === 'Edit' && options.holdEdit && !editHeld) {
       editHeld = true
       await options.holdEdit
@@ -461,7 +461,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { redactSent, clock, runs, envs, order, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
+  return { mapAsked, redactSent, clock, runs, envs, order, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -666,10 +666,10 @@ test('an edit is compiled and run against the warehouse; column drift from schem
   await clock.settle()
 
   // One show per edit, and no dbt ls when the manifest already names the model.
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(1)
   expect(runs.some(argv => argv[1] === 'ls')).toBe(false)
   // Only the model runs: its tests would fail on the renamed column and be reported as the model's error.
-  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '--select', 'path:models/orders.sql,package:shop,orders', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
+  expect(runs.find(argv => argv[1] === 'show' && !argv.includes('--inline'))).toEqual([DBT, 'show', '--select', 'path:models/orders.sql,package:shop,orders', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
   const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(note).toContain('the warehouse returned 2 columns')
   expect(note).toContain('- documented in schema.yml but not returned: amount')
@@ -696,171 +696,6 @@ test('an edit is compiled and run against the warehouse; column drift from schem
   await band.unmount()
 })
 
-kitTest('an undocumented column is the edit\'s only when the edit names it and the SQL before did not', () => {
-  const before = 'select id, amount / 100 as amount from {{ ref("raw") }}'
-  // A rewritten expression keeps its column: not a new gap. A column no list names is not the edit's either when the
-  // edit only rewrote a named item's line.
-  const lines = 'select\n  id,\n  amount / 100 as amount\nfrom {{ ref("raw") }}'
-  expect(undocumentedByEdit(['amount', 'x_passthrough'], lines, lines.replace('amount / 100 as amount', 'amount as amount'), null)).toEqual({ fresh: [], old: ['amount', 'x_passthrough'] })
-  // An edit that changed anything else (here the whole statement on one line): such a column counts as the edit's.
-  expect(undocumentedByEdit(['amount', 'x_passthrough'], before, 'select id, amount from {{ ref("raw") }}', null)).toEqual({ fresh: ['x_passthrough'], old: ['amount'] })
-  // A new or renamed column is.
-  expect(undocumentedByEdit(['amount_cents'], before, 'select id, amount as amount_cents from {{ ref("raw") }}', null)).toEqual({ fresh: ['amount_cents'], old: [] })
-  // An earlier check that returned it: there before.
-  expect(undocumentedByEdit(['amount_cents'], null, null, ['id', 'amount_cents'])).toEqual({ fresh: [], old: ['amount_cents'] })
-  // A check after another (no SQL from before), of a column the last check did not return: new.
-  expect(undocumentedByEdit(['amount_cents'], null, null, ['id'])).toEqual({ fresh: ['amount_cents'], old: [] })
-  // Nothing to compare with: every column is the edit's, as before.
-  expect(undocumentedByEdit(['amount'], null, null, null)).toEqual({ fresh: ['amount'], old: [] })
-  // A column a CTE already had, newly in the model's own select list: the edit's.
-  const cte = 'with src as (select id, amount from raw) select id from src'
-  expect(undocumentedByEdit(['amount'], cte, cte.replace('select id from src', 'select id, amount from src'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A subquery inside the model's own list is not one of its outputs.
-  const sub = 'select id, (select amount from raw) as total from src'
-  expect(undocumentedByEdit(['amount'], sub, sub.replace('select id,', 'select id, amount,'), ['id', 'total'])).toEqual({ fresh: ['amount'], old: [] })
-  // A `select *` from a CTE reads that CTE's own list, not an earlier CTE's.
-  const two = 'with src as (select id, amount from raw), b as (select id from src) select * from b'
-  expect(undocumentedByEdit(['amount'], two, two.replace('b as (select id from src)', 'b as (select id, amount from src)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // The CTE a `*` reads is found behind an alias, a semicolon, or another `select *` CTE.
-  for (const tail of [' t', ';']) {
-    const aliased = `with src as (select id, amount from raw),\nb as (select id from src)\nselect * from b${tail}`
-    expect(undocumentedByEdit(['amount'], aliased, aliased.replace('b as (select id from src)', 'b as (select id, amount from src)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  }
-  const chained = 'with src as (select id, amount from raw), a as (select * from src), b as (select id from a) select * from b'
-  expect(undocumentedByEdit(['amount'], chained, chained.replace('b as (select id from a)', 'b as (select id, amount from a)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A column added two `select *` CTEs up is new in the model's output.
-  const up = 'with src as (select id from raw),\n b as (select * from src)\nselect * from b'
-  expect(undocumentedByEdit(['amount'], up, up.replace('select id from raw', 'select id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A `*` over a join of CTEs: a column added to one of them is the edit's.
-  const joined = 'with a as (select * from {{ ref("x") }}), b as (select id from raw) select * from a join b using (id)'
-  expect(undocumentedByEdit(['amount'], joined, joined.replace('select id from raw', 'select id, amount from raw'), null)).toEqual({ fresh: ['amount'], old: [] })
-  // A column added to a CTE behind a joined `select *` CTE is the edit's: every CTE is part of what a `*` reads.
-  const deep = 'with src as (select id from raw),\n a as (select * from src),\n b as (select id from other)\nselect * from a join b using (id)'
-  expect(undocumentedByEdit(['amount'], deep, deep.replace('select id from raw', 'select id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A macro list whose arguments changed, or a `* exclude (…)` dropped: the column is the edit's.
-  const macro = "select {{ dbt_utils.star(from=ref('raw_orders'), except=['amount']) }}\nfrom {{ ref('raw_orders') }}"
-  expect(undocumentedByEdit(['amount'], macro, macro.replace("except=['amount']", 'except=[]'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  expect(undocumentedByEdit(['amount'], 'select * exclude (amount) from raw', 'select * from raw', ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // Columns a macro fills, with no Jinja changed (Tuva's passthrough columns), are not the edit's; one added to a
-  // `{% set %}` column list is.
-  const tuva = "{%- set core -%}\n      med.claim_id\n    , med.paid_amount\n{%- endset -%}\n{%- set ext -%}\n    {{ extension_columns(ref('x')) }}\n{%- endset -%}\nselect\n    {{ core }}\n    {{ ext }}\nfrom {{ ref('x') }} as med"
-  expect(undocumentedByEdit(['x_temp_payer'], tuva, tuva.replace('    , med.paid_amount', '    , greatest(med.paid_amount, 0) as paid_amount'), null)).toEqual({ fresh: [], old: ['x_temp_payer'] })
-  expect(undocumentedByEdit(['paid_cents'], tuva, tuva.replace('    , med.paid_amount', '    , med.paid_amount\n    , med.paid_amount * 100 as paid_cents'), null)).toEqual({ fresh: ['paid_cents'], old: [] })
-  // A `* exclude (…)` over a CTE stays unresolved: dropping the exclusion exposes a new column.
-  const excluded = 'with src as (select id, amount from raw)\nselect * exclude (amount) from src'
-  expect(undocumentedByEdit(['amount'], excluded, excluded.replace(' exclude (amount)', ''), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // Only the `{% set %}` lists the model's own list renders name its outputs; one a CTE renders does not.
-  const inner = '{% set cols %}id, amount{% endset %}\nwith raw as (select 1 as id, 10 as amount),\n src as (select {{ cols }} from raw)\nselect id from src'
-  expect(undocumentedByEdit(['amount'], inner, inner.replace('select id from src', 'select id, amount from src'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A `{% set %}` list a CTE renders, read through `select *`: a column added to it is new.
-  const viaCte = '{% set cols %}id{% endset %}\nwith src as (select {{ cols }} from raw)\nselect * from src'
-  expect(undocumentedByEdit(['amount'], viaCte, viaCte.replace('{% set cols %}id{% endset %}', '{% set cols %}id, amount{% endset %}'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A CTE's declared column names are what `select *` returns.
-  const declared = 'with src(id, old_name) as (select id, amount from raw) select * from src'
-  expect(undocumentedByEdit(['new_name'], declared, declared.replace('old_name', 'new_name'), ['id', 'old_name'])).toEqual({ fresh: ['new_name'], old: [] })
-  // A keyword inside a quoted alias does not end the list.
-  const quoted = 'select id as "from", amount from raw'
-  expect(undocumentedByEdit(['tax'], quoted, quoted.replace('amount from', 'amount, tax from'), ['from', 'amount'])).toEqual({ fresh: ['tax'], old: [] })
-  // Jinja alternatives each name outputs, but a name only in a branch that may not run is no evidence it was there.
-  const branches = '{% if is_incremental() %}\nselect id, amount from new_rows\n{% else %}\nselect id, amount from all_rows\n{% endif %}'
-  expect(undocumentedByEdit(['id'], branches, branches.replace('select id, amount from new_rows', 'select id, amount  from new_rows'), null)).toEqual({ fresh: ['id'], old: [] })
-  // A `*` whose source Jinja picks: a changed Jinja expression or tag keeps the column the edit's.
-  const picked = "{% set src = 'a' %}\nselect * from {{ ref(src) }}"
-  expect(undocumentedByEdit(['x'], picked, picked.replace("'a'", "'b'"), null)).toEqual({ fresh: ['x'], old: [] })
-  // A `{% set %}` list behind a joined `*`: a column added to it is the edit's.
-  const setJoin = '{% set cols %}id{% endset %}\nwith a as (select {{ cols }} from raw), b as (select id from other)\nselect * from a join b using (id)'
-  expect(undocumentedByEdit(['amount'], setJoin, setJoin.replace('{% set cols %}id{% endset %}', '{% set cols %}id, amount{% endset %}'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // Quoted CTE names keep their identity: `select * from "two"` reads two's columns, not one's.
-  const quotedCtes = 'with "one" as (select id from raw), "two" as (select id, amount from raw)\nselect * from "one"'
-  expect(undocumentedByEdit(['amount'], quotedCtes, quotedCtes.replace('select * from "one"', 'select * from "two"'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A Jinja flag that turns a column on: named before in a branch that did not run, so the column is the edit's.
-  const flag = '{% set include_amount = false %}\nselect id,\n{% if include_amount %}\n  amount,\n{% endif %}\n  status\nfrom raw'
-  expect(undocumentedByEdit(['amount'], flag, flag.replace('false', 'true'), ['id', 'status'])).toEqual({ fresh: ['amount'], old: [] })
-  // A changed CTE line with two items is not one output's item, even when it ends with an output's name.
-  const twoItems = 'with raw as (select 1 as id, 10 as amount),\na as (\n  select id\n  from raw\n), b as (select id from raw)\nselect a.* exclude (id), b.id\nfrom a join b using (id)'
-  expect(undocumentedByEdit(['amount'], twoItems, twoItems.replace('  select id\n', '  select amount, id\n'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A CTE declared inside a subquery does not shadow the query's own.
-  const shadow = 'with raw as (select 1 as id, 10 as amount),\nsrc as (select id from raw)\nselect * from src\nwhere exists (\n  with src as (select id, amount from raw)\n  select 1 from src\n)'
-  expect(undocumentedByEdit(['amount'], shadow, shadow.replace('src as (select id from raw)', 'src as (select id, amount from raw)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A name in a Jinja branch that does not run is no evidence the column was there.
-  const inactive = 'select id,\n{% if false %}\n  amount,\n{% endif %}\n  status\nfrom raw'
-  expect(undocumentedByEdit(['amount'], inactive, inactive.replace('  status\n', '  status,\n  amount\n'), ['id', 'status'])).toEqual({ fresh: ['amount'], old: [] })
-  // Lines moved from one CTE to another behind an unresolved `*`: the column is the edit's.
-  const moved = 'with a as (\n  select id,\n  amount\n  from raw\n), b as (\n  select id\n  from raw\n)\nselect a.* exclude (amount), b.*\nfrom a join b using (id)'
-  const movedAfter = moved.replace('  select id,\n  amount\n', '  select id\n').replace('  select id\n  from raw\n)\nselect', '  select id,\n  amount\n  from raw\n)\nselect')
-  expect(undocumentedByEdit(['amount'], moved, movedAfter, ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A line whose text also appears in a GROUP BY is judged where it is: a new select item stays the edit's.
-  expect(undocumentedByEdit(['amount'], 'select\n  id\nfrom raw\ngroup by\n  id', 'select\n  id,\n  amount\nfrom raw\ngroup by\n  id', ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // Jinja control flow anywhere (a set-block list rendered under `{% if %}`) is outside what is read: the column is the edit's.
-  const gated = '{% set cols %}id, amount{% endset %}\nselect\n  id\n  {% if var("x") %}, {{ cols }}{% endif %}\nfrom raw'
-  expect(undocumentedByEdit(['amount'], gated, gated.replace('  id\n', '  id \n'), null)).toEqual({ fresh: ['amount'], old: [] })
-  // A `{% set %}` variable set twice: which value renders is not read, so the column is the edit's.
-  const twice = '{% set cols %}id, amount{% endset %}\n{% set cols %}id{% endset %}\nselect {{ cols }} from raw'
-  expect(undocumentedByEdit(['amount'], twice, twice.replace('{% set cols %}id{% endset %}', '{% set cols %}id, amount{% endset %}'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // A trailing comment is not an item's name; quoted (case-sensitive) names are outside what is compared.
-  expect(undocumentedByEdit(['new_col'], 'select\n  id,\n  amount -- note\nfrom raw', 'select\n  id,\n  amount, -- note\n  x as new_col -- note\nfrom raw', null)).toEqual({ fresh: ['new_col'], old: [] })
-  expect(undocumentedByEdit(['Amount'], 'select id, "amount" from raw', 'select id, "amount", "Amount" from raw', null)).toEqual({ fresh: ['Amount'], old: [] })
-  // The last check's columns match exactly: `Amount` returned before is not `amount`.
-  expect(undocumentedByEdit(['amount'], 'select id, 10 as "Amount" from raw', 'select id, 10 as "Amount", 20 as "amount" from raw', ['id', 'Amount'])).toEqual({ fresh: ['amount'], old: [] })
-  // A SELECT inside a macro or a `{% set %}` body is not the model's output list.
-  const unused = '{% macro unused() %}\nselect id, amount from raw\n{% endmacro %}\nselect id from raw'
-  expect(undocumentedByEdit(['amount'], unused, unused.replace('select id from raw', 'select id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  const setQuery = '{% set q %}\nselect id, amount from raw\n{% endset %}\nselect id from raw'
-  expect(undocumentedByEdit(['amount'], setQuery, setQuery.replace('\nselect id from raw', '\nselect id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  // Blocks inside blocks, dollar quotes, and a rendered list given an alias are outside what is read.
-  const nested = '{% set outer %}\n{% set inner %}id{% endset %}\nselect id, amount from s.orders\n{% endset %}\nselect id from raw'
-  expect(undocumentedByEdit(['amount'], nested, nested.replace('\nselect id from raw', '\nselect id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
-  expect(undocumentedByEdit(['amount'], '{% set cols %}amount{% endset %}\nselect {{ cols }} as total from raw', '{% set cols %}amount{% endset %}\nselect {{ cols }} as total, amount from raw', ['total'])).toEqual({ fresh: ['amount'], old: [] })
-  // A bare render beside other items still renders its list: an expression rewritten there keeps its column.
-  const mixed = '{% set cols %}\n  id,\n  amount\n{% endset %}\nselect {{ cols }}, status from {{ ref("raw") }}'
-  expect(undocumentedByEdit(['amount'], mixed, mixed.replace('  amount\n', '  amount * 2 as amount\n'), null)).toEqual({ fresh: [], old: ['amount'] })
-  // A list with no FROM ends at its UNION; a changed ref() leaves the explicitly named outputs as they were.
-  const constants = 'select 1 as id, 10 as amount\nunion all\nselect 2 as id, 20 as amount'
-  expect(undocumentedByEdit(['amount'], constants, constants.replace('10 as amount', '10 * 2 as amount'), null)).toEqual({ fresh: [], old: ['amount'] })
-  expect(undocumentedByEdit(['amount'], "select id, amount from {{ ref('raw_orders') }}", "select id, amount from {{ ref('raw_orders_v2') }}", null)).toEqual({ fresh: [], old: ['amount'] })
-  // With no FROM the list ends at ORDER BY; a `--` inside a string is not a comment.
-  expect(undocumentedByEdit(['amount'], 'select 1 as id, 10 as amount\norder by id', 'select 1 as id, 10 as amount\norder by amount', null)).toEqual({ fresh: [], old: ['amount'] })
-  expect(undocumentedByEdit(['marker'], "select id, '--' as marker from raw", "select id, '--'  as marker from raw", null)).toEqual({ fresh: [], old: ['marker'] })
-  // A statement terminator, or a comment beside a rendered list, does not hide a name.
-  expect(undocumentedByEdit(['amount'], 'select 1 as id, 10 as amount;', 'select 1 as id, 20 as amount;', null)).toEqual({ fresh: [], old: ['amount'] })
-  const commented = '{% set cols %}\n  id,\n  amount\n{% endset %}\nselect\n  {{ cols }} -- the list\nfrom {{ ref("raw") }}'
-  expect(undocumentedByEdit(['amount'], commented, commented.replace('  amount\n', '  amount * 2 as amount\n'), null)).toEqual({ fresh: [], old: ['amount'] })
-  // A UNION takes its names from its first branch.
-  const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
-  expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
-  // A `*` from a ref(): a filter line changed brings no column; another ref() may.
-  const star = "select * from {{ ref('stg') }}"
-  expect(undocumentedByEdit(['x'], `${star}\nwhere a = 1`, `${star}\nwhere a = 2`, null)).toEqual({ fresh: [], old: ['x'] })
-  expect(undocumentedByEdit(['x'], star, "select * from {{ ref('other') }}", null)).toEqual({ fresh: ['x'], old: [] })
-  // A gap an earlier edit made stays the edit's when a later edit rewrites its expression.
-  expect(undocumentedByEdit(['amount_cents'], 'select id, amount as amount_cents from x', 'select id, amount * 100 as amount_cents from x', ['id'], ['amount_cents'])).toEqual({ fresh: ['amount_cents'], old: [] })
-})
-
-test('an older check that ends after a newer one does not erase the newer edit\'s gap', async ($, on) => {
-  let release!: () => void
-  const until = new Promise<void>(resolve => (release = resolve))
-  const show: Options['show'] = { rows: [{ order_id: 1, amount: 10 }] }
-  const { clock, files } = await start($, on, { show, files: { 'models/orders.sql': 'select order_id, amount from {{ ref("stg_orders") }}' }, holdReadAfterShows: { path: 'models/orders.sql', shows: 1, until } })
-  // The first edit's check pauses after its dbt show, reading the model.
-  files['models/orders.sql'] = 'select order_id,  amount from {{ ref("stg_orders") }}'
-  const first = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'order_id, amount', new_string: 'order_id,  amount' })
-  await clock.advance(CHECK_HOLD_MS + 100)
-  await first
-  // A newer edit adds amount_cents, undocumented: its check warns.
-  show.rows = [{ order_id: 1, amount: 10, amount_cents: 1000 }]
-  files['models/orders.sql'] = 'select order_id,  amount, amount * 100 as amount_cents from {{ ref("stg_orders") }}'
-  const second: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount from', new_string: 'amount, amount * 100 as amount_cents from' })
-  await clock.settle()
-  expect(second.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: amount_cents')
-  // The older check ends now: it is no longer the newest, and records nothing.
-  release()
-  await clock.settle()
-  files['models/orders.sql'] = 'select order_id,  amount, amount * 101 as amount_cents from {{ ref("stg_orders") }}'
-  const third: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount * 100', new_string: 'amount * 101' })
-  await clock.settle()
-  expect(third.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: amount_cents')
-})
-
 test('from integration_tests with no manifest there, dbt ls names the file\'s model and version, so only that version runs', async ($, on) => {
   const { clock, runs } = await start($, on, {
     show: { rows: [{ order_id: 1, amount: 10 }], node: 'orders.v2' },
@@ -876,20 +711,24 @@ test('from integration_tests with no manifest there, dbt ls names the file\'s mo
   await clock.settle()
   const ls = runs.find(argv => argv[1] === 'ls')!
   expect(ls.slice(0, 4)).toEqual([DBT, 'ls', '--select', 'package:shop'])
-  expect(runs.find(argv => argv[1] === 'show')!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
+  expect(runs.find(argv => argv[1] === 'show' && !argv.includes('--inline'))!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
 })
 
-test('only the columns an edit left undocumented are its gaps; ones undocumented before it are said once, quietly', async ($, on) => {
-  let release!: () => void
-  const hold = new Promise<void>(resolve => (release = resolve))
+kitTest('a column the model returned before the edit is not the edit\'s gap; names match exactly; with nothing to compare, every one is', () => {
+  expect(undocumentedByEdit(['status', 'amount_cents'], ['order_id', 'amount', 'status'])).toEqual({ fresh: ['amount_cents'], old: ['status'] })
+  expect(undocumentedByEdit(['amount'], ['id', 'Amount'])).toEqual({ fresh: ['amount'], old: [] })
+  expect(undocumentedByEdit(['status'], ['status'], ['status'])).toEqual({ fresh: ['status'], old: [] })
+  expect(undocumentedByEdit(['status'], null)).toEqual({ fresh: ['status'], old: [] })
+})
+
+test('only the columns an edit left undocumented are its gaps, from what the warehouse returned before; older ones are said once, quietly', async ($, on) => {
   const show: Options['show'] = { rows: [{ order_id: 1, amount: 10, status: 'placed', amount_cents: 1000 }] }
-  const { clock, files } = await start($, on, { show, holdEdit: hold, files: { 'models/orders.sql': 'select order_id, amount, status from {{ ref("stg_orders") }}' } })
-  const call = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'status from', new_string: 'status, amount * 100 as amount_cents from' })
+  // The model as it is built: order_id, amount and status; status was never documented.
+  const { clock, runs } = await start($, on, { show, built: () => [{ order_id: 1, amount: 10, status: 'placed' }] })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
-  files['models/orders.sql'] = 'select order_id, amount, status, amount * 100 as amount_cents from {{ ref("stg_orders") }}'
-  release()
-  const result: any = await call
-  await clock.settle()
+  // dbt shows the model's built relation: the columns it returned before the edit. No SQL is read for it.
+  expect(runs.find(argv => argv.includes('--inline'))).toEqual([DBT, 'show', '--inline', "select * from {{ ref('orders') }}", '--limit', '1', '--output', 'json', '--log-format', 'json'])
   const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(note).toContain('- returned but not documented in schema.yml: amount_cents\n')
   expect(note).toContain("- already undocumented before this edit (not this edit's doing; nothing to fix for it): status")
@@ -900,16 +739,15 @@ test('only the columns an edit left undocumented are its gaps; ones undocumented
   expect(await pane.find({ type: 'Text', text: '  not documented, from before this edit' })).toBeDefined()
   await pane.unmount()
 
-  // A later edit that rewrites the new column, still undocumented, still warns about it.
-  files['models/orders.sql'] = 'select order_id, amount, status, amount * 101 as amount_cents from {{ ref("stg_orders") }}'
-  const rewritten: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'status, amount', new_string: 'status,  amount' })
+  // A later edit, the new column still undocumented: still the edit's. The built relation is asked once only.
+  const rewritten: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select  *', new_string: 'select   *' })
   await clock.settle()
   expect(rewritten.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: amount_cents\n')
+  expect(runs.filter(argv => argv.includes('--inline')).length).toBe(1)
 
-  // The next edit adds no column: nothing is the edit's gap, and the older ones are not said again.
+  // The column dropped again: nothing is the edit's gap, and the older ones are not said again.
   show.rows = [{ order_id: 1, amount: 10, status: 'placed' }]
-  files['models/orders.sql'] = 'select order_id, amount, status from {{ ref("stg_orders") }}'
-  const again: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount, status', new_string: 'amount,  status' })
+  const again: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select   *', new_string: 'select *' })
   await clock.settle()
   const second = again.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(second).not.toContain('not documented')
@@ -940,7 +778,7 @@ test('a package tested from integration_tests is compiled and validated from the
   })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
-  const at = runs.findIndex(argv => argv[1] === 'show')
+  const at = runs.findIndex(argv => argv[1] === 'show' && !argv.includes('--inline'))
   // `path:` would read from integration_tests: the package and the model's name select it there.
   expect(runs[at]).toEqual(['dbt', 'show', '--select', 'package:shop,orders', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
   expect(cwds[at]).toBe(`${ROOT}/integration_tests`)
@@ -968,7 +806,7 @@ test('from integration_tests the package repo\'s own dbt is used, and a versione
   })
   await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
-  const at = runs.findIndex(argv => argv[1] === 'show')
+  const at = runs.findIndex(argv => argv[1] === 'show' && !argv.includes('--inline'))
   // The repo's .venv dbt (integration_tests has none), run in integration_tests, for version 2 only.
   expect(runs[at]!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
   expect(cwds[at]).toBe(`${ROOT}/integration_tests`)
@@ -986,21 +824,22 @@ test('from integration_tests, a file whose model dbt does not list there runs no
   })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
-  expect(runs.some(argv => argv[1] === 'show')).toBe(false)
+  expect(runs.some(argv => argv[1] === 'show' && !argv.includes('--inline'))).toBe(false)
   expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- not checked: dbt has no model for this file in the project that installs this package')
 })
 
-test('after /clear, a gap an edit made in the last conversation is not this conversation\'s', async ($, on) => {
+test('after /clear, the next conversation compares with the model as built again, not with the last conversation\'s edits', async ($, on) => {
   const show: Options['show'] = { rows: [{ order_id: 1, amount: 10, amount_cents: 1000 }] }
-  let next = 'select order_id, amount, amount * 100 as amount_cents from {{ ref("stg_orders") }}'
-  const { clock, files } = await start($, on, { show, files: { 'models/orders.sql': 'select order_id, amount from {{ ref("stg_orders") }}' }, onEdit: () => void (files['models/orders.sql'] = next) })
-  const first: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount from', new_string: 'amount, amount * 100 as amount_cents from' })
+  let built: Record<string, unknown>[] = [{ order_id: 1, amount: 10 }]
+  const { clock } = await start($, on, { show, built: () => built })
+  const first: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
   expect(first.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: amount_cents')
+  // The edit was built, then the conversation cleared.
+  built = [{ order_id: 1, amount: 10, amount_cents: 1000 }]
   await $.session.end({ reason: 'clear' } as any)
   await clock.settle()
-  next = 'select order_id, amount, amount * 101 as amount_cents from {{ ref("stg_orders") }}'
-  const later: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount * 100', new_string: 'amount * 101' })
+  const later: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select  *', new_string: 'select *' })
   await clock.settle()
   const note = later.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(note).not.toContain('- returned but not documented in schema.yml: amount_cents')
@@ -1022,7 +861,7 @@ test('from integration_tests, a saved manifest that maps the file to an older ve
   })
   await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
-  expect(runs.find(argv => argv[1] === 'show')!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
+  expect(runs.find(argv => argv[1] === 'show' && !argv.includes('--inline'))!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
 })
 
 test('from integration_tests, dbt ls failing on a compilation error shows that error, not "no model"', async ($, on) => {
@@ -1058,99 +897,42 @@ test('a project whose packages are not installed gets a one-line note, not a fai
   await band.unmount()
 })
 
-kitTest('a model, seed or source named by its table instead of ref() or source() is found, in any spelling; ref(), CTEs, comments and strings are not', () => {
-  const manifest = {
-    nodes: {
-      'model.jaffle_shop.stg_orders': { resource_type: 'model', name: 'stg_orders', relation_name: '"jaffle_shop"."main"."stg_orders"' },
-      'model.jaffle_shop.orders': { resource_type: 'model', name: 'orders', relation_name: '"jaffle_shop"."main"."orders"' },
-      'seed.jaffle_shop.raw_payments': { resource_type: 'seed', name: 'raw_payments', relation_name: '"jaffle_shop"."main"."raw_payments"' },
-    },
-    sources: { 'source.jaffle_shop.shop.customers': { source_name: 'shop', name: 'customers', relation_name: '"raw"."shop"."customers"' } },
-  }
-  const self = 'model.jaffle_shop.orders'
-  expect(hardcodedRelations("with orders as (select * from {{ ref('stg_orders') }}) select * from orders", manifest, self)).toEqual([])
-  expect(hardcodedRelations('with orders as (select * from main.stg_orders) select * from orders', manifest, self)).toEqual([{ relation: 'main.stg_orders', use: "{{ ref('stg_orders') }}" }])
-  expect(hardcodedRelations('select * from "jaffle_shop"."main"."stg_orders" o join raw_payments p using (order_id)', manifest, self)).toEqual([
-    { relation: '"jaffle_shop"."main"."stg_orders"', use: "{{ ref('stg_orders') }}" },
-    { relation: 'raw_payments', use: "{{ ref('raw_payments') }}" },
-  ])
-  expect(hardcodedRelations('select * from shop.customers', manifest, self)).toEqual([{ relation: 'shop.customers', use: "{{ source('shop', 'customers') }}" }])
-  // Not code: a comment, a string; and the model itself.
-  expect(hardcodedRelations("-- from main.stg_orders\nselect 'from main.stg_orders' as note from {{ ref('stg_orders') }} /* join raw_payments */", manifest, self)).toEqual([])
-  expect(hardcodedRelations('select * from main.orders', manifest, self)).toEqual([])
-  expect(hardcodedRelations('with stg_orders(id) as (select 1) select * from stg_orders', manifest, self)).toEqual([])
-  // A CTE named like a model, quoted or not, is the CTE.
-  expect(hardcodedRelations('with "stg_orders" as (select 1 as id) select * from "stg_orders"', manifest, self)).toEqual([])
-  // A manifest too big to read here comes as a slice of the model's graph: the relations it lists apart still count,
-  // though the table, no longer a ref(), is out of the graph.
-  const sliced = { nodes: {}, relations: [{ id: 'model.jaffle_shop.stg_orders', resource_type: 'model', name: 'stg_orders', relation_name: '"jaffle_shop"."main"."stg_orders"' }, { id: 'source.jaffle_shop.shop.customers', resource_type: 'source', name: 'customers', source_name: 'shop', relation_name: '"raw"."shop"."customers"' }] }
-  expect(hardcodedRelations('select * from main.stg_orders join shop.customers using (id)', sliced, self)).toEqual([
-    { relation: 'main.stg_orders', use: "{{ ref('stg_orders') }}" },
-    { relation: 'shop.customers', use: "{{ source('shop', 'customers') }}" },
-  ])
-  // A bare name two relations share (two schemas) is ambiguous: not flagged.
-  const twice = { nodes: { 'model.s.current_orders': { resource_type: 'model', name: 'current_orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
-  expect(hardcodedRelations('select * from orders', twice, self)).toEqual([])
-  expect(hardcodedRelations('select * from archive.orders', twice, self)).toEqual([{ relation: 'archive.orders', use: "{{ ref('archived_orders') }}" }])
-  // A FROM inside a function call names no relation.
-  expect(hardcodedRelations("select extract(day from orders) as d, trim(both ' ' from stg_orders) as t from {{ ref('x') }}", manifest, self)).toEqual([])
-  // A keyword inside a quoted alias, and text inside Jinja control flow, are not read as relations.
-  expect(hardcodedRelations('select 1 as "from stg_orders"', manifest, self)).toEqual([])
-  expect(hardcodedRelations("{% if false %}select * from main.stg_orders{% else %}select * from {{ ref('stg_orders') }}{% endif %}", manifest, self)).toEqual([])
-  // A quoted name is that identifier exactly: another case, or one quoted name holding a dot, is not the relation.
-  const quoted = { nodes: { 'model.d.orders3': { resource_type: 'model', name: 'orders3', relation_name: '"d"."s"."orders3"' } } }
-  expect(hardcodedRelations('select id from "s"."ORDERS3"', quoted, self)).toEqual([])
-  expect(hardcodedRelations('select id from "s.orders3"', quoted, self)).toEqual([])
-  expect(hardcodedRelations('select id from "s"."orders3"', quoted, self)).toEqual([{ relation: '"s"."orders3"', use: "{{ ref('orders3') }}" }])
-  // A table the manifest quotes in upper or mixed case, or one name holding a dot, is not what an unquoted name reads.
-  const cased = (rel: string) => ({ nodes: { 'model.d.orders4': { resource_type: 'model', name: 'orders4', relation_name: rel } } })
-  expect(hardcodedRelations('select id from s.orders4', cased('"d"."s"."ORDERS4"'), self)).toEqual([])
-  expect(hardcodedRelations('select id from s.orders4', cased('"d"."s"."Orders4"'), self)).toEqual([])
-  expect(hardcodedRelations('select id from raw.orders4', cased('"d"."s"."raw.orders4"'), self)).toEqual([])
-  expect(hardcodedRelations('select id from s.orders4', cased('"d"."s"."orders4"'), self)).toEqual([{ relation: 's.orders4', use: "{{ ref('orders4') }}" }])
-  // A table-valued function, dollar-quoted text, and blocks inside blocks are not relations.
-  expect(hardcodedRelations('select * from main.stg_orders(1)', manifest, self)).toEqual([])
-  expect(hardcodedRelations('select $$ from main.stg_orders $$ as note from raw', manifest, self)).toEqual([])
-  expect(hardcodedRelations('{% set outer %}\n{% set inner %}id{% endset %}\nselect id from main.stg_orders\n{% endset %}\nselect id from raw', manifest, self)).toEqual([])
-  // A CTE declared inside a subquery does not hide the outer query's table of the same name.
-  const scoped = { nodes: { 'model.shop.orders5': { resource_type: 'model', name: 'orders5', relation_name: '"d"."main"."orders5"' } } }
-  expect(hardcodedRelations('select id from orders5\nwhere exists (\n  with orders5 as (select 1 as id)\n  select id from orders5\n)', scoped, self)).toEqual([{ relation: 'orders5', use: "{{ ref('orders5') }}" }])
-  // Inside a CTE's own body its name is still the table (a CTE is not recursive unless declared so).
-  expect(hardcodedRelations('with orders5 as (select id from orders5)\nselect id from orders5', scoped, self)).toEqual([{ relation: 'orders5', use: "{{ ref('orders5') }}" }])
-  // A macro, or a `{% set %}` block, that may not be rendered here is not read.
-  expect(hardcodedRelations('{% macro unused() %}\nselect id from main.stg_orders\n{% endmacro %}\nselect id from raw', manifest, self)).toEqual([])
-  // The model itself takes part: its own bare name shared with another relation is ambiguous, and never advice.
-  const own = { nodes: { 'model.s.orders': { resource_type: 'model', name: 'orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
-  expect(hardcodedRelations('select * from orders', own, 'model.s.orders')).toEqual([])
-  expect(hardcodedRelations('select * from main.orders', own, 'model.s.orders')).toEqual([])
-  // Another package's model of the same name is named with its package.
-  const packages = { nodes: { 'model.jaffle_shop.orders2': { resource_type: 'model', name: 'orders2', package_name: 'jaffle_shop', relation_name: '"d"."main"."orders2"' }, 'model.pkg.orders2': { resource_type: 'model', name: 'orders2', package_name: 'pkg', relation_name: '"d"."pkg"."orders2"' } } }
-  expect(hardcodedRelations('select * from pkg.orders2', packages, self)).toEqual([{ relation: 'pkg.orders2', use: "{{ ref('pkg', 'orders2') }}" }])
-  // A versioned model other than the latest keeps its version in the advice.
-  const versions = { nodes: { 'model.p.orders.v1': { resource_type: 'model', name: 'orders', version: 1, latest_version: 2, relation_name: '"d"."s"."orders_v1"' }, 'model.p.orders.v2': { resource_type: 'model', name: 'orders', version: 2, latest_version: 2, relation_name: '"d"."s"."orders"' } } }
-  expect(hardcodedRelations('select * from s.orders_v1', versions, self)).toEqual([{ relation: 's.orders_v1', use: "{{ ref('orders', v=1) }}" }])
-  expect(hardcodedRelations('select * from s.orders', versions, self)).toEqual([{ relation: 's.orders', use: "{{ ref('orders') }}" }])
-  expect(MANIFEST_SLICE).toContain("out['relations'] = ")
-})
-
-test('an edit that swaps a ref() for the table it builds is flagged: lineage cannot follow it', async ($, on) => {
-  const { clock, toasts } = await start($, on, { files: { 'models/orders.sql': 'select order_id, amount from stg_orders' } })
-  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'from stg_orders', new_string: 'from  stg_orders' })
+test('a table the compiled SQL reads that is a dbt node but not a dependency is flagged, from altimate-code\'s dbt_map_relations', async ($, on) => {
+  // dbt compiled the edited model: it reads stg_orders by its table, so dbt no longer lists it among the model's parents.
+  const compiled = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], depends_on: { nodes: [] } } } }
+  const mapRelations = [{ raw: 'main.stg_orders', replaceWith: "{{ ref('stg_orders') }}", match: 'partial', candidates: [{ uniqueId: 'model.shop.stg_orders', replaceWith: "{{ ref('stg_orders') }}", kind: 'model', name: 'stg_orders', relationName: '"shop"."main"."stg_orders"', match: 'partial' }] }]
+  const { clock, toasts, mapAsked } = await start($, on, { manifestAfterShow: compiled, files: { 'target/manifest.json': JSON.stringify(MANIFEST), 'target/.altimate-plugin/compiled/shop/models/orders.sql': 'select * from main.stg_orders' }, mapRelations })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
+  // The compiled SQL and the manifest dbt show just wrote.
+  expect(mapAsked).toEqual([{ sql: 'select * from main.stg_orders', manifest_path: `${ROOT}/target/.altimate-plugin/manifest.json` }])
   const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
-  expect(note).toContain("- hardcoded stg_orders: use {{ ref('stg_orders') }}. dbt does not know this model reads it")
+  expect(note).toContain("- hardcoded main.stg_orders: use {{ ref('stg_orders') }}. dbt does not know this model reads it")
   expect(note).toContain('Put the ref() or source() back unless the user asked for the table by name, and tell the user.')
   expect(toasts).toContain('⚠ orders · compiled and validated against the warehouse')
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
-  expect(await band.find({ type: 'Text', text: /hardcoded stg_orders: use \{\{ ref\('stg_orders'\) \}\} — lineage can't follow it/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /hardcoded main\.stg_orders: use \{\{ ref\('stg_orders'\) \}\} — lineage can't follow it/ })).toBeDefined()
   await band.unmount()
+})
+
+test('a table read through ref() (a dependency), the model itself, or an unclear match is never flagged; without the tool, nothing is', async ($, on) => {
+
+  const mapRelations = [
+    { raw: '"shop"."main"."stg_orders"', match: 'exact', candidates: [{ uniqueId: 'model.shop.stg_orders', replaceWith: "{{ ref('stg_orders') }}", match: 'exact' }] },
+    { raw: 'orders', match: 'exact', candidates: [{ uniqueId: 'model.shop.orders', replaceWith: "{{ ref('orders') }}", match: 'exact' }] },
+    { raw: 'revenue', match: 'partial', candidates: [{ uniqueId: 'model.shop.revenue', replaceWith: "{{ ref('revenue') }}" }, { uniqueId: 'seed.shop.raw_orders', replaceWith: "{{ ref('raw_orders') }}" }] },
+  ]
+  const { clock } = await start($, on, { files: { 'target/.altimate-plugin/compiled/shop/models/orders.sql': 'select * from "shop"."main"."stg_orders", orders, revenue' }, mapRelations })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).not.toContain('hardcoded')
 })
 
 test('a dbt command that only rewrites the manifest starts no check; a change to the model\'s schema.yml checks it again', async ($, on) => {
   const { clock, runs, mtimes, setBash } = await start($, on, { show: { rows: [{ order_id: 1, order_total: 10 }] } })
   await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'as amount', new_string: 'as order_total' })
   await clock.settle()
-  const shows = () => runs.filter(argv => argv[1] === 'show').length
+  const shows = () => runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length
   expect(shows()).toBe(1)
   // Claude's own build rewrites the manifest: no warehouse query for that.
   mtimes['target/manifest.json'] = 90_000
@@ -1252,7 +1034,7 @@ test('an edit of a macro or a file outside a dbt project runs no dbt', async ($,
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/macros/cents.sql`, old_string: 'a', new_string: 'b' })
   await $.tool.call({ tool: 'Edit', file_path: '/elsewhere/q.sql', old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show')).toEqual([])
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline'))).toEqual([])
 })
 
 // ─── 08 · A failed run, one press from a fix ─────────────────────────────────────────────────────
@@ -1356,13 +1138,13 @@ test('/dbt-show runs dbt show for a model, and Re-run runs it again; an error sh
   const reply: any = await $.command.run({ command: 'dbt-show', args: 'orders' })
   await clock.settle()
   expect(reply.text).toBe('Running dbt show for orders; the rows open in the Query results pane.')
-  expect(runs.filter(argv => argv[1] === 'show')).toEqual([[DBT, 'show', '--select', 'orders', '--indirect-selection', 'empty', '--limit', '50', '--output', 'json', '--log-format', 'json']])
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline'))).toEqual([[DBT, 'show', '--select', 'orders', '--indirect-selection', 'empty', '--limit', '50', '--output', 'json', '--log-format', 'json']])
 
   const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /1 row · 2 columns .* · your query/ })).toBeDefined()
   await ui.press({ key: 'results-rerun' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(2)
   await ui.unmount()
 })
 
@@ -1619,10 +1401,10 @@ test('only files under model-paths are compiled and validated; a model there is,
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/orders.sql`, old_string: 'a', new_string: 'b' })
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/macros/x.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show')).toEqual([])
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline'))).toEqual([])
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/transform/orders.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(1)
 })
 
 test('a file dbt has no model for is reported as not checked, not as a failure', async ($, on) => {
@@ -1649,7 +1431,7 @@ test('model-paths of "." checks a model in the project folder; a passing seed do
   const { clock, runs, setBash } = await start($, on, { files: { 'dbt_project.yml': "name: 'shop'\nprofile: 'shop'\nmodel-paths: ['.']\n" } })
   await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(1)
   setBash({ stdout: BUILD_FAILED, isError: true })
   await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders' })
   setBash({ stdout: `${HEADER}\nDone. PASS=3 WARN=0 ERROR=0 SKIP=0 NO-OP=0 TOTAL=3` })
@@ -1685,7 +1467,7 @@ test('checks a newer edit replaced before their turn run no query and tell Claud
   const results: any[] = await Promise.all([first, second, third])
   await clock.settle()
   // The first two were replaced before their turn: only the newest edit's query ran.
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(1)
   const notes = results.map(one => (one.context ?? []).filter((note: string) => note.startsWith('Altimate compile-and-validate')).length)
   // Which of the two later edits is the newest depends on the order the other features let them through: one of them, never the first.
   expect(notes[0]).toBe(0)
@@ -1736,7 +1518,7 @@ test('a file changed while its check ran is checked again afterwards', async ($,
   setBash({ stdout: 'ok' })
   await $.tool.call({ tool: 'Bash', command: 'ls' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(2)
 })
 
 test('an Edit of schema.yml checks the model again', async ($, on) => {
@@ -1746,7 +1528,7 @@ test('an Edit of schema.yml checks the model again', async ($, on) => {
   mtimes['models/schema.yml'] = 50_000
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'amount', new_string: 'order_total' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(2)
 })
 
 test('a passing run against another target leaves a failed run as it is', async ($, on) => {
@@ -1803,7 +1585,7 @@ test('Re-run of a bare `dbt` (an activated venv, uv run) runs the project\'s own
   const ui = await $.ui.mount({ ...RESULTS, surface: 'terminal' })
   await ui.press({ key: 'results-rerun' })
   await clock.settle()
-  expect(runs.find(argv => argv[1] === 'show')).toEqual([DBT, 'show', '-s', 'orders', '--limit', '5', '--output', 'json', '--log-format', 'json'])
+  expect(runs.find(argv => argv[1] === 'show' && !argv.includes('--inline'))).toEqual([DBT, 'show', '-s', 'orders', '--limit', '5', '--output', 'json', '--log-format', 'json'])
   await ui.unmount()
 })
 
@@ -1850,7 +1632,7 @@ test('a recheck waiting on its file when /clear lands runs no query and restores
   await $.session.end({ reason: 'clear' } as any)
   release()
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(1)
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ key: 'dbt-check-details' })).toBeUndefined()
   await band.unmount()
@@ -1912,7 +1694,7 @@ test('an edit of schema.yml checks the model again even when the model had no sc
   await clock.settle()
   await $.tool.call({ tool: 'Write', file_path: `${ROOT}/models/schema.yml`, content: 'version: 2' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(2)
 })
 
 test('the doctor does not call a package\'s model deleted, and a manifest over 4 MiB is not a "may be stale"', async ($, on) => {
@@ -1944,14 +1726,14 @@ test('an edit of a .yml outside the checked model\'s project, or in its build ou
   await $.tool.call({ tool: 'Edit', file_path: '/elsewhere/.github/workflows/ci.yml', old_string: 'a', new_string: 'b' })
   await $.tool.call({ tool: 'Write', file_path: `${ROOT}/target/run_results.yml`, content: 'x' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(1)
 })
 
 test('a file path with `..` in it is read as the plain path inside its project', async ($, on) => {
   const { clock, runs } = await start($, on)
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/../models/orders.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.find(argv => argv[1] === 'show')?.[3]).toBe('path:models/orders.sql,package:shop,orders')
+  expect(runs.find(argv => argv[1] === 'show' && !argv.includes('--inline'))?.[3]).toBe('path:models/orders.sql,package:shop,orders')
 })
 
 test('a schema.yml written while the model\'s first check still runs checks it again once that check ends', async ($, on) => {
@@ -1964,7 +1746,7 @@ test('a schema.yml written while the model\'s first check still runs checks it a
   await $.tool.call({ tool: 'Write', file_path: `${ROOT}/models/schema.yml`, content: 'version: 2' })
   release()
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(2)
 })
 
 test('a relative DBT_PROFILES_DIR is read from the project folder', async ($, on) => {
@@ -1984,7 +1766,7 @@ test('a deleted schema file makes its check run again, and the doctor finds a de
   setBash({ stdout: 'ok' })
   await $.tool.call({ tool: 'Bash', command: 'rm models/schema.yml' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(2)
   await $.command.run({ command: 'dbt-doctor', args: '' })
   await clock.settle()
   const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
@@ -2013,7 +1795,7 @@ test('an unrelated edit while a check runs does not replace a pending recheck', 
   await $.tool.call({ tool: 'Edit', file_path: '/elsewhere/.github/workflows/ci.yml', old_string: 'a', new_string: 'b' })
   release()
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(2)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(2)
 })
 
 test('Claude\'s plain `dbt show` (dbt\'s text table, as dbt prints it) lands in the pane', async ($, on) => {
@@ -2473,7 +2255,7 @@ test('a versioned model whose file has another name is selected by its name too,
   const { clock, runs, toasts } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(manifest), 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.find(argv => argv[1] === 'show')?.[3]).toBe('path:models/legacy.sql,package:shop,orders')
+  expect(runs.find(argv => argv[1] === 'show' && !argv.includes('--inline'))?.[3]).toBe('path:models/legacy.sql,package:shop,orders')
   expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
   expect((result.context ?? []).some((note: string) => note.includes('FAILED'))).toBe(false)
 })
@@ -2564,7 +2346,7 @@ test('a versioned model\'s first check, with no manifest yet, learns its name fr
   await clock.settle()
   // dbt ls (no query) gives the name; the model is shown once, with it.
   expect(runs.filter(argv => argv[1] === 'ls')).toEqual([[DBT, 'ls', '--select', 'path:models/legacy.sql,package:shop', '--resource-type', 'model', '--indirect-selection', 'empty', '--output', 'json', '--output-keys', 'name resource_type', '--log-format', 'text']])
-  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,orders'])
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,orders'])
   expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
   expect((result.context ?? []).some((note: string) => note.includes('FAILED'))).toBe(false)
 })
@@ -2575,7 +2357,7 @@ test('a check whose manifest holds an old name for the model asks again with the
   const { clock, runs, toasts } = await start($, on, { manifestAfterShow: manifest('orders'), files: { 'target/manifest.json': JSON.stringify(manifest('legacy_name')), 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,legacy_name', 'path:models/legacy.sql,package:shop,orders'])
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,legacy_name', 'path:models/legacy.sql,package:shop,orders'])
   expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
 })
 
@@ -2622,7 +2404,7 @@ test('a versioned model whose show prints nothing ends FAILED after one show, na
   const { clock, runs } = await start($, on, { manifestAfterShow: manifest, listed: ['orders'], files: { 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'never_selected' } })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').length).toBe(1)
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length).toBe(1)
   const note = (result.context ?? []).join('\n')
   expect(note).toContain('FAILED')
   expect(note).toContain('the model orders')
@@ -3567,7 +3349,7 @@ test('dbt ls lists the model and its test: only the model gives the name, so the
   const { clock, runs } = await start($, on, { files: { 'target/manifest.json': JSON.stringify(manifest), 'models/legacy.sql': 'select 1' }, listed: [{ name: 'orders', resource_type: 'model' }, { name: 'not_null_orders_id', resource_type: 'test' }], show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,orders'])
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop,orders'])
   expect((result.context ?? []).join('\n')).not.toContain('FAILED')
 })
 
@@ -3598,7 +3380,7 @@ test('a run that exited 0 whose rows say "command not found" does not make dbt u
   const { clock, runs } = await start($, on, { show: { rows: [{ msg: 'command not found' }] } })
   await editOrders($)
   await clock.settle()
-  const shows = () => runs.filter(argv => argv[1] === 'show').length
+  const shows = () => runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length
   expect(shows()).toBe(1)
   await editOrders($)
   await clock.settle()
@@ -3613,7 +3395,7 @@ test('a dbt deps that fails because git is not found does not make dbt unrunnabl
   await band.unmount()
   const result: any = await editOrders($)
   await clock.settle()
-  expect(runs.some(argv => argv[1] === 'show')).toBe(true)
+  expect(runs.some(argv => argv[1] === 'show' && !argv.includes('--inline'))).toBe(true)
   expect(noteOf(result)).not.toContain('dbt could not be run here')
 })
 
@@ -3622,7 +3404,7 @@ test('dbt ls that fails, a first show with no preview and a fresh manifest that 
   const { clock, runs, toasts } = await start($, on, { listFails: true, manifestAfterShow: manifest, files: { 'models/legacy.sql': 'select 1' }, show: { rows: [{ order_id: 1 }], node: 'orders', mustInclude: 'orders' } })
   const result: any = await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/legacy.sql`, old_string: 'a', new_string: 'b' })
   await clock.settle()
-  expect(runs.filter(argv => argv[1] === 'show').map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop', 'path:models/legacy.sql,package:shop,orders'])
+  expect(runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).map(argv => argv[3])).toEqual(['path:models/legacy.sql,package:shop', 'path:models/legacy.sql,package:shop,orders'])
   expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
   expect((result.context ?? []).join('\n')).not.toContain('FAILED')
 })
@@ -3684,7 +3466,7 @@ test('a dbt deps that fails because git is not found, as dash and busybox say it
   await band.unmount()
   const result: any = await editOrders($)
   await clock.settle()
-  expect(runs.some(argv => argv[1] === 'show')).toBe(true)
+  expect(runs.some(argv => argv[1] === 'show' && !argv.includes('--inline'))).toBe(true)
   expect(noteOf(result)).not.toContain('dbt could not be run here')
 })
 
@@ -3696,7 +3478,7 @@ test('a bare exit 127 that says something is not found does not make dbt unrunna
   await band.unmount()
   const result: any = await editOrders($)
   await clock.settle()
-  expect(runs.some(argv => argv[1] === 'show')).toBe(true)
+  expect(runs.some(argv => argv[1] === 'show' && !argv.includes('--inline'))).toBe(true)
   expect(noteOf(result)).not.toContain('dbt could not be run here')
 })
 
@@ -3855,7 +3637,7 @@ for (const [what, exitCode, stderr] of WRAPPERS) {
     await clock.settle()
     expect(noteOf(first)).toContain('- not checked: dbt could not be run here.')
     expect(noteOf(first)).not.toContain('FAILED')
-    const shows = () => runs.filter(argv => argv[1] === 'show').length
+    const shows = () => runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline')).length
     const after = shows()
     await editOrders($)
     await clock.settle()
@@ -4184,7 +3966,7 @@ test('a /dbt-show under way when /clear ends the conversation is saved with the 
   await $.command.run({ command: 'dbt-show', args: 'orders' })
   // Until dbt show has started and is held: the profile's values were read before it.
   await clock.settle()
-  expect(runs.some(argv => argv[1] === 'show')).toBe(true)
+  expect(runs.some(argv => argv[1] === 'show' && !argv.includes('--inline'))).toBe(true)
   await $.session.end({ reason: 'clear' } as any)
   release()
   await clock.settle()
