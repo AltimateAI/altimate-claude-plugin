@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, compared, dollars, evidenceLines, explain, fixRequest, mentions, supportsSavings } from './savings'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, evidenceLines, explain, fixRequest, mentions, supportsSavings } from './savings'
 
 const ROOT = '/repo'
 
@@ -1005,4 +1005,24 @@ test('a job whose evidence lacks its trigger, host cluster, hours or DBUs reads 
   // Present values still read as before, and a tiny DBU figure is "under 0.1" without "about".
   expect(evidenceLines({ ...JOB.evidence, estimated_dbus: 0.01 })[0]).toContain(', under 0.1 DBUs, most on cluster "shared analytics"')
   expect(evidenceLines(JOB.evidence)[0]).toContain('(periodic), 181.8 hours on all-purpose compute, about 1,818.2 DBUs')
+})
+
+test('when no check could run, the pane and the notice say nothing was checked, not that nothing was found', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const checks = ['Migrate Classic/Pro to Serverless', 'Over-Sized Warehouse', 'Idle Cluster Detection', 'Job Running on All-Purpose Compute']
+  // One check listed twice (one per workspace) is still one check.
+  answer.metadata.skipped = [...checks, checks[3]].map(check => ({ check, reason: 'INSUFFICIENT_PERMISSIONS' }))
+  answer.metadata.report = { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
+  const { clock, toasts } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  expect(toasts.at(-1)).toBe('Databricks savings check: none of the 4 checks could run, so nothing was checked.')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^None of the 4 checks could run, so nothing was checked\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No savings found|-?\d+ of 4 checks that ran/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a check skipped in two workspaces counts once in the verdict', () => {
+  expect(checksNotRun({ skipped: ['Idle Cluster Detection (refused)', 'Idle Cluster Detection (time limit)'] })).toBe(1)
 })

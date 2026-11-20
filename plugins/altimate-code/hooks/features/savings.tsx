@@ -421,10 +421,24 @@ function checkedText(view: SavingsView): string {
   return `${view.checked.warehouses} SQL warehouses, ${view.checked.clusters} all-purpose clusters and ${view.checked.jobs} jobs${across}`
 }
 
+/** How many of the checks could not run: each skipped check once, never more than there are. */
+export function checksNotRun(view: Pick<SavingsView, 'skipped'>): number {
+  // Each entry is "Check name (reason)"; a check can be listed more than once (one per workspace).
+  return Math.min(CHECK_COUNT, new Set(view.skipped.map(one => one.replace(/ \(.*$/s, ''))).size)
+}
+
+/** The verdict when nothing was found: only as wide as the checks that ran, and none when no check ran. */
+function nothingFound(view: SavingsView): string {
+  const notRun = checksNotRun(view)
+  if (notRun >= CHECK_COUNT) return `None of the ${CHECK_COUNT} checks could run, so nothing was checked.`
+  return notRun ? `No savings found by the ${CHECK_COUNT - notRun} of ${CHECK_COUNT} checks that ran.` : `No savings found by these ${CHECK_COUNT} checks.`
+}
+
 function summary(view: SavingsView): string {
   if (view.total.resources === 0) {
-    const notRun = view.skipped.length ? `; ${view.skipped.length} of the ${CHECK_COUNT} checks could not run` : ''
-    return `Databricks savings check: no savings found on ${checkedText(view)}${notRun}.`
+    const notRun = checksNotRun(view)
+    if (notRun >= CHECK_COUNT) return `Databricks savings check: none of the ${CHECK_COUNT} checks could run, so nothing was checked.`
+    return `Databricks savings check: no savings found on ${checkedText(view)}${notRun ? `; ${notRun} of the ${CHECK_COUNT} checks could not run` : ''}.`
   }
   return `Databricks savings check: ${range(view.total.min, view.total.max)} a month on ${view.total.resources} resource${view.total.resources === 1 ? '' : 's'}.`
 }
@@ -612,11 +626,7 @@ export function register(on: On, _context: FeatureContext) {
             </Text>
           </Box>
         ) : (
-          <Text>
-            {report.skipped.length
-              ? `No savings found by the ${CHECK_COUNT - report.skipped.length} of ${CHECK_COUNT} checks that ran.`
-              : `No savings found by these ${CHECK_COUNT} checks.`}
-          </Text>
+          <Text>{nothingFound(report)}</Text>
         )}
         {report.findings.map((one, at) => (
           <Box key={`finding-${at}`} flexDirection="column">
