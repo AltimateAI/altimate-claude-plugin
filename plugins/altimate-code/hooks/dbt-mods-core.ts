@@ -971,7 +971,8 @@ function ctesOf(sql: string, code: string): Map<string, { raw: string; declared:
     }
     const listAt = match[2] ? match.index! + match[0].indexOf(match[2]) : -1
     const declared = match[2] ? sql.slice(listAt + 1, listAt + match[2].trimEnd().length - 1).split(',').map(one => unquote(one)).filter(Boolean) : null
-    out.set(unquote(match[1]!), { raw: sql.slice(open, i - 1), declared })
+    // The name as written: masking hides a quoted name's letters.
+    out.set(unquote(sql.slice(match.index!, match.index! + match[1]!.length)), { raw: sql.slice(open, i - 1), declared })
   }
   return out
 }
@@ -981,10 +982,10 @@ function ctesOf(sql: string, code: string): Map<string, { raw: string; declared:
  * its names from its first branch; Jinja alternatives (`{% if %} select … {% else %} select … {% endif %}`) give the
  * names of every branch), not those of a CTE or a subquery inside it. A `select *` from one of its CTEs reads that
  * CTE's own list (or the names it declares), through a chain of them. `star` when a `*` is left that the SQL does not
- * name; `source` is then its list and what it reads, as written, with every CTE of the model. `vars` are the Jinja
+ * name. `vars` are the Jinja
  * variables the lists render (`{{ cols }}`). Null when there is no such SELECT.
  */
-export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw: string; declared: string[] | null }>): { names: Set<string>; star: boolean; source?: string; vars: Set<string> } | null {
+export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw: string; declared: string[] | null }>): { names: Set<string>; star: boolean; vars: Set<string> } | null {
   const code = masked(sql)
   const ctes = new Map([...(outer ?? []), ...ctesOf(sql, code)])
   const selects: number[] = []
@@ -997,8 +998,7 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
   const vars = new Set<string>()
   let star = false
   let modified = false
-  const sources: string[] = []
-  let resolved: { names: Set<string>; star: boolean; source?: string; vars: Set<string> } | null = null
+  let resolved: { names: Set<string>; star: boolean; vars: Set<string> } | null = null
   for (const select of heads) {
     const next = selects.find(at => at > select) ?? code.length
     const from = topLevel(code, 'from', select + 6)
@@ -1026,14 +1026,9 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
     const body = read && heads.length === 1 && !modified && depth < 8 ? ctes.get(unquote(read[1]!)) : undefined
     if (body?.declared) resolved = { names: new Set(body.declared.map(one => one.toLowerCase())), star: false, vars: new Set() }
     else if (body) resolved = outputColumns(body.raw, depth + 1, ctes)
-    const cut = Math.min(...['where', 'group', 'order', 'limit', 'qualify', 'having', 'window', 'union'].map(word => topLevel(tail, word)).filter(at => at >= 0), tail.length)
-    sources.push(sql.slice(select, from + 4 + cut))
   }
-  if (resolved) return { names: new Set([...names, ...resolved.names]), star: resolved.star, vars: new Set([...vars, ...resolved.vars]), ...(resolved.source !== undefined && { source: resolved.source }) }
-  if (!star) return { names, star, vars }
-  // What the `*`s read, as written, with every CTE of the model (one it names may read another).
-  const source = [...sources, ...[...ctes].map(([name, one]) => `${name}:${one.raw}`)].map(one => one.replace(/\s+/g, ' ').trim()).join(' | ')
-  return { names, star, source, vars }
+  if (resolved) return { names: new Set([...names, ...resolved.names]), star: resolved.star, vars: new Set([...vars, ...resolved.vars]) }
+  return { names, star, vars }
 }
 
 /**
@@ -1062,11 +1057,9 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     if (!was || !now) return false
     // Named after the edit: there before only when it was named before too.
     if (now.names.has(key) || nowSet.has(key)) return was.names.has(key) || wasSet.has(key)
-    // Through a `*` the SQL does not resolve: there before only when the edit left the list, what it reads and every
-    // CTE alone.
-    if (now.star || was.star) return now.star && was.star && now.source !== undefined && now.source === was.source
-    // Named nowhere (a macro fills the list): there before only when no Jinja expression or tag changed and every line
-    // the edit changed is a select item of a named output (it rewrote a column's expression, nothing else).
+    // Named nowhere (through a `*` the SQL does not resolve, or a macro): there before only when no Jinja expression or
+    // tag changed and every line the edit changed either rewrote a named output's select item or sits in a clause that
+    // adds no column (WHERE, GROUP BY, HAVING, QUALIFY, ORDER BY, LIMIT).
     return jinjaOf(before!) === jinjaOf(after!) && onlyNamedItems(before!, after!, new Set([...was.names, ...wasSet]), new Set([...now.names, ...nowSet]))
   }
   return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
@@ -1098,11 +1091,53 @@ function onlyNamedItems(before: string, after: string, was: Set<string>, now: Se
     else added.push(line)
   }
   const removed = [...left].flatMap(([line, n]) => Array.from({ length: n }, () => line))
-  const item = (line: string, names: Set<string>) => {
+  const quietBefore = columnlessLines(before)
+  const quietAfter = columnlessLines(after)
+  const item = (line: string, names: Set<string>, quiet: Set<string>) => {
+    if (quiet.has(line)) return true
     const name = itemName(line.replace(/^,\s*/, '').replace(/,\s*$/, ''))
     return !!name && names.has(name)
   }
-  return added.every(line => item(line, now)) && removed.every(line => item(line, was))
+  return added.every(line => item(line, now, quietAfter)) && removed.every(line => item(line, was, quietBefore))
+}
+
+// The clauses whose text can add no output column.
+const COLUMNLESS = new Set(['where', 'group', 'having', 'qualify', 'order', 'limit'])
+const CLAUSES = new Set(['select', 'from', 'join', 'on', 'using', 'where', 'group', 'having', 'qualify', 'order', 'limit', 'union', 'window'])
+
+/** The lines (trimmed) of a model whose every word sits in a clause that adds no column, at any paren depth. */
+function columnlessLines(sql: string): Set<string> {
+  const code = masked(sql).split('\n')
+  const raw = sql.split('\n')
+  const clauses: string[] = ['']
+  const out = new Set<string>()
+  code.forEach((line, n) => {
+    let words = 0
+    let quiet = true
+    for (const token of line.matchAll(/\(|\)|[A-Za-z_]\w*|[^\s()]/g)) {
+      const text = token[0]
+      if (text === '(') {
+        clauses.push(clauses[clauses.length - 1]!)
+        continue
+      }
+      if (text === ')') {
+        if (clauses.length > 1) clauses.pop()
+        continue
+      }
+      const word = text.toLowerCase()
+      if (CLAUSES.has(word)) {
+        clauses[clauses.length - 1] = word
+        // A clause keyword is part of the line: the line adds no column only if that clause adds none.
+        if (!COLUMNLESS.has(word)) quiet = false
+        words++
+        continue
+      }
+      words++
+      if (!clauses.some(one => COLUMNLESS.has(one))) quiet = false
+    }
+    if (words && quiet) out.add(raw[n]!.trim())
+  })
+  return out
 }
 
 /** Every Jinja expression and tag of a model, in order, spaces collapsed. */

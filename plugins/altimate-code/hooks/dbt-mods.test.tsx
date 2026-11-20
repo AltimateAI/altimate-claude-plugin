@@ -764,12 +764,21 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // Jinja alternatives each name outputs.
   const branches = '{% if is_incremental() %}\nselect id, amount from new_rows\n{% else %}\nselect id from all_rows\n{% endif %}'
   expect(undocumentedByEdit(['amount'], branches, branches.replace('select id, amount from new_rows', 'select id, amount  from new_rows'), null)).toEqual({ fresh: [], old: ['amount'] })
+  // A `*` whose source Jinja picks: a changed Jinja expression or tag keeps the column the edit's.
+  const picked = "{% set src = 'a' %}\nselect * from {{ ref(src) }}"
+  expect(undocumentedByEdit(['x'], picked, picked.replace("'a'", "'b'"), null)).toEqual({ fresh: ['x'], old: [] })
+  // A `{% set %}` list behind a joined `*`: a column added to it is the edit's.
+  const setJoin = '{% set cols %}id{% endset %}\nwith a as (select {{ cols }} from raw), b as (select id from other)\nselect * from a join b using (id)'
+  expect(undocumentedByEdit(['amount'], setJoin, setJoin.replace('{% set cols %}id{% endset %}', '{% set cols %}id, amount{% endset %}'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // Quoted CTE names keep their identity: `select * from "two"` reads two's columns, not one's.
+  const quotedCtes = 'with "one" as (select id from raw), "two" as (select id, amount from raw)\nselect * from "one"'
+  expect(undocumentedByEdit(['amount'], quotedCtes, quotedCtes.replace('select * from "one"', 'select * from "two"'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
-  // A `*` from a ref(): what it reads unchanged brings no column (a filter edit); another ref() may.
+  // A `*` from a ref(): a filter line changed brings no column; another ref() may.
   const star = "select * from {{ ref('stg') }}"
-  expect(undocumentedByEdit(['x'], `${star} where a = 1`, `${star} where a = 2`, null)).toEqual({ fresh: [], old: ['x'] })
+  expect(undocumentedByEdit(['x'], `${star}\nwhere a = 1`, `${star}\nwhere a = 2`, null)).toEqual({ fresh: [], old: ['x'] })
   expect(undocumentedByEdit(['x'], star, "select * from {{ ref('other') }}", null)).toEqual({ fresh: ['x'], old: [] })
   // A gap an earlier edit made stays the edit's when a later edit rewrites its expression.
   expect(undocumentedByEdit(['amount_cents'], 'select id, amount as amount_cents from x', 'select id, amount * 100 as amount_cents from x', ['id'], ['amount_cents'])).toEqual({ fresh: ['amount_cents'], old: [] })
