@@ -2197,6 +2197,17 @@ test('a failed answer whose error is not text says the CLI failed, not a script 
   await ui.unmount()
 })
 
+test('a failed answer whose error is an empty string shows the CLI\'s own text', async ($, on) => {
+  const answer = { status: 'ok', title: 'Databricks Savings: FAILED', output: 'The Databricks savings check failed: warehouse unreachable', metadata: { success: false, error: '' } }
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.some(text => /no answer/.test(text))).toBe(false)
+  await ui.unmount()
+})
+
 test('a CLI error reads as its text: a string, an object by its reason or message, else as JSON', () => {
   expect(errorText('boom')).toBe('boom')
   expect(errorText({ reason: 'no access' })).toBe('no access')

@@ -692,7 +692,7 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
     if (!view) {
       // The CLI's text is only the first line of what it printed; an old altimate-code is told by its whole usage.
       const raw = ('raw' in result ? result.raw : '') || ''
-      const error = metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)
+      const error = metadata?.error === undefined || metadata.error === null || metadata.error === '' ? (tooOldCli(raw) ? raw : result.text || raw) : metadata.error
       const why = explain(errorText(error || 'no answer'), connection)
       await update($, messageAtom, now => (live() ? why : now))
       say(`Databricks savings check: ${why.text} ${why.recovery}`)
@@ -1005,7 +1005,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
           })
         }
       />
-      <Button key="savings-hide" label="Hide" onPress={() => whenPressed($, () => update($, bandAtom, () => null))} />
+      <Button key="savings-hide" label="Hide" onPress={() => whenPressed($, pressedIn => update($, bandAtom, now => (pressedIn === conversation ? null : now)))} />
     </Box>
   )
 }
