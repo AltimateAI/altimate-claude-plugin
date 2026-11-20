@@ -976,9 +976,9 @@ export function register(on: On, _context: FeatureContext) {
 
 /** After the session started: the place to register commands. */
 export async function sessionStart($: EngineInterface, _e: Args<'session.start'>) {
-  // A run that was going when the last session ended can never finish, so neither its claim nor its running
-  // flag may block this one.
-  claim = null
+  // A run that was going when the last session ended can never finish, so it must not block this one. Its claim
+  // is not dropped here: it lives in this module, which a reload starts afresh, and while the module stays loaded
+  // its run may still be going.
   await update($, busyAtom, () => null)
   await $.command.register({
     name: COMMAND,
