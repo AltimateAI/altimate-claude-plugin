@@ -40,7 +40,7 @@ import {
 } from '../savings-rows'
 import { setStatusPart } from '../status-line'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
-import { SHELLS, leaderEnd, simpleCommands } from '../shell'
+import { SHELLS, leaderEnd, shellScript, simpleCommands } from '../shell'
 import { findProject } from './defer'
 import type { BandUi, FeatureContext } from './index'
 
@@ -139,8 +139,8 @@ const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
 const DATABRICKS_SUBCOMMANDS = new Set(['warehouses', 'clusters', 'bundle', 'jobs'])
 const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
-// xargs options that take their value as the next word (`-n 1`, `-I {}`, `-P 4`).
-const XARGS_VALUE_OPTIONS = new Set(['-n', '-I', '-P', '-L', '-s', '-d', '-E', '-a'])
+// xargs options that take their value as the next word (`-n 1`, `-I {}`, `-P 4`; BSD's `-J %`, `-R`, `-S`).
+const XARGS_VALUE_OPTIONS = new Set(['-n', '-I', '-P', '-L', '-s', '-d', '-E', '-a', '-J', '-R', '-S', '--max-args', '--max-procs', '--max-lines', '--max-chars', '--delimiter', '--arg-file'])
 
 /**
  * Whether a shell line runs the Databricks CLI's `warehouses`, `clusters`, `bundle` or `jobs` command,
@@ -163,8 +163,8 @@ export function runsDatabricksCompute(line: string): boolean {
     }
     const program = (words[at] ?? '').split('/').pop() ?? ''
     if (SHELLS.has(program)) {
-      const script = words.findIndex((word, k) => k > at && /^-[a-z]*c$/.test(word))
-      if (script > 0 && words[script + 1] !== undefined && runsDatabricksCompute(words[script + 1]!)) return true
+      const script = shellScript(words, at)
+      if (script !== null && runsDatabricksCompute(script)) return true
       continue
     }
     if (!isDatabricks(words[at] ?? '')) continue

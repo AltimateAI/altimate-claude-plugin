@@ -12,6 +12,24 @@ const LEADER_VALUE_OPTIONS: Record<string, readonly string[]> = {
   nice: ['-n'],
 }
 export const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
+/** A shell's options that take their value as the next word (`-o pipefail`, `--rcfile x`). */
+const SHELL_VALUE_OPTIONS = new Set(['-o', '+o', '-O', '+O', '--rcfile', '--init-file'])
+
+/**
+ * The script a shell runs from its `-c` option (alone or in a cluster: `-lc`, `-cx`, `-Ec`): the first word
+ * after the shell's options. Null when none of its options is `-c`, so `bash deploy.sh -c x` runs no script
+ * here. `at` is where the shell's own name is.
+ */
+export function shellScript(words: readonly string[], at: number): string | null {
+  let script = false
+  let i = at + 1
+  for (; i < words.length && /^[-+]./.test(words[i]!) && words[i] !== '--'; i++) {
+    if (SHELL_VALUE_OPTIONS.has(words[i]!)) i++
+    else if (/^-[A-Za-z]*c[A-Za-z]*$/.test(words[i]!)) script = true
+  }
+  if (words[i] === '--') i++
+  return script ? (words[i] ?? null) : null
+}
 
 /** Where the heredoc started by `<<` at `i` ends: its delimiter, whether it was quoted, and `<<` at `i` is one at all (not `<<<`, not a shift in `$((x<<2))`). */
 function heredocAt(text: string, i: number): { delimiter: string; quoted: boolean; strip: boolean; end: number } | null {
@@ -175,7 +193,7 @@ export function simpleCommands(line: string): string[][] {
         const { body, next } = heredocBody(line, at, doc)
         at = next - 1
         const bin = (doc.owner[leaderEnd(doc.owner)] ?? '').split('/').pop() ?? ''
-        if (SHELLS.has(bin) && !doc.owner.some(w => /^-[a-z]*c$/.test(w))) nested.push(...simpleCommands(body))
+        if (SHELLS.has(bin) && shellScript(doc.owner, leaderEnd(doc.owner)) === null) nested.push(...simpleCommands(body))
         else if (!doc.quoted) nested.push(...substitutionsIn(body).flatMap(simpleCommands))
       }
       i = at
