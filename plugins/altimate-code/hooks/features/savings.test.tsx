@@ -574,7 +574,8 @@ test('Hide pressed just before a /clear leaves the new conversation\'s own offer
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
   await clock.settle()
   let band = await $.ui.mount(BAND)
-  // The press is accepted, then the conversation is cleared and the new one gets its offer, all before the press's work runs.
+  // The press is accepted, then the conversation is cleared and the new one gets its offer, all before the press's work
+  // runs: only the conversation check in front of the work keeps that late Hide from wiping the new offer.
   await band.press({ key: 'savings-hide' })
   await $.session.end({ reason: 'clear' } as any)
   await band.unmount()
