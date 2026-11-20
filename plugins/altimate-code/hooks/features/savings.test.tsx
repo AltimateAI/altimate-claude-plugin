@@ -1614,6 +1614,22 @@ test('a drafted fix on a warehouse id two workspaces share is followed on its ow
   await ui.unmount()
 })
 
+test('a fix drafted in one workspace is not followed on the other workspace\'s warehouse when a later run reads only that one', async ($, on) => {
+  const key = `savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`
+  // This run reads only workspace 111, whose warehouse of the same id was resized.
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.workspaces_checked = 1
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store: { [key]: { ...FIX, workspaceId: '222', dailyCost: 10 } } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => /changed to X-SMALL/.test(text))).toEqual([])
+  expect(texts).toContain('Classic: fix drafted 2026-11-01, and this run did not list it, so no amount is claimed.')
+  await ui.unmount()
+})
+
 test('Draft the fix on a warehouse id two workspaces share keeps its own workspace\'s cost and size', async ($, on) => {
   const answer = sharedIdAnswer()
   answer.metadata.report = JSON.parse(JSON.stringify(ANSWER.metadata.report))

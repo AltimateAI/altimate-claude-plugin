@@ -55,14 +55,21 @@ export function daysAfter(date: string, window: { start: string; end: string }):
   return Number.isFinite(days) ? Math.min(Math.max(days, 0), windowDays(window)) : 0
 }
 
-// Snowflake gives a warehouse with no usage its name for an id, so there the name finds it too. An id repeats across
-// workspaces, so with several read the row must be the fix's workspace's; an answer kept without row workspaces finds none.
 const severalWorkspaces = (view: SavingsView) => (view.checked?.workspaces ?? 1) > 1
+/**
+ * Whether a warehouse row is in the workspace a fix or finding names. An id repeats across workspaces: with several
+ * read, the two must name the same one (an answer kept without row workspaces matches none). With one read, a side
+ * that names no workspace matches, but two that name different ones never do: a later run that reads only the other
+ * workspace is not the fix's warehouse.
+ */
+export const sameWorkspace = (row: string | null | undefined, wanted: string | null | undefined, several: boolean) =>
+  several ? (row ?? null) === (wanted ?? null) : !row || !wanted || row === wanted
+// Snowflake gives a warehouse with no usage its name for an id, so there the name finds it too.
 const rowOf = (fix: FixRecord, view: SavingsView) =>
   view.inventory.find(
     one =>
       (one.id === fix.resourceId || (fix.platform === 'snowflake' && one.name === fix.resourceName)) &&
-      (!severalWorkspaces(view) || (one.workspaceId ?? null) === (fix.workspaceId ?? null)),
+      sameWorkspace(one.workspaceId, fix.workspaceId, severalWorkspaces(view)),
   )
 const configOf = (row: SavingsView['inventory'][number]) => `${size(row.size)} ${row.type}`
 const isFlagged = (fix: FixRecord, view: SavingsView, sameCheck: boolean) =>

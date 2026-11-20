@@ -17,7 +17,7 @@ import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseV
 import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
-import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from '../savings-fixes'
+import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, sameWorkspace, type FixRecord } from '../savings-fixes'
 import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
@@ -507,10 +507,8 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
   const listed = new Set([...(metadata.warehouses ?? []), ...report.findings].map(one => one.workspace_id).filter(Boolean)).size
   const reported = Number(metadata.workspaces_checked)
   const workspaces = Number.isInteger(reported) && reported > 0 ? Math.max(reported, listed) : listed
-  // A warehouse id repeats across workspaces, so with several read the row is found by its workspace too; in one,
-  // the id alone finds it, since the finding or the row may lack the workspace id.
-  const rowOf = (id: string, workspaceId: string | null | undefined) =>
-    inventory.find(row => row.id === id && (workspaces <= 1 || row.workspaceId === (workspaceId ?? null)))
+  // A warehouse id repeats across workspaces, so the row is found by its workspace too (`sameWorkspace`).
+  const rowOf = (id: string, workspaceId: string | null | undefined) => inventory.find(row => row.id === id && sameWorkspace(row.workspaceId, workspaceId, workspaces > 1))
   // Each warehouse's queries once, however many findings quote them.
   const queries = new Map<string, { id: string; workspaceId: string | null; count: number }>()
   for (const one of report.findings) {
