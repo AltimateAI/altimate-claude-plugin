@@ -11,6 +11,8 @@ import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, size
 import {
   cellText,
   columnDrift,
+  hardcodedRelations,
+  undocumentedByEdit,
   columnWidths,
   dbtCommands,
   type DbtCommand,
@@ -102,6 +104,10 @@ let doctorNoteDue: string | null = null
 const queues = new Map<string, Promise<unknown>>()
 // The newest check per file: an older one of the same file landing late does not overwrite it.
 const checkSeq = new Map<string, number>()
+// The columns each model's last check got back, by project and file, less the gaps an edit made: a column there is not a new gap.
+const lastReturned = new Map<string, string[]>()
+// Models whose columns undocumented from before an edit were said once in this conversation: not said again.
+const oldGapsSaid = new Set<string>()
 let seq = 0
 // Bumped when a conversation ends (/clear): work started in the last one lands nowhere in this one.
 let generation = 0
@@ -360,6 +366,73 @@ async function projectName($: EngineInterface, root: string): Promise<string | n
   return /^name:\s*['"]?([\w-]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1] ?? null
 }
 
+/** What a project's packages.yml (or a dependencies.yml with packages) asks for, and whether anything is installed; null when it declares none. */
+async function packagesOf($: EngineInterface, root: string): Promise<{ file: string; installPath: string; installed: boolean } | null> {
+  // A dependencies.yml that declares only `projects:` has no packages to install.
+  const file = (await $.fs.exists(`${root}/packages.yml`).catch(() => false))
+    ? 'packages.yml'
+    : /^packages:/m.test(await $.fs.read(`${root}/dependencies.yml`).catch(() => ''))
+      ? 'dependencies.yml'
+      : null
+  if (!file) return null
+  // `packages-install-path` in dbt_project.yml, `dbt_packages` when absent.
+  const configured = /^packages-install-path:\s*['"]?([^'"#\s]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1]
+  // A Jinja value is dbt's to render: dbt's default stands in.
+  const installPath = configured && !configured.includes('{{') ? configured : 'dbt_packages'
+  const installed = (await $.fs.list(installPath.startsWith('/') ? installPath : `${root}/${installPath}`).catch(() => [])).length > 0
+  return { file, installPath, installed }
+}
+
+// The project below a package's folder that installs it, by package folder: found once a session.
+const runners = new Map<string, Promise<string | null>>()
+
+/**
+ * A dbt project in a folder below `root`, a level or two down (a package's `integration_tests`), whose
+ * packages.yml or dependencies.yml installs `root` itself by a local path (`local: ../`). That is where dbt is run
+ * for a package repo: its packages are installed there, not in the package's own folder.
+ */
+function runnerOf($: EngineInterface, root: string): Promise<string | null> {
+  const known = runners.get(root)
+  if (known) return known
+  const finding = (async () => {
+    let level = [root]
+    for (let depth = 0; depth < 2; depth++) {
+      const next: string[] = []
+      for (const dir of level) {
+        for (const entry of await $.fs.list(dir).catch(() => [])) {
+          if (entry.kind !== 'dir' || entry.name.startsWith('.') || ['node_modules', 'target', 'dbt_packages', 'dbt_modules', 'logs', 'venv'].includes(entry.name)) continue
+          const sub = `${dir}/${entry.name}`
+          next.push(sub)
+          if (!(await $.fs.exists(`${sub}/dbt_project.yml`).catch(() => false))) continue
+          const declared = `${await $.fs.read(`${sub}/packages.yml`).catch(() => '')}\n${await $.fs.read(`${sub}/dependencies.yml`).catch(() => '')}`
+          for (const one of declared.matchAll(/^\s*-?\s*local:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/gm)) {
+            const path = one[1]!.trim()
+            if (normalize(path.startsWith('/') ? path : `${sub}/${path}`) === root) return sub
+          }
+        }
+      }
+      level = next.slice(0, 200)
+    }
+    return null
+  })()
+  runners.set(root, finding)
+  return finding
+}
+
+/**
+ * Where the plugin runs dbt for a model of `root`: the project below it that installs it (a package tested from
+ * integration_tests, whose vars enable its models and whose packages are installed there), else the project itself.
+ * The project itself is kept when only its own packages are installed.
+ */
+async function runPlaceOf($: EngineInterface, root: string): Promise<string> {
+  const runner = await runnerOf($, root)
+  if (!runner) return root
+  const theirs = await packagesOf($, runner)
+  if (!theirs || theirs.installed) return runner
+  const own = await packagesOf($, root)
+  return own && own.installed ? root : runner
+}
+
 /** The project's artifact folder (`target-path` in dbt_project.yml): absolute, or under the project. */
 async function targetOf($: EngineInterface, root: string): Promise<string> {
   const path = targetPath(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
@@ -396,7 +469,7 @@ async function pythonFor($: EngineInterface, root: string): Promise<string> {
  * manifest over 4 MiB (more than $.fs.read takes) is read for one file's node only, `rel`, through the
  * project's Python, as the lineage half reads one through altimate-code.
  */
-async function readManifest($: EngineInterface, root: string, rel?: string, dir?: string): Promise<{ manifest: any; mtimeMs: number } | null> {
+async function readManifest($: EngineInterface, root: string, rel?: string, dir?: string, pkg?: string | null): Promise<{ manifest: any; mtimeMs: number } | null> {
   const path = `${dir ?? (await targetOf($, root))}/manifest.json`
   const stat = await $.fs.stat(path).catch(() => null)
   if (!stat || stat.kind !== 'file') return null
@@ -413,7 +486,7 @@ async function readManifest($: EngineInterface, root: string, rel?: string, dir?
     if (cached) return { manifest: await cached, mtimeMs: stat.mtimeMs }
     const slicing = (async () => {
       const python = await pythonFor($, root)
-      const project = (await projectName($, root)) ?? ''
+      const project = (pkg !== undefined ? pkg : await projectName($, root)) ?? ''
       const run = await $.process.run([python, '-c', MANIFEST_SLICE, path, rel, project], { cwd: root, timeoutMs: 60_000 })
       if (run.exitCode !== 0 || run.isStdoutTruncated) throw new Error('manifest slice failed')
       return JSON.parse(run.stdout)
@@ -448,7 +521,7 @@ function addContext<T extends { context?: string[] }>(result: T, note: string | 
 const schemaOf = (node: any): string | null => (typeof node?.patch_path === 'string' ? node.patch_path.replace(/^[^:]*:\/\//, '') : null)
 
 /** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
-async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
+async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation, sqlBefore: string | null = null): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
   const rel = relative(root, file)
   // A check from a conversation that has ended takes no place in the order: it can neither land nor push a
   // current check out. Within this conversation, `current` is the newest check of its file (an older one of the
@@ -462,11 +535,16 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   const newest = () => seq === mine && generation === mineGeneration
   // Changes made from here on are newer than this check: the next recheck sees them.
   const started = await $.clock.now()
+  // Where dbt runs: the project, or for a package repo whose own packages are not installed, the project below it
+  // that installs it (integration_tests), where its models are this package's.
+  const place = await runPlaceOf($, root)
+  const viaRunner = place !== root
+  const pkg = await projectName($, root)
   // The model's own name, from the manifest when it knows the file (shown to the person; dbt selects by path).
-  const before = await readManifest($, root, rel)
-  const known = before ? nodeForFile(before.manifest, rel, await projectName($, root)) : null
+  const before = await readManifest($, place, rel, undefined, pkg)
+  const known = before ? nodeForFile(before.manifest, rel, pkg) : null
   const model = typeof known?.node?.name === 'string' ? known.node.name : basename(file).replace(/\.sql$/i, '')
-  const blank = { model, root, file: rel, errors: [], missing: [], undocumented: [], columns: null, returned: [], documented: [], reason: null, ran: false, schema: schemaOf(known?.node), target: await targetOf($, root) }
+  const blank = { model, root, file: rel, errors: [], missing: [], undocumented: [], columns: null, returned: [], documented: [], reason: null, ran: false, schema: schemaOf(known?.node), target: await targetOf($, root), ...(viaRunner && { ranFrom: relative(root, place) }) }
   // Not run at all: a reason the check could not start, said as "not checked".
   const notChecked = async (reason: string) => {
     const view: CheckView = { ...blank, status: 'partial', reason, ms: 0, at: started }
@@ -475,7 +553,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   }
   // dbt splits a selection on spaces (a union of the pieces): a path with whitespace would select, and run, other models.
   if (/\s/.test(rel)) return notChecked("the model's path has a space, which dbt's selector would split")
-  if (unrunnable.has(root)) return notChecked(NO_DBT)
+  if (unrunnable.has(place)) return notChecked(NO_DBT)
   await setCheck($, { ...blank, status: 'running', ms: 0, at: started }, newest)
   // The file itself, by path (a name can be a version's or another package's), and only it: dbt's eager
   // indirect selection would also run its tests, and show a test's failure as the model's.
@@ -483,17 +561,19 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // package (`a,b`) selects only the project's model. dbt prints a preview only for a node whose name is in the
   // selection string, so the model's name joins the intersection: a versioned model whose file has another
   // name (`defined_in`) is still previewed, and the path keeps it to that one version.
-  const pkg = await projectName($, root)
-  const selectorFor = (name: string | null) => [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(name ? [name] : [])].join(',')
-  const scratch = await scratchOf($, root)
-  const run1 = (args: string[], read?: () => Promise<Artifact>): Promise<ProcessDone> => runDbt($, root, args, DBT_TIMEOUT_MS, current, true, read).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  // From the project that installs the package, `path:` reads from that project's folder: the package and the model's
+  // name select it instead (the file's name when the manifest does not know it).
+  const selectorFor = (name: string | null) =>
+    viaRunner ? [...(pkg ? [`package:${pkg}`] : []), name ?? basename(file).replace(/\.sql$/i, '')].join(',') : [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(name ? [name] : [])].join(',')
+  const scratch = await scratchOf($, place)
+  const run1 = (args: string[], read?: () => Promise<Artifact>): Promise<ProcessDone> => runDbt($, place, args, DBT_TIMEOUT_MS, current, true, read).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   // The manifest the show wrote is read while the plugin's dbt queue is still held, so no other run of it replaces it first.
-  const show = (select: string) => run1(['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], () => readManifest($, root, rel, scratch))
+  const show = (select: string) => run1(['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], () => readManifest($, place, rel, scratch, pkg))
   // A newer edit replaced this check before its turn: nothing ran, nothing to report.
   const replaced = () => notChecked('a newer check replaced this one').then(one => ({ ...one, note: '' }))
   const knownName = typeof known?.node?.name === 'string' ? known.node.name : null
   let name = knownName
-  if (!name) {
+  if (!name && !viaRunner) {
     // No manifest that lists the file: dbt runs the query whatever the selection and prints a preview only
     // for a name it carries, so a second show would run it again. Ask dbt for the name first: `ls` runs no query.
     const listing = await run1(['ls', '--select', selectorFor(null), '--resource-type', 'model', '--indirect-selection', 'empty', '--output', 'json', '--output-keys', 'name resource_type', '--log-format', 'text'])
@@ -508,7 +588,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   if (cannotRun(run)) return notChecked(NO_DBT)
   // dbt show re-parsed the project: the manifest it wrote (in the plugin's own folder) holds the model and schema.yml as they are.
   let after = run.artifact ?? null
-  let node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
+  let node = after ? nodeForFile(after.manifest, rel, pkg) : null
   let named = typeof node?.node?.name === 'string' ? node.node.name : null
   let preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
   // No preview, and the fresh manifest names the model with a name the selector did not carry (an old name that
@@ -519,13 +599,23 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
     if (again === SKIPPED) return replaced()
     run = again
     after = run.artifact ?? null
-    node = after ? nodeForFile(after.manifest, rel, await projectName($, root)) : null
+    node = after ? nodeForFile(after.manifest, rel, pkg) : null
     named = typeof node?.node?.name === 'string' ? node.node.name : null
     preview = run.exitCode === 0 ? showPreview(run.stdout, node?.id ?? known?.id) : null
   }
   const ms = (await $.clock.now()) - started
   const errors = run.exitCode === 0 ? [] : logErrors(run.stdout)
   if (run.exitCode !== 0 && errors.length === 0) errors.push(dbtTail(run, 6) || `dbt exited ${run.exitCode}`)
+  // dbt stopped before the model because the project's packages are not installed: nothing about the model is
+  // known, so it is a one-line note, not the model's failure.
+  if (run.exitCode !== 0 && errors.some(one => DEPS_MISSING.test(one))) {
+    const where = relative(root, place) || 'this project'
+    const reason = `dbt's packages are not installed in ${where}, so dbt could not compile it (run \`dbt deps\` there, or run dbt from the project that installs this package)`
+    const view: CheckView = { ...blank, status: 'partial', reason, ms, at: started }
+    await setCheck($, view, newest)
+    if (current()) checkEnded(`${root}/${rel}`, mine, null)
+    return { view, note: checkNote(view), current, newest }
+  }
   // dbt exited 0 but showed nothing. A model the manifest still lists is a failure; a file it does not
   // list (a model just disabled, not a model at all) was not checked.
   const nothingShown = run.exitCode === 0 && !preview
@@ -550,8 +640,17 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
             : documented.length === 0
               ? 'schema.yml documents no columns for this model'
               : null
-  const status: CheckView['status'] = errors.length ? 'error' : reason ? 'partial' : drift.missing.length || drift.undocumented.length ? 'warn' : 'ok'
-  const view: CheckView = { ...blank, model: named ?? model, schema: node ? schemaOf(node.node) : blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: drift.undocumented, columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
+  // Only the columns this edit left undocumented are its gaps; ones undocumented before it are said once, quietly.
+  const sqlNow = await $.fs.read(file).catch(() => null)
+  const gaps = undocumentedByEdit(drift.undocumented, sqlBefore, sqlBefore === null ? null : sqlNow, lastReturned.get(fileKey) ?? null)
+  // A model, seed, snapshot or source named by its table instead of ref() or source(): dbt and lineage cannot follow it.
+  const hardcoded = sqlNow !== null && !errors.length ? hardcodedRelations(sqlNow, after?.manifest ?? before?.manifest, node?.id ?? known?.id ?? null) : []
+  // A gap this session's edit made stays the edit's on the next check, until schema.yml or the model closes it.
+  if (returned && !stale) lastReturned.set(fileKey, returned.filter(one => !gaps.fresh.includes(one)))
+  const said = oldGapsSaid.has(fileKey)
+  if (gaps.old.length && !stale && current()) oldGapsSaid.add(fileKey)
+  const status: CheckView['status'] = errors.length ? 'error' : hardcoded.length ? 'warn' : reason ? 'partial' : drift.missing.length || gaps.fresh.length ? 'warn' : 'ok'
+  const view: CheckView = { ...blank, model: named ?? model, schema: node ? schemaOf(node.node) : blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: gaps.fresh, ...(gaps.old.length ? { undocumentedBefore: gaps.old, ...(said && { oldGapsSaid: true }) } : {}), ...(hardcoded.length ? { hardcoded } : {}), columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
   await setCheck($, view, newest)
   if (current()) checkEnded(`${root}/${rel}`, mine, view.ran && after ? { root, file: `${root}/${rel}`, manifest: `${scratch}/manifest.json`, mtimeMs: after.mtimeMs } : null)
   // An edit of a schema file or macro that came while this ran checks it again now.
@@ -662,6 +761,9 @@ function editConcerns(check: CheckView, edited: string): boolean {
 
 const NO_DBT = 'dbt could not be run here'
 
+// dbt's own words when packages.yml lists packages that are not installed.
+const DEPS_MISSING = /expects \d+ package\(s\)[^\n]*but found only \d+ package\(s\) installed|Run "?dbt deps"?/i
+
 const STATUS_ICON: Record<CheckView['status'], string> = { running: '…', ok: '✓', partial: '◦', warn: '⚠', error: '✖' }
 
 // An error that says nothing about the model's own SQL: a parent relation not built yet, a profile or a connection.
@@ -682,11 +784,14 @@ function checkNote(view: CheckView): string {
     ].join('\n')
   }
   if (!view.ran) return [head, `- not checked: ${view.reason}.`].join('\n')
-  const lines = [head, `- compiled and ran${view.columns !== null ? `; the warehouse returned ${view.columns} columns` : ''}.`]
+  const lines = [head, `- compiled and ran${view.ranFrom ? ` from ${view.ranFrom} (the project that installs this package)` : ''}${view.columns !== null ? `; the warehouse returned ${view.columns} columns` : ''}.`]
+  for (const one of view.hardcoded ?? []) lines.push(`- hardcoded ${one.relation}: use ${one.use}. dbt does not know this model reads it, so it is left out of the DAG and of column lineage, and it reads whatever that table holds in this target.`)
   if (view.reason) lines.push(`- its columns were not compared with schema.yml: ${view.reason}.`)
   if (view.missing.length) lines.push(`- documented in schema.yml but not returned: ${view.missing.join(', ')}`)
   if (view.undocumented.length) lines.push(`- returned but not documented in schema.yml: ${view.undocumented.join(', ')}`)
-  if (view.status === 'warn') lines.push('Update schema.yml or the model so they agree, or tell the user why they differ.')
+  if (view.undocumentedBefore?.length && !view.oldGapsSaid) lines.push(`- already undocumented before this edit (not this edit's doing; nothing to fix for it): ${view.undocumentedBefore.join(', ')}`)
+  if (view.hardcoded?.length) lines.push('Put the ref() or source() back unless the user asked for the table by name, and tell the user.')
+  if (view.status === 'warn' && (view.missing.length || view.undocumented.length)) lines.push('Update schema.yml or the model so they agree, or tell the user why they differ.')
   return lines.join('\n')
 }
 
@@ -1333,21 +1438,16 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     checks.push({ id: 'adapter', label: 'Adapter', status: 'ok', detail: `${type}${adapter ? ` ${adapter.version}` : ''}`, fix: null })
   }
 
-  // Packages: packages.yml with nothing installed (at packages-install-path) fails every parse.
-  // A dependencies.yml that declares only `projects:` has no packages to install.
-  const packagesFile = (await $.fs.exists(`${root}/packages.yml`).catch(() => false))
-    ? 'packages.yml'
-    : /^packages:/m.test(await $.fs.read(`${root}/dependencies.yml`).catch(() => ''))
-      ? 'dependencies.yml'
-      : null
-  if (packagesFile) {
-    // `packages-install-path` in dbt_project.yml, `dbt_packages` when absent.
-    const configured = /^packages-install-path:\s*['"]?([^'"#\s]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1]
-    // A Jinja value is dbt's to render: dbt's default stands in.
-    const installPath = configured && !configured.includes('{{') ? configured : 'dbt_packages'
-    const installed = installPath.startsWith('/') ? installPath : `${root}/${installPath}`
-    const has = (await $.fs.list(installed).catch(() => [])).length > 0
-    checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail: has ? `${installPath} installed` : `${packagesFile} is not installed`, fix: has ? null : 'dbt deps' })
+  // Packages: packages.yml with nothing installed (at packages-install-path) fails every parse. A package repo
+  // whose own packages are not installed is fine when the project below it that installs it (integration_tests)
+  // has them: dbt is run from there.
+  const packages = await packagesOf($, root)
+  if (packages) {
+    const runner = packages.installed ? null : await runnerOf($, root)
+    const theirs = runner ? await packagesOf($, runner) : null
+    const has = packages.installed || (!!runner && (!theirs || theirs.installed))
+    const detail = packages.installed ? `${packages.installPath} installed` : has ? `installed in ${relative(root, runner!)}, where dbt runs for this package` : `${packages.file} is not installed`
+    checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail, fix: has ? null : 'dbt deps' })
   }
 
   // Manifest freshness.
@@ -1428,6 +1528,8 @@ async function openDoctor($: EngineInterface) {
 export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
   const asked = generation
   contextGiven.clear()
+  oldGapsSaid.clear()
+  lastReturned.clear()
   pendingNotes.splice(0)
   doctorNoteDue = null
   unrunnable.clear()
@@ -1495,10 +1597,13 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
         : check.status === 'error'
           ? (check.errors[0] ?? 'failed').split('\n').filter(Boolean).slice(-2).join(' ').slice(0, 160)
           : [
+              ...(check.hardcoded ?? []).map(one => `hardcoded ${one.relation}: use ${one.use} — lineage can't follow it`),
               check.columns !== null ? `${check.columns} columns` : 'no row returned',
               check.missing.length ? `missing ${check.missing.join(', ')}` : null,
               check.undocumented.length ? `undocumented ${check.undocumented.join(', ')}` : null,
-              check.status === 'ok' && check.columns !== null ? 'match schema.yml' : null,
+              check.status === 'ok' && check.columns !== null ? (check.undocumentedBefore?.length ? 'no new gaps with schema.yml' : 'match schema.yml') : null,
+              check.undocumentedBefore?.length && !check.oldGapsSaid ? `${check.undocumentedBefore.length} undocumented before this edit` : null,
+              check.ranFrom ? `ran from ${check.ranFrom}` : null,
               `${(check.ms / 1000).toFixed(1)}s`,
             ]
               .filter(Boolean)
@@ -1719,8 +1824,11 @@ function pendingLines(agentId: string | null): string[] {
   return withPending({ context: [] as string[] }, agentId).context
 }
 
+/** Compile and validate reads a model's text from before an edit, to tell the columns the edit left undocumented from older gaps. */
+export const DBT_MODS_EDIT_READS_BEFORE = true
+
 /** After a model Claude edited: compile it and run it against the warehouse, then check its columns. */
-export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string }): Promise<string[]> {
+export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string; before?: string | null }): Promise<string[]> {
   if (!enabled || !EDIT_TOOLS.has(e.tool)) return []
   const path = normalize(file.path)
   // The conversation this edit belongs to, taken before the edit ran, so a /clear during it is seen.
@@ -1732,7 +1840,7 @@ export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; ag
     const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
     const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
     if (root && inModels) {
-      const check = compileAndValidate($, root, path, asked)
+      const check = compileAndValidate($, root, path, asked, file.before ?? null)
       const landed = await within($, CHECK_HOLD_MS, check)
       // Landed, and still the newest check of this file in this conversation.
       if (landed && landed.current()) {
@@ -1789,6 +1897,8 @@ export async function endDbtMods($: EngineInterface) {
   parsed = null
   forcedWhileBusy = null
   contextGiven.clear()
+  oldGapsSaid.clear()
+  lastReturned.clear()
   pendingNotes.splice(0)
   doctorNoteDue = null
   await update($, checkAtom, () => null)
@@ -1954,12 +2064,13 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
       running: 'Compiling and running it against the warehouse…',
       ok: 'Compiles, runs, and its columns match schema.yml',
       partial: check.ran ? `Compiles and runs; columns not compared: ${check.reason}` : `Not checked: ${check.reason}`,
-      warn: 'Compiles and runs, but its columns differ from schema.yml',
+      warn: check.hardcoded?.length ? `Compiles and runs, but names ${check.hardcoded.map(one => one.relation).join(', ')} by table: lineage can't follow it` : 'Compiles and runs, but its columns differ from schema.yml',
       error: 'dbt could not compile or run it',
     }[check.status]
     // The exact names the core compared: a quoted column is not matched without case here.
     const missing = new Set(check.missing)
     const extra = new Set(check.undocumented)
+    const before = new Set(check.undocumentedBefore ?? [])
     return (
       <Box flexDirection="column" gap={1}>
         <Box flexDirection="column">
@@ -1969,6 +2080,18 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
           </Text>
           <Text color={color} bold>{verdict}</Text>
         </Box>
+        {check.hardcoded?.length ? (
+          <Box flexDirection="column">
+            <Text bold>Named by table, not ref() or source()</Text>
+            {check.hardcoded.map(one => (
+              <Text key={`hardcoded-${one.relation}`}>
+                <Text color="warning">{one.relation}</Text>
+                <Text dimColor>  use </Text>
+                <Text>{one.use}</Text>
+              </Text>
+            ))}
+          </Box>
+        ) : null}
         {check.errors.length ? (
           <Box flexDirection="column">
             <Text bold>dbt said</Text>
@@ -1983,9 +2106,9 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
             {check.columns === null ? <Text dimColor>The query returned no row, so its columns could not be read.</Text> : null}
             {check.returned.map(name => (
               <Text key={`col-${name}`}>
-                {check.status === 'partial' ? <Text dimColor>· </Text> : <Text color={extra.has(name) ? 'warning' : 'success'}>{extra.has(name) ? '+ ' : '✓ '}</Text>}
+                {check.status === 'partial' ? <Text dimColor>· </Text> : before.has(name) ? <Text dimColor>· </Text> : <Text color={extra.has(name) ? 'warning' : 'success'}>{extra.has(name) ? '+ ' : '✓ '}</Text>}
                 <Text>{name}</Text>
-                {extra.has(name) ? <Text dimColor>  returned, not documented</Text> : null}
+                {extra.has(name) ? <Text dimColor>  returned, not documented</Text> : before.has(name) ? <Text dimColor>  not documented, from before this edit</Text> : null}
               </Text>
             ))}
             {check.documented.filter(name => missing.has(name)).map(name => (

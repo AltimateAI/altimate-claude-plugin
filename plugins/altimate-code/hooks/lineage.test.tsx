@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void> }
+type Options = { fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void> }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -155,6 +155,8 @@ async function start($: any, on: any, options: Options = {}) {
       if (!options.persisted?.readable) throw new Error('EACCES')
       return { value: JSON.stringify({ ...reach, report: 'Impact' }) }
     }
+    const given = options.fileText?.(e.path)
+    if (given !== undefined) return { value: given }
     return { value: e.path === MANIFEST_PATH ? JSON.stringify(options.manifest ?? MANIFEST) : 'select 1' }
   })
   on('tool.list', () => ({
@@ -203,6 +205,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const inert = nothingToReport(e.argv)
     if (inert) return { value: inert }
+    const shell = options.shell?.(e.argv)
+    if (shell) return { value: { ...shell, stderr: '' } }
     const [, command, , tool] = e.argv
     // A slow CLI dbt_lineage: it answers once the test lets it.
     if (command === 'tool' && tool === 'dbt_lineage' && options.holdCliLineage) await options.holdCliLineage
@@ -275,6 +279,9 @@ test('reading a model points the pane at it: the manifest graph, then its column
   expect(logs.some(line => line.startsWith('lineage-pane · target/manifest.json · ') && line.endsWith('offline'))).toBe(true)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Wider than the pane, it opens as its ends: v picks the whole graph.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /GRAPH · manifest/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
@@ -437,8 +444,8 @@ test('[c] picks a column and shows its reach; [d] unfolds downstream; a model in
   await clock.settle()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  // The text lists: graph → ends only → folders → list.
-  for (let i = 0; i < 3; i++) await ui.press({ key: 'lineage-view' })
+  // The text lists: the whole graph (it opened as its ends, being wider than the pane) → ends only → folders → list.
+  for (let i = 0; i < 4; i++) await ui.press({ key: 'lineage-view' })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /2 more models/ })).toBeDefined()
   await ui.press({ key: 'lineage-down' })
@@ -468,6 +475,10 @@ test('the graph view draws boxes a press follows; [v] cycles the views and [l] t
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /┏━+┓/ })).toBeDefined()
+  // Wider than the pane, it opens as its ends: v picks the whole graph, and then cycles the views.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest/ })).toBeDefined()
   for (const title of [/ENDS ONLY · manifest/, /FOLDERS · manifest/, 'UPSTREAM · manifest', /GRAPH · manifest/]) {
     await ui.press({ key: 'lineage-view' })
     await clock.settle()
@@ -658,7 +669,8 @@ test('a graph too big for Claude Code to draw is shown as folders, saying why, n
   const { clock } = await start($, on, { manifest: { ...MANIFEST, nodes } })
   await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // A pane wide enough for the small graph below, so it is drawn whole rather than as its ends.
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 200 }, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^FOLDERS · manifest/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /the whole graph is more than Claude Code can draw in a pane, so it is shown as folders/ })).toBeDefined()
   // A small graph (upstream of a report, away from the 600) is still drawn whole.
@@ -817,6 +829,9 @@ test('a manifest over 4 MiB is read through altimate-code: the graph comes from 
   await clock.settle()
   expect(calls).toEqual(['tool:Read', 'cli:dbt_lineage:graph'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Wider than the pane, it opens as its ends: v picks the whole graph.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   expect(await ui.find({ type: 'Text', text: /GRAPH · altimate-code/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 test ·/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
@@ -1241,6 +1256,9 @@ test('the graph is one canvas with every level and whole names; h and l pan it, 
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/${name(3)}.sql` })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 60 }, surface: 'terminal' })
+  // Wider than the pane, it opens as its ends; v shows the whole graph.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   const range = async () => /columns (\d+)–(\d+) of (\d+)/.exec((await ui.find({ type: 'Text', text: /columns \d+–\d+ of \d+/ }))!.text!)!.slice(1).map(Number)
   const [start1, , total] = await range()
   // Centred on the model, whose name is drawn whole; never a fold or a cut.
@@ -1278,6 +1296,8 @@ test('every parent is drawn, no "+N more", each followable after panning to it',
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/${long('focus')}.sql` })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 120 }, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   expect(await ui.find({ type: 'Button', text: /\+\d+ more/ })).toBeUndefined()
   // The parents sit left of the model: pan there.
   for (let i = 0; i < 10; i++) await ui.press({ key: 'lineage-pan-left' })
@@ -1751,6 +1771,9 @@ test("a press on a graph box asks for warehouse lineage; the pane following Clau
   await clock.settle()
   expect(calls).not.toContain('mcp:table_lineage')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Wider than the pane, it opens as its ends: v picks the whole graph.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   const box = await ui.find({ type: 'Button', text: /int_orders/ })
   await ui.press({ key: box!.key! })
   await clock.settle()
@@ -1907,4 +1930,79 @@ optionTest('show_edit_impact also shows the per-edit impact note to the person',
   await clock.settle()
   expect(debug).toContain(NOTE)
   expect(logs).toContain(NOTE)
+})
+
+optionTest('a model a shell command rewrites gets the per-edit impact note too, to Claude and the person', { show_edit_impact: true }, async ($, on) => {
+  const before = 'select sum(amount) as revenue from orders'
+  let text = before
+  let changed = 1
+  const { clock, logs, debug } = await start($, on, {
+    fileText: path => (path === FILE ? text : undefined),
+    fileMtime: path => (path === FILE ? changed : undefined),
+    // find lists the files changed in the last minute; git has the model's text from the last commit.
+    shell: argv => (argv[0] === 'find' ? { exitCode: 0, stdout: changed > 1 ? `${FILE}\n` : '' } : argv[0] === 'git' && argv[3] === 'rev-parse' ? { exitCode: 0, stdout: `${ROOT}\n` } : argv[0] === 'git' && argv[3] === 'show' ? { exitCode: 0, stdout: before } : undefined),
+    toolResult: e => {
+      // The command rewrites the model, as `python3 -c` or `sed -i` does.
+      if (e.tool === 'Bash') {
+        text = 'select sum(amount) - sum(refunds) as revenue from orders'
+        changed = Number.MAX_SAFE_INTEGER
+      }
+      return undefined
+    },
+  })
+  const result: any = await $.tool.call({ tool: 'Bash', command: `python3 -c "import pathlib; p = pathlib.Path('models/fct_orders.sql'); p.write_text(p.read_text().replace('sum(amount)', 'sum(amount) - sum(refunds)'))"` })
+  await clock.settle()
+  expect(debug).toContain(NOTE)
+  expect(logs).toContain(NOTE)
+  expect(result.context?.some((one: string) => one.startsWith("Altimate lineage for 'fct_orders.revenue'") || one.startsWith('Altimate lineage for fct_orders.revenue'))).toBe(true)
+  // A command that reads a model changes nothing: no note.
+  const read: any = await $.tool.call({ tool: 'Bash', command: 'cat models/fct_orders.sql' })
+  await clock.settle()
+  expect((read.context ?? []).some((one: string) => one.startsWith('Altimate lineage for'))).toBe(false)
+})
+
+test('the pane moves to the model being edited as the edit starts, before the edit lands', async ($, on) => {
+  let release!: () => void
+  const until = new Promise<void>(resolve => (release = resolve))
+  let ran = false
+  const { clock } = await start($, on, {
+    holdReach: { column: 'revenue', until },
+    toolResult: e => {
+      if (e.tool === 'Edit') ran = true
+      return undefined
+    },
+  })
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /fct_orders/ })).toBeUndefined()
+  const edit = $.tool.call(EDIT)
+  // The edit is held while its impact lookup runs: the pane already shows the model being edited.
+  for (let i = 0; i < 10; i++) await clock.advance(100)
+  expect(ran).toBe(false)
+  expect(await pane.find({ type: 'Text', text: /fct_orders/ })).toBeDefined()
+  release()
+  await edit
+  await clock.settle()
+  await pane.unmount()
+})
+
+test('a graph wider than the pane opens as its ends, which fit, with its dashboards named; v shows the whole graph', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 50 }, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^ENDS ONLY/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /wider than the pane: ends only · v for the whole graph/ })).toBeDefined()
+  // No window onto a wider canvas: nothing runs off the right.
+  expect(await ui.find({ type: 'Text', text: /columns \d+–\d+ of \d+/ })).toBeUndefined()
+  // The dashboard is in view: drawn as a box, or named under the drawing.
+  const drawn = await ui.find({ type: 'Button', text: /Exec Revenue/ })
+  const named = await ui.find({ type: 'Text', text: /dashboard.* downstream.*Exec Revenue/ })
+  expect(drawn ?? named).toBeDefined()
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^GRAPH/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /columns \d+–\d+ of \d+/ })).toBeDefined()
+  // Whatever the window shows, the dashboards stay named.
+  expect((await ui.find({ type: 'Button', text: /Exec Revenue/ })) ?? (await ui.find({ type: 'Text', text: /Exec Revenue/ }))).toBeDefined()
+  await ui.unmount()
 })

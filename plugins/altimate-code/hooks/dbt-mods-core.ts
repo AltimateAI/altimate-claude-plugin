@@ -3,7 +3,7 @@
 // each reading is tested on dbt's real output.
 import type { DbtFailure, DoctorCheck, ModelContext, QueryResult } from '../types'
 import { isDbtSubcommand, parseDbtCommand, type DbtInvocation } from './dbt-command'
-import { withoutComment } from './lineage-graph'
+import { selectItems, withoutComment } from './lineage-graph'
 
 const ANSI = /\u001b\[[0-9;]*m/g
 
@@ -812,6 +812,72 @@ export function columnDrift(documented: string[], returned: string[], quoted: st
     missing: documented.filter(one => (exact.has(one) ? !returned.includes(one) : !has.has(one.toLowerCase()))),
     undocumented: returned.filter(one => !loose.has(one.toLowerCase()) && !exact.has(one)),
   }
+}
+
+/** SQL with its comments gone and its string literals emptied, so neither is read as code. */
+function sqlCode(sql: string): string {
+  return sql.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (one.startsWith("'") ? "''" : ' '))
+}
+
+// An identifier part: double-quoted, backquoted, bracketed or bare.
+const PART = String.raw`(?:"[^"]+"|` + '`[^`]+`' + String.raw`|\[[^\]]+\]|[A-Za-z_][\w$]*)`
+const RELATION_AFTER = new RegExp(String.raw`\b(?:from|join)\s+(${PART}(?:\s*\.\s*${PART}){0,2})`, 'gi')
+const unquote = (part: string) => part.trim().replace(/^["`\[]|["`\]]$/g, '').toLowerCase()
+
+/**
+ * Relations a model's SQL names directly after FROM or JOIN that are a dbt model, seed, snapshot or source of the
+ * manifest: each should be a `ref()` or `source()`, or dbt (and column lineage) cannot follow it. Jinja, comments,
+ * string literals and the model's own CTEs are left out; the model itself is never flagged.
+ */
+export function hardcodedRelations(sql: string, manifest: any, selfId?: string | null): { relation: string; use: string }[] {
+  const text = sqlCode(sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, ' __jinja__ '))
+  const ctes = new Set([...text.matchAll(/\b([A-Za-z_]\w*)\s+as\s*(?:not\s+)?(?:materialized\s+)?\(/gi)].map(one => one[1]!.toLowerCase()))
+  // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
+  const known = new Map<string, { relation: string; use: string }>()
+  const add = (id: string, node: any, use: string) => {
+    if (id === selfId) return
+    const parts = typeof node?.relation_name === 'string' ? node.relation_name.split('.').map(unquote) : [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(Boolean).map((one: string) => String(one).toLowerCase())
+    if (!parts.length) return
+    for (let i = 0; i < parts.length; i++) known.set(parts.slice(i).join('.'), { relation: parts.slice(i).join('.'), use })
+  }
+  for (const [id, node] of Object.entries<any>(manifest?.nodes ?? {})) {
+    if (['model', 'seed', 'snapshot'].includes(node?.resource_type) && typeof node?.name === 'string') add(id, node, `{{ ref('${node.name}') }}`)
+  }
+  for (const [id, node] of Object.entries<any>(manifest?.sources ?? {})) {
+    if (typeof node?.source_name === 'string' && typeof node?.name === 'string') add(id, node, `{{ source('${node.source_name}', '${node.name}') }}`)
+  }
+  const found = new Map<string, { relation: string; use: string }>()
+  for (const match of text.matchAll(RELATION_AFTER)) {
+    const written = match[1]!
+    const parts = written.split(/\s*\.\s*/).map(unquote)
+    if (parts.includes('__jinja__') || (parts.length === 1 && ctes.has(parts[0]!))) continue
+    const hit = known.get(parts.join('.'))
+    if (hit && !found.has(hit.use)) found.set(hit.use, { relation: written.replace(/\s+/g, ''), use: hit.use })
+  }
+  return [...found.values()]
+}
+
+/**
+ * Which undocumented columns this edit made, and which were undocumented already. A column is the edit's when the SQL
+ * after the edit names it in a select list and the SQL before did not (a new or renamed column), and the last check
+ * of the model did not return it. Any other (named before, or not named by the edit at all: a `select *`, a macro, a
+ * package's passthrough columns) was there before. With neither the SQL from before nor an earlier check, or no
+ * change seen between the two texts, every column counts as the edit's.
+ */
+export function undocumentedByEdit(undocumented: string[], before: string | null, after: string | null, earlier: string[] | null): { fresh: string[]; old: string[] } {
+  if (before === null && earlier === null) return { fresh: undocumented, old: [] }
+  // The file reads the same as before the edit: what the edit changed is not seen, so nothing is set aside.
+  if (earlier === null && before !== null && after !== null && before === after) return { fresh: undocumented, old: [] }
+  const was = before === null ? null : selectItems(sqlCode(before))
+  const now = after === null ? null : selectItems(sqlCode(after))
+  const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
+  const old = (name: string) => {
+    const key = name.toLowerCase()
+    if (returned.has(key)) return true
+    if (!was || !now) return false
+    return was.has(key) || !now.has(key)
+  }
+  return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
 }
 
 // What the history may keep: the plugin store takes 4 MiB of JSON in all, the history and bookmarks among

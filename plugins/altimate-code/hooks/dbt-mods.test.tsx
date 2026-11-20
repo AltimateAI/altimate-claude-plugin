@@ -2,6 +2,8 @@ import { expect, mock, test as kitTest } from 'claude-code/testing'
 
 import {
   columnDrift,
+  hardcodedRelations,
+  undocumentedByEdit,
   columnWidths,
   dbtCommand,
   dbtCommands,
@@ -678,6 +680,133 @@ test('an edit is compiled and run against the warehouse; column drift from schem
   expect(opened).toContain('altimate-check:focus')
   await band.press({ key: 'dbt-check-dismiss' })
   expect(await band.find({ key: 'dbt-check-dismiss' })).toBeUndefined()
+  await band.unmount()
+})
+
+kitTest('an undocumented column is the edit\'s only when the edit names it and the SQL before did not', () => {
+  const before = 'select id, amount / 100 as amount from {{ ref("raw") }}'
+  // A rewritten expression keeps its column: not a new gap. A column from a macro or `*` is not the edit's either.
+  expect(undocumentedByEdit(['amount', 'x_passthrough'], before, 'select id, amount from {{ ref("raw") }}', null)).toEqual({ fresh: [], old: ['amount', 'x_passthrough'] })
+  // A new or renamed column is.
+  expect(undocumentedByEdit(['amount_cents'], before, 'select id, amount as amount_cents from {{ ref("raw") }}', null)).toEqual({ fresh: ['amount_cents'], old: [] })
+  // An earlier check that returned it: there before.
+  expect(undocumentedByEdit(['amount_cents'], null, null, ['id', 'amount_cents'])).toEqual({ fresh: [], old: ['amount_cents'] })
+  // A check after another (no SQL from before), of a column the last check did not return: new.
+  expect(undocumentedByEdit(['amount_cents'], null, null, ['id'])).toEqual({ fresh: ['amount_cents'], old: [] })
+  // Nothing to compare with: every column is the edit's, as before.
+  expect(undocumentedByEdit(['amount'], null, null, null)).toEqual({ fresh: ['amount'], old: [] })
+})
+
+test('only the columns an edit left undocumented are its gaps; ones undocumented before it are said once, quietly', async ($, on) => {
+  let release!: () => void
+  const hold = new Promise<void>(resolve => (release = resolve))
+  const show: Options['show'] = { rows: [{ order_id: 1, amount: 10, status: 'placed', amount_cents: 1000 }] }
+  const { clock, files } = await start($, on, { show, holdEdit: hold, files: { 'models/orders.sql': 'select order_id, amount, status from {{ ref("stg_orders") }}' } })
+  const call = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'status from', new_string: 'status, amount * 100 as amount_cents from' })
+  await clock.settle()
+  files['models/orders.sql'] = 'select order_id, amount, status, amount * 100 as amount_cents from {{ ref("stg_orders") }}'
+  release()
+  const result: any = await call
+  await clock.settle()
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).toContain('- returned but not documented in schema.yml: amount_cents\n')
+  expect(note).toContain("- already undocumented before this edit (not this edit's doing; nothing to fix for it): status")
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /undocumented amount_cents · 1 undocumented before this edit/ })).toBeDefined()
+  await band.unmount()
+  const pane = await $.ui.mount({ ...CHECK, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: '  not documented, from before this edit' })).toBeDefined()
+  await pane.unmount()
+
+  // The next edit adds no column: nothing is the edit's gap, and the older ones are not said again.
+  show.rows = [{ order_id: 1, amount: 10, status: 'placed' }]
+  files['models/orders.sql'] = 'select order_id, amount, status from {{ ref("stg_orders") }}'
+  const again: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount, status', new_string: 'amount,  status' })
+  await clock.settle()
+  const second = again.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(second).not.toContain('not documented')
+  expect(second).not.toContain('already undocumented')
+  const after = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await after.find({ type: 'Text', text: /no new gaps with schema\.yml/ })).toBeDefined()
+  expect(await after.find({ type: 'Text', text: /undocumented before this edit/ })).toBeUndefined()
+  await after.unmount()
+})
+
+test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {
+  const { clock, runs, cwds, toasts } = await start($, on, {
+    pathDbtPython: '/usr/bin/python3',
+    show: { rows: [{ order_id: 1, amount: 10 }], node: 'orders' },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+      // The package's own packages installed too: its models are still run where its tests enable them.
+      'dbt_packages/dbt_utils/dbt_project.yml': "name: 'dbt_utils'\n",
+    },
+  })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  const at = runs.findIndex(argv => argv[1] === 'show')
+  // `path:` would read from integration_tests: the package and the model's name select it there.
+  expect(runs[at]).toEqual(['dbt', 'show', '--select', 'package:shop,orders', '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'])
+  expect(cwds[at]).toBe(`${ROOT}/integration_tests`)
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).toContain('- compiled and ran from integration_tests (the project that installs this package); the warehouse returned 2 columns.')
+  expect(toasts).toContain('✓ orders · compiled and validated against the warehouse')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /match schema\.yml · ran from integration_tests/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('a project whose packages are not installed gets a one-line note, not a failure, when nothing installs it elsewhere', async ($, on) => {
+  const { clock, toasts } = await start($, on, {
+    show: { error: 'dbt expects 1 package(s) based on packages specified in packages.yml, but found only 0 package(s) installed in dbt_packages. Run "dbt deps"' },
+    files: { 'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n' },
+  })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).not.toContain('FAILED')
+  expect(note).toContain("- not checked: dbt's packages are not installed in this project, so dbt could not compile it (run `dbt deps` there, or run dbt from the project that installs this package).")
+  expect(toasts.some(one => one.startsWith('✖'))).toBe(false)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /^◦ Compile & validate / })).toBeDefined()
+  await band.unmount()
+})
+
+kitTest('a model, seed or source named by its table instead of ref() or source() is found, in any spelling; ref(), CTEs, comments and strings are not', () => {
+  const manifest = {
+    nodes: {
+      'model.jaffle_shop.stg_orders': { resource_type: 'model', name: 'stg_orders', relation_name: '"jaffle_shop"."main"."stg_orders"' },
+      'model.jaffle_shop.orders': { resource_type: 'model', name: 'orders', relation_name: '"jaffle_shop"."main"."orders"' },
+      'seed.jaffle_shop.raw_payments': { resource_type: 'seed', name: 'raw_payments', relation_name: '"jaffle_shop"."main"."raw_payments"' },
+    },
+    sources: { 'source.jaffle_shop.shop.customers': { source_name: 'shop', name: 'customers', relation_name: '"raw"."shop"."customers"' } },
+  }
+  const self = 'model.jaffle_shop.orders'
+  expect(hardcodedRelations("with orders as (select * from {{ ref('stg_orders') }}) select * from orders", manifest, self)).toEqual([])
+  expect(hardcodedRelations('with orders as (select * from main.stg_orders) select * from orders', manifest, self)).toEqual([{ relation: 'main.stg_orders', use: "{{ ref('stg_orders') }}" }])
+  expect(hardcodedRelations('select * from "jaffle_shop"."main"."stg_orders" o join raw_payments p using (order_id)', manifest, self)).toEqual([
+    { relation: '"jaffle_shop"."main"."stg_orders"', use: "{{ ref('stg_orders') }}" },
+    { relation: 'raw_payments', use: "{{ ref('raw_payments') }}" },
+  ])
+  expect(hardcodedRelations('select * from shop.customers', manifest, self)).toEqual([{ relation: 'shop.customers', use: "{{ source('shop', 'customers') }}" }])
+  // Not code: a comment, a string; and the model itself.
+  expect(hardcodedRelations("-- from main.stg_orders\nselect 'from main.stg_orders' as note from {{ ref('stg_orders') }} /* join raw_payments */", manifest, self)).toEqual([])
+  expect(hardcodedRelations('select * from main.orders', manifest, self)).toEqual([])
+})
+
+test('an edit that swaps a ref() for the table it builds is flagged: lineage cannot follow it', async ($, on) => {
+  const { clock, toasts } = await start($, on, { files: { 'models/orders.sql': 'select order_id, amount from stg_orders' } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'from stg_orders', new_string: 'from  stg_orders' })
+  await clock.settle()
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).toContain("- hardcoded stg_orders: use {{ ref('stg_orders') }}. dbt does not know this model reads it")
+  expect(note).toContain('Put the ref() or source() back unless the user asked for the table by name, and tell the user.')
+  expect(toasts).toContain('⚠ orders · compiled and validated against the warehouse')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /hardcoded stg_orders: use \{\{ ref\('stg_orders'\) \}\} — lineage can't follow it/ })).toBeDefined()
   await band.unmount()
 })
 

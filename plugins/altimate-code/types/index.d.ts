@@ -231,12 +231,20 @@ export type CheckView = {
   schema: string | null
   /** The project's artifact folder (absolute): edits there are dbt's output, not sources. */
   target: string
+  /** The project below a package's folder that dbt ran from (`integration_tests`), relative to the package; absent when dbt ran in the project itself. */
+  ranFrom?: string
   /** dbt's compile or warehouse errors. */
   errors: string[]
   /** Columns schema.yml documents that the warehouse did not return. */
   missing: string[]
-  /** Columns the warehouse returned that schema.yml does not document. */
+  /** Columns the warehouse returned that schema.yml does not document, that the edit made (new or renamed ones). */
   undocumented: string[]
+  /** Undocumented columns that were undocumented before the edit too: not the edit's gaps. */
+  undocumentedBefore?: string[]
+  /** Those were already said once this conversation: the band and Claude's note leave them out. */
+  oldGapsSaid?: boolean
+  /** Relations the model names by table that are a dbt model, seed, snapshot or source: each with the ref() or source() to use. */
+  hardcoded?: { relation: string; use: string }[]
   /** Columns the warehouse returned; null when it returned no row to read them from. */
   columns: number | null
   /** Their names, in the query's order. */
@@ -327,7 +335,8 @@ export type Reach = {
 }
 
 /** `note` says why a found column has no reach to give (models it reads were not read), in place of one. */
-export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean; note?: string }
+/** `value`: a column whose values the change alters though no select item of the model changed (an expression in a Jinja block, say). */
+export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean; note?: string; value?: boolean }
 
 /** What the band shows after a task that changed models. */
 export type TaskSummaryView = {
@@ -335,6 +344,8 @@ export type TaskSummaryView = {
   models: { name: string; modelLevel: number | null; columns: SummaryColumn[] }[]
   /** Models whose SQL could not be read, across every column traced: the reach is a lower bound. */
   unresolved: number
+  /** Models read in full that may pass a column on without naming it (`select *`), where no reach was traced. */
+  unseen?: number
   truncated: boolean
   /** Where the report was written, once one was asked for. */
   report: string | null
@@ -662,6 +673,8 @@ declare module 'claude-code' {
       lineageExpanded: { up: boolean; down: boolean }
       /** How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists. */
       lineageView: 'graph' | 'ends' | 'folders' | 'list'
+      /** Whether the person picked the view: until then a graph wider than the pane is drawn as its ends. */
+      isLineageViewChosen: boolean
       /** The graph canvas's first visible column; null centres it on the followed model. */
       lineagePan: number | null
       /** The dbt models Claude's last answer names, first named first. */

@@ -23,6 +23,7 @@ import {
   countText,
   describeGraph,
   downstreamArt,
+  downstreamOf,
   findModel,
   findModelOrColumn,
   graphFromSql,
@@ -76,6 +77,8 @@ const warehouseAtom = atom({ plugin: 'altimate-code', key: 'lineageWarehouse' } 
 const expandedAtom = atom({ plugin: 'altimate-code', key: 'lineageExpanded' } as const, { up: false, down: false })
 // How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists.
 const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 'graph' as ViewKind | 'list')
+// Whether the person picked the view (v): until then a graph wider than the pane is shown as its ends, which fit.
+const viewChosenAtom = atom({ plugin: 'altimate-code', key: 'isLineageViewChosen' } as const, false)
 // A model the pane should scroll down to once its graph is drawn: the canvas can be taller than the pane.
 let revealFor: string | null = null
 // The dbt models Claude's last answer names, in the order it names them.
@@ -867,7 +870,7 @@ function cut(text: string, max: number): string {
  * columns, which downstream models and dashboards read that column. Logged, then added to
  * Claude's context with the edit's result.
  */
-async function impactFirst($: EngineInterface, e: any, file: string, deadline: number, progress: { project: boolean; failed?: boolean }): Promise<ImpactNote | null> {
+async function impactFirst($: EngineInterface, e: any, file: string, deadline: number, progress: { project: boolean; failed?: boolean }, changedAt?: number | null): Promise<ImpactNote | null> {
   const root = await projectRoot($, file, true)
   if (!root) return null
   projectSeen = true
@@ -890,8 +893,9 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   if (!graph || !id) return null
   const node = graph.nodes[id]!
   // The file already changed after the last compile: the manifest describes an older version of it.
-  const fileStat = await $.fs.stat(file).catch(() => null)
-  const stale = !!fileStat && fileStat.mtimeMs > stat.mtimeMs
+  // A file a shell command just changed is judged by its time before the command (unknown: not said).
+  const fileStat = changedAt === undefined ? await $.fs.stat(file).catch(() => null) : null
+  const stale = changedAt === undefined ? !!fileStat && fileStat.mtimeMs > stat.mtimeMs : changedAt !== null && changedAt > stat.mtimeMs
   const counts = impactOf(graph, id)
   const downstream = counts.direct + counts.transitive
   if (downstream === 0 && counts.exposures.length === 0) return null
@@ -1150,6 +1154,47 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
   )
 }
 
+// A shell command that may write the SQL files it names (`sed -i`, a redirect, `tee`, a script).
+const WRITES = /\bsed\b[^|;&]*\s-i|\bperl\b[^|;&]*\s-\w*i|>>?\s*['"]?[^\s'"|;&]*\.sql\b|\btee\b|\b(?:python3?|node|ruby|bun|deno)\b|\b(?:mv|cp|patch|truncate)\b|\bgit\s+(?:apply|checkout|restore)\b/
+// The most model files one shell command's note is about.
+const MAX_BASH_MODELS = 3
+// A file's time can trail the clock read as the command started by this much.
+const MTIME_SLACK_MS = 1_000
+
+/** A shell command that may write, as it started: where it runs and when, to find the model files it changed after. */
+type BashStart = { command: string; startedAt: number }
+
+/** The project's model files a shell command changed: modified since it started, with their text from the last commit. */
+async function bashChanged($: EngineInterface, start: BashStart): Promise<{ root: string; files: { file: string; before: string }[] } | null> {
+  // From the session's folder, as the task summary reads it: Claude's shell folder can be slow to read, and this holds the command's result.
+  const base = await $.session.root().catch(() => '.')
+  const root = await projectRoot($, commandDir(start.command, base), false).catch(() => null)
+  if (!root) return null
+  const models = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')).models.map(one => one.replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean)
+  const dirs = models.map(one => (one === '.' ? root : `${root}/${one}`))
+  if (!dirs.length) return null
+  // Files touched in the last minute, then each one's own time against the command's start.
+  const listed = await $.process.run(['find', ...dirs, '-name', '*.sql', '-type', 'f', '-mmin', '-1'], { timeoutMs: 10_000 }).catch(() => null)
+  const top = (await $.process.run(['git', '-C', root, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 }).catch(() => null))?.stdout.trim() ?? ''
+  const files: { file: string; before: string }[] = []
+  for (const file of (listed?.stdout ?? '').split('\n').map(one => one.trim()).filter(Boolean)) {
+    if (files.length >= MAX_BASH_MODELS) break
+    if (/[\\/](?:target|dbt_packages|dbt_modules)[\\/]/.test(file.slice(root.length)) || !isModelPath(root, models, file)) continue
+    const stat = await $.fs.stat(file).catch(() => null)
+    if (!stat || stat.mtimeMs < start.startedAt) continue
+    // Its text before: the last commit's (an untracked file had none).
+    const head = top && file.startsWith(`${top}/`) ? await $.process.run(['git', '-C', top, 'show', `HEAD:${file.slice(top.length + 1)}`], { timeoutMs: 5_000 }).catch(() => null) : null
+    files.push({ file, before: head?.exitCode === 0 ? head.stdout : '' })
+  }
+  return { root, files }
+}
+
+/** Whether a file is under one of the project's model folders. */
+function isModelPath(root: string, models: string[], file: string): boolean {
+  const rel = file.slice(root.length + 1)
+  return file.startsWith(`${root}/`) && /\.sql$/i.test(rel) && models.some(one => one === '.' || rel.startsWith(`${one}/`))
+}
+
 /** The lineage hooks whose events no other part of the plugin hooks. */
 export function registerLineage(on: On, options: Record<string, unknown> = {}) {
   showEditImpact = options.show_edit_impact === true || options.show_edit_impact === 'true'
@@ -1266,6 +1311,19 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     let lookup: Promise<ImpactNote | null> | null = null
     let finished = false
     const progress: { project: boolean; failed?: boolean } = { project: false }
+    // The pane moves to the model being edited as the edit starts, not once it has landed.
+    if (isEdit) later($, async () => void (await follow($, { file: file!, auto: true })))
+    // A shell command that may write (`python3 …`, `sed -i`): its start, so a model it rewrites gets the same note as
+    // an Edit. Nothing is read or run before it: a slow lookup never holds the command or the gates after this hook.
+    const bash: BashStart | null = e.tool === 'Bash' && 'command' in e && !(e as { agentId?: string }).agentId && WRITES.test(String(e.command)) ? { command: String(e.command), startedAt: (await $.clock.now()) - MTIME_SLACK_MS } : null
+    // The model file it names: the pane moves to it as the command starts, in the background.
+    if (bash && /\.sql\b/i.test(bash.command)) {
+      later($, async () => {
+        const base = (await $.session.cwd().catch(() => null)) ?? (await $.session.root().catch(() => '.'))
+        const first = sqlFilesIn(bash.command, commandDir(bash.command, base))[0]
+        if (first && (await $.fs.exists(first).catch(() => false))) await follow($, { file: first, auto: true })
+      })
+    }
     if (isEdit) {
       // The columns stop half a second before the hold ends, leaving time to write the note.
       lookup = impactFirst($, e, file!, (await $.clock.now()) + HOLD_TOTAL_MS - 500, progress)
@@ -1288,6 +1346,27 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     // Any tool may have changed the shown model's file (Edit, a shell command): one stat says so.
     later($, () => recheckStale($))
     if (result.deny || result.isError) return result
+    // The model files the shell command changed: the pane follows the first, and each gets the impact note an Edit gets.
+    const bashNotes: ImpactNote[] = []
+    if (bash) {
+      const changed = await within($, 3_000, bashChanged($, bash).catch(() => null))
+      if (changed?.files.length) {
+        clearSqlGraphs()
+        later($, async () => void (await follow($, { file: changed.files[0]!.file, auto: true })))
+        const deadline = (await $.clock.now()) + HOLD_TOTAL_MS - 500
+        const notes = await within(
+          $,
+          HOLD_TOTAL_MS,
+          Promise.all(changed.files.map(async one => impactFirst($, { tool: 'Edit', file_path: one.file, old_string: one.before, new_string: await $.fs.read(one.file).catch(() => '') }, one.file, deadline, { project: false }, null).catch(() => null))),
+        )
+        for (const note of notes ?? []) {
+          if (!note) continue
+          bashNotes.push(note)
+          $.ui.log(note.toast, { to: 'debug' })
+          if (showEditImpact) $.ui.log(note.toast)
+        }
+      }
+    }
     // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
     if (file && EDIT_TOOLS.has(e.tool) && /(\.sql|\.py|dbt_project\.yml)$/i.test(file)) clearSqlGraphs()
     // Projects are found by their dbt_project.yml alone.
@@ -1341,6 +1420,14 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
         $.ui.log(`impact-first · added to Claude's context: lineage for ${note.view.column ? `${note.view.model}.${note.view.column}` : note.view.model}`, { to: 'debug' })
         return { ...result, context: [...(result.context ?? []), note.context] } as typeof result
       }
+    }
+    const fresh = bashNotes.filter(one => !contextGiven.has(one.key))
+    if (fresh.length) {
+      for (const one of fresh) {
+        contextGiven.add(one.key)
+        $.ui.log(`impact-first · added to Claude's context: lineage for ${one.view.column ? `${one.view.model}.${one.view.column}` : one.view.model} (changed by a shell command)`, { to: 'debug' })
+      }
+      return { ...result, context: [...(result.context ?? []), ...fresh.map(one => one.context)] } as typeof result
     }
     if (lookupFailed) {
       const name = (file!.split(/[\\/]/).pop() ?? file!).replace(/\.sql$/i, '')
@@ -1408,6 +1495,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     const stale = await read($, staleAtom)
     const loading = await read($, loadingAtom)
     const chosenView = await read($, viewAtom)
+    const viewChosen = await read($, viewChosenAtom)
     const pan = await read($, panAtom)
     const answer = await read($, answerAtom)
     const node = focus && graph ? graph.nodes[focus.model] : null
@@ -1499,6 +1587,18 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
         ;({ drawn, room, maxPan, from, shownRows } = draw())
       }
     }
+    // The whole graph is wider than the pane and the person has not picked a view: its ends, which fit, with the
+    // dashboards at the end, rather than a window with edges running off the right.
+    const fitted = !viewChosen && view === 'graph' && !!drawn && drawn.canvas > room
+    const wide = fitted ? drawn!.canvas : 0
+    if (fitted) {
+      view = 'ends'
+      ;({ drawn, room, maxPan, from, shownRows } = draw())
+    }
+    // Dashboards downstream that the drawing leaves out (past the pane, or folded): named under it.
+    const drawnIds = new Set(shownRows.flatMap(row => row.map(one => one.node).filter(Boolean)))
+    const dashboards = view === 'list' ? [] : downstreamOf(graph, focus.model).rows.filter(row => row.node.type === 'exposure')
+    const unseenDashboards = dashboards.filter(row => !drawnIds.has(row.node.id))
     // From what is shown: a stored pan past the edge (a narrower pane, a right-clamped start) is not the start.
     const panBy = (step: number) => update($, panAtom, () => Math.min(maxPan, Math.max(0, from + step)))
     // Once a new model's graph is drawn, scroll the pane to it: the canvas can be taller than the pane.
@@ -1578,6 +1678,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
               {graph.upTruncated || graph.truncated ? ` · ${[graph.upTruncated && 'upstream', graph.truncated && 'downstream'].filter(Boolean).join(' and ')} cut at 500 nodes` : ''}
             </Text>
             {tooBig && <Text color="warning">⚠ the whole graph is more than Claude Code can draw in a pane, so it is shown as folders · v: ends only, list</Text>}
+            {fitted && <Text dimColor>the whole graph is {wide} columns wide, wider than the pane: ends only · v for the whole graph</Text>}
             {view === 'graph' && (
               <Box flexDirection="row" gap={2}>
                 {drawn.canvas > room && <Button key="lineage-pan-left" plain hotkey="h" label="◀ pan" onPress={() => panBy(-Math.max(8, Math.floor(room / 2)))} />}
@@ -1596,6 +1697,12 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
               </Box>
             )}
             {shownRows.map((row, i) => drawRow(ui, $, graph, row.some(one => one.text) ? row : [{ text: ' ' }], `graph-${i}`))}
+            {unseenDashboards.length > 0 && (
+              <Text key="lineage-dashboards" color="warning">
+                ◆ {plural(dashboards.length, 'dashboard')} downstream{unseenDashboards.length < dashboards.length ? ` (${unseenDashboards.length} not drawn)` : ''}: {unseenDashboards.slice(0, 6).map(row => row.node.label ?? row.node.name).join(' · ')}
+                {unseenDashboards.length > 6 ? ` · +${unseenDashboards.length - 6} more` : ''}
+              </Text>
+            )}
           </Box>
         )}
         {view !== 'list' && foldedList('down')}
@@ -1728,7 +1835,11 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
               plain
               hotkey="v"
               label={VIEW_TITLE[view].toLowerCase()}
-              onPress={() => update($, viewAtom, current => VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length]!)}
+              onPress={async () => {
+                // Shown as its ends only because it did not fit: v shows the whole graph.
+                if (!fitted) await update($, viewAtom, current => VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length]!)
+                await update($, viewChosenAtom, () => true)
+              }}
             />
           )}
           <Button

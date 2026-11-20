@@ -23,6 +23,7 @@ import {
   reportHtml,
   sectionOf,
   summaryLines,
+  valueCandidates,
   summaryOf,
   upstreamWords,
   WINDOWS_EXPLORER,
@@ -154,7 +155,7 @@ describe('the summary', () => {
   test('a model with no changed output column shows its model-level count alone', () => {
     const change = { ...CHANGE, columns: [] }
     const lines = summaryLines(summaryOf([change], [{ model: 'fct_orders', column: null, down: null, up: null, modelLevel: 6, failed: false }], null))
-    expect(lines).toEqual(['◆ Lineage after this task · 1 model changed', 'fct_orders · 6 downstream models at model level', '  no output column changed: the model-level count stands'])
+    expect(lines).toEqual(['◆ Lineage after this task · 1 model changed', 'fct_orders · 6 downstream models at model level', '  values may change downstream; the model-level count stands'])
   })
 })
 
@@ -594,4 +595,51 @@ test('a reach left unknown by a model read only in part keeps the footer a lower
   expect(lines).toContain('  amount  not traced: 1 downstream model could not be read')
   expect(lines).toContain('⚠ Lower bound: 1 model could not be read')
   expect(lines).not.toContain('✓ Every downstream model was read')
+})
+
+// altimate-code's real answer for jaffle_shop's stg_payments.amount (cents change), asked of a manifest copy one
+// folder below target/: the seed's CSV header could not be found, so both readers, which select *, were read in
+// full and the value was not traced through them.
+const STAR_ANSWER = {"version": 1, "focus": {"model": "model.jaffle_shop.stg_payments", "column": "amount"}, "direction": "downstream", "inputs": {"sql": "compiled_code", "catalog": null, "engine": "altimate-core 0.9.0", "workarounds": ["relations keyed database.schema.name", "ephemeral parents expanded", "parent columns = documented + own lineage targets + SELECT list", "aggregate FILTER clause dropped before analysis", "WITH nested inside a CTE reported unresolved", "reads with zero traced columns reported unresolved"]}, "counts": {"columns": 0, "models": 0, "hops": 0, "contracts": 0, "ends": 0, "may_carry_models": 2, "not_traced_models": 0, "model_level": 2}, "nodes": [{"id": "model.jaffle_shop.stg_payments", "name": "stg_payments", "folder": "staging", "materialized": "view", "contract": false, "tests": 3, "exposures": []}], "columns": [{"model": 0, "column": "amount", "hop": 0, "end": false, "how": null, "how_from": null}], "edges": [], "also_reads": [], "unresolved": [], "may_carry": [{"id": "model.jaffle_shop.customers", "name": "customers", "reason": "star"}, {"id": "model.jaffle_shop.orders", "name": "orders", "reason": "star"}], "flags": [], "consumers": {"declared": 0, "exposures": []}, "truncated": false, "next": null} as any
+
+test('a reach of 0 beside readers that select * is not traced, and the footer never says every model was read', () => {
+  expect(unknownReach(STAR_ANSWER)).toBe('not traced: 2 downstream models may read it without naming it (select *)')
+  const change = { model: 'stg_payments', file: 'models/staging/stg_payments.sql', root: '/r', columns: [{ name: 'amount', before: 'amount / 100', after: 'amount' }], ended: '' } as any
+  const traces = [{ model: 'stg_payments', column: 'amount', down: STAR_ANSWER, up: null, modelLevel: 2, failed: false, unknown: unknownReach(STAR_ANSWER)! }] as any
+  const lines = summaryLines(summaryOf([change], traces, null))
+  expect(lines).toEqual([
+    '◆ Lineage after this task · 1 model changed',
+    'stg_payments · 2 downstream models at model level',
+    '  amount  not traced: 2 downstream models may read it without naming it (select *)',
+    '⚠ Lower bound: 2 models may read it without naming it',
+  ])
+})
+
+test('a change no select item shows (a value computed in a Jinja block) names the columns whose values change, and their reach', () => {
+  // Tuva's core__medical_claim lists its columns in a `{% set %}` block the select reads.
+  const before = "{%- set cols -%}\n      med.claim_id\n    , med.paid_amount\n    , med.allowed_amount\n{%- endset -%}\nselect {{ cols }} from {{ ref('x') }} as med\nwhere med.claim_id is not null"
+  const after = before.replace('    , med.paid_amount', '    , case when med.paid_amount < 0 then 0 else med.paid_amount end as paid_amount')
+  expect(changedColumns(before, after)).toEqual([])
+  expect(valueCandidates(before, after)).toEqual(['paid_amount'])
+  // A filter names no column whose value changes.
+  expect(valueCandidates(before, before.replace('is not null', 'is not null and med.paid_amount > 0'))).toEqual([])
+  const answer = {
+    version: 1, focus: { model: 'model.t.core__medical_claim', column: 'paid_amount' }, direction: 'downstream',
+    nodes: [{ id: 'model.t.core__medical_claim', name: 'core__medical_claim' }, { id: 'model.t.fact_claims', name: 'fact_claims' }],
+    columns: [{ model: 0, column: 'paid_amount', hop: 0 }, { model: 1, column: 'paid_amount', hop: 1, end: true }],
+    counts: { columns: 1, models: 1, ends: 1, hops: 1, may_carry_models: 3, model_level: 97 }, unresolved: [], may_carry: [],
+  } as any
+  const change = { model: 'core__medical_claim', file: 'models/core/final/core__medical_claim.sql', root: '/r', columns: [], values: ['paid_amount'], ended: '' } as any
+  const traces = [
+    { model: 'core__medical_claim', column: null, down: null, up: null, modelLevel: 97, failed: false },
+    { model: 'core__medical_claim', column: 'paid_amount', down: answer, up: null, modelLevel: 97, failed: false, value: true },
+  ] as any
+  expect(summaryLines(summaryOf([change], traces, null))).toEqual([
+    '◆ Lineage after this task · 1 model changed',
+    'core__medical_claim · 97 downstream models at model level',
+    '  values change in paid_amount → reaches 1 column in 1 model (1 end column) · 3 more may change',
+    '✓ Every downstream model was read',
+  ])
+  // None the manifest has: the values may still change, said without a count of 0.
+  expect(summaryLines(summaryOf([change], traces.slice(0, 1), null))).toContain('  values may change downstream; the model-level count stands')
 })

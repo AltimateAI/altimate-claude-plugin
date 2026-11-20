@@ -8,9 +8,9 @@ const ROOT = '/repo'
 const MANIFEST = `${ROOT}/target/manifest.json`
 // The manifest copies carry the session's id: read from the copy the task start made.
 let RUNS: string[][] = []
-const tag = () => RUNS.map(one => (one[0] === 'cp' ? /\/manifest-before\.([^/]+)\.json$/.exec(one[2] ?? '')?.[1] : undefined)).find(Boolean) ?? ''
-const snapshot = () => `${ROOT}/target/.altimate-lineage/manifest-before.${tag()}.json`
-const frozen = () => `${ROOT}/target/.altimate-lineage/task-manifest.${tag()}.json`
+const tag = () => RUNS.map(one => (one[0] === 'cp' ? /\/\.altimate-manifest-before\.([^/]+)\.json$/.exec(one[2] ?? '')?.[1] : undefined)).find(Boolean) ?? ''
+const snapshot = () => `${ROOT}/target/.altimate-manifest-before.${tag()}.json`
+const frozen = () => `${ROOT}/target/.altimate-task-manifest.${tag()}.json`
 const TASK_FILE = `${ROOT}/target/.altimate-lineage/last-task.json`
 const REPORT = `${ROOT}/target/.altimate-lineage/report.html`
 const MODEL = `${ROOT}/models/fct_orders.sql`
@@ -213,12 +213,13 @@ async function start($: any, on: any, options: Options = {}) {
 
 const directional = (tools: Record<string, any>[]) => tools.filter(one => one.direction)
 
-test('a task start copies the manifest aside, never reading it', async ($, on) => {
+test('a task start copies the manifest aside, never reading it, in target/ itself so altimate-code finds the project above it', async ($, on) => {
   const { runs, turn } = await start($, on)
   await turn('t1', async () => {})
-  expect(runs).toContainEqual(['mkdir', '-p', `${ROOT}/target/.altimate-lineage`])
   expect(runs).toContainEqual(['cp', MANIFEST, snapshot()])
-  expect(runs.findIndex(one => one[0] === 'mkdir')).toBeLessThan(runs.findIndex(one => one[0] === 'cp'))
+  // altimate-code takes the folder above the manifest's as the project (a seed's CSV header): a copy one folder
+  // deeper traced nothing through a `select *` from a seed.
+  expect(snapshot().replace(/\/[^/]+$/, '')).toBe(`${ROOT}/target`)
 })
 
 test("each session's manifest copies carry its id, so another session's task never replaces them; a task's end clears copies a day old", async ($, on) => {
@@ -236,7 +237,9 @@ test("each session's manifest copies carry its id, so another session's task nev
   expect(runs).toContainEqual(['mv', '-f', snapshot(), frozen()])
   expect(directional(tools).every(one => one.manifest_path === frozen())).toBe(true)
   const clear = runs.findIndex(one => one[0] === 'find')
-  expect(runs[clear]).toEqual(['find', `${ROOT}/target/.altimate-lineage`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', '+1440', '-delete'])
+  expect(runs[clear]).toEqual(['find', `${ROOT}/target`, '-maxdepth', '1', '-name', '.altimate-*manifest*.json', '-mmin', '+1440', '-delete'])
+  // Copies an older version kept below target/.altimate-lineage go too.
+  expect(runs[clear + 1]).toEqual(['find', `${ROOT}/target/.altimate-lineage`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', '+1440', '-delete'])
   expect(clear).toBeLessThan(runs.findIndex(one => one[0] === 'mv'))
 })
 
@@ -516,7 +519,7 @@ test('a change to no output column falls back to the model-level count', async (
   expect(directional(tools)).toEqual([{ manifest_path: frozen(), model: 'stg_payments', change_type: 'modify', direction: 'downstream' }])
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: 'stg_payments · 6 downstream models at model level' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: '  no output column changed: the model-level count stands' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '  values may change downstream; the model-level count stands' })).toBeDefined()
   await band.unmount()
   await $.command.run({ command: 'lineage-report', args: '' } as any)
   expect(embedded(writes.get(REPORT)!).focuses[0]).toMatchObject({ model: 'stg_payments', column: null, modelLevel: 6 })

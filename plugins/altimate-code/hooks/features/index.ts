@@ -18,6 +18,7 @@ import {
   dbtModsBashAfter,
   dbtModsCallStart,
   dbtModsEditAfter,
+  DBT_MODS_EDIT_READS_BEFORE as dbtModsEditReadsBefore,
   dbtModsReadOrEditAfter,
   endDbtMods,
   newTurnDbtMods,
@@ -399,7 +400,7 @@ export async function featuresBashAfter($: EngineInterface, e: BashCall, result:
 export const EDIT_AFTER_TIMEOUT_MS = dbtModsCheckHoldMs + 5_000
 
 /** Whether any feature's `editAfter` needs the file's text from before the edit. */
-export const EDIT_READS_BEFORE: boolean = runsEditReadsBefore || deferEditReadsBefore || toModelEditReadsBefore || commentsEditReadsBefore || costEditReadsBefore || healthEditReadsBefore || sqlGraphEditReadsBefore || docsEditReadsBefore || cteProfileEditReadsBefore
+export const EDIT_READS_BEFORE: boolean = dbtModsEditReadsBefore || runsEditReadsBefore || deferEditReadsBefore || toModelEditReadsBefore || commentsEditReadsBefore || costEditReadsBefore || healthEditReadsBefore || sqlGraphEditReadsBefore || docsEditReadsBefore || cteProfileEditReadsBefore
 
 /** The context lines every feature adds after an edit landed. */
 export async function featuresEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<string[]> {

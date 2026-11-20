@@ -15,6 +15,7 @@ import {
   type ColumnTrace,
   consumersOf,
   fingerprint,
+  MAX_TASK_COLUMNS,
   type ModelChange,
   modelLevelOf,
   openersFor,
@@ -25,6 +26,7 @@ import {
   summaryLines,
   summaryOf,
   unknownReach,
+  valueCandidates,
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { projectLayout } from './lineage-graph'
@@ -35,8 +37,13 @@ export const REPORT_COMMAND = 'lineage-report'
 const LINEAGE_DIR = 'target/.altimate-lineage'
 // A task's copy of the manifest while it runs, and the last finished task's, kept for its report. Each
 // session has its own, so two sessions in one project never read each other's; a day on, they go.
-export const runningManifest = (tag: string) => `manifest-before.${tag}.json`
-export const taskManifest = (tag: string) => `task-manifest.${tag}.json`
+export const runningManifest = (tag: string) => `.altimate-manifest-before.${tag}.json`
+export const taskManifest = (tag: string) => `.altimate-task-manifest.${tag}.json`
+// The copies sit in target/ itself, beside the manifest, not in LINEAGE_DIR: altimate-code takes the folder above
+// a manifest's folder as the project (to read a seed's CSV header, which a `select *` from a seed needs), so a
+// copy one folder deeper traced nothing through a `select *` and read as a reach of 0.
+const COPY_DIR = 'target'
+const COPY_GLOB = '.altimate-*manifest*.json'
 const MANIFEST_COPIES_KEPT_MINUTES = '+1440'
 /** This session's id as a file-name part. */
 export async function sessionTag($: EngineInterface): Promise<string> {
@@ -126,10 +133,8 @@ function prepareRoot($: EngineInterface, t: Task, root: string): Promise<RootSta
     const manifest = `${root}/target/manifest.json`
     if (await $.fs.exists(manifest).catch(() => false)) {
       // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read.
-      const dir = `${root}/${LINEAGE_DIR}`
-      const made = await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5_000 }).catch(() => null)
-      const copy = `${dir}/${runningManifest(await sessionTag($))}`
-      const copied = made?.exitCode === 0 ? await $.process.run(['cp', manifest, copy], { timeoutMs: 20_000 }).catch(() => null) : null
+      const copy = `${root}/${COPY_DIR}/${runningManifest(await sessionTag($))}`
+      const copied = await $.process.run(['cp', manifest, copy], { timeoutMs: 20_000 }).catch(() => null)
       if (copied?.exitCode === 0) snapshot = copy
     }
     const top = (await git($, ['-C', root, 'rev-parse', '--show-toplevel']))?.trim()
@@ -170,7 +175,11 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     if (state && !isModelFile(state.layout, relative(one.root, file))) continue
     const current = await $.fs.read(file).catch(() => '')
     if (current === one.original) continue
-    changes.push({ model: modelName(file), file: relative(one.root, file), root: one.root, columns: changedColumns(one.original, current), ended: fingerprint(current) })
+    const columns = changedColumns(one.original, current)
+    // No select item changed (a value computed in a Jinja block the select reads, say): the names the change rewrote
+    // are asked of the manifest, and the ones it has are traced as columns whose values change.
+    const values = columns.length === 0 ? valueCandidates(one.original, current) : []
+    changes.push({ model: modelName(file), file: relative(one.root, file), root: one.root, columns, ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }
   if (changes.length > MAX_MODELS) $.ui.log(`lineage-summary · ${changes.length} models changed; tracing the first ${MAX_MODELS}`)
   return changes.slice(0, MAX_MODELS)
@@ -211,13 +220,22 @@ const unknownOf = (answer: ColumnAnswer | null) => {
 
 /** What the band needs: each changed column's downstream answer, and the model-level count for a model with none. */
 async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrace[]> {
-  const jobs: (() => Promise<ColumnTrace>)[] = []
+  const jobs: (() => Promise<ColumnTrace | null>)[] = []
   for (const change of done.changes) {
     if (change.columns.length === 0) {
       jobs.push(async () => {
         const meta = await ask($, done, change, null, 'downstream')
         return { model: change.model, column: null, down: null, up: null, modelLevel: modelLevelOf(meta), failed: meta === null, consumers: consumersOf(meta) }
       })
+      // Names the change rewrote: only those the manifest has as the model's columns are kept (null drops the rest).
+      for (const name of change.values ?? []) {
+        jobs.push(async () => {
+          const meta = await ask($, done, change, name, 'downstream')
+          const answer = answerOf(meta)
+          if (!answer || !answer.columns.some(one => one.hop === 0)) return null
+          return { model: change.model, column: name, down: answer, up: null, modelLevel: modelLevelOf(meta), failed: false, value: true, ...unknownOf(answer), consumers: consumersOf(meta) }
+        })
+      }
     }
     for (const col of change.columns) {
       jobs.push(async () => {
@@ -239,7 +257,10 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
       })
     }
   }
-  return pool(jobs, PARALLEL)
+  const traces = (await pool(jobs, PARALLEL)).filter((one): one is ColumnTrace => one !== null)
+  // At most three columns whose values change, the most named first, as for changed select items.
+  const values = traces.filter(one => one.value)
+  return values.length > MAX_TASK_COLUMNS ? traces.filter(one => !one.value || values.indexOf(one) < MAX_TASK_COLUMNS) : traces
 }
 
 /** What a report adds: where each changed column comes from. */
@@ -260,9 +281,13 @@ async function freezeManifests($: EngineInterface, t: Task, changes: ModelChange
   const out: Record<string, string | null> = {}
   const tag = await sessionTag($)
   for (const root of new Set(changes.map(one => one.root))) {
-    const dir = `${root}/${LINEAGE_DIR}`
+    const dir = `${root}/${COPY_DIR}`
     await $.process
-      .run(['find', dir, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
+      .run(['find', dir, '-maxdepth', '1', '-name', COPY_GLOB, '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
+      .catch(() => null)
+    // Copies an older version kept in LINEAGE_DIR.
+    await $.process
+      .run(['find', `${root}/${LINEAGE_DIR}`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
       .catch(() => null)
     const state = await t.roots.get(root)?.catch(() => null)
     if (!state?.snapshot) {
@@ -340,6 +365,7 @@ type SavedTask = {
 }
 
 async function saveTask($: EngineInterface, root: string, saved: SavedTask) {
+  await $.process.run(['mkdir', '-p', `${root}/${LINEAGE_DIR}`], { timeoutMs: 5_000 }).catch(() => null)
   await $.fs
     .write(`${root}/${LINEAGE_DIR}/${TASK_FILE}`, JSON.stringify(saved))
     .catch(error => $.ui.log(`lineage-summary · the task could not be saved: ${String(error)}`, { to: 'debug' }))
