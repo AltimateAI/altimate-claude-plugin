@@ -4311,3 +4311,38 @@ kitTest('with info_toasts off, model context and a passing check raise no toast;
   expect(await band.find({ type: 'Text', text: /Compile & validate/ })).toBeDefined()
   await band.unmount()
 })
+
+const quiet = { options: { dbt_mods: true, info_toasts: false } }
+
+kitTest('with info_toasts off, a passing doctor raises no toast; a doctor that finds a problem still does', quiet, async ($: any, on: any) => {
+  const { clock, toasts } = await start($, on, { interactive: true })
+  await clock.settle()
+  expect(toasts.filter(one => one.includes('dbt doctor'))).toEqual([])
+})
+
+kitTest('with info_toasts off, the doctor that finds a stale manifest still raises its toast', quiet, async ($: any, on: any) => {
+  const { clock, toasts } = await start($, on, { interactive: true, now: 200_000, mtimes: { 'models/orders.sql': 5_000 } })
+  await clock.settle()
+  expect(toasts).toContain('⚕ dbt doctor · Manifest needs attention')
+})
+
+kitTest('with info_toasts off, a passing recheck raises no toast but the band says so; a failed edit check still toasts', quiet, async ($: any, on: any) => {
+  const show: Options['show'] = { rows: [{ order_id: 1, order_total: 10 }] }
+  const { clock, mtimes, toasts } = await start($, on, { show })
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'as amount', new_string: 'as order_total' })
+  await clock.settle()
+  show!.rows = [{ order_id: 1, amount: 10 }]
+  mtimes['models/orders.sql'] = 50_000
+  await $.tool.call({ tool: 'Bash', command: 'altimate run "fix it, then dbt build" --agent builder' })
+  await clock.settle()
+  expect(toasts.some(one => one.includes('checked again'))).toBe(false)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /2 columns · match schema\.yml/ })).toBeDefined()
+  await band.unmount()
+
+  show!.error = BINDER
+  delete show!.rows
+  await $.tool.call({ tool: 'Write', file_path: ORDERS, content: 'select order_dte from x' })
+  await clock.settle()
+  expect(toasts).toContain('✖ orders · dbt could not compile or run it · see the band')
+})
