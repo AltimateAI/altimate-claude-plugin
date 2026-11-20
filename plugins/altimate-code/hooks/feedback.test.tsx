@@ -615,6 +615,18 @@ test('a quoted password with a semicolon inside, and a last unquoted connection-
   expect(out).toContain('and more')
 })
 
+test('ADO.NET doubled quotes inside a quoted password are part of it, and a profile value that is also a key name does not hide the key', () => {
+  const out = redactSecrets('Server=db;Password="alpha""omega-secret";Encrypt=yes')
+  expect(out).not.toMatch(/alpha|omega/)
+  expect(out).toContain('Encrypt=yes')
+  setRedactions(ROOT, ['password', 'secret'])
+  try {
+    expect(redactSecrets('password=hunter2-production-key and client_secret=private-client-credential')).not.toMatch(/hunter2|private-client/)
+  } finally {
+    clearRedactions()
+  }
+})
+
 test('a profile value that YAML writes with doubled apostrophes is cut out too', () => {
   setRedactions(ROOT, ["alpha'omega-secret"])
   try {
