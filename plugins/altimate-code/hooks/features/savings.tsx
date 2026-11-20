@@ -860,9 +860,9 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
         key="savings-run"
         label="Run /savings"
         onPress={() =>
-          pressRun($, async () => {
+          pressRun($, async live => {
             await update($, bandAtom, () => null)
-            await openPane($)
+            if (live()) await openPane($)
           })
         }
       />
@@ -872,16 +872,17 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
 }
 
 /** A press that starts a run: a second press before the first one's run has started, or while it runs, starts nothing. */
-function pressRun($: EngineInterface, first?: () => Promise<unknown>) {
+function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<unknown>) {
   if (pressQueued) return
   pressQueued = true
   const at = generation
   later($, async () => {
     try {
-      // A /clear since the press drops it before anything is marked running.
-      if (at !== generation) return
-      await first?.()
-      if (at !== generation || (await read($, busyAtom))) return
+      // A /clear since the press drops it before anything is marked running, at every step.
+      const live = () => at === generation
+      if (!live()) return
+      await first?.(live)
+      if (!live() || (await read($, busyAtom)) || !live()) return
       await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
       await runCheck($, lastConnection, at)
     } finally {
