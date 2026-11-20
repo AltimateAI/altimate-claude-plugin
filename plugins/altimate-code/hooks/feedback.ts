@@ -40,6 +40,29 @@ const SETTINGS: ReadonlyArray<readonly [string, string]> = [
 // ─── Redaction ────────────────────────────────────────────────────────────────────────────────────────
 
 const MASK = '‹redacted›'
+// A line that ends in a credential key with a YAML block-scalar header (`password: |`, `secret: >- # note`): the value is the indented lines after it.
+const BLOCK_HEADER = /^([ \t]*(?:-[ \t]+)?[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?[ \t]*:[ \t]*)[|>][+-]?\d?[ \t]*(?:#.*)?$/i
+
+/** Cuts out the indented lines (blank ones between them too) that follow a credential key's YAML block-scalar header. */
+export function redactBlockScalars(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const header = BLOCK_HEADER.exec(lines[i]!.replace(/\r$/, ''))
+    if (!header) {
+      out.push(lines[i]!)
+      continue
+    }
+    out.push(`${header[1]}${MASK}`)
+    let end = i
+    for (let next = i + 1; next < lines.length; next++) {
+      if (/^[ \t]+\S/.test(lines[next]!)) end = next
+      else if (!/^[ \t]*\r?$/.test(lines[next]!)) break
+    }
+    i = end
+  }
+  return out.join('\n')
+}
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, MASK],
   [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, MASK],
@@ -52,9 +75,8 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g, `$1 ${MASK}`],
   // user:password@host in a connection string or URL.
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, `$1${MASK}@`],
-  // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a YAML block scalar with its indented lines,
-  // a quoted value to its own closing quote (a backslash escape or a doubled quote is inside it), or the rest of the word.
-  [/((?<![\w.-])[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?\s*[:=]\s*)[|>][+-]?\d?[ \t]*(?:\r?\n[ \t]+[^\n]*)+/gi, `$1${MASK}`],
+  // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
+  // backslash escape or a doubled quote is inside it) or the rest of the word. A YAML block scalar is cut whole first (redactBlockScalars).
   [/((?<![\w.-])[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\S+)/gi, `$1${MASK}`],
   // A long unbroken run of key-like characters.
   [/\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g, MASK],
@@ -62,7 +84,7 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
 
 /** The text with every token, key, password and connection-string credential cut out. */
 export function redactSecrets(text: string): string {
-  return SECRET_PATTERNS.reduce((out, [pattern, to]) => out.replace(pattern, to), redactValues(text))
+  return SECRET_PATTERNS.reduce((out, [pattern, to]) => out.replace(pattern, to), redactBlockScalars(redactValues(text)))
 }
 
 const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
