@@ -135,7 +135,7 @@ let offered = false
 let turnRunning = false
 let heldNotices: string[] = []
 // A press of Run again is under way, from its first moment.
-let pressStarting = false
+let pressStarting: object | null = null
 
 // Files that define Databricks compute: bundles, their resources, Terraform. Read only when one is edited.
 const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/(?:[^/]+\/)*[^/]+\.ya?ml|[^/]+\.tf)$/i
@@ -157,7 +157,8 @@ const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses
 export function isDatabricksConfig(path: string, text: string): boolean {
   const file = path.replace(/\\/g, '/')
   if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
-  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text)
+  // A block commented out with /* */ declares nothing.
+  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text.replace(/\/\*[\s\S]*?\*\//g, ''))
   if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null
@@ -1132,7 +1133,8 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
     if (!view) {
       // The CLI's text is only the first line of what it printed; an old altimate-code is told by its whole usage.
       const raw = ('raw' in result ? result.raw : '') || ''
-      return { platform, why: explain((metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)) || 'no answer', connection, platform) }
+      // The CLI's reason is text; anything else is read as text too, never as a script error.
+      return { platform, why: explain(String((metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)) || 'no answer'), connection, platform) }
     }
     const today = dayOf(await $.clock.now())
     if (!live()) return null
@@ -1281,7 +1283,9 @@ async function runCheck($: EngineInterface, asked: string | null, at: number) {
 async function startPressedRun($: EngineInterface, asked: string | null, at: number) {
   // A /clear since the press drops it before anything is marked running.
   if (pressStarting || at !== generation) return
-  pressStarting = true
+  // Only this press clears the guard: one from before a /clear must not free it for a later press.
+  const mine = {}
+  pressStarting = mine
   try {
     if (await read($, busyAtom)) return
     const connections = await read($, connectionsAtom)
@@ -1289,7 +1293,7 @@ async function startPressedRun($: EngineInterface, asked: string | null, at: num
     if (at !== generation) return
     await update($, busyAtom, now => (at === generation ? busyOf(asked, connections) : now))
   } finally {
-    pressStarting = false
+    if (pressStarting === mine) pressStarting = null
   }
   await runCheck($, asked, at)
 }
@@ -1847,7 +1851,7 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   offered = false
   turnRunning = false
   heldNotices = []
-  pressStarting = false
+  pressStarting = null
   await update($, bandAtom, () => null)
   await update($, whatIfAtom, () => null)
   await update($, busyAtom, () => null)

@@ -4308,10 +4308,22 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['resources/near.yml', 'resources:\n  jobs_extra:\n    a: {}\n'],
     ['resources/dash.yml', 'resources:\n  dashboards:\n    jobs:\n      a: {}\n'],
     ['infra/eks.tf', 'variable "databricks_account_id" {}\nresource "aws_eks_cluster" "main" {\n  name = var.databricks_account_id\n}\n'],
+    ['infra/old.tf', '/*\nresource "databricks_job" "x" {\n}\n*/\nresource "aws_s3_bucket" "b" {}\n'],
     ['config/jobs.yml', 'resources:\n  jobs:\n    a: {}\n'],
   ]
   expect(yes.filter(([path, text]) => !isDatabricksConfig(path, text)).map(([path]) => path)).toEqual([])
   expect(no.filter(([path, text]) => isDatabricksConfig(path, text)).map(([path]) => path)).toEqual([])
+})
+
+test('a failed answer whose error is not text says the CLI failed, not a script error', async ($, on) => {
+  const answer = { status: 'ok', title: 'Databricks Savings: FAILED', output: 'The Databricks savings check failed', metadata: { success: false, error: { reason: 'no access' } } }
+  const { clock, toasts } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect([...texts, ...toasts].filter(text => /TypeError|is not a function/.test(text))).toEqual([])
+  await ui.unmount()
 })
 
 test('a lookback the answer sends as a string is still the window\'s length', async ($, on) => {
