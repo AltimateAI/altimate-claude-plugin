@@ -1,6 +1,7 @@
-// For tests: what core's savings rules return, captured from core's compiled binding (`databricksSavings`)
-// called with the synthetic facts below. It has every finding kind Databricks has, and what-if rows for one
-// warehouse id in two workspaces. Regenerate by passing the facts, as JSON, to the binding the CLI ships.
+// For tests: what core's savings rules return, captured from core's compiled binding (`databricksSavings` and
+// `snowflakeSavings`) called with the synthetic facts below. It has every finding kind each platform has,
+// Snowflake's Underutilized Cluster among them with no dollar estimate, and what-if rows for one warehouse id
+// in two workspaces. Regenerate by passing the facts, as JSON, to the binding the CLI ships.
 
 /** The `DatabricksSavingsInput` core was given. */
 export const DATABRICKS_FACTS = {
@@ -454,4 +455,463 @@ export const DATABRICKS_REPORT = {
       "workspace_id": "1001"
     }
   ]
+} as const
+
+/** The `SnowflakeSavingsInput` core was given. */
+export const SNOWFLAKE_FACTS = {
+  "lookback_days": 7,
+  "price_per_credit": 3,
+  "warehouses": [
+    {
+      "warehouse_id": "sf-synth-idle",
+      "warehouse_name": "SYNTH_IDLE",
+      "warehouse_size": "Medium",
+      "warehouse_type": "STANDARD",
+      "min_cluster_count": 1,
+      "max_cluster_count": 1,
+      "query_count": 500,
+      "sub_five_second_queries": 480,
+      "sub_five_second_credits": 30,
+      "usage_days": [
+        {
+          "day": "2026-11-10",
+          "credits_used": 40,
+          "active_periods": 10,
+          "short_periods": 1
+        },
+        {
+          "day": "2026-11-11",
+          "credits_used": 40,
+          "active_periods": 10,
+          "short_periods": 1
+        },
+        {
+          "day": "2026-11-12",
+          "credits_used": 40,
+          "active_periods": 10,
+          "short_periods": 1
+        },
+        {
+          "day": "2026-11-13",
+          "credits_used": 40,
+          "active_periods": 10,
+          "short_periods": 1
+        },
+        {
+          "day": "2026-11-14",
+          "credits_used": 40,
+          "active_periods": 10,
+          "short_periods": 1
+        },
+        {
+          "day": "2026-11-15",
+          "credits_used": 40,
+          "active_periods": 10,
+          "short_periods": 1
+        },
+        {
+          "day": "2026-11-16",
+          "credits_used": 40,
+          "active_periods": 10,
+          "short_periods": 1
+        }
+      ],
+      "idle_days": [
+        {
+          "day": "2026-11-10",
+          "active_seconds": 33000,
+          "idle_seconds": 30000,
+          "credits_used": 40
+        },
+        {
+          "day": "2026-11-11",
+          "active_seconds": 33000,
+          "idle_seconds": 30000,
+          "credits_used": 40
+        },
+        {
+          "day": "2026-11-12",
+          "active_seconds": 33000,
+          "idle_seconds": 30000,
+          "credits_used": 40
+        },
+        {
+          "day": "2026-11-13",
+          "active_seconds": 33000,
+          "idle_seconds": 30000,
+          "credits_used": 40
+        },
+        {
+          "day": "2026-11-14",
+          "active_seconds": 33000,
+          "idle_seconds": 30000,
+          "credits_used": 40
+        },
+        {
+          "day": "2026-11-15",
+          "active_seconds": 33000,
+          "idle_seconds": 30000,
+          "credits_used": 40
+        },
+        {
+          "day": "2026-11-16",
+          "active_seconds": 33000,
+          "idle_seconds": 30000,
+          "credits_used": 40
+        }
+      ]
+    },
+    {
+      "warehouse_id": "sf-synth-multi",
+      "warehouse_name": "SYNTH_MULTI",
+      "warehouse_size": "Large",
+      "warehouse_type": "STANDARD",
+      "min_cluster_count": 1,
+      "max_cluster_count": 2,
+      "query_count": 4000,
+      "sub_five_second_queries": 100,
+      "sub_five_second_credits": 5,
+      "usage_days": [
+        {
+          "day": "2026-11-10",
+          "credits_used": 60,
+          "active_periods": 40,
+          "short_periods": 30
+        },
+        {
+          "day": "2026-11-11",
+          "credits_used": 60,
+          "active_periods": 40,
+          "short_periods": 30
+        },
+        {
+          "day": "2026-11-12",
+          "credits_used": 60,
+          "active_periods": 40,
+          "short_periods": 30
+        },
+        {
+          "day": "2026-11-13",
+          "credits_used": 60,
+          "active_periods": 40,
+          "short_periods": 30
+        },
+        {
+          "day": "2026-11-14",
+          "credits_used": 60,
+          "active_periods": 40,
+          "short_periods": 30
+        },
+        {
+          "day": "2026-11-15",
+          "credits_used": 60,
+          "active_periods": 40,
+          "short_periods": 30
+        },
+        {
+          "day": "2026-11-16",
+          "credits_used": 60,
+          "active_periods": 40,
+          "short_periods": 30
+        }
+      ],
+      "cluster_days": [
+        {
+          "day": "2026-11-10",
+          "clusters": [
+            {
+              "cluster_number": 1,
+              "idle_seconds": 100,
+              "busy_seconds": 30000
+            },
+            {
+              "cluster_number": 2,
+              "idle_seconds": 200,
+              "busy_seconds": 50
+            }
+          ]
+        },
+        {
+          "day": "2026-11-11",
+          "clusters": [
+            {
+              "cluster_number": 1,
+              "idle_seconds": 100,
+              "busy_seconds": 30000
+            },
+            {
+              "cluster_number": 2,
+              "idle_seconds": 200,
+              "busy_seconds": 50
+            }
+          ]
+        },
+        {
+          "day": "2026-11-12",
+          "clusters": [
+            {
+              "cluster_number": 1,
+              "idle_seconds": 100,
+              "busy_seconds": 30000
+            },
+            {
+              "cluster_number": 2,
+              "idle_seconds": 200,
+              "busy_seconds": 50
+            }
+          ]
+        },
+        {
+          "day": "2026-11-13",
+          "clusters": [
+            {
+              "cluster_number": 1,
+              "idle_seconds": 100,
+              "busy_seconds": 30000
+            },
+            {
+              "cluster_number": 2,
+              "idle_seconds": 200,
+              "busy_seconds": 50
+            }
+          ]
+        },
+        {
+          "day": "2026-11-14",
+          "clusters": [
+            {
+              "cluster_number": 1,
+              "idle_seconds": 100,
+              "busy_seconds": 30000
+            },
+            {
+              "cluster_number": 2,
+              "idle_seconds": 200,
+              "busy_seconds": 50
+            }
+          ]
+        },
+        {
+          "day": "2026-11-15",
+          "clusters": [
+            {
+              "cluster_number": 1,
+              "idle_seconds": 100,
+              "busy_seconds": 30000
+            },
+            {
+              "cluster_number": 2,
+              "idle_seconds": 200,
+              "busy_seconds": 50
+            }
+          ]
+        },
+        {
+          "day": "2026-11-16",
+          "clusters": [
+            {
+              "cluster_number": 1,
+              "idle_seconds": 100,
+              "busy_seconds": 30000
+            },
+            {
+              "cluster_number": 2,
+              "idle_seconds": 200,
+              "busy_seconds": 50
+            }
+          ]
+        }
+      ],
+      "restart_days": [
+        {
+          "day": "2026-11-10",
+          "gaps": [
+            {
+              "gap_seconds": 20,
+              "bounces": 40
+            }
+          ]
+        },
+        {
+          "day": "2026-11-11",
+          "gaps": [
+            {
+              "gap_seconds": 20,
+              "bounces": 40
+            }
+          ]
+        },
+        {
+          "day": "2026-11-12",
+          "gaps": [
+            {
+              "gap_seconds": 20,
+              "bounces": 40
+            }
+          ]
+        },
+        {
+          "day": "2026-11-13",
+          "gaps": [
+            {
+              "gap_seconds": 20,
+              "bounces": 40
+            }
+          ]
+        },
+        {
+          "day": "2026-11-14",
+          "gaps": [
+            {
+              "gap_seconds": 20,
+              "bounces": 40
+            }
+          ]
+        },
+        {
+          "day": "2026-11-15",
+          "gaps": [
+            {
+              "gap_seconds": 20,
+              "bounces": 40
+            }
+          ]
+        },
+        {
+          "day": "2026-11-16",
+          "gaps": [
+            {
+              "gap_seconds": 20,
+              "bounces": 40
+            }
+          ]
+        }
+      ]
+    }
+  ]
+} as const
+
+/** Core's `SnowflakeSavingsReport` for those facts. */
+export const SNOWFLAKE_REPORT = {
+  "findings": [
+    {
+      "check_id": "high_idle_time",
+      "daily_max": 109.09090909090911,
+      "daily_min": 76.36363636363637,
+      "evidence": {
+        "active_seconds": 231000,
+        "credits_used": 280,
+        "flagged_days": [
+          "2026-11-10",
+          "2026-11-11",
+          "2026-11-12",
+          "2026-11-13",
+          "2026-11-14",
+          "2026-11-15",
+          "2026-11-16"
+        ],
+        "idle_ratio": 0.9090909090909091,
+        "idle_seconds": 210000,
+        "kind": "high_idle_time",
+        "price_per_credit": 3,
+        "wasted_cost": 763.6363636363637
+      },
+      "monthly_max": 3272.7272727272734,
+      "monthly_min": 2290.909090909091,
+      "resource_id": "sf-synth-idle",
+      "resource_name": "SYNTH_IDLE",
+      "resource_type": "sql_warehouse",
+      "severity": "critical",
+      "title": "High Idle Time",
+      "workspace_id": null
+    },
+    {
+      "check_id": "frequent_restart_overcharge",
+      "daily_max": 16,
+      "daily_min": 10.67,
+      "evidence": {
+        "bounces": 280,
+        "credits_per_hour": 8,
+        "double_billed_seconds": 11200,
+        "flagged_days": [
+          "2026-11-10",
+          "2026-11-11",
+          "2026-11-12",
+          "2026-11-13",
+          "2026-11-14",
+          "2026-11-15",
+          "2026-11-16"
+        ],
+        "kind": "frequent_restart",
+        "price_per_credit": 3
+      },
+      "monthly_max": 480,
+      "monthly_min": 320.1,
+      "resource_id": "sf-synth-multi",
+      "resource_name": "SYNTH_MULTI",
+      "resource_type": "sql_warehouse",
+      "severity": "low",
+      "title": "Frequent Restart Overcharge",
+      "workspace_id": null
+    },
+    {
+      "check_id": "downsize_warehouse",
+      "daily_max": 6.428571428571429,
+      "daily_min": 3.857142857142857,
+      "evidence": {
+        "cost_basis": 90,
+        "current_size": "Medium",
+        "kind": "downsize_warehouse",
+        "price_per_credit": 3,
+        "query_count": 500,
+        "recommended_size": "Small",
+        "short_period_percent": null,
+        "sub_five_second_percent": 96
+      },
+      "monthly_max": 192.85714285714286,
+      "monthly_min": 115.71428571428572,
+      "resource_id": "sf-synth-idle",
+      "resource_name": "SYNTH_IDLE",
+      "resource_type": "sql_warehouse",
+      "severity": "medium",
+      "title": "Downsize Warehouse",
+      "workspace_id": null
+    },
+    {
+      "check_id": "underutilized_cluster",
+      "daily_max": 0,
+      "daily_min": 0,
+      "evidence": {
+        "flagged_days": [
+          "2026-11-10",
+          "2026-11-11",
+          "2026-11-12",
+          "2026-11-13",
+          "2026-11-14",
+          "2026-11-15",
+          "2026-11-16"
+        ],
+        "highest_idle_percent": 80,
+        "kind": "underutilized_cluster",
+        "max_cluster_count": 2,
+        "recommended_max_cluster_count": 1
+      },
+      "monthly_max": 0,
+      "monthly_min": 0,
+      "resource_id": "sf-synth-multi",
+      "resource_name": "SYNTH_MULTI",
+      "resource_type": "sql_warehouse",
+      "severity": "low",
+      "title": "Underutilized Cluster",
+      "workspace_id": null
+    }
+  ],
+  "lookback_days": 7,
+  "price_per_credit": 3,
+  "total": {
+    "monthly_max": 3752.7272727272734,
+    "monthly_min": 2611.009090909091,
+    "resources": 2
+  },
+  "what_if": []
 } as const

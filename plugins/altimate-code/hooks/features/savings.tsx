@@ -256,7 +256,8 @@ export function evidenceLines(evidence: Record<string, unknown> | undefined, day
     }
     case 'underutilized_cluster':
       return [
-        `Cluster ${count(evidence.cluster_number)} of ${count(evidence.max_cluster_count)} was barely needed on ${daysOf(evidence.flagged_days)} (up to ${percentOf(evidence.highest_idle_percent)} idle)`,
+        // The cluster the check flags is always the highest the warehouse may start, so core names only that maximum.
+        `The highest of its ${count(evidence.max_cluster_count)} clusters was barely needed on ${daysOf(evidence.flagged_days)} (up to ${percentOf(evidence.highest_idle_percent)} idle)`,
         `Lowering the maximum to ${count(evidence.recommended_max_cluster_count)} cluster${Number(evidence.recommended_max_cluster_count) === 1 ? '' : 's'} may add some queueing; no dollar estimate`,
       ]
     case 'frequent_restart':
@@ -307,7 +308,7 @@ function factOf(evidence: Record<string, unknown>, title: string): string {
     case 'downsize_warehouse':
       return `${oneLine(evidence.current_size) || '?'} could be ${oneLine(evidence.recommended_size) || '?'}`
     case 'underutilized_cluster':
-      return `cluster ${count(evidence.cluster_number)} of ${count(evidence.max_cluster_count)} barely needed`
+      return `highest of ${count(evidence.max_cluster_count)} clusters barely needed`
     case 'frequent_restart':
       return `${count(evidence.bounces)} suspend-and-resume bounces`
     case 'over_sized':

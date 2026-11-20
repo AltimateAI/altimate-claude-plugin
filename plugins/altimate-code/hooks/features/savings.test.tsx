@@ -3,7 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { SNOWFLAKE_CAPTURE } from './savings-snowflake-capture.test-data'
 import { skippedChecks } from '../savings-checks'
 import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, evidenceLines, explain, fitLine, fixRequest, mentions, runsDatabricksCompute, slimTitle, statusText, supportsSavings, toView } from './savings'
-import { DATABRICKS_FACTS, DATABRICKS_REPORT } from './savings-core.testkit'
+import { DATABRICKS_FACTS, DATABRICKS_REPORT, SNOWFLAKE_FACTS, SNOWFLAKE_REPORT } from './savings-core.testkit'
 
 const ROOT = '/repo'
 
@@ -209,7 +209,7 @@ const SNOWFLAKE_ANSWER = {
         snowflakeFinding('downsize_warehouse', 'Downsize Warehouse', { kind: 'downsize_warehouse', current_size: 'Large', recommended_size: 'Medium', short_period_percent: 95, sub_five_second_percent: 91.5, query_count: 1200, cost_basis: 42, price_per_credit: 3 }, 54, 90),
         snowflakeFinding('high_idle_time', 'High Idle Time', { kind: 'high_idle_time', idle_ratio: 0.6, idle_seconds: 7200, active_seconds: 12000, flagged_days: ['2026-11-11', '2026-11-12'], credits_used: 10, price_per_credit: 3, wasted_cost: 18 }, 54, 77.14),
         snowflakeFinding('frequent_restart_overcharge', 'Frequent Restart Overcharge', { kind: 'frequent_restart', bounces: 12, double_billed_seconds: 300, credits_per_hour: 4, flagged_days: ['2026-11-11'], price_per_credit: 3 }, 4.29, 6.43),
-        snowflakeFinding('underutilized_cluster', 'Underutilized Cluster', { kind: 'underutilized_cluster', cluster_number: 2, max_cluster_count: 2, recommended_max_cluster_count: 1, highest_idle_percent: 70, flagged_days: ['2026-11-13'] }, 0, 0),
+        snowflakeFinding('underutilized_cluster', 'Underutilized Cluster', { kind: 'underutilized_cluster', max_cluster_count: 2, recommended_max_cluster_count: 1, highest_idle_percent: 70, flagged_days: ['2026-11-13'] }, 0, 0),
       ],
       total: { monthly_min: 54, monthly_max: 90, resources: 1 },
       what_if: [],
@@ -1750,7 +1750,7 @@ test('each kind of Snowflake finding says what it rests on, and what to change',
   expect(await ui.find({ type: 'Text', text: /^Large could be Medium: 95\.0% of its active periods lasted 80 seconds or less; 91\.5% of 1,200 queries ran in 5 seconds or less$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^60% idle on 2 days above 40%: 2\.0 of 3\.3 active hours$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^12 suspend-and-resume bounces inside a billed minute on 1 day$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /^Cluster 2 of 2 was barely needed on 1 day \(up to 70% idle\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^The highest of its 2 clusters was barely needed on 1 day \(up to 70% idle\)$/ })).toBeDefined()
   for (const key of ['fix-0', 'fix-1', 'fix-2', 'fix-3']) await ui.press({ key })
   await clock.settle()
   expect(fills[0]).toContain('Draft the change for this Snowflake savings finding')
@@ -3434,6 +3434,34 @@ function coreAnswer() {
   }
 }
 
+/** What `finops_snowflake_savings` prints around core's own report for the testkit's synthetic facts. */
+function coreSnowflakeAnswer() {
+  const price = SNOWFLAKE_FACTS.price_per_credit
+  return {
+    status: 'ok',
+    title: 'Snowflake Savings',
+    output: 'Snowflake savings',
+    metadata: {
+      success: true,
+      window: { start: '2026-11-10', end: '2026-11-17' },
+      warehouse: 'sfmega',
+      ran_on: 'SYNTH_MULTI',
+      warehouses_checked: SNOWFLAKE_FACTS.warehouses.length,
+      price: { per_credit: price, source: 'rate_sheet', as_of: '2026-11-16' },
+      skipped: [],
+      limited: [],
+      warehouses: SNOWFLAKE_FACTS.warehouses.map(one => ({
+        id: one.warehouse_id,
+        name: one.warehouse_name,
+        type: one.warehouse_type,
+        size: one.warehouse_size,
+        window_cost: one.usage_days.reduce((sum, day) => sum + day.credits_used, 0) * price,
+      })),
+      report: JSON.parse(JSON.stringify(SNOWFLAKE_REPORT)),
+    },
+  }
+}
+
 /** What the pane draws in place of a value it lacks, or a value read from a field core does not send. */
 const UNREAL = /\?|undefined|NaN/
 const kindsOf = (report: { findings: readonly { evidence: { kind: string } }[] }) => [...new Set(report.findings.map(one => one.evidence.kind))].sort()
@@ -3443,18 +3471,26 @@ const drawnOf = async (ui: any) => [
 ]
 
 test('every finding kind core returns is drawn from its own fields: no "?", "undefined" or "NaN" on the slim pane, Show all, a fix draft, a what-if, the report page, the notice, the status line or the band', async ($, on) => {
+  // Core's answers hold every kind each platform has; Underutilized Cluster carries no dollar estimate.
   expect(kindsOf(DATABRICKS_REPORT)).toEqual(['idle_cluster', 'job_on_all_purpose', 'over_sized', 'serverless'])
+  expect(kindsOf(SNOWFLAKE_REPORT)).toEqual(['downsize_warehouse', 'frequent_restart', 'high_idle_time', 'underutilized_cluster'])
+  expect(SNOWFLAKE_REPORT.findings.find(one => one.check_id === 'underutilized_cluster')).toMatchObject({ monthly_min: 0, monthly_max: 0 })
 
   // Each finding's evidence, the one fact the slim pane and the tool-row note quote, and its fix request.
-  const view = toView(coreAnswer().metadata as any)!
-  expect(view.findings.length).toBe(DATABRICKS_REPORT.findings.length)
-  expect(view.findings.flatMap(one => [one.title, one.fact, one.fixRequest, ...one.evidence]).filter(line => UNREAL.test(line))).toEqual([])
+  for (const [metadata, platform] of [
+    [coreAnswer().metadata, 'databricks'],
+    [coreSnowflakeAnswer().metadata, 'snowflake'],
+  ] as const) {
+    const view = toView(metadata as any, platform)!
+    expect(view.findings.length).toBe(metadata.report.findings.length)
+    expect(view.findings.flatMap(one => [one.title, one.fact, one.fixRequest, ...one.evidence]).filter(line => UNREAL.test(line))).toEqual([])
+  }
 
   const files = {
     [`${ROOT}/dbt_project.yml`]: 'name: acme\n',
     [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "pro" {\n  name = "synth_pro"\n  cluster_size = "Large"\n}\n',
   }
-  const { clock, toasts, fills, written, statuses } = await start($, on, { answer: coreAnswer(), files })
+  const { clock, toasts, fills, written, statuses } = await start($, on, { list: BOTH, answer: coreAnswer(), snowflake: coreSnowflakeAnswer(), files })
   await savings($)
   await clock.settle()
   const slim = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -3463,10 +3499,12 @@ test('every finding kind core returns is drawn from its own fields: no "?", "und
 
   const ui = await mountFull($)
   const full = await drawnOf(ui)
+  expect(full).toContain('SYNTH_MULTI · Underutilized Cluster · no dollar estimate')
+  expect(full).toContain('The highest of its 2 clusters was barely needed on 7 days (up to 80% idle)')
   expect(full).toContain('All-purpose cluster 100% idle across 5 active days (zombie), average worker CPU 3%, peak 10%')
   expect(full.filter(text => UNREAL.test(text))).toEqual([])
 
-  const findings = DATABRICKS_REPORT.findings.length
+  const findings = DATABRICKS_REPORT.findings.length + SNOWFLAKE_REPORT.findings.length
   for (let at = 0; at < findings; at++) await ui.press({ key: `fix-${at}` })
   await clock.settle()
   expect(fills.length).toBe(findings)
@@ -3483,7 +3521,8 @@ test('every finding kind core returns is drawn from its own fields: no "?", "und
   await ui.press({ key: 'share' })
   await clock.settle()
   const page = written.get(`${ROOT}/target/.altimate-lineage/savings-report.html`)!
-  expect(page).toContain('synth_pro')
+  expect(page).toContain('The highest of its 2 clusters was barely needed')
+  expect(page).toContain('What if synth_classic in workspace 1002 (')
   const shown = page
     .replace(/<style>[\s\S]*?<\/style>/g, '')
     .replace(/<[^>]*>/g, '\n')
