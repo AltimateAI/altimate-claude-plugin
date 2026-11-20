@@ -332,7 +332,7 @@ const configOf = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSi
 
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
-  return String(value ?? '')
+  return oneLine(value)
     .split(/[_-]/)
     .map(part => (/^\d*X$/i.test(part) ? part.toUpperCase() : part.charAt(0).toUpperCase() + part.slice(1).toLowerCase()))
     .join('-')
@@ -649,7 +649,9 @@ export async function trackChanges(
     // A /clear while the baselines were read: this run keeps nothing.
     if (!live()) return []
     const windowCost = typeof warehouse.window_cost === 'number' ? warehouse.window_cost : null
-    const changed = stored && (stored.size !== sizeOrNull(warehouse.size) || stored.type !== warehouse.type)
+    // A size read on one side only is no resize: the other run did not read it. The type still tells a change.
+    const resized = stored?.size != null && warehouse.size != null && stored.size !== warehouse.size
+    const changed = stored && (resized || stored.type !== warehouse.type)
     // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
     // A baseline kept without a cost takes the first one a later run gives, while the warehouse is still unchanged.
     if (stored && !changed && stored.windowCost === null && windowCost !== null) {

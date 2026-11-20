@@ -73,7 +73,7 @@ export function cleanTree<T>(node: T): T {
 export const amount = (min: number, max: number) => (max > 0 ? `${range(min, max)} a month` : 'no dollar estimate')
 
 /** A size as the pane writes it: `2X_SMALL` is `2X-SMALL`. */
-export const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
+export const size = (value: unknown) => (oneLine(value) || '?').replace(/_/g, '-')
 
 /** A whole count; one the answer lacks (missing, empty, not a number) reads "?", not 0. */
 export const count = (value: unknown) => (known(value) ? Math.round(Number(value)).toLocaleString('en-US') : '?')
