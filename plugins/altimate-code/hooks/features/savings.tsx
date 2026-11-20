@@ -112,7 +112,9 @@ const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, 
 const messagesAtom = atom({ plugin: 'altimate-code', key: 'savingsMessages' } as const, [] as { platform: SavingsPlatform; text: string; recovery: string }[])
 const bandAtom = atom({ plugin: 'altimate-code', key: 'savingsBand' } as const, null as { text: string } | null)
 // The alternative pressed in the pane's what-if row: which warehouse, and which choice.
-const whatIfAtom = atom({ plugin: 'altimate-code', key: 'savingsWhatIf' } as const, null as { resourceId: string; label: string } | null)
+// A warehouse id can repeat across the workspaces one connection reads, and two connections can list the same
+// warehouse: the pressed choice keeps its connection and workspace too.
+const whatIfAtom = atom({ plugin: 'altimate-code', key: 'savingsWhatIf' } as const, null as { connection: string | null; workspaceId: string | null; resourceId: string; label: string } | null)
 const connectionsAtom = atom({ plugin: 'altimate-code', key: 'savingsConnections' } as const, null as SavingsConnection[] | null)
 const rowsAtom = atom({ plugin: 'altimate-code', key: 'savingsRows' } as const, {} as Record<string, SavingsWarehouseRef>)
 const sharedAtom = atom({ plugin: 'altimate-code', key: 'savingsShared' } as const, null as { text: string } | null)
@@ -439,6 +441,7 @@ export function fixRequest(finding: ToolFinding, days = 7, platform: SavingsPlat
 type ToolWhatIf = {
   resource_id: string
   resource_name: string
+  workspace_id?: string | null
   current_label: string
   current_monthly_cost: number
   choices: { label: string; monthly_cost: number; monthly_saving: number; fits: boolean; cores: number; cores_needed: number }[]
@@ -553,6 +556,8 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
       .map(one => ({
         resourceId: one.resource_id,
         resourceName: shownName(one.resource_name, one.resource_id),
+        workspace: workspaces > 1 ? oneLine(one.workspace_id) || null : null,
+        workspaceId: one.workspace_id ?? null,
         currentMonthly: Number(one.current_monthly_cost),
         choices: one.choices
           // Serverless is priced without a size, so only a sized choice needs the cores its queries need.
@@ -1606,17 +1611,20 @@ export function register(on: On, _context: FeatureContext) {
               })}
               {view.whatIf.map(one => {
                 const at = whatIfs++
-                const choice = picked?.resourceId === one.resourceId ? one.choices.find(c => c.label === picked.label) : undefined
+                const choice =
+                  picked && picked.connection === view.connection && picked.workspaceId === one.workspaceId && picked.resourceId === one.resourceId
+                    ? one.choices.find(c => c.label === picked.label)
+                    : undefined
                 const amounts = choice ? compared(one.currentMonthly, choice.monthlyCost) : undefined
                 return (
                   <Box key={`whatif-${at}`} flexDirection="column">
-                    <Text bold>{`What if ${one.resourceName} (${dollars(one.currentMonthly)} a month now) were…`}</Text>
+                    <Text bold>{`What if ${one.resourceName}${one.workspace ? ` in workspace ${one.workspace}` : ''} (${dollars(one.currentMonthly)} a month now) were…`}</Text>
                     <Box gap={1} flexWrap="wrap">
                       {one.choices.map((c, k) => (
                         <Button
                           key={`whatif-${at}-${k}`}
                           label={`${c.label} ${dollars(c.monthlyCost)}${c.fits === false ? ' ⚠' : ''}`}
-                          onPress={() => later($, () => update($, whatIfAtom, () => ({ resourceId: one.resourceId, label: c.label })))}
+                          onPress={() => later($, () => update($, whatIfAtom, () => ({ connection: view.connection, workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label })))}
                         />
                       ))}
                     </Box>

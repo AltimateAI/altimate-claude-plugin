@@ -38,7 +38,7 @@ const view = (over: Partial<SavingsView> = {}): SavingsView => ({
       fixRequest: '',
     },
   ],
-  whatIf: [{ resourceId: 'w1', resourceName: 'Classic', currentMonthly: 40, choices: [{ label: 'X-SMALL', monthlyCost: 20, monthlySaving: 20, fits: false, cores: 4, coresNeeded: 6 }] }],
+  whatIf: [{ resourceId: 'w1', resourceName: 'Classic', workspace: null, workspaceId: null, currentMonthly: 40, choices: [{ label: 'X-SMALL', monthlyCost: 20, monthlySaving: 20, fits: false, cores: 4, coresNeeded: 6 }] }],
   changes: [],
   inventory: [
     { id: 'w0', name: 'A', type: 'SERVERLESS', size: 'SMALL', windowCost: 5 },

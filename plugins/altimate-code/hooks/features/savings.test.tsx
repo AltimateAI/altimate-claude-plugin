@@ -3,6 +3,7 @@ import { expect, mock, test } from 'claude-code/testing'
 import { SNOWFLAKE_CAPTURE } from './savings-snowflake-capture.test-data'
 import { skippedChecks } from '../savings-checks'
 import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, evidenceLines, explain, fitLine, fixRequest, mentions, runsDatabricksCompute, slimTitle, statusText, supportsSavings, toView } from './savings'
+import { DATABRICKS_FACTS, DATABRICKS_REPORT } from './savings-core.testkit'
 
 const ROOT = '/repo'
 
@@ -3410,3 +3411,144 @@ for (const step of ['pane open', 'version probe', 'tool run', 'baseline read', '
     await after.unmount()
   })
 }
+
+/** What `finops_databricks_savings` prints around core's own report for the testkit's synthetic facts. */
+function coreAnswer() {
+  return {
+    status: 'ok',
+    title: 'Databricks Savings',
+    output: 'Databricks savings',
+    metadata: {
+      success: true,
+      window: { start: '2026-11-10', end: '2026-11-17' },
+      warehouse: 'dbxmega',
+      ran_on: 'wh-synth-pro',
+      warehouses_checked: DATABRICKS_FACTS.warehouses.length,
+      clusters_checked: DATABRICKS_FACTS.clusters.length,
+      jobs_checked: DATABRICKS_FACTS.jobs.length,
+      workspaces_checked: 2,
+      skipped: [],
+      warehouses: DATABRICKS_FACTS.warehouses.map(one => ({ id: one.warehouse_id, workspace_id: one.workspace_id, name: one.warehouse_name, type: one.warehouse_type, size: one.warehouse_size, window_cost: one.total_cost })),
+      report: JSON.parse(JSON.stringify(DATABRICKS_REPORT)),
+    },
+  }
+}
+
+/** What the pane draws in place of a value it lacks, or a value read from a field core does not send. */
+const UNREAL = /\?|undefined|NaN/
+const kindsOf = (report: { findings: readonly { evidence: { kind: string } }[] }) => [...new Set(report.findings.map(one => one.evidence.kind))].sort()
+const drawnOf = async (ui: any) => [
+  ...((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)),
+  ...((await ui.findAll({ type: 'Button' })) as any[]).map(one => String(one.props.label)),
+]
+
+test('every finding kind core returns is drawn from its own fields: no "?", "undefined" or "NaN" on the slim pane, Show all, a fix draft, a what-if, the report page, the notice, the status line or the band', async ($, on) => {
+  expect(kindsOf(DATABRICKS_REPORT)).toEqual(['idle_cluster', 'job_on_all_purpose', 'over_sized', 'serverless'])
+
+  // Each finding's evidence, the one fact the slim pane and the tool-row note quote, and its fix request.
+  const view = toView(coreAnswer().metadata as any)!
+  expect(view.findings.length).toBe(DATABRICKS_REPORT.findings.length)
+  expect(view.findings.flatMap(one => [one.title, one.fact, one.fixRequest, ...one.evidence]).filter(line => UNREAL.test(line))).toEqual([])
+
+  const files = {
+    [`${ROOT}/dbt_project.yml`]: 'name: acme\n',
+    [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "pro" {\n  name = "synth_pro"\n  cluster_size = "Large"\n}\n',
+  }
+  const { clock, toasts, fills, written, statuses } = await start($, on, { answer: coreAnswer(), files })
+  await savings($)
+  await clock.settle()
+  const slim = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await drawnOf(slim)).filter(text => UNREAL.test(text))).toEqual([])
+  await slim.unmount()
+
+  const ui = await mountFull($)
+  const full = await drawnOf(ui)
+  expect(full).toContain('All-purpose cluster 100% idle across 5 active days (zombie), average worker CPU 3%, peak 10%')
+  expect(full.filter(text => UNREAL.test(text))).toEqual([])
+
+  const findings = DATABRICKS_REPORT.findings.length
+  for (let at = 0; at < findings; at++) await ui.press({ key: `fix-${at}` })
+  await clock.settle()
+  expect(fills.length).toBe(findings)
+  expect(fills.filter(text => UNREAL.test(text))).toEqual([])
+
+  for (const [row, one] of DATABRICKS_REPORT.what_if.entries()) {
+    for (let k = 0; k < one.choices.length; k++) {
+      await ui.press({ key: `whatif-${row}-${k}` })
+      await clock.settle()
+      expect((await drawnOf(ui)).filter(text => UNREAL.test(text))).toEqual([])
+    }
+  }
+
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  const page = written.get(`${ROOT}/target/.altimate-lineage/savings-report.html`)!
+  expect(page).toContain('synth_pro')
+  const shown = page
+    .replace(/<style>[\s\S]*?<\/style>/g, '')
+    .replace(/<[^>]*>/g, '\n')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+  expect(shown.filter(line => UNREAL.test(line))).toEqual([])
+  await ui.unmount()
+  expect(toasts.filter(text => UNREAL.test(text))).toEqual([])
+  expect(statuses.filter(text => text !== undefined && UNREAL.test(text))).toEqual([])
+
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'Large', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  const line = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)).find(text => text.startsWith('synth_pro'))
+  expect(line).toBe('synth_pro: Over-Sized Warehouse, $5,400–$9,450 a month to save. /savings shows why.')
+  await band.unmount()
+})
+
+test('a what-if choice opens only its own warehouse when two workspaces share the warehouse id and the choice', async ($, on) => {
+  const [first, second] = DATABRICKS_REPORT.what_if
+  // Core's own answer: one id, the same choices, two workspaces.
+  expect(first!.resource_id).toBe(second!.resource_id)
+  expect(first!.workspace_id).not.toBe(second!.workspace_id)
+  expect(first!.choices[1]!.label).toBe(second!.choices[1]!.label)
+  const { clock } = await start($, on, { answer: coreAnswer() })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^What if synth_classic in workspace 1001 \(\$283 a month now\) were…$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^What if synth_classic in workspace 1002 \(/ })).toBeDefined()
+  const opened = async () => ((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).map(one => String(one.text))
+  const at = (one: (typeof DATABRICKS_REPORT.what_if)[number] | undefined) => compared(one!.current_monthly_cost, one!.choices[1]!.monthly_cost)
+
+  await ui.press({ key: 'whatif-0-1' })
+  await clock.settle()
+  expect(await opened()).toEqual([`At X-SMALL: ${at(first).now} a month instead of ${at(first).was}, ${at(first).gap} less. Its 16 cores cover the 4 its queries need (twice what 99% of them use).`])
+
+  await ui.press({ key: 'whatif-1-1' })
+  await clock.settle()
+  const now = await opened()
+  expect(now.length).toBe(1)
+  expect(now[0]).toContain(`instead of ${at(second).was},`)
+  await ui.unmount()
+})
+
+test('a what-if choice opens only the connection it was pressed in when two connections list the same warehouse', async ($, on) => {
+  const answer = coreAnswer()
+  const { clock } = await start($, on, { list: BOTH, answer })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  // The second connection reads the same workspaces, so its answer lists the same warehouses.
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await mountFull($)
+  const headings = ((await ui.findAll({ type: 'Text', text: /^What if synth_classic in workspace 1001 / })) as any[]).length
+  // Both connections' answers are drawn, each with its own what-if rows.
+  expect(headings).toBe(2)
+  const rows = DATABRICKS_REPORT.what_if.length
+  await ui.press({ key: 'whatif-0-1' })
+  await clock.settle()
+  expect(((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).length).toBe(1)
+  await ui.press({ key: `whatif-${rows}-1` })
+  await clock.settle()
+  expect(((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).length).toBe(1)
+  await ui.unmount()
+})
