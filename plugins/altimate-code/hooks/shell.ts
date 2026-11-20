@@ -14,43 +14,28 @@ const LEADER_VALUE_OPTIONS: Record<string, readonly string[]> = {
 export const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
 /** A shell's long options that take their value as the next word (`--rcfile x`). */
 const SHELL_VALUE_OPTIONS = new Set(['--rcfile', '--init-file'])
-/** The options this reader knows: bash's short ones (`o` and `O` take a value each), and its long ones. */
-const KNOWN_SHORT = /^[-+][abcefhiklmnoprstuvxBCEHOPT]+$/
-const KNOWN_LONG = new Set(['--login', '--norc', '--noprofile', '--posix', '--restricted', '--verbose', '--noediting', '--debugger', '--help', '--version', ...SHELL_VALUE_OPTIONS])
-/** A redirection word as `simpleCommands` writes it (`>`, `2>`, `2>&`, `<`, `<<<`), before its target. */
-const REDIRECT_WORD = /^\d*(>[>|&]?|<(<<|>)?)$/
 
 /**
  * The script a shell runs from its `-c` option (alone or in a cluster: `-lc`, `-cx`, `-Ec`): the first word
  * after the shell's options, where each `o` or `O` in a cluster takes the next word as its value, in order
- * (`-o pipefail`, `-euo pipefail`, `-oc pipefail`). Redirections are not the shell's words (the calling
- * shell takes them), so `bash 2>/dev/null -c x` and `bash -c >log x` run `x`. '' when `-c` has no script
- * word after it. An option this reader does not know may take a value and so hide a `-c` after it
- * (`zsh --emulate sh -c x`, `ksh -R f -c x`): past one, any `-c` counts, as the push check always read it.
- * Null when there is none: `bash deploy.sh -c x` runs deploy.sh, with `-c` as its argument. `at` is where
- * the shell's own name is.
+ * (`-o pipefail`, `-euo pipefail`, `-oc pipefail`). '' when `-c` has no script word after it. An option
+ * this reader does not know may take a value and so hide a `-c` after it (`zsh --emulate sh -c x`): then,
+ * as the push check always did, any `-c` after the shell's name counts, with the word after it as its
+ * script. Null when there is none. `at` is where the shell's own name is.
  */
 export function shellScript(words: readonly string[], at: number): string | null {
-  const args: string[] = []
-  for (let k = at + 1; k < words.length; k++) {
-    if (REDIRECT_WORD.test(words[k]!)) k++
-    else args.push(words[k]!)
-  }
   let script = false
-  let unknown = false
-  let i = 0
-  for (; i < args.length && /^[-+]./.test(args[i]!) && args[i] !== '--'; i++) {
-    const word = args[i]!
+  let i = at + 1
+  for (; i < words.length && /^[-+]./.test(words[i]!) && words[i] !== '--'; i++) {
+    const word = words[i]!
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(word)) script = true
-    if (!KNOWN_SHORT.test(word) && !KNOWN_LONG.has(word)) unknown = true
     if (SHELL_VALUE_OPTIONS.has(word)) i++
     else if (/^[-+][A-Za-z]+$/.test(word)) i += (word.match(/[oO]/g) ?? []).length
   }
-  if (args[i] === '--') i++
-  if (script) return args[i] ?? ''
-  if (!unknown) return null
-  const c = args.findIndex((word, k) => k >= i && /^-[a-z]*c$/.test(word))
-  return c < 0 ? null : (args[c + 1] ?? '')
+  if (words[i] === '--') i++
+  if (script) return words[i] ?? ''
+  const c = words.findIndex((word, k) => k > at && /^-[a-z]*c$/.test(word))
+  return c < 0 ? null : (words[c + 1] ?? '')
 }
 
 /** Where the heredoc started by `<<` at `i` ends: its delimiter, whether it was quoted, and `<<` at `i` is one at all (not `<<<`, not a shift in `$((x<<2))`). */

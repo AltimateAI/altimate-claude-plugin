@@ -1171,14 +1171,9 @@ test('a shell runs its -c script from any option cluster, and past options this 
   // An unknown option may take a value, so a `-c` after it still counts, as it always did.
   expect(isGitPush("zsh --emulate sh -c 'git push'")).toBe(true)
   expect(isGitPush("ksh -R x -c 'git push'")).toBe(true)
-  // A script's own `-check`, `-force` or `-c` argument is no `-c` of the shell's.
+  // A script's own `-check` or `-force` argument is no `-c`.
   expect(isGitPush("sh ./ci.sh -check 'git push'")).toBe(false)
   expect(isGitPush("bash ./run.sh -force 'git push'")).toBe(false)
-  expect(isGitPush("bash deploy.sh -c 'git push'")).toBe(false)
-  // A redirection is the calling shell's, before or after `-c`.
-  for (const line of ["bash 2>/dev/null -c 'git push'", "bash 2>&1 -c 'git push'", "bash >/dev/null -c 'git push'", "bash -c >log 'git push'", "bash -c 2>/dev/null 'git push'"]) {
-    expect(isGitPush(line)).toBe(true)
-  }
   expect(filesWrittenBy("bash -ec 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
   expect(filesWrittenBy("bash -euo pipefail -c 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
 })
