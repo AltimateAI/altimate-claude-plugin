@@ -3876,6 +3876,42 @@ test('a fix drafted on a warehouse core sends with no size reads its type alone 
   await ui.unmount()
 })
 
+test('two workspaces sharing a warehouse id: a drafted fix, a what-if press and a baseline each touch only their own workspace', async ($, on) => {
+  const ours = DATABRICKS_REPORT.findings.findIndex(one => one.resource_id === 'wh-synth-classic' && one.workspace_id === '1001' && one.check_id === 'wh_classic_pro_to_serverless')
+  expect(DATABRICKS_REPORT.findings.some(one => one.resource_id === 'wh-synth-classic' && one.workspace_id === '1002')).toBe(true)
+  const baseline = (workspace: string) => `savings-baseline:dbxmega:${workspace}:wh-synth-classic`
+  const fix = (workspace: string) => `savings-fix:project:${ROOT}/dbxmega:${workspace}:sql_warehouse:wh-synth-classic`
+  // 1001 is as its baseline says; 1002 was MEDIUM when first flagged and is SMALL now.
+  const store = {
+    [baseline('1001')]: { date: '2026-11-03', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 66 },
+    [baseline('1002')]: { date: '2026-11-03', config: { size: 'MEDIUM', type: 'CLASSIC' }, windowCost: 99 },
+  }
+  const { clock, store: kept } = await start($, on, { answer: coreAnswer(), store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  // Baseline: only 1002's warehouse changed, and only its line is drawn.
+  expect(texts.filter(text => /^synth_classic .* since 2026-11-03\./.test(text))).toEqual([
+    'synth_classic (workspace 1002): MEDIUM CLASSIC → SMALL CLASSIC since 2026-11-03. Observed spend: $424 a month before, $212 after.',
+  ])
+  expect(kept.get(baseline('1001'))).toEqual(store[baseline('1001')])
+  // Drafted fix: kept under 1001 with 1001's cost and size; nothing kept for 1002.
+  await ui.press({ key: `fix-${ours}` })
+  await clock.settle()
+  expect(kept.get(fix('1001'))).toMatchObject({ workspaceId: '1001', config: { size: 'SMALL', type: 'CLASSIC' } })
+  expect(Math.abs((kept.get(fix('1001')) as any).dailyCost - 66 / 7)).toBeLessThan(1e-9)
+  expect(kept.has(fix('1002'))).toBe(false)
+  // What-if: pressing 1001's choice opens 1001's comparison alone.
+  await ui.press({ key: 'whatif-0-1' })
+  await clock.settle()
+  const opened = ((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).map(one => String(one.text))
+  const first = DATABRICKS_REPORT.what_if[0]!
+  expect(first.workspace_id).toBe('1001')
+  expect(opened).toEqual([`At X-SMALL: ${compared(first.current_monthly_cost, first.choices[1]!.monthly_cost).now} a month instead of ${compared(first.current_monthly_cost, first.choices[1]!.monthly_cost).was}, ${compared(first.current_monthly_cost, first.choices[1]!.monthly_cost).gap} less. Its 16 cores cover the 4 its queries need (twice what 99% of them use).`])
+  await ui.unmount()
+})
+
 test('a what-if choice opens only its own warehouse when two workspaces share the warehouse id and the choice', async ($, on) => {
   const [first, second] = DATABRICKS_REPORT.what_if
   // Core's own answer: one id, the same choices, two workspaces.
