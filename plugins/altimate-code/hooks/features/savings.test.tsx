@@ -224,6 +224,8 @@ function failure(error: string) {
 type Options = {
   /** Runs while the pane opens, before the engine answers. */
   onOpen?: () => Promise<void>
+  /** Runs at each await point a run reaches, before the engine answers it. */
+  onStep?: (step: string) => Promise<void>
   answer?: unknown
   /** `tool run` exits 1 with this answer, as altimate-code does for a tool it does not have. */
   error?: unknown
@@ -313,8 +315,12 @@ async function start($: any, on: any, options: Options = {}) {
     statuses.push(e.text)
     return { value: undefined }
   })
-  on('store.get', (_: unknown, e: { key: string }) => ({ value: store.get(e.key) }))
-  on('store.set', (_: unknown, e: { key: string; value: unknown }) => {
+  on('store.get', async (_: unknown, e: { key: string }) => {
+    if (e.key.startsWith('savings-baseline:')) await options.onStep?.('baseline read')
+    return { value: store.get(e.key) }
+  })
+  on('store.set', async (_: unknown, e: { key: string; value: unknown }) => {
+    if (e.key.startsWith('savings-baseline:')) await options.onStep?.('baseline write')
     if (options.storeFull || options.storeRefuses?.(e.key)) return { deny: 'the store is over its limit' }
     store.set(e.key, e.value)
     return { value: undefined }
@@ -332,6 +338,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.root', () => ({ value: ROOT }))
   on('ui.open', async () => {
     await options.onOpen?.()
+    await options.onStep?.('pane open')
     return { value: options.isPlaced === false ? { isPlaced: false } : {} }
   })
   on('ui.close', () => ({ value: undefined }))
@@ -361,6 +368,7 @@ async function start($: any, on: any, options: Options = {}) {
       return { value: { exitCode: options.openExit ?? 0, stdout: '', stderr: '' } }
     }
     if (command === '--version') {
+      await options.onStep?.('version probe')
       if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
       if (options.versionRejects) return { deny: options.versionRejects }
       // The status line's own version check at session start runs without the switches: not the savings check's.
@@ -380,6 +388,7 @@ async function start($: any, on: any, options: Options = {}) {
     // The other halves of the plugin ask the CLI for other things at session start.
     if (command !== 'tool' || tool !== 'finops_databricks_savings') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     runs.push({ argv: [...e.argv], env: e.init?.env })
+    await options.onStep?.('tool run')
     if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
     if (options.runRejects) return { deny: options.runRejects }
     if (options.hold) await options.hold
@@ -3368,3 +3377,34 @@ test('a /clear while /savings opens its pane drops that run, and the next /savin
   await clock.settle()
   expect(runs.length).toBe(1)
 })
+
+// Every await point of a /savings run, from the command to the report. A /clear at each one in turn.
+for (const step of ['pane open', 'version probe', 'tool run', 'baseline read', 'baseline write']) {
+  test(`a /clear at the run's ${step} leaves nothing running and no old report, and the next /savings runs`, async ($, on) => {
+    const options: any = {}
+    const { clock, toasts, store } = await start($, on, options)
+    let cleared = false
+    options.onStep = async (at: string) => {
+      if (at !== step || cleared) return
+      cleared = true
+      await $.session.end({ reason: 'clear' } as any)
+    }
+    await savings($)
+    await clock.settle()
+    expect(cleared).toBe(true)
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /a month/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /Checking the workspace/ })).toBeUndefined()
+    await ui.unmount()
+    expect(toasts.filter(text => text.startsWith('Databricks savings check'))).toEqual([])
+    // Up to the baseline write itself, the dropped run keeps no baseline.
+    if (step !== 'baseline write') expect([...store.keys()].filter(key => key.startsWith('savings-baseline:'))).toEqual([])
+    options.onStep = undefined
+    const said = await savings($)
+    expect(String((said as any)?.text)).not.toContain('already running')
+    await clock.settle()
+    const after = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await after.find({ type: 'Text', text: /a month/ })).toBeDefined()
+    await after.unmount()
+  })
+}
