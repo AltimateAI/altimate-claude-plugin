@@ -1160,6 +1160,8 @@ async function startPressedRun($: EngineInterface, asked: string | null, at: num
   try {
     if (await read($, busyAtom)) return
     const connections = await read($, connectionsAtom)
+    // Checked again after the reads: a /clear meanwhile must not leave the check marked running.
+    if (at !== generation) return
     await update($, busyAtom, () => busyOf(asked, connections))
   } finally {
     pressStarting = false
@@ -1694,7 +1696,9 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
         onPress={() => {
           const at = generation
           later($, async () => {
+            if (at !== generation) return
             await update($, bandAtom, () => null)
+            if (at !== generation) return
             await openPane($)
             await startPressedRun($, lastAsked, at)
           })
