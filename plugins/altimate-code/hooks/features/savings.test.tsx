@@ -1614,11 +1614,18 @@ test('the program is found past every leader the push check knows, and past xarg
     'xargs -P 4 databricks clusters get',
     "bash -c 'databricks bundle deploy'",
     'sh -lc "databricks jobs list"',
+    "bash -cx 'databricks warehouses list'",
+    "bash -Ec 'databricks jobs list'",
+    "bash -o pipefail -c 'databricks jobs list'",
+    'ls | xargs -J % databricks clusters get %',
+    'xargs --max-args 1 databricks clusters get',
   ]) {
     expect(runsDatabricksCompute(line)).toBe(true)
   }
   expect(runsDatabricksCompute('nice -n 10 echo databricks bundle deploy')).toBe(false)
   expect(runsDatabricksCompute("bash -c 'echo databricks bundle deploy'")).toBe(false)
+  // The shell runs deploy.sh; the `-c` after it is that script's own argument.
+  expect(runsDatabricksCompute("bash deploy.sh -c 'databricks bundle deploy'")).toBe(false)
 })
 
 test('a job figure the answer leaves blank reads ?, not "under 0.1"', () => {

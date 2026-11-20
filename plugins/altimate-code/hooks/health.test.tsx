@@ -1,7 +1,8 @@
 import { expect, mock, test as engineTest } from 'claude-code/testing'
 
 import { PHASE_TIMEOUT_MS } from './tool-chain'
-import { GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
+import { GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, toolArgs } from './features/health'
+import { simpleCommands } from './shell'
 
 // These tests are about the health check's own lines: the dbt helpers (their doctor and compile lines) are left off.
 const test = ((name: string, ...rest: any[]) => {
@@ -912,4 +913,11 @@ test('with ALTIMATE_TELEMETRY_DISABLED the push gate holds as before and sends n
   await $.command.run({ command: 'health', args: '' } as any)
   await clock.settle()
   expect(usage).toEqual([])
+})
+
+test('a shell runs its -c script only when -c is among its own options, in any cluster', () => {
+  expect(isGitPush("bash -cx 'git push'")).toBe(true)
+  expect(isGitPush("bash -o pipefail -c 'git push'")).toBe(true)
+  expect(isGitPush("bash deploy.sh -c 'git push'")).toBe(false)
+  expect(filesWrittenBy("bash -ec 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
 })
