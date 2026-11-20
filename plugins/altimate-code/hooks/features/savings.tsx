@@ -86,8 +86,9 @@ let generation = 0
 // the conversation (the prompt box, the band, a toast) is dropped once it moved on. A run starting does not move it.
 let conversation = 0
 let lastConnection: string | null = null
-// Set from a press that starts a run (Run again, the band's Run /savings) until that run ends.
-let pressQueued = false
+// The press that starts a run (Run again, the band's Run /savings), from the press until that run ends. Only that
+// press clears it, so one from before a /clear cannot free the guard for a later press.
+let pressQueued: object | null = null
 // The once-a-session offer of /savings when the session first touches Databricks config.
 let offered = false
 
@@ -111,7 +112,8 @@ const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses
 export function isDatabricksConfig(path: string, text: string): boolean {
   const file = path.replace(/\\/g, '/')
   if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
-  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text)
+  // A block commented out with /* */ declares nothing.
+  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text.replace(/\/\*[\s\S]*?\*\//g, ''))
   if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null
@@ -686,7 +688,8 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
       // The CLI's text is only the first line of what it printed; an old altimate-code is told by its whole usage.
       const raw = ('raw' in result ? result.raw : '') || ''
       const error = metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)
-      const why = explain(error || 'no answer', connection)
+      // The CLI's reason is text; anything else is read as text too, never as a script error.
+      const why = explain(String(error || 'no answer'), connection)
       await update($, messageAtom, now => (live() ? why : now))
       say(`Databricks savings check: ${why.text} ${why.recovery}`)
       return
@@ -959,7 +962,7 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   conversation += 1
   lastConnection = null
   offered = false
-  pressQueued = false
+  pressQueued = null
   await update($, bandAtom, () => null)
   await update($, whatIfAtom, () => null)
   await update($, reportAtom, () => null)
@@ -992,7 +995,8 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
 /** A press that starts a run: a second press before the first one's run has started, or while it runs, starts nothing. */
 function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<unknown>) {
   if (pressQueued) return
-  pressQueued = true
+  const mine = {}
+  pressQueued = mine
   const at = generation
   later($, async () => {
     try {
@@ -1004,7 +1008,7 @@ function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<u
       await update($, busyAtom, now => (live() ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
       await runCheck($, lastConnection, at)
     } finally {
-      pressQueued = false
+      if (pressQueued === mine) pressQueued = null
     }
   })
 }
