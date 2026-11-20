@@ -84,8 +84,10 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g, `$1 ${MASK}`],
   // user:password@host in a connection string or URL.
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, `$1${MASK}@`],
-  // A connection string's password: a braced value (ODBC `PWD={a b};`, `}}` is a literal brace) or a value that runs to the next `;`, spaces included.
-  [/((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:\{(?:[^}\n]|\}\})*\}|[^;\n]*(?=;))/gi, `$1${MASK}`],
+  // A connection string's password: a quoted or braced value to its own closing delimiter (ODBC `PWD={a b};`, `}}` is a literal brace), or a
+  // value that runs to the next `;`, spaces included; the last field of a string (after a `;`, or alone on its line) runs to the end of the line.
+  [/((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\})*\}|[^;\n]*(?=;))/gi, `$1${MASK}`],
+  [/((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?!‹redacted›)[^;\n]*$/gim, `$1${MASK}`],
   // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
   // backslash escape or a doubled quote is inside it) or the rest of the word. A YAML block scalar is cut whole first (redactBlockScalars).
   [/((?<![\w.-])[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?\s*[:=]\s*)(?!‹redacted›)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\S+)/gi, `$1${MASK}`],
