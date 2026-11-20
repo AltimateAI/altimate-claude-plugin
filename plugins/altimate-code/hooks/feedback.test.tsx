@@ -567,6 +567,40 @@ test('a description that is refused as too long, or empty after the flag, leaves
   expect(creates()).toEqual([])
 })
 
+test('credential keys with a prefix or suffix (DBT_PASSWORD, access_token), YAML block scalars and doubled apostrophes are cut out whole, with no profile values loaded', () => {
+  const text = [
+    'DBT_PASSWORD=hunter2',
+    'SNOWFLAKE_PASSWORD="warehouse private secret"',
+    'access_token=private-token-value',
+    "password: 'alpha''omega-secret'",
+    'password: |\n  my-database-password\n  second-line-secret\nuser: bob',
+    'client_secret: >-\n  folded-secret',
+    'AWS_SECRET_ACCESS_KEY=abcd/efgh+ijkl',
+  ].join('\n')
+  const out = redactSecrets(text)
+  expect(out).not.toMatch(/hunter2|warehouse|private-token|omega|database-password|second-line|folded-secret|abcd\/efgh/)
+  expect(out).toContain('user: bob')
+})
+
+test('a profile value that YAML writes with doubled apostrophes is cut out too', () => {
+  setRedactions(ROOT, ["alpha'omega-secret"])
+  try {
+    expect(redactSecrets("it said 'alpha''omega-secret' and alpha'omega-secret")).not.toMatch(/alpha|omega/)
+  } finally {
+    clearRedactions()
+  }
+})
+
+test('~/ paths and a path with parentheses in a folder name are replaced whole, with or without a home folder known', () => {
+  expect(withoutHome('see ~/private/payroll.sql now', [HOME])).toBe('see <path under home> now')
+  expect(withoutHome('see ~/private/payroll.sql now', [])).toBe('see <path under home> now')
+  expect(withoutHome("open '~/My Files/a.sql'", [])).toBe("open '<path under home>'")
+  expect(withoutHome(`see ${HOME}/Client(Private)/payroll.sql now`, [HOME])).toBe('see <path under home> now')
+  expect(withoutHome(`(see ${HOME}/x.sql)`, [HOME])).toBe('(see <path under home>)')
+  expect(withoutHome('a~b and file:///Users/alice/x.sql', [HOME])).toBe('a~b and file://<path under home>')
+  expect(withoutHome('2~3 and ~ alone', [])).toBe('2~3 and ~ alone')
+})
+
 test('a Windows home path as JSON or a Python repr writes it, with doubled backslashes or escaped slashes, is replaced whole', () => {
   const home = 'C:\\Users\\Alice'
   const json = JSON.stringify({ path: 'C:\\Users\\Alice\\work\\orders.sql', posix: `${HOME}/work/orders.sql` })

@@ -52,7 +52,10 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g, `$1 ${MASK}`],
   // user:password@host in a connection string or URL.
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, `$1${MASK}@`],
-  [/\b((?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|authorization)["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/gi, `$1${MASK}`],
+  // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a YAML block scalar with its indented lines,
+  // a quoted value to its own closing quote (a backslash escape or a doubled quote is inside it), or the rest of the word.
+  [/((?<![\w.-])[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?\s*[:=]\s*)[|>][+-]?\d?[ \t]*(?:\r?\n[ \t]+[^\n]*)+/gi, `$1${MASK}`],
+  [/((?<![\w.-])[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\S+)/gi, `$1${MASK}`],
   // A long unbroken run of key-like characters.
   [/\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g, MASK],
 ]
@@ -81,15 +84,16 @@ function homeForms(homes: readonly string[]): string[] {
   return [...forms].sort((a, b) => b.length - a.length)
 }
 
-const PATH_SEGMENT = `(?:[^\\s'"\`<>()\\\\/]|'(?=[A-Za-z0-9]))`
+const PATH_SEGMENT = `(?:[^\\s'"\`<>()\\\\/]|'(?=[A-Za-z0-9])|\\([^\\s()'"\`<>]*\\))`
 // The rest of a path after its home folder: segments, and a space inside one when a separator follows within three words
 // ("Client Files/acme"). A path that ends in a space-separated word ("Client Files") is cut at the space unless it is quoted.
 const PATH_TAIL = `(?:[\\\\/]${PATH_SEGMENT}*(?: (?=(?:${PATH_SEGMENT}+ ){0,7}${PATH_SEGMENT}+[\\\\/])${PATH_SEGMENT}+)*)*`
 
-/** Every path under the home folder replaced whole: a quoted one up to its closing quote, an unquoted one with the spaces inside its folder names. */
+/** Every path under the home folder, and every `~/…` path, replaced whole: a quoted one up to its closing quote, an unquoted one with the spaces inside its folder names. */
 export function withoutHome(text: string, homes: readonly string[]): string {
-  return homeForms(homes).reduce((out, form) => {
-    const home = escapeRegex(form)
+  // `~` stands for the home folder whoever the user is, so it counts only before a separator.
+  const forms = [...homeForms(homes).map(form => escapeRegex(form)), '(?<![\\w.~/\\\\-])~(?=[\\\\/])']
+  return forms.reduce((out, home) => {
     // A quoted path runs to its own closing quote (a quote of another kind, or an escaped one, is part of the name).
     return ['"', "'", '`']
       .reduce((text, quote) => text.replace(new RegExp(`${quote}${home}(?:[^${quote}\\n\\\\]|\\\\.)*${quote}`, 'gi'), `${quote}<path under home>${quote}`), out)
