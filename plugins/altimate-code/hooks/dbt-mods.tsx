@@ -24,6 +24,7 @@ import {
   sameFailure,
   isVersioned,
   fixPrompt,
+  listedFiles,
   listedNames,
   logErrors,
   modelContext,
@@ -601,6 +602,20 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
     const names = listing.exitCode === 0 ? listedNames(listing.stdout) : []
     if (names.length === 1) name = names[0]!
   }
+  if (!name && viaRunner) {
+    // From the project that installs the package and no manifest there that lists the file: dbt names the file's
+    // model, and its version, so only the edited version runs. `ls` runs no query.
+    const base = basename(file).replace(/\.sql$/i, '')
+    const listing = await run1(['ls', '--select', `${pkg ? `package:${pkg},` : ''}${base.replace(/_v(\d+)$/i, '')}`, '--resource-type', 'model', '--output', 'json', '--output-keys', 'name version original_file_path', '--log-format', 'text'])
+    if (listing === SKIPPED) return replaced()
+    if (cannotRun(listing)) return notChecked(NO_DBT)
+    const mine = listing.exitCode === 0 ? listedFiles(listing.stdout).filter(one => one.file === rel) : []
+    if (mine.length === 1) {
+      name = mine[0]!.name
+      const version = mine[0]!.version
+      versionOf = () => version
+    }
+  }
   const selector = selectorFor(name)
   let run = await show(selector)
   if (run === SKIPPED) return replaced()
@@ -613,7 +628,8 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // No preview, and the fresh manifest names the model with a name the selector did not carry (an old name that
   // selected nothing, or none when dbt ls could not give one): ask once more, with the name replaced, not added: a
   // comma intersects, and the old name and the new one select nothing together. The only case of a second show.
-  versionOf = () => node?.node?.version ?? known?.node?.version
+  const listedVersion = versionOf
+  versionOf = () => node?.node?.version ?? known?.node?.version ?? listedVersion()
   if (run.exitCode === 0 && !preview && named && selectorFor(named) !== selector && !selector.split(',').includes(named)) {
     const again = await show(selectorFor(named))
     if (again === SKIPPED) return replaced()
@@ -663,13 +679,14 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // Only the columns this edit left undocumented are its gaps; ones undocumented before it are said once, quietly.
   const sqlNow = await $.fs.read(file).catch(() => null)
   const gaps = undocumentedByEdit(drift.undocumented, sqlBefore, sqlBefore === null ? null : sqlNow, lastReturned.get(fileKey) ?? null, editGaps.get(fileKey) ?? [])
-  if (returned && !stale) editGaps.set(fileKey, gaps.fresh)
+  // Only the newest check of this file records what it found: an older one finishing late does not erase a newer edit's gaps.
+  if (returned && current()) editGaps.set(fileKey, gaps.fresh)
   // A model, seed, snapshot or source named by its table instead of ref() or source(): dbt and lineage cannot follow it.
   const hardcoded = sqlNow !== null && !errors.length ? hardcodedRelations(sqlNow, after?.manifest ?? before?.manifest, node?.id ?? known?.id ?? null) : []
   // A gap this session's edit made stays the edit's on the next check, until schema.yml or the model closes it.
-  if (returned && !stale) lastReturned.set(fileKey, returned.filter(one => !gaps.fresh.includes(one)))
+  if (returned && current()) lastReturned.set(fileKey, returned.filter(one => !gaps.fresh.includes(one)))
   const said = oldGapsSaid.has(fileKey)
-  if (gaps.old.length && !stale && current()) oldGapsSaid.add(fileKey)
+  if (gaps.old.length && current()) oldGapsSaid.add(fileKey)
   const status: CheckView['status'] = errors.length ? 'error' : hardcoded.length ? 'warn' : reason ? 'partial' : drift.missing.length || gaps.fresh.length ? 'warn' : 'ok'
   const view: CheckView = { ...blank, model: named ?? model, schema: node ? schemaOf(node.node) : blank.schema, status, reason, ran: !errors.length && !nothingShown, errors: errors.map(one => one.slice(0, 1500)), missing: drift.missing, undocumented: gaps.fresh, ...(gaps.old.length ? { undocumentedBefore: gaps.old, ...(said && { oldGapsSaid: true }) } : {}), ...(hardcoded.length ? { hardcoded } : {}), columns: returned ? returned.length : null, returned: returned ?? [], documented, ms, at: started }
   await setCheck($, view, newest)

@@ -626,6 +626,8 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   // Nor does a predicate on the line below its WHERE, or a reworded comment.
   const filtered = `${before}\n  and med.paid_amount > 0`
   expect(valueCandidates(filtered, filtered.replace('> 0', '> 100'))).toEqual([])
+  const split = 'select paid_amount from raw where\n paid_amount > 0'
+  expect(valueCandidates(split, split.replace('> 0', '> 100'))).toEqual([])
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')
   expect(valueCandidates(commented, commented.replace('in cents', 'in dollars'))).toEqual([])
   const answer = {

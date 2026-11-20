@@ -157,6 +157,20 @@ export function logErrors(stdout: string): string[] {
 }
 
 /** The node names `dbt ls --output json --output-keys name` printed: one JSON object per line, among dbt's own log lines. */
+/** The models `dbt ls --output json --output-keys "name version original_file_path"` lists, each with its file and version. */
+export function listedFiles(stdout: string): { name: string; version: unknown; file: string }[] {
+  const out: { name: string; version: unknown; file: string }[] = []
+  for (const line of stripAnsi(stdout).split('\n')) {
+    const text = line.trim()
+    if (!text.startsWith('{')) continue
+    try {
+      const one = JSON.parse(text)
+      if (typeof one?.name === 'string' && typeof one?.original_file_path === 'string') out.push({ name: one.name, version: one.version ?? null, file: one.original_file_path })
+    } catch {}
+  }
+  return out
+}
+
 export function listedNames(stdout: string): string[] {
   const names: string[] = []
   for (const line of stripAnsi(stdout).split('\n')) {
@@ -831,7 +845,7 @@ const unquote = (part: string) => part.trim().replace(/^["`\[]|["`\]]$/g, '').to
  */
 export function hardcodedRelations(sql: string, manifest: any, selfId?: string | null): { relation: string; use: string }[] {
   const text = sqlCode(sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, ' __jinja__ '))
-  const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s+as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
+  const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   const known = new Map<string, { relation: string; use: string }>()
   const add = (id: string, node: any, use: string) => {
@@ -864,36 +878,87 @@ function masked(sql: string): string {
   return sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, one => one.replace(/[^\n]/g, ' '))
 }
 
-/**
- * The model's own output columns: the names in its last top-level SELECT (after its CTEs), not those of a CTE or
- * subquery. `star` when that list has a `*`, whose columns the SQL does not name. Null when there is no such SELECT.
- */
-export function outputColumns(sql: string): { names: Set<string>; star: boolean } | null {
-  const code = masked(sql)
+/** Where the keyword `word` starts at paren depth 0 in masked SQL, from `from`; the last one when `last`. -1 when none. */
+function topLevel(code: string, word: string, from = 0, last = false): number {
   let depth = 0
-  let last = -1
-  for (let i = 0; i < code.length; i++) {
+  let found = -1
+  const re = new RegExp(`^${word}\\b`, 'i')
+  for (let i = from; i < code.length; i++) {
     const ch = code[i]!
     if (ch === '(') depth++
     else if (ch === ')') depth = Math.max(0, depth - 1)
-    else if (depth === 0 && /[Ss]/.test(ch) && /^select\b/i.test(code.slice(i, i + 7)) && !/\w/.test(code[i - 1] ?? '')) last = i
-  }
-  if (last < 0) return null
-  // The list runs to the FROM at the same depth.
-  let end = code.length
-  depth = 0
-  for (let i = last + 6; i < code.length; i++) {
-    const ch = code[i]!
-    if (ch === '(') depth++
-    else if (ch === ')') depth = Math.max(0, depth - 1)
-    else if (depth === 0 && /^from\b/i.test(code.slice(i, i + 5)) && !/\w/.test(code[i - 1] ?? '')) {
-      end = i
-      break
+    else if (depth === 0 && re.test(code.slice(i, i + word.length + 1)) && !/\w/.test(code[i - 1] ?? '')) {
+      found = i
+      if (!last) return i
     }
   }
-  const list = code.slice(last, end)
-  const star = /(?:^select\s+(?:distinct\s+)?|,\s*)(?:[\w"`]+\.)?\*/i.test(list.replace(/\s+/g, ' ').trim())
-  return { names: new Set(selectItems(sql.slice(last, end)).keys()), star }
+  return found
+}
+
+/** A select list split at its top-level commas. */
+function topItems(list: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let at = 0
+  for (let i = 0; i < list.length; i++) {
+    const ch = list[i]!
+    if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    else if (ch === ',' && depth === 0) {
+      out.push(list.slice(at, i))
+      at = i + 1
+    }
+  }
+  out.push(list.slice(at))
+  return out.map(one => one.trim()).filter(Boolean)
+}
+
+/** The CTEs of a model's SQL, by name, with their bodies (masked text). */
+function ctesOf(code: string): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const match of code.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))) {
+    let depth = 1
+    const open = match.index! + match[0].length
+    let i = open
+    for (; i < code.length && depth > 0; i++) {
+      if (code[i] === '(') depth++
+      else if (code[i] === ')') depth--
+    }
+    out.set(unquote(match[1]!), code.slice(open, i - 1))
+  }
+  return out
+}
+
+/**
+ * The model's own output columns: the names in its last top-level SELECT (after its CTEs), not those of a CTE or a
+ * subquery inside it. A `select *` from one of its CTEs reads that CTE's own list. `star` when a `*` is left that the
+ * SQL does not name. Null when there is no such SELECT.
+ */
+export function outputColumns(sql: string, depth = 0): { names: Set<string>; star: boolean } | null {
+  const code = masked(sql)
+  const select = topLevel(code, 'select', 0, true)
+  if (select < 0) return null
+  const from = topLevel(code, 'from', select + 6)
+  const list = code.slice(select + 6, from < 0 ? code.length : from).replace(/^\s*(?:distinct|all)\b/i, '')
+  const names = new Set<string>()
+  let star = false
+  for (const item of topItems(list)) {
+    const bare = item.replace(/\s+/g, ' ').trim()
+    if (/^(?:[\w"`]+\.)?\*$/.test(bare)) {
+      star = true
+      continue
+    }
+    const name = /\bas\s+["`]?([A-Za-z_]\w*)["`]?$/i.exec(bare)?.[1] ?? /[\s)]["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1] ?? /^(?:["`]?[A-Za-z_]\w*["`]?\.)*["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1]
+    if (name) names.add(name.toLowerCase())
+  }
+  if (star && depth < 5 && from >= 0) {
+    // `select * from <cte>`: that CTE's own list, once its name is the only relation read.
+    const source = /^\s*((?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*))\s*(?:as\s+\w+\s*)?(?:$|where\b|group\b|order\b|limit\b|qualify\b|having\b)/i.exec(code.slice(from + 4))
+    const body = source ? ctesOf(code).get(unquote(source[1]!)) : undefined
+    const inner = body !== undefined ? outputColumns(body, depth + 1) : null
+    if (inner) return { names: new Set([...names, ...inner.names]), star: inner.star }
+  }
+  return { names, star }
 }
 
 /**

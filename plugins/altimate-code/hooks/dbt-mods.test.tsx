@@ -38,7 +38,7 @@ import {
   textTable,
   versionInfo,
 } from './dbt-mods-core'
-import { MANIFEST_SLICE, PROFILE_REDACT, PROFILE_TYPE, RUN_FAILURES } from './dbt-mods'
+import { CHECK_HOLD_MS, MANIFEST_SLICE, PROFILE_REDACT, PROFILE_TYPE, RUN_FAILURES } from './dbt-mods'
 
 // The dbt helpers on; the lineage half reads no manifest in these tests that it would draw.
 // The kit's `$` and `on`, loosely typed: the tests drive engine events with only the fields the helpers read.
@@ -213,6 +213,8 @@ type Options = {
   listFails?: boolean
   /** A file whose stat waits for `until` while it is set. */
   statGate?: { path: string; until?: Promise<void> }
+  /** The first read of this project file after `shows` dbt shows have run waits for `until`. */
+  holdReadAfterShows?: { path: string; shows: number; until: Promise<void> }
   /** The project's artifact folder, when not `target`. */
   target?: string
   /** Where Claude's shell is, when not the session folder. */
@@ -334,9 +336,15 @@ async function start($: any, on: any, options: Options = {}) {
     const size = /(^|\/)manifest\.json$/.test(rel) && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
     return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: false } }
   })
-  on('fs.read', (_: unknown, e: { path: string }) => {
+  let readHeld = false
+  on('fs.read', async (_: unknown, e: { path: string }) => {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
     const rel = e.path.slice(ROOT.length + 1)
+    const hold = options.holdReadAfterShows
+    if (hold && !readHeld && rel === hold.path && showsRun === hold.shows) {
+      readHeld = true
+      await hold.until
+    }
     if (rel.endsWith('manifest.json')) order.push(`read ${rel}`)
     if (!(rel in files)) throw new Error('ENOENT')
     if (rel === 'target/run_results.json' && (options.runResultsSize ?? 0) > 4 * 1024 * 1024) throw new Error('file is larger than 4 MiB')
@@ -355,6 +363,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   let held = false
   let shows = 0
+  let showsRun = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string; env?: Record<string, string> } }) => {
     runs.push([...e.argv])
     envs.push(e.init?.env ?? {})
@@ -405,6 +414,7 @@ async function start($: any, on: any, options: Options = {}) {
       return { value: { exitCode: 0, stdout: 'Performance info: target/perf_info.json', stderr: '' } }
     }
     if (verb === 'show') {
+      showsRun++
       const show = options.show ?? { rows: [{ order_id: 1, amount: 10 }] }
       // A dbt show writes run_results.json to its own artifact folder; a run of Claude's that ends meanwhile writes the project's.
       if (show.writes) files[`${out}/run_results.json`] = JSON.stringify({ ...RUN_RESULTS, metadata: { invocation_id: show.writes, generated_at: 'x' } })
@@ -698,8 +708,57 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // A column a CTE already had, newly in the model's own select list: the edit's.
   const cte = 'with src as (select id, amount from raw) select id from src'
   expect(undocumentedByEdit(['amount'], cte, cte.replace('select id from src', 'select id, amount from src'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A subquery inside the model's own list is not one of its outputs.
+  const sub = 'select id, (select amount from raw) as total from src'
+  expect(undocumentedByEdit(['amount'], sub, sub.replace('select id,', 'select id, amount,'), ['id', 'total'])).toEqual({ fresh: ['amount'], old: [] })
+  // A `select *` from a CTE reads that CTE's own list, not an earlier CTE's.
+  const two = 'with src as (select id, amount from raw), b as (select id from src) select * from b'
+  expect(undocumentedByEdit(['amount'], two, two.replace('b as (select id from src)', 'b as (select id, amount from src)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
   // A gap an earlier edit made stays the edit's when a later edit rewrites its expression.
   expect(undocumentedByEdit(['amount_cents'], 'select id, amount as amount_cents from x', 'select id, amount * 100 as amount_cents from x', ['id'], ['amount_cents'])).toEqual({ fresh: ['amount_cents'], old: [] })
+})
+
+test('an older check that ends after a newer one does not erase the newer edit\'s gap', async ($, on) => {
+  let release!: () => void
+  const until = new Promise<void>(resolve => (release = resolve))
+  const show: Options['show'] = { rows: [{ order_id: 1, amount: 10 }] }
+  const { clock, files } = await start($, on, { show, files: { 'models/orders.sql': 'select order_id, amount from {{ ref("stg_orders") }}' }, holdReadAfterShows: { path: 'models/orders.sql', shows: 1, until } })
+  // The first edit's check pauses after its dbt show, reading the model.
+  files['models/orders.sql'] = 'select order_id,  amount from {{ ref("stg_orders") }}'
+  const first = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'order_id, amount', new_string: 'order_id,  amount' })
+  await clock.advance(CHECK_HOLD_MS + 100)
+  await first
+  // A newer edit adds amount_cents, undocumented: its check warns.
+  show.rows = [{ order_id: 1, amount: 10, amount_cents: 1000 }]
+  files['models/orders.sql'] = 'select order_id,  amount, amount * 100 as amount_cents from {{ ref("stg_orders") }}'
+  const second: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount from', new_string: 'amount, amount * 100 as amount_cents from' })
+  await clock.settle()
+  expect(second.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: amount_cents')
+  // The older check ends now: it is no longer the newest, and records nothing.
+  release()
+  await clock.settle()
+  files['models/orders.sql'] = 'select order_id,  amount, amount * 101 as amount_cents from {{ ref("stg_orders") }}'
+  const third: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'amount * 100', new_string: 'amount * 101' })
+  await clock.settle()
+  expect(third.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: amount_cents')
+})
+
+test('from integration_tests with no manifest there, dbt ls names the file\'s model and version, so only that version runs', async ($, on) => {
+  const { clock, runs } = await start($, on, {
+    show: { rows: [{ order_id: 1, amount: 10 }], node: 'orders.v2' },
+    listed: [{ name: 'orders', version: 1, original_file_path: 'models/orders_v1.sql' } as any, { name: 'orders', version: 2, original_file_path: 'models/orders.sql' } as any],
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+    },
+  })
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  const ls = runs.find(argv => argv[1] === 'ls')!
+  expect(ls.slice(0, 4)).toEqual([DBT, 'ls', '--select', 'package:shop,orders'])
+  expect(runs.find(argv => argv[1] === 'show')!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
 })
 
 test('only the columns an edit left undocumented are its gaps; ones undocumented before it are said once, quietly', async ($, on) => {
@@ -826,6 +885,7 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   // Not code: a comment, a string; and the model itself.
   expect(hardcodedRelations("-- from main.stg_orders\nselect 'from main.stg_orders' as note from {{ ref('stg_orders') }} /* join raw_payments */", manifest, self)).toEqual([])
   expect(hardcodedRelations('select * from main.orders', manifest, self)).toEqual([])
+  expect(hardcodedRelations('with stg_orders(id) as (select 1) select * from stg_orders', manifest, self)).toEqual([])
   // A CTE named like a model, quoted or not, is the CTE.
   expect(hardcodedRelations('with "stg_orders" as (select 1 as id) select * from "stg_orders"', manifest, self)).toEqual([])
   // A manifest too big to read here comes as a slice of the model's graph: the relations it lists apart still count,

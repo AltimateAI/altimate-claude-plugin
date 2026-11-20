@@ -95,6 +95,7 @@ const NOT_COLUMNS = new Set(
 )
 // A line that starts a clause, and the clauses that filter or join rather than compute a value.
 const CLAUSE = /^\s*(select|from|where|join|left|right|inner|full|cross|on|group|having|qualify|order|limit|union|with)\b/i
+const CLAUSES = /\b(select|from|where|join|on|group|having|qualify|order|limit|union)\b/gi
 const FILTERS = new Set(['where', 'join', 'left', 'right', 'inner', 'full', 'cross', 'on', 'having', 'qualify', 'group', 'order'])
 // A changed line that filters or joins rather than computes a value.
 const NOT_A_VALUE = /^\s*(?:where|and|or|on|from|join|left|right|inner|full|cross|group|order|having|limit|qualify|union|\)|\{%-?\s*(?:if|endif|for|endfor|else))\b/i
@@ -116,10 +117,13 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
   const left = new Map<string, number>()
   for (const line of was) left.set(line, (left.get(line) ?? 0) + 1)
   // Each line of the text after, with whether it sits in a filter or join clause (a predicate split over lines).
-  let filtering = false
+  // The clause a line starts in is the one it opens, else the last one the line before it reached.
+  let carried = false
   const added = now.flatMap(line => {
-    const clause = CLAUSE.exec(line)?.[1]?.toLowerCase()
-    if (clause) filtering = FILTERS.has(clause)
+    const opens = CLAUSE.exec(line)?.[1]?.toLowerCase()
+    const filtering = opens ? FILTERS.has(opens) : carried
+    const clauses = [...line.matchAll(CLAUSES)].map(one => one[1]!.toLowerCase())
+    carried = clauses.length ? FILTERS.has(clauses[clauses.length - 1]!) : filtering
     const n = left.get(line) ?? 0
     if (n > 0) left.set(line, n - 1)
     return n === 0 && !filtering ? [line] : []
