@@ -1525,12 +1525,31 @@ async function manifestCheck($: EngineInterface, root: string): Promise<{ check:
  */
 async function recheckDoctorManifest($: EngineInterface) {
   const view = await read($, doctorAtom)
-  if (!view || view.busy) return
+  if (!view) return
+  // A doctor running now may publish what it read before this change: it reads the manifest again when it is done.
+  if (view.busy) {
+    recheckWhenIdle = true
+    return
+  }
+  const seq = ++manifestSeq
   const { check, staleFiles } = await manifestCheck($, view.root)
+  // A newer read (another change, or the doctor itself) has the say.
+  if (seq !== manifestSeq) return
   check.detail = redactValues(check.detail)
   if (check.fix) check.fix = redactValues(check.fix)
-  await update($, doctorAtom, prev => (prev && prev.root === view.root && !prev.busy && prev.at === view.at ? { ...prev, checks: prev.checks.map(one => (one.id === 'manifest' ? check : one)), staleFiles } : prev))
+  let landed = false
+  await update($, doctorAtom, prev => {
+    if (!prev || prev.root !== view.root || prev.busy) return prev
+    landed = true
+    return { ...prev, checks: prev.checks.map(one => (one.id === 'manifest' ? check : one)), staleFiles }
+  })
+  if (!landed && (await read($, doctorAtom))?.busy) recheckWhenIdle = true
 }
+
+// Each read of the manifest's freshness, by the doctor or after a change: only the newest one is shown.
+let manifestSeq = 0
+// A change arrived while the doctor was running: the manifest is read again once it is done.
+let recheckWhenIdle = false
 
 async function runDoctor($: EngineInterface, root: string, connection = false): Promise<DoctorView> {
   const previous = await read($, doctorAtom)
@@ -1597,7 +1616,8 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail, fix: has ? null : 'dbt deps' })
   }
 
-  // Manifest freshness.
+  // Manifest freshness. A read after a change that is still going is outdated by this one.
+  manifestSeq++
   const manifest = await manifestCheck($, root)
   checks.push(manifest.check)
   const staleFiles = manifest.staleFiles
@@ -1623,6 +1643,11 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   }
   const view: DoctorView = { root, checks, at: await $.clock.now(), staleFiles, busy: null }
   await update($, doctorAtom, () => view)
+  // A change while it ran (the connection test can take minutes): its manifest line is read again.
+  if (recheckWhenIdle) {
+    recheckWhenIdle = false
+    later($, () => recheckDoctorManifest($))
+  }
   return view
 }
 

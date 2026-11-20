@@ -43,6 +43,8 @@ let saidOldCoverage = false
 const applied = new Map<string, string>()
 // How many downstream columns this session's Apply presses asked Claude to copy a description to.
 let copiedThisSession = 0
+// The conversation an Apply was pressed in: a /clear starts another, whose count starts at 0.
+let conversation = 0
 // An Apply whose request is still being sent; a second press is ignored.
 let applying = false
 /** Whether this feature has put a part in the status line, so a session start clears it only then. */
@@ -660,6 +662,7 @@ export function register(on: On, context: FeatureContext) {
                   const prompt = applyPrompt(groups, state.skipped)
                   if (!prompt || applying) return
                   applying = true
+                  const pressedIn = conversation
                   const marks: string[] = []
                   const sent = new Set(sentGroups(groups, state.skipped).map(group => offerKey(group)))
                   try {
@@ -683,7 +686,7 @@ export function register(on: On, context: FeatureContext) {
                       for (const key of marks) applied.delete(key)
                       throw error
                     }
-                    copiedThisSession += marks.length
+                    if (pressedIn === conversation) copiedThisSession += marks.length
                     // Only what was sent is cleared: an offer that arrived meanwhile stays.
                     await update($, docsAtom, prev => {
                       const left = (prev?.groups ?? []).filter(group => !sent.has(offerKey(group)))
@@ -720,6 +723,7 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   saidOldCoverage = false
   applied.clear()
   copiedThisSession = 0
+  conversation++
   applying = false
   await update($, docsAtom, () => null)
   if (statusShown) await setStatusPart($, 'docs', null)
@@ -734,6 +738,8 @@ export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {}
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
+  copiedThisSession = 0
+  conversation++
   // A coverage read still running belongs to the conversation that ended (a /clear has no session start).
   waiting = null
   coverageSeq++

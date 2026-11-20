@@ -190,6 +190,10 @@ type Options = {
   manifestAfterShow?: unknown
   /** The first Edit waits for this before its result returns. */
   holdEdit?: Promise<void>
+  /** dbt debug answers once this settles. */
+  holdDebug?: Promise<void>
+  /** A stat of this path answers what it read only once `until` settles (an older read finishing late). */
+  statAfter?: { path: string; until: () => Promise<void> | undefined }
   /** Collects what the plugin writes to the debug log. */
   logs?: string[]
   /** While set, a read of the session's root waits for it. */
@@ -336,6 +340,8 @@ async function start($: any, on: any, options: Options = {}) {
     const isDir = !(rel in files)
     const mtimeMs = rel === 'target/run_results.json' ? (options.runResultsAt ?? 5_000) : (mtimes[rel] ?? 500)
     const size = /(^|\/)manifest\.json$/.test(rel) && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
+    const after = options.statAfter && e.path === `${ROOT}/${options.statAfter.path}` ? options.statAfter.until() : undefined
+    if (after) await after
     return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: false } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
@@ -405,7 +411,10 @@ async function start($: any, on: any, options: Options = {}) {
     }
     if (bin !== (options.pathDbtPython ? 'dbt' : DBT)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
-    if (verb === 'debug') return { value: { ...(options.debug ?? { exitCode: 0, stdout: DEBUG }), stderr: '' } }
+    if (verb === 'debug') {
+      if (options.holdDebug) await options.holdDebug
+      return { value: { ...(options.debug ?? { exitCode: 0, stdout: DEBUG }), stderr: '' } }
+    }
     if (verb === 'ls' && options.listFails) return { value: { exitCode: 1, stdout: '', stderr: 'ls failed' } }
     if (verb === 'ls') return { value: { exitCode: 0, stdout: `${(options.listed ?? []).map(one => JSON.stringify(typeof one === 'string' ? { name: one } : one)).join('\n')}\n`, stderr: '' } }
     if (verb === 'deps' && options.depsFails) return { value: { exitCode: options.depsExit ?? 1, stdout: '', stderr: options.depsFails } }
@@ -4363,6 +4372,54 @@ test('a doctor shown before an edit reads the manifest again after it: it no lon
   await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /^current \(written/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('an edit while the doctor tests the connection is read once it is done: the doctor does not publish a manifest from before it as current', async ($, on) => {
+  let release!: () => void
+  const holdDebug = new Promise<void>(resolve => (release = resolve))
+  const { clock, mtimes } = await start($, on, { now: 200_000, holdDebug, show: { rows: [{ order_id: 1, amount: 10 }] } })
+  const reply = $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  // A shell command changes a model while dbt debug is still running.
+  mtimes['models/orders.sql'] = 150_000
+  await $.tool.call({ tool: 'Bash', command: 'touch models/orders.sql' } as any)
+  await clock.settle()
+  release()
+  await reply
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^current \(written/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('of two manifest reads after edits, the older finishing last does not put "current" back over the newer "stale"', async ($, on) => {
+  let release: (() => void) | null = null
+  let holdNext = false
+  const statAfter = {
+    path: 'models/orders.sql',
+    until: () => {
+      if (!holdNext) return undefined
+      holdNext = false
+      return new Promise<void>(resolve => (release = resolve))
+    },
+  }
+  const { clock, mtimes } = await start($, on, { interactive: true, now: 200_000, statAfter, show: { rows: [{ order_id: 1, amount: 10 }] } })
+  await clock.settle()
+  // The first read sees the file unchanged and is slow to answer.
+  holdNext = true
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  expect(release).not.toBeNull()
+  // The file changes; the second read sees it and lands first.
+  mtimes['models/orders.sql'] = 150_000
+  await $.tool.call({ tool: 'Bash', command: 'touch models/orders.sql' } as any)
+  await clock.settle()
+  release!()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
   await ui.unmount()
 })
