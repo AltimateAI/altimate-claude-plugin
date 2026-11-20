@@ -17,9 +17,10 @@ const SHELL_VALUE_OPTIONS = new Set(['--rcfile', '--init-file'])
 
 /**
  * The script a shell runs from its `-c` option (alone or in a cluster: `-lc`, `-cx`, `-Ec`): the first word
- * after the shell's options, where a cluster ending in `o` or `O` (`-o pipefail`, `-euo pipefail`) takes the
- * next word as its value. Null when none of its options is `-c`, so `bash deploy.sh -c x` runs no script
- * here. `at` is where the shell's own name is.
+ * after the shell's options, where each `o` or `O` in a cluster takes the next word as its value, in order
+ * (`-o pipefail`, `-euo pipefail`, `-oc pipefail`). '' when `-c` has no script word after it; null when none
+ * of the shell's options is `-c`, so `bash deploy.sh -c x` runs no script here. `at` is where the shell's own
+ * name is.
  */
 export function shellScript(words: readonly string[], at: number): string | null {
   let script = false
@@ -27,10 +28,11 @@ export function shellScript(words: readonly string[], at: number): string | null
   for (; i < words.length && /^[-+]./.test(words[i]!) && words[i] !== '--'; i++) {
     const word = words[i]!
     if (/^-[A-Za-z]*c[A-Za-z]*$/.test(word)) script = true
-    if (SHELL_VALUE_OPTIONS.has(word) || /^[-+][A-Za-z]*[oO]$/.test(word)) i++
+    if (SHELL_VALUE_OPTIONS.has(word)) i++
+    else if (/^[-+][A-Za-z]+$/.test(word)) i += (word.match(/[oO]/g) ?? []).length
   }
   if (words[i] === '--') i++
-  return script ? (words[i] ?? null) : null
+  return script ? (words[i] ?? '') : null
 }
 
 /** Where the heredoc started by `<<` at `i` ends: its delimiter, whether it was quoted, and `<<` at `i` is one at all (not `<<<`, not a shift in `$((x<<2))`). */
