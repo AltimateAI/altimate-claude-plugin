@@ -6,7 +6,7 @@
 // and never calls the difference saved. A fix that changes neither leaves nothing to see but its finding
 // clearing, which usage falling can do too.
 import type { SavingsFinding, SavingsFixLine, SavingsPlatform, SavingsView, WarehouseConfig } from '../types'
-import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig, SETTINGS, type Setting } from './savings-config'
+import { changedSettings, comparable, configLabel, configOf, loadConfig, SETTINGS, type Setting } from './savings-config'
 import { cents, DAY_MS, OBSERVED_NOTE, oneLine, PLATFORM_NAME, windowDays } from './savings-format'
 
 /** What is kept when a fix is drafted. */
@@ -119,19 +119,6 @@ export function readsAllKnown(fix: FixRecord, view: SavingsView): boolean {
   if (!row) return false
   const now = configOf(row)
   return SETTINGS.every(setting => was[setting] === null || now[setting] !== null)
-}
-
-/**
- * The settings a kept fix holds after this run: each one it did not know is filled from what this run read, and
- * none it knew is overwritten. A run that saw a setting it knew change fills nothing: its other values are the
- * warehouse after the change, not what the fix was drafted against. Null when the run teaches it nothing.
- */
-export function mergedConfig(fix: FixRecord, view: SavingsView): WarehouseConfig | null {
-  const was = keptConfig(fix)
-  const row = was === null ? undefined : rowOf(fix, view)
-  if (!was || !row) return null
-  const now = configOf(row)
-  return learns(was, now) ? mergeConfig(was, now) : null
 }
 
 /** What a run says became of a drafted fix. */

@@ -39,7 +39,7 @@ export function savingsReportHtml(kept: readonly SavingsKept[], builtAt: string,
         : 'No savings found by these checks.'
     return `<section>
 <h2>${escape(name)}</h2>
-<div class="dim">${view.connection ? `Connection ${escape(view.connection)} · ` : ''}the ${days} days to ${escape(view.window.end)} · ${LOCAL_CHECK_COUNT} of Altimate's ${HOSTED_CHECK_COUNT[view.platform]} ${escape(name)} checks · priced at ${escape(view.pricing)} · checked ${escape(new Date(savedAt).toISOString().slice(0, 10))}</div>
+<div class="dim">${view.connection ? `Connection ${escape(view.connection)} · ` : ''}the ${days} days${view.window.end ? ` to ${escape(view.window.end)}` : ''} · ${LOCAL_CHECK_COUNT} of Altimate's ${HOSTED_CHECK_COUNT[view.platform]} ${escape(name)} checks · priced at ${escape(view.pricing)} · checked ${escape(new Date(savedAt).toISOString().slice(0, 10))}</div>
 ${view.skipped.length > 0 ? `<p class="gap">Not checked: ${escape(view.skipped.join('; '))}.</p>` : ''}
 ${limited ? `<p class="gap">${escape(limited)}</p>` : ''}
 ${view.fixes.map(one => (one.state === 'lower' ? `<p>${escape(one.text)}</p>` : `<p class="gap">${escape(one.text)}</p>`)).join('\n')}

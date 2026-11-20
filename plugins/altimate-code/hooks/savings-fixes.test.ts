@@ -3,7 +3,7 @@ import { expect, test } from 'claude-code/testing'
 import type { SavingsFinding, SavingsView } from '../types'
 import type { WarehouseConfig } from '../types'
 import { OBSERVED_NOTE } from './savings-format'
-import { daysAfter, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, mergedConfig, type FixRecord } from './savings-fixes'
+import { daysAfter, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from './savings-fixes'
 
 const WINDOW = { start: '2026-11-11', end: '2026-11-18' }
 
@@ -51,8 +51,8 @@ const rowView = (config: WarehouseConfig) =>
     pricing: 'list price',
     inventory: [{ id: 'w1', name: 'Classic', type: config.type, size: config.size, windowCost: 7 }],
   }) as unknown as SavingsView
-// The other setting is either known when drafted and the same now, or unknown when drafted and read now: a run in
-// which a known setting changed fills nothing, since its values are the warehouse after the change.
+// The other setting is either known when drafted and the same now, or unknown when drafted and read now. What the
+// draft did not read stays unread: the line compares only the settings known both then and now.
 for (const { setting, a, b, other, otherValue } of SETTING_CASES) {
   for (const otherBefore of ['known', 'unknown'] as const) {
     for (const before of ['known', 'unknown'] as const) {
@@ -65,11 +65,6 @@ for (const { setting, a, b, other, otherValue } of SETTING_CASES) {
             const view = rowView(now)
             // Changed: only a setting known on both sides, with different values.
             const changed = before === 'known' && after === 'known' && !same
-            // Merge: a known setting is never overwritten; an unknown one takes what this run read, unless this run
-            // saw a change.
-            const kept = mergedConfig(drafted, view) ?? was
-            expect(kept[setting]).toBe(before === 'known' ? a : after === 'known' ? now[setting] : null)
-            expect(kept[other]).toBe(otherBefore === 'known' ? otherValue : changed ? null : otherValue)
             // The line names only the settings known both then and now; with none, it claims nothing.
             const named = (['size', 'type'] as const).filter(one => was[one] !== null && now[one] !== null)
             expect(fixChanged(drafted, view)).toBe(named.length === 0 ? null : changed)
@@ -88,32 +83,29 @@ for (const { setting, a, b, other, otherValue } of SETTING_CASES) {
   }
 }
 
-test('a fix drafted with its size unknown does not take the size of a run in which its type changed', () => {
-  // Drafted against CLASSIC with no size read. This run reads MEDIUM PRO: MEDIUM is the size after the change.
-  const drafted = fix({ config: { size: null, type: 'CLASSIC' }, changedSeen: '2026-11-10' })
-  const view = rowView({ size: 'MEDIUM', type: 'PRO' })
-  expect(mergedConfig(drafted, view)).toBeNull()
-  expect(fixChanged(drafted, view)).toBe(true)
-  // The line names the type alone: the size it was drafted at was never read.
-  expect(fixProgress(drafted, view).text).toBe(`Classic: changed to PRO since 2026-11-10: observed spend $4.00 a day before, $1.00 a day now (measured from Databricks billing). ${OBSERVED_NOTE}`)
+test('a fix drafted with its size unknown never claims the size did not change: the resize may be the fix', () => {
+  // Drafted against CLASSIC with no size read, then resized: this run reads X_SMALL CLASSIC. The size it was drafted
+  // at was never read, so the line names the type alone.
+  const drafted = fix({ config: { size: null, type: 'CLASSIC' } })
+  const view = rowView({ size: 'X_SMALL', type: 'CLASSIC' })
+  expect(fixChanged(drafted, view)).toBe(false)
+  expect(fixProgress(drafted, view).text).toBe('Classic: fix drafted 2026-11-01, but it is still CLASSIC: it is no longer flagged, and its type did not change, so no saving is claimed.')
 })
 
-test('a fix whose settings were not read both then and now claims nothing yet, and keeps what this run read', () => {
+test('a fix whose settings were not read both then and now claims nothing yet', () => {
   for (const config of [{ size: null, type: null }, 'SMALL CLASSIC', '? PRO']) {
     // The strings an older version kept load with every setting unknown.
     const drafted = fix({ config: config as WarehouseConfig, changedSeen: '2026-11-10' })
     const view = rowView({ size: 'X_SMALL', type: 'PRO' })
     expect(fixChanged(drafted, view)).toBeNull()
     expect(fixProgress(drafted, view).text).toBe('Classic: fix drafted 2026-11-01, but its size and type were not read both then and now, so nothing is claimed yet.')
-    expect(mergedConfig(drafted, view)).toEqual({ size: 'X_SMALL', type: 'PRO' })
   }
 })
 
-test('a run that reads one setting but not another keeps what the record knew, so a later resize still shows', () => {
+test('a run that does not read the setting a fix knows cannot tell, and a later run that does still sees the resize', () => {
   const drafted = fix({ config: { size: 'SMALL', type: null } })
-  const merged = mergedConfig(drafted, rowView({ size: null, type: 'PRO' }))
-  expect(merged).toEqual({ size: 'SMALL', type: 'PRO' })
-  expect(fixChanged({ ...drafted, config: merged }, rowView({ size: 'X_SMALL', type: 'PRO' }))).toBe(true)
+  expect(fixChanged(drafted, rowView({ size: null, type: 'PRO' }))).toBeNull()
+  expect(fixChanged(drafted, rowView({ size: 'X_SMALL', type: 'PRO' }))).toBe(true)
 })
 
 test('with one workspace read, a finding that names a workspace the fix did not is still the fix\'s finding', () => {

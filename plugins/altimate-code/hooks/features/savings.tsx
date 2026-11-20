@@ -16,9 +16,9 @@ import type { SavingsConnection, SavingsFinding, SavingsFixLine, SavingsKept, Sa
 import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
 import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
-import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig } from '../savings-config'
+import { changedSettings, comparable, configLabel, configOf, covers, learns, loadConfig } from '../savings-config'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
-import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, mergedConfig, readsAllKnown, sameWorkspace, severalWorkspaces, type FixRecord } from '../savings-fixes'
+import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, readsAllKnown, sameWorkspace, severalWorkspaces, type FixRecord } from '../savings-fixes'
 import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, distinctFindingCount, dollars, findingKey, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
@@ -125,6 +125,9 @@ const expandedAtom = atom({ plugin: 'altimate-code', key: 'savingsExpanded' } as
 // its warehouse when the conversation changed never writes its report into the new one.
 let generation = 0
 let lastAsked: string | null = null
+// The conversation's number: a /clear, a resume or a logout starts the next. What a press or a tool call writes into
+// the conversation (the prompt box, the band, a toast) is dropped once it moved on. A run starting does not move it.
+let conversation = 0
 // The once-a-session offer of /savings when the session first touches Databricks config.
 let offered = false
 // While Claude is working a finished run says nothing: its result is on the status line and in the pane,
@@ -135,7 +138,7 @@ let heldNotices: string[] = []
 let pressStarting = false
 
 // Files that define Databricks compute: bundles, their resources, Terraform. Read only when one is edited.
-const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/[^/]+\.ya?ml|[^/]+\.tf)$/i
+const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/(?:[^/]+\/)*[^/]+\.ya?ml|[^/]+\.tf)$/i
 // What marks such a file, or a command, as about warehouses or clusters.
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 // What marks a file as Databricks config at all: a Terraform `databricks_` resource, or a bundle.
@@ -528,12 +531,13 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
   const counted = new Set([...queries.values()].map(one => rowOf(one.id, one.workspaceId)?.type ?? null))
   const view: SavingsView = {
     platform,
-    connection: metadata.warehouse ?? null,
+    connection: oneLine(metadata.warehouse) || null,
     identity: '',
     scope: platform === 'snowflake' ? (metadata.warehouse ?? null) : null,
     pricing,
     ranOn: metadata.ran_on ?? null,
-    window: metadata.window,
+    // Core always sends both ends; a missing one reads as unknown, never "undefined".
+    window: { start: oneLine(metadata.window.start), end: oneLine(metadata.window.end) },
     checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0, workspaces: Math.max(1, workspaces) },
     // Each with the CLI's reason: a check can be skipped for a refused read, for the run's time limit
     // (its query may still be running), or because core refused its facts.
@@ -666,14 +670,13 @@ export async function trackChanges(
     const windowCost = known(warehouse.window_cost) ? Number(warehouse.window_cost) : null
     // Only a setting both runs read can have changed, and the line names only those.
     const changed = stored ? changedSettings(stored.config, now) : []
-    // Per setting, a later read fills what the baseline did not know and never overwrites what it knew, but only a
-    // read in which nothing known changed: after a change it reads the warehouse as it is now (`mergeConfig`). A
-    // cost kept unknown likewise takes the first one a later run gives while nothing changed. A later change then
-    // shows.
-    const fillCost = stored && changed.length === 0 && stored.windowCost === null && windowCost !== null
-    if (stored && (fillCost || learns(stored.config, now))) {
-      const filled: Baseline = { ...stored, config: mergeConfig(stored.config, now), ...(fillCost ? { windowCost, days: windowDays(view.window) } : {}) }
-      await $.store.set(key, filled).catch(() => undefined)
+    // The baseline is one run's read: its settings, date and cost all come from that run, so a setting is never
+    // paired with another run's spend. A run that reads every setting and the cost it knew, finds none changed and
+    // reads one more (a setting, or the cost) replaces it whole; any other run leaves it as it was.
+    const readsAll = stored && covers(stored.config, now) && (stored.windowCost === null || windowCost !== null)
+    const readsMore = stored && (learns(stored.config, now) || (stored.windowCost === null && windowCost !== null))
+    if (stored && changed.length === 0 && readsAll && readsMore) {
+      await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
     }
     // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
     if (stored && changed.length > 0 && stored.windowCost !== null && windowCost !== null) {
@@ -1058,14 +1061,12 @@ async function fixesFor($: EngineInterface, view: SavingsView, today: string, li
       const { changedSeen: _gone, ...rest } = held
       fix = rest
     }
-    // The line compares this run with what the draft knew. The record then takes each setting it did not know from
-    // this run, keeping every one it did, so a later change of it shows.
+    // The line compares this run with what the draft knew. A setting the draft did not read stays unread: the
+    // change most likely to have happened since is the fix itself, so a later read is not what it was drafted against.
     const line = fixProgress(fix, view)
-    const merged = mergedConfig(fix, view)
-    const kept = merged ? { ...fix, config: merged } : fix
     // A /clear while the fixes were read: this run writes nothing back.
     if (!live()) return []
-    if (kept !== held) await $.store.set(key, kept).catch(() => undefined)
+    if (fix !== held) await $.store.set(key, fix).catch(() => undefined)
     lines.push(line)
   }
   return lines
@@ -1276,22 +1277,22 @@ async function rememberFix($: EngineInterface, view: SavingsView, finding: Savin
 
 /**
  * A press runs on the clock after the event that delivered it, so one landing just before a /clear would act in the
- * new conversation: it runs only if no /clear came since, and is given that conversation's generation.
+ * new conversation: it runs only if the conversation it was pressed in is still the current one, and is given it.
  */
-function whenPressed($: EngineInterface, work: (at: number) => Promise<unknown>) {
-  const at = generation
+function whenPressed($: EngineInterface, work: (pressedIn: number) => Promise<unknown>) {
+  const pressedIn = conversation
   later($, async () => {
-    if (at === generation) await work(at)
+    if (pressedIn === conversation) await work(pressedIn)
   })
 }
 
 /** Puts the finding's fix request in the prompt box; nothing is sent until the person presses Enter. */
-async function draftFix($: EngineInterface, view: SavingsView, finding: SavingsFinding, at: number) {
+async function draftFix($: EngineInterface, view: SavingsView, finding: SavingsFinding, pressedIn: number) {
   const filled = await $.prompt.fill({ text: finding.fixRequest }).catch(() => null)
   // A /clear while the box was filled replaced its text: the request is not followed and nothing is said.
-  if (at !== generation) return
+  if (pressedIn !== conversation) return
   const remembered = filled?.isFilled ? await rememberFix($, view, finding) : true
-  if (at !== generation) return
+  if (pressedIn !== conversation) return
   notify(
     $,
     filled?.isFilled
@@ -1303,7 +1304,7 @@ async function draftFix($: EngineInterface, view: SavingsView, finding: SavingsF
 /** Writes the kept answers as a local page and opens it. Nothing is uploaded. */
 async function shareReport($: EngineInterface, at: number) {
   // The page is written whatever happens; what it says about it goes only to the conversation it was asked in.
-  const say = (text: string) => update($, sharedAtom, now => (at === generation ? { text } : now))
+  const say = (text: string) => update($, sharedAtom, now => (at === conversation ? { text } : now))
   const kept = keptViews(liveKept(await read($, reportsAtom), await $.clock.now()))
   if (kept.length === 0) return
   const project = await findProject($).catch(() => null)
@@ -1325,7 +1326,7 @@ async function shareReport($: EngineInterface, at: number) {
 /** Opens Altimate's sign-up page; the address alone, with nothing from this run in it. */
 async function openAltimate($: EngineInterface, at: number) {
   const opened = await openReport($, SIGNUP_URL).catch(() => false)
-  if (!opened) await update($, sharedAtom, now => (at === generation ? { text: `No browser could be opened. Altimate is at ${SIGNUP_URL}` } : now))
+  if (!opened) await update($, sharedAtom, now => (at === conversation ? { text: `No browser could be opened. Altimate is at ${SIGNUP_URL}` } : now))
 }
 
 /** Whether `text` names `name` as a whole word: `dev` is not in `devices`. */
@@ -1336,7 +1337,7 @@ export function mentions(text: string, name: string | null | undefined): boolean
 }
 
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
-async function bandFor($: EngineInterface, text: string, at: number, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
+async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string; offer: boolean } | null> {
   const kept = keptViews(liveKept(await read($, reportsAtom), await $.clock.now()))
   // An id only counts where it is long enough to mean something: a Snowflake id is a small number, a job's too.
   const matches = kept
@@ -1351,14 +1352,21 @@ async function bandFor($: EngineInterface, text: string, at: number, aboutComput
   if (named && places.size > 1) {
     const platforms = new Set(same.map(({ view }) => view.platform))
     const where = platforms.size > 1 ? 'places' : platforms.has('snowflake') ? 'Snowflake accounts' : 'workspaces'
-    return { text: `${named.resourceName} has findings in ${places.size} ${where}. /savings shows each.` }
+    return { text: `${named.resourceName} has findings in ${places.size} ${where}. /savings shows each.`, offer: false }
   }
-  if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${named.monthlyMax > 0 ? `${range(named.monthlyMin, named.monthlyMax)} a month to save` : 'no dollar estimate'}. /savings shows why.` }
+  if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${named.monthlyMax > 0 ? `${range(named.monthlyMin, named.monthlyMax)} a month to save` : 'no dollar estimate'}. /savings shows why.`, offer: false }
   if (kept.length > 0 || offered || !aboutCompute) return null
-  // A /clear while the answer was read: the new conversation keeps its own once-a-session offer.
-  if (at !== generation) return null
-  offered = true
-  return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection; it starts the SQL warehouse if it is stopped, which bills).' }
+  return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection; it starts the SQL warehouse if it is stopped, which bills).', offer: true }
+}
+
+/**
+ * Puts a band line above the prompt, unless the conversation `at` names has ended since: the line, and the spending
+ * of the once-a-session offer, belong to the conversation the file or command was in.
+ */
+async function showBand($: EngineInterface, band: { text: string; offer: boolean } | null, at: number) {
+  if (!band || at !== conversation) return
+  if (band.offer) offered = true
+  await update($, bandAtom, () => ({ text: band.text }))
 }
 
 type ToolRow = { tool_use_id?: string; tool: string; input: unknown }
@@ -1589,7 +1597,7 @@ export function register(on: On, _context: FeatureContext) {
                   <Button
                     key={`fix-${at}`}
                     label="Draft the fix"
-                    onPress={() => whenPressed($, conversation => draftFix($, view, finding, conversation))}
+                    onPress={() => whenPressed($, pressedIn => draftFix($, view, finding, pressedIn))}
                   />
                 </Box>
               </Box>
@@ -1642,7 +1650,7 @@ export function register(on: On, _context: FeatureContext) {
               <Box flexDirection="column">
                 <Text bold>{name} savings check</Text>
                 <Text dimColor>
-                  {checkedText(view)} · the {days} days to {view.window.end}
+                  {checkedText(view)} · the {days} days{view.window.end ? ` to ${view.window.end}` : ''}
                   {view.connection ? ` · connection ${view.connection}` : ''}
                 </Text>
                 <Text dimColor>Read-only, with your own connection. Nothing was sent to Altimate.</Text>
@@ -1689,7 +1697,7 @@ export function register(on: On, _context: FeatureContext) {
                         </Text>
                       ))}
                       <Box>
-                        <Button key={`fix-${at}`} label="Draft the fix" onPress={() => whenPressed($, conversation => draftFix($, view, one, conversation))} />
+                        <Button key={`fix-${at}`} label="Draft the fix" onPress={() => whenPressed($, pressedIn => draftFix($, view, one, pressedIn))} />
                       </Box>
                     </Box>
                   </Box>
@@ -1787,6 +1795,7 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   generation += 1
   lastAsked = null
+  conversation += 1
   offered = false
   turnRunning = false
   heldNotices = []
@@ -1841,31 +1850,29 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   const invocation = dbtRunOf(e.command)
   if (!invocation || !e.tool_use_id) return null
   // The conversation the run was asked in: a /clear from here on keeps its note out of the new one.
-  const at = generation
+  const at = conversation
   if (!Object.values(await read($, reportsAtom)).some(one => one.view.findings.length > 0)) return null
   const ref = await refOfDbtRun($, e.command, invocation)
   const id = e.tool_use_id
-  if (ref) await update($, rowsAtom, rows => (at === generation ? Object.fromEntries([...Object.entries(rows), [id, ref] as const].slice(-ROWS_KEPT)) : rows))
+  if (ref) await update($, rowsAtom, rows => (at === conversation ? Object.fromEntries([...Object.entries(rows), [id, ref] as const].slice(-ROWS_KEPT)) : rows))
   return null
 }
 
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   if (!runsDatabricksCompute(e.command)) return
   // The conversation the command ran in: a /clear from here on keeps its line out of the new one.
-  const at = generation
+  const at = conversation
   // A databricks warehouses, clusters, bundle or jobs command is about compute whatever its words.
-  const band = await bandFor($, e.command, at, true)
-  if (band) await update($, bandAtom, now => (at === generation ? band : now))
+  await showBand($, await bandFor($, e.command, true), at)
 }
 
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
   if (!DATABRICKS_CONFIG.test(file.path.replace(/\\/g, '/'))) return
   // The conversation the edit was made in: a /clear from here on keeps its line out of the new one.
-  const at = generation
+  const at = conversation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
-  if (!DATABRICKS_TEXT.test(text) || at !== generation) return
-  const band = await bandFor($, text, at)
-  if (band) await update($, bandAtom, now => (at === generation ? band : now))
+  if (!DATABRICKS_TEXT.test(text)) return
+  await showBand($, await bandFor($, text), at)
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}
