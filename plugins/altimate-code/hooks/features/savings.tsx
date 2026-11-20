@@ -145,6 +145,41 @@ const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses'])
 
 /**
+ * A Terraform file's code: line comments, block comments and heredoc bodies dropped, a quoted string kept whole so a
+ * slash and star in it (an S3 path) do not open a comment.
+ */
+function terraformCode(source: string): string {
+  const text = source.replace(/^\uFEFF/, '')
+  let code = ''
+  let i = 0
+  while (i < text.length) {
+    const rest = text.slice(i)
+    const heredoc = /^<<-?([A-Za-z_][\w-]*)[ \t]*\r?\n/.exec(rest)
+    if (heredoc) {
+      const end = new RegExp(`^[ \\t]*${heredoc[1]}[ \\t]*$`, 'm').exec(rest.slice(heredoc[0].length))
+      i += end ? heredoc[0].length + end.index + end[0].length : rest.length
+    } else if (text[i] === '"') {
+      let j = i + 1
+      while (j < text.length && text[j] !== '"' && text[j] !== '\n') j += text[j] === '\\' ? 2 : 1
+      code += text.slice(i, j + 1)
+      i = j + 1
+    } else if (text[i] === '#' || rest.startsWith('//')) {
+      i += (/^[^\n]*/.exec(rest) as RegExpExecArray)[0].length
+    } else if (rest.startsWith('/*')) {
+      const end = rest.indexOf('*/', 2)
+      const length = end === -1 ? rest.length : end + 2
+      // The line breaks inside it stay, so what follows the comment is where it was.
+      code += rest.slice(0, length).replace(/[^\n]/g, '')
+      i += length
+    } else {
+      code += text[i]
+      i += 1
+    }
+  }
+  return code
+}
+
+/**
  * Whether an edited file is Databricks config, decided by its kind first:
  * - a bundle's `databricks.yml` always is;
  * - a Terraform file is when it declares a `databricks_` resource or data source (its label quoted or not);
@@ -161,8 +196,7 @@ export function isDatabricksPath(path: string): boolean {
 export function isDatabricksConfig(path: string, text: string): boolean {
   const file = path.replace(/\\/g, '/')
   if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
-  // A block commented out with /* */ from the start of a line declares nothing; a /* inside a string is not one.
-  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text.replace(/^[ \t]*\/\*[\s\S]*?\*\//gm, ''))
+  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(terraformCode(text))
   if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null
@@ -1953,7 +1987,9 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
   const at = conversation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
   if (!isDatabricksConfig(file.path, text)) return
-  await showBand($, await bandFor($, text, COMPUTE_WORDS.test(text)), at)
+  // A Terraform file's comments and heredoc bodies say nothing about what it declares.
+  const code = /\.tf$/i.test(file.path) ? terraformCode(text) : text
+  await showBand($, await bandFor($, code, COMPUTE_WORDS.test(code)), at)
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}
