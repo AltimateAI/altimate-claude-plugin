@@ -117,3 +117,19 @@ test('the last version printed is read, and a preview build is no release to com
   expect(isPreviewBuild('0.0.0--202611190701')).toBe(true)
   expect(isPreviewBuild('0.12.9')).toBe(false)
 })
+
+test('a call that sets an environment or bypasses the daemon goes through the CLI even without cliOnly', async () => {
+  let connects = 0
+  const { $, argvs, mcpCalls } = standIn(() => {
+    connects++
+    return { isConnected: true, server: 'altimate-code' }
+  })
+  await runTool($, 'finops_x', {}, { noDaemon: true })
+  await runTool($, 'finops_x', {}, { env: { ALTIMATE_TELEMETRY_DISABLED: 'true' } })
+  expect(connects).toBe(0)
+  expect(mcpCalls()).toBe(0)
+  expect(argvs.map(argv => argv.slice(1))).toEqual([
+    ['tool', 'run', 'finops_x', '--args', '{}', '--json', '--no-daemon'],
+    ['tool', 'run', 'finops_x', '--args', '{}', '--json'],
+  ])
+})

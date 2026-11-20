@@ -1,7 +1,7 @@
 // The "Share report" page: one self-contained HTML file of the kept /savings answers. No script, no
 // remote asset, no upload: it is a file on this machine until the person sends it to someone.
 import type { SavingsKept, SavingsPlatform } from '../types'
-import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT } from './savings-checks'
+import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan } from './savings-checks'
 import { amount, cleanText, combinedTotal, compared, dollars, limitedText, OBSERVED_NOTE, PLATFORM_NAME, range, windowDays } from './savings-format'
 
 const escape = (value: unknown) =>
@@ -29,7 +29,11 @@ export function savingsReportHtml(kept: readonly SavingsKept[], builtAt: string,
     const days = windowDays(view.window)
     const notRun = checksNotRun(view)
     const limited = limitedText(view)
-    const verdict = view.skipped.length > 0 || limited ? 'No savings found by the checks that ran.' : 'No savings found by these checks.'
+    const verdict = nothingRan(view)
+      ? 'None of the checks could run, so nothing was checked.'
+      : view.skipped.length > 0 || limited
+        ? 'No savings found by the checks that ran.'
+        : 'No savings found by these checks.'
     return `<section>
 <h2>${escape(name)}</h2>
 <div class="dim">${view.connection ? `Connection ${escape(view.connection)} · ` : ''}the ${days} days to ${escape(view.window.end)} · ${LOCAL_CHECK_COUNT} of Altimate's ${HOSTED_CHECK_COUNT[view.platform]} ${escape(name)} checks · priced at ${escape(view.pricing)} · checked ${escape(new Date(savedAt).toISOString().slice(0, 10))}</div>
@@ -39,9 +43,10 @@ ${view.fixes.map(one => (one.state === 'lower' ? `<p>${escape(one.text)}</p>` : 
 ${view.changes
   .map(one => {
     const costs = compared(one.monthlyBefore, one.monthlyNow)
-    return `<p>${escape(`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${costs.was} a month before, ${costs.now} after. ${OBSERVED_NOTE}`)}</p>`
+    return `<p>${escape(`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${costs.was} a month before, ${costs.now} after.`)}</p>`
   })
   .join('\n')}
+${view.changes.length > 0 ? `<p class="dim">${escape(OBSERVED_NOTE)}</p>` : ''}
 ${view.findings.length === 0 ? `<p>${verdict}</p>` : ''}
 ${view.findings
   .map(
@@ -65,7 +70,7 @@ ${one.choices.map(c => `<tr><td>${escape(c.label)}</td><td class="n">${escape(do
 <body><main>
 <h1>Warehouse savings report</h1>
 <div class="dim">Built ${escape(builtAt)} on this machine from read-only checks on your own connections. Nothing was sent to Altimate.</div>
-<p class="total">${total.resources > 0 ? `${escape(range(total.min, total.max))} a month` : findings > 0 ? `${findings} finding${findings === 1 ? '' : 's'}, no dollar estimate` : 'No savings found'}</p>
+<p class="total">${total.resources > 0 ? `${escape(range(total.min, total.max))} a month` : findings > 0 ? `${findings} finding${findings === 1 ? '' : 's'}, no dollar estimate` : views.length > 0 && views.every(nothingRan) ? 'Nothing was checked' : 'No savings found'}</p>
 <div class="dim">${total.resources > 0 ? `on ${total.resources} resource${total.resources === 1 ? '' : 's'}, ${priced} and the measured week's rate, each counted once at its largest saving` : findings > 0 ? 'see each finding below' : 'by the checks that ran'}${partial ? '. Some checks did not run in full: see below.' : ''}</div>
 ${failed.map(one => `<p class="gap">The last ${escape(PLATFORM_NAME[one.platform])} check did not finish: ${escape(one.text)}</p>`).join('\n')}
 ${sections.join('\n')}

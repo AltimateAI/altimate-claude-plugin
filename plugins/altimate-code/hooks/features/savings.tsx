@@ -13,10 +13,10 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { SavingsConnection, SavingsFinding, SavingsFixLine, SavingsKept, SavingsPlatform, SavingsView, SavingsWarehouseRef } from '../../types'
-import { MISSING_BINARY, later, runAltimate, runTool } from '../altimate-cli'
+import { MISSING_BINARY, compareVersions, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
 import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
-import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT } from '../savings-checks'
+import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
 import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from '../savings-fixes'
 import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
@@ -75,21 +75,22 @@ export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.12'
 const VERSION_TIMEOUT_MS = 15_000
 
 /**
- * Whether `altimate --version` names a release the check may start. A source build prints `local`
- * whatever its age (an old checkout without assessment mode does too), so it is refused like any
- * version that cannot be read; a build made with the release script carries its version.
+ * Whether what `altimate --version` printed names a release the check may start. The version is read as
+ * the status line reads it (the last version printed, so `altimate-code 0.12.12` or a runtime note before
+ * it still reads), and compared as semver does: a prerelease of the minimum is older than it. A source
+ * build prints `local` whatever its age (an old checkout without assessment mode does too), so it is
+ * refused like any version that cannot be read; a build made with the release script carries its version.
  */
-export function supportsSavings(version: string): boolean {
-  const parts = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version)
-  if (!parts) return false
-  const have = parts.slice(1, 4).map(Number)
-  const need = SAVINGS_MIN_ALTIMATE_CODE.split('.').map(Number)
-  for (let at = 0; at < 3; at++) if (have[at] !== need[at]) return have[at]! > need[at]!
-  return true
+export function supportsSavings(printed: string): boolean {
+  const version = parseVersion(printed)
+  return version !== null && compareVersions(version, SAVINGS_MIN_ALTIMATE_CODE) >= 0
 }
 
 // An altimate-code connection name; anything else could read as a CLI flag.
 const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+/** The savings tool's arguments: the connection asked for, and the go-ahead the person gave by typing /savings. */
+const savingsArgs = (connection: string | null) => (connection ? { warehouse: connection, confirm: true } : { confirm: true })
 
 const ADD_CONNECTION: Record<SavingsPlatform, string> = {
   databricks:
@@ -135,14 +136,25 @@ const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/[^/]+\.ya?ml|[^/]
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 // What marks a file as Databricks config at all: a Terraform `databricks_` resource, or a bundle.
 const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
-const DATABRICKS_COMMAND = /(?:^|[\s;&|(])databricks\s+(?:warehouses|clusters|bundle|jobs)\b/
+// Only a command the shell runs: at the start, or after `;`, `&&`, `||`, `|`, `(` or a newline, with any
+// environment assignments before it. `echo databricks bundle deploy` only names it.
+const DATABRICKS_COMMAND = /(?:^|[;&|(\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*databricks\s+(?:warehouses|clusters|bundle|jobs)\b/
 const BAND_READ_LIMIT = 200_000
 
 const percent = (share: unknown) => `${Math.round(Number(share) * 100)}%`
 const percentOf = (value: unknown) => `${Math.round(Number(value))}%`
-/** One decimal; a figure that would round to 0.0 reads "under 0.1". */
-const tenths = (value: unknown) =>
-  Number(value) < 0.05 ? 'under 0.1' : Number(value).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+const UNDER_TENTH = 'under 0.1'
+/** One decimal; a figure that would round to 0.0 reads "under 0.1", and one the answer lacks reads "?". */
+const tenths = (value: unknown) => {
+  const number = Number(value)
+  if (value === null || value === undefined || value === '' || !Number.isFinite(number)) return '?'
+  return number < 0.05 ? UNDER_TENTH : number.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+}
+/** `tenths` for an estimate: "about 1.2", "under 0.1" or "?". */
+const approxTenths = (value: unknown) => {
+  const shown = tenths(value)
+  return shown === UNDER_TENTH || shown === '?' ? shown : `about ${shown}`
+}
 const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10)
 /** A workspace name as shown: cleaned, or the id when nothing printable is left. */
 const shownName = (name: unknown, id: unknown) => oneLine(name) || oneLine(id)
@@ -168,11 +180,15 @@ export function evidenceLines(evidence: Record<string, unknown>, days = 7): stri
         `All-purpose cluster ${percent(evidence.idle_ratio)} idle across ${count(evidence.active_days)} active days (${String(evidence.idle_pattern).replace(/_/g, ' ')}), average worker CPU ${percentOf(evidence.avg_cpu_active_pct)}, peak ${percentOf(evidence.peak_cpu_active_pct)}`,
         `Auto-termination ${evidence.auto_termination_minutes ? `${evidence.auto_termination_minutes} minutes` : 'off'}; $${Number(evidence.total_cost).toFixed(2)} billed on all-purpose compute over ${days} days`,
       ]
-    case 'job_on_all_purpose':
+    case 'job_on_all_purpose': {
+      // A trigger or host cluster the answer does not name is left out, not printed as "undefined" or "".
+      const trigger = oneLine(evidence.trigger_type).toLowerCase()
+      const cluster = shownName(evidence.host_cluster_name, evidence.host_cluster_id)
       return [
-        `${count(evidence.task_runs)} task ${Number(evidence.task_runs) === 1 ? 'run' : 'runs'} (${String(evidence.trigger_type).toLowerCase()}), ${tenths(evidence.task_hours)} hours on all-purpose compute, ${Number(evidence.estimated_dbus) < 0.05 ? 'under 0.1' : `about ${tenths(evidence.estimated_dbus)}`} DBUs, most on cluster ${quoted(shownName(evidence.host_cluster_name, evidence.host_cluster_id))}`,
+        `${count(evidence.task_runs)} task ${Number(evidence.task_runs) === 1 ? 'run' : 'runs'}${trigger ? ` (${trigger})` : ''}, ${tenths(evidence.task_hours)} hours on all-purpose compute, ${approxTenths(evidence.estimated_dbus)} DBUs${cluster ? `, most on cluster ${quoted(cluster)}` : ''}`,
         `$${Number(evidence.all_purpose_rate_per_dbu).toFixed(3)} a DBU now; a job cluster would be about $${Number(evidence.jobs_rate_per_dbu).toFixed(3)}${evidence.jobs_rate_estimated ? ' (estimated: the workspace billed no jobs compute)' : ''}`,
       ]
+    }
     case 'high_idle_time':
       return [
         `${percent(evidence.idle_ratio)} idle on ${daysOf(evidence.flagged_days)} above 40%: ${activeSpan(evidence.idle_seconds, evidence.active_seconds)}`,
@@ -304,7 +320,7 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
     case 'job_on_all_purpose':
       return {
         noun: 'Job',
-        change: `run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster each task uses now (most of the job's DBUs are on id ${oneLine(e.host_cluster_id)})`,
+        change: `run it on a job cluster: give its tasks a new_cluster (or job_cluster_key) instead of existing_cluster_id, sized like the cluster each task uses now${oneLine(e.host_cluster_id) ? ` (most of the job's DBUs are on id ${oneLine(e.host_cluster_id)})` : ''}`,
         defines: "the job's bundle resource, Terraform databricks_job, or JSON",
         // A task listed in `jobs update` replaces that whole task, so the draft starts from the job as it is.
         otherwise: `write the JSON for \`databricks jobs update --json\`: start from \`databricks jobs get ${id}\` and give each task you change whole, with only its cluster changed`,
@@ -461,7 +477,6 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
     whatIf: (report.what_if ?? []).map(one => ({
       resourceId: one.resource_id,
       resourceName: shownName(one.resource_name, one.resource_id),
-      currentLabel: one.current_label,
       currentMonthly: one.current_monthly_cost,
       choices: one.choices.map(choice => ({
         label: size(choice.label),
@@ -481,9 +496,12 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
 }
 
 /** What a warehouse was when a run first flagged it, kept across sessions to show its spend before and after a change. */
-type Baseline = { date: string; type: string; size: string | null; windowCost: number }
+/** `windowCost` is null when the answer gave the warehouse no cost: no amount is claimed from it. */
+type Baseline = { date: string; type: string; size: string | null; windowCost: number | null }
 
-const baselineKey = (connection: string, warehouseId: string) => `savings-baseline:${connection}:${warehouseId}`
+// One connection can read several workspaces, where warehouse ids can repeat: the workspace is part of the key.
+const baselineKey = (scope: string, warehouse: Pick<ToolWarehouse, 'id' | 'workspace_id'>) =>
+  `savings-baseline:${scope}:${warehouse.workspace_id ? `${warehouse.workspace_id}:` : ''}${warehouse.id}`
 const sizeOrNull = (value: string | null | undefined) => value ?? null
 
 /**
@@ -494,15 +512,18 @@ const sizeOrNull = (value: string | null | undefined) => value ?? null
  */
 export async function trackChanges($: EngineInterface, view: SavingsView, warehouses: ToolWarehouse[], today: string): Promise<SavingsView['changes']> {
   const connection = view.connection ?? 'default'
-  const flagged = new Set(view.findings.filter(one => isWarehouse(one.resourceType)).map(one => one.resourceId))
+  const flagged = new Set(view.findings.filter(one => isWarehouse(one.resourceType)).map(one => `${one.workspaceId ?? ''}/${one.resourceId}`))
   const changes: SavingsView['changes'] = []
   for (const warehouse of warehouses) {
-    const key = baselineKey(view.platform === 'snowflake' ? keyOf(view) : connection, warehouse.id)
+    const key = baselineKey(view.platform === 'snowflake' ? keyOf(view) : connection, warehouse)
     const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
-    const windowCost = warehouse.window_cost ?? 0
+    const windowCost = typeof warehouse.window_cost === 'number' ? warehouse.window_cost : null
     const changed = stored && (stored.size !== sizeOrNull(warehouse.size) || stored.type !== warehouse.type)
-    if (stored && changed) {
+    // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
+    if (stored && changed && typeof stored.windowCost === 'number' && windowCost !== null) {
       changes.push({
+        resourceId: warehouse.id,
+        workspaceId: warehouse.workspace_id ?? null,
         name: shownName(warehouse.name, warehouse.id),
         from: `${size(stored.size)} ${stored.type}`,
         to: `${size(warehouse.size)} ${warehouse.type}`,
@@ -511,7 +532,7 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
         monthlyNow: (windowCost * 30) / windowDays(view.window),
       })
     }
-    if (!stored && flagged.has(warehouse.id)) {
+    if (!stored && flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`)) {
       await $.store
         .set(key, { date: today, type: warehouse.type, size: sizeOrNull(warehouse.size), windowCost } satisfies Baseline)
         .catch(() => undefined)
@@ -556,7 +577,7 @@ export function explain(error: string, connection: string | null = null, platfor
           : 'The check reads system.billing, system.compute, system.query and system.lakeflow: ask a workspace admin for SELECT on those schemas, then run /savings again.',
     }
   }
-  const args = JSON.stringify(connection ? { warehouse: connection, confirm: true } : { confirm: true })
+  const args = JSON.stringify(savingsArgs(connection))
   return {
     text: `The savings check failed: ${error.split('\n')[0]!.slice(0, 300)}`,
     recovery: `Run /savings again; if it fails again, run the same check in a terminal: \`ALTIMATE_ASSESSMENT_MODE=true ALTIMATE_TELEMETRY_DISABLED=true altimate tool run ${TOOLS[platform]} --args '${args}' --json --no-daemon\`.`,
@@ -573,18 +594,20 @@ function checkedText(view: SavingsView): string {
 const unpriced = (view: SavingsView) => view.findings.filter(one => one.monthlyMax <= 0).length
 const findingCount = (count: number) => `${count} finding${count === 1 ? '' : 's'}, no dollar estimate`
 
-/** The verdict when nothing was found: only as wide as what actually ran. */
+/** The verdict when nothing was found: only as wide as what actually ran, and none when no check ran. */
 function nothingFound(view: SavingsView): string {
   if (view.skipped.length === 0) return `No savings found by these ${LOCAL_CHECK_COUNT} checks.`
-  // Databricks skips one check at a time; a Snowflake entry can cover several, or be about warehouses.
-  return view.platform === 'databricks' ? `No savings found by the ${LOCAL_CHECK_COUNT - view.skipped.length} of ${LOCAL_CHECK_COUNT} checks that ran.` : 'No savings found by the checks that ran.'
+  if (nothingRan(view)) return `None of the ${LOCAL_CHECK_COUNT} checks could run, so nothing was checked.`
+  // A Snowflake entry can cover several checks, or be about warehouses, so only Databricks counts them.
+  return view.platform === 'databricks' ? `No savings found by the ${LOCAL_CHECK_COUNT - skippedChecks(view)} of ${LOCAL_CHECK_COUNT} checks that ran.` : 'No savings found by the checks that ran.'
 }
 
 function summary(view: SavingsView): string {
   const name = PLATFORM_NAME[view.platform]
   if (view.total.resources === 0) {
     if (view.findings.length > 0) return `${name} savings check: ${findingCount(view.findings.length)}.`
-    const notRun = view.skipped.length ? (view.platform === 'databricks' ? `; ${view.skipped.length} of the ${LOCAL_CHECK_COUNT} checks could not run` : '; some checks could not run') : ''
+    if (nothingRan(view)) return `${name} savings check: none of the ${LOCAL_CHECK_COUNT} checks could run, so nothing was checked.`
+    const notRun = view.skipped.length ? (view.platform === 'databricks' ? `; ${skippedChecks(view)} of the ${LOCAL_CHECK_COUNT} checks could not run` : '; some checks could not run') : ''
     return `${name} savings check: no savings found on ${checkedText(view)}${notRun}.`
   }
   return `${name} savings check: ${range(view.total.min, view.total.max)} a month on ${view.total.resources} resource${view.total.resources === 1 ? '' : 's'}.`
@@ -650,9 +673,11 @@ export function statusText(kept: Record<string, SavingsKept>, connections: reado
         ? `${range(total.min, total.max)}/mo to save`
         : findings > 0
           ? findingCount(findings)
-          : views.some(view => view.skipped.length > 0 || view.limited.length > 0)
-            ? 'nothing found by the checks that ran'
-            : 'no savings found'
+          : views.every(nothingRan)
+            ? 'nothing was checked'
+            : views.some(view => view.skipped.length > 0 || view.limited.length > 0)
+              ? 'nothing found by the checks that ran'
+              : 'no savings found'
     return `${said}${when} · /savings`
   }
   const names = PLATFORMS.filter(platform => connections?.some(one => one.platform === platform)).map(platform => PLATFORM_NAME[platform])
@@ -687,15 +712,17 @@ async function listConnections($: EngineInterface): Promise<SavingsConnection[] 
   return connections
 }
 
-/** What `altimate --version` printed: its last line. */
-const versionOf = (printed: { stdout?: unknown }) => String(printed.stdout ?? '').trim().split('\n').pop()?.trim() ?? ''
+/** The version `altimate --version` printed, read as the status line reads it: on stdout, else on stderr. */
+const versionOf = (printed: { stdout?: unknown; stderr?: unknown }) => parseVersion(String(printed.stdout ?? '')) ?? parseVersion(String(printed.stderr ?? ''))
+/** A source build prints `local` instead of a version. */
+const isSourceBuild = (printed: { stdout?: unknown }) => String(printed.stdout ?? '').trim().split('\n').pop()?.trim() === 'local'
 
 /** At session start: which platforms could be checked, for the status line. Runs no check. */
 async function detectPlatforms($: EngineInterface) {
   const mine = generation
   const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY).catch(() => null)
   // An altimate-code too old for assessment mode is not started at all, as for the check itself.
-  if (!printed || !supportsSavings(versionOf(printed)) || mine !== generation) return
+  if (!printed || !supportsSavings(versionOf(printed) ?? '') || mine !== generation) return
   await listConnections($)
   if (mine === generation) await drawStatus($)
 }
@@ -799,12 +826,20 @@ export function fitLine(text: string, width: number): string {
   return `${head.slice(0, word > 0 ? word : width - 1)}…`
 }
 
-/** A finding's one-line title in the slim view: resource · platform · check · range, the name shortened to fit. */
+/** `text` in at most `room` columns, cut with "…". */
+const shorten = (text: string, room: number) => (text.length <= room ? text : `${text.slice(0, Math.max(room - 1, 0))}…`)
+
+/**
+ * A finding's one-line title in the slim view, resource · platform · check · range, within `width`: the
+ * name is shortened first, to no fewer than 8 characters, then the check's title.
+ */
 export function slimTitle(view: SavingsView, one: SavingsFinding, width = SLIM_WIDTH): string {
-  const rest = ` · ${PLATFORM_NAME[view.platform]} · ${one.title} · ${amount(one.monthlyMin, one.monthlyMax)}`
-  const room = width - rest.length
-  const name = one.resourceName.length <= room ? one.resourceName : `${one.resourceName.slice(0, Math.max(room - 1, 8))}…`
-  return `${name}${rest}`
+  const head = ` · ${PLATFORM_NAME[view.platform]} · `
+  const tail = ` · ${amount(one.monthlyMin, one.monthlyMax)}`
+  const fixed = head.length + tail.length
+  const name = shorten(one.resourceName, Math.max(width - fixed - one.title.length, Math.min(one.resourceName.length, 9)))
+  const line = `${name}${head}${shorten(one.title, width - fixed - name.length)}${tail}`
+  return shorten(line, width)
 }
 
 /** How many of Altimate's checks did not run here, across the platforms that did. */
@@ -856,8 +891,7 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
   const { platform, connection } = target
   try {
     // Typing /savings is the user's go-ahead, which the tool asks for before it queries the warehouse.
-    const args = connection ? { warehouse: connection, confirm: true } : { confirm: true }
-    const result = await runTool($, TOOLS[platform], args, { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
+    const result = await runTool($, TOOLS[platform], savingsArgs(connection), { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
     if (!live()) return null
     const metadata = result.metadata as ToolMetadata | null
     const view = toView(metadata, platform)
@@ -872,7 +906,7 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
     view.changes = await trackChanges($, view, metadata?.warehouses ?? [], today)
     view.fixes = await fixesFor($, view, today)
     // A drafted fix says what became of that warehouse; the older "since first flagged" line would repeat it.
-    view.changes = view.changes.filter(change => !view.fixes.some(fix => fix.resourceName === change.name))
+    view.changes = view.changes.filter(change => !view.fixes.some(fix => fix.resourceId === change.resourceId && (fix.workspaceId ?? null) === change.workspaceId))
     return live() ? { view } : null
   } catch (error) {
     if (!live()) return null
@@ -904,18 +938,31 @@ async function runCheck($: EngineInterface, asked: string | null) {
     await drawStatus($)
     const until = (await $.clock.now()) + RUN_BUDGET_MS
     const known = await read($, connectionsAtom)
-    const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY)
+    // A CLI that cannot be started at all goes to the install message below; one that does not answer is unreadable.
+    const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY).catch(error => {
+      if (MISSING_BINARY.test(String(error))) throw error
+      return { stdout: '', stderr: '' }
+    })
     if (!live()) return
     const version = versionOf(printed)
-    if (!supportsSavings(version)) {
+    if (!version || !supportsSavings(version)) {
       const targets = targetsFor(asked, known)
-      await refuse(targets[0]!.platform, checkName(targets), {
-        text: `This altimate-code has no ${checkName(targets)}.`,
-        recovery:
-          version === 'local'
-            ? `It is a source build, which does not show whether it has assessment mode; use a released altimate-code ${SAVINGS_MIN_ALTIMATE_CODE} or later, then run /savings again.`
-            : `${version ? `It is ${version}; u` : 'U'}pdate it to ${SAVINGS_MIN_ALTIMATE_CODE} or later (\`altimate upgrade\`), then run /savings again.`,
-      })
+      const noCheck = `This altimate-code has no ${checkName(targets)}.`
+      await refuse(
+        targets[0]!.platform,
+        checkName(targets),
+        isSourceBuild(printed)
+          ? {
+              text: noCheck,
+              recovery: `It is a source build, which does not show whether it has assessment mode; use a released altimate-code ${SAVINGS_MIN_ALTIMATE_CODE} or later, then run /savings again.`,
+            }
+          : version
+            ? { text: noCheck, recovery: `It is ${version}; update it to ${SAVINGS_MIN_ALTIMATE_CODE} or later (\`altimate upgrade\`), then run /savings again.` }
+            : {
+                text: "altimate-code's version could not be read, so the savings check was not started.",
+                recovery: `Run \`altimate --version\` in a terminal: if it prints no version, or one older than ${SAVINGS_MIN_ALTIMATE_CODE}, update altimate-code (\`altimate upgrade\`), then run /savings again.`,
+              },
+      )
       return
     }
     // Asked afresh: a connection added since the session started counts.
@@ -1338,15 +1385,15 @@ export function register(on: On, _context: FeatureContext) {
                   {one.text}
                 </Text>
               ))}
-              {view.changes.map((one, at) => {
-                const amounts = compared(one.monthlyBefore, one.monthlyNow)
-                return (
-                  <Box key={`change-${section}-${at}`} flexDirection="column">
-                    <Text>{`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${amounts.was} a month before, ${amounts.now} after.`}</Text>
-                    <Text dimColor>{OBSERVED_NOTE}</Text>
-                  </Box>
-                )
-              })}
+              {view.changes.length > 0 ? (
+                <Box key={`changes-${section}`} flexDirection="column">
+                  {view.changes.map((one, at) => {
+                    const amounts = compared(one.monthlyBefore, one.monthlyNow)
+                    return <Text key={`change-${section}-${at}`}>{`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${amounts.was} a month before, ${amounts.now} after.`}</Text>
+                  })}
+                  <Text dimColor>{OBSERVED_NOTE}</Text>
+                </Box>
+              ) : null}
               {view.total.resources > 0 ? (
                 <Box flexDirection="column">
                   <Text bold color="success">

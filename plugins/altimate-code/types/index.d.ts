@@ -685,6 +685,8 @@ export type SavingsFinding = {
 /** What became of a drafted fix, as of one run. */
 export type SavingsFixLine = {
   resourceId: string
+  /** The workspace the fixed resource is in; null when the answer does not say. */
+  workspaceId: string | null
   resourceName: string
   /** `lower`: the change was seen and billed spend fell; amounts from different weeks, so not a measured saving. */
   state: 'measuring' | 'lower' | 'no_saving' | 'unchanged' | 'unmeasured'
@@ -708,7 +710,11 @@ export type SavingsView = {
   window: { start: string; end: string }
   /** What was read; `workspaces` counts the Databricks workspaces the run read warehouses, clusters or jobs from. */
   checked: { warehouses: number; clusters: number; jobs: number; workspaces: number }
-  /** What did not run, each with the CLI's reason: a check, or on Snowflake also warehouses the role cannot list. */
+  /**
+   * What did not run in full, each with the CLI's reason in brackets: a check whose system tables the connection
+   * could not read, that hit the run's time limit (its query may still be running) or whose facts core refused;
+   * on Snowflake also warehouses the role cannot list.
+   */
   skipped: string[]
   /** What a query read only the first 10,000 of, e.g. `jobs`. */
   limited: string[]
@@ -719,13 +725,12 @@ export type SavingsView = {
   whatIf: {
     resourceId: string
     resourceName: string
-    currentLabel: string
     currentMonthly: number
     choices: { label: string; monthlyCost: number; monthlySaving: number; fits: boolean; cores: number; coresNeeded: number }[]
   }[]
   /** Warehouses whose size or type changed since a run first flagged them, with their observed spend a month before and
    * after: billed in different weeks, so not a saving measured with the workload held constant. */
-  changes: { name: string; from: string; to: string; since: string; monthlyBefore: number; monthlyNow: number }[]
+  changes: { resourceId: string; workspaceId: string | null; name: string; from: string; to: string; since: string; monthlyBefore: number; monthlyNow: number }[]
   /** Every warehouse the run read, with what it cost over the window. */
   inventory: { id: string; name: string; type: string; size: string | null; windowCost: number | null }[]
   /** Queries the findings' evidence counted; null when none did. */

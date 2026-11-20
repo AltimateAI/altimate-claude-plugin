@@ -1,7 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { SNOWFLAKE_CAPTURE } from './savings-snowflake-capture.test-data'
-import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, evidenceLines, explain, fitLine, fixRequest, mentions, statusText, supportsSavings, toView } from './savings'
+import { skippedChecks } from '../savings-checks'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, evidenceLines, explain, fitLine, fixRequest, mentions, slimTitle, statusText, supportsSavings, toView } from './savings'
 
 const ROOT = '/repo'
 
@@ -256,6 +257,8 @@ type Options = {
   storeFull?: boolean
   /** What `uname -sr` prints. */
   uname?: string
+  /** `altimate --version` rejects with this, as `$.process.run` does on its timeout. */
+  versionRejects?: string
 }
 
 // The clock of the test that is running: tests in a file run one at a time.
@@ -348,6 +351,7 @@ async function start($: any, on: any, options: Options = {}) {
     }
     if (command === '--version') {
       if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
+      if (options.versionRejects) return { deny: options.versionRejects }
       // The status line's own version check at session start runs without the switches: not the savings check's.
       if (e.init?.env?.ALTIMATE_ASSESSMENT_MODE === 'true') versionRuns.push({ env: e.init?.env })
       return { value: { exitCode: 0, stdout: `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: '' } }
@@ -1060,10 +1064,12 @@ test('an altimate-code older than the check is never started for it: only `--ver
 
 test('a version that cannot be read, or a source build, is refused; the first release with the check runs it', async ($, on) => {
   // A source build prints `local` whatever its age, old checkouts without assessment mode included.
-  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local']) {
+  // A prerelease of the minimum is older than it, as semver orders them; a preview build (0.0.0-…) is older still.
+  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12-beta.1', '0.0.0-main-202611191200']) {
     expect(supportsSavings(version)).toBe(false)
   }
-  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', '0.12.12-beta.1']) {
+  // Read as the status line reads it: the last version printed, with or without the CLI's name or a runtime note.
+  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', 'altimate-code 0.12.12', 'node v22.1.0\n0.12.13']) {
     expect(supportsSavings(version)).toBe(true)
   }
   const local = await start($, on, { version: 'local' })
@@ -2432,5 +2438,198 @@ test('a session end, and a run that is refused, open the pane slim again', async
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^A query was refused/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// --- Missing values, checks that did not run, the version, the command match and per-workspace baselines.
+
+test('a job whose evidence lacks its trigger, host cluster, hours or DBUs reads without "NaN", "undefined", empty quotes or "(id )"', () => {
+  const evidence = { kind: 'job_on_all_purpose', task_runs: 3, all_purpose_rate_per_dbu: 0.55, jobs_rate_per_dbu: 0.15 }
+  const [line] = evidenceLines(evidence)
+  expect(line).toBe('3 task runs, ? hours on all-purpose compute, ? DBUs')
+  const request = fixRequest({ ...JOB, evidence })
+  expect(request).not.toMatch(/NaN|undefined|""|\(id \)/)
+  expect(request).toContain('sized like the cluster each task uses now.')
+  // Present values still read as before, and a tiny DBU figure is "under 0.1" without "about".
+  expect(evidenceLines({ ...JOB.evidence, estimated_dbus: 0.01 })[0]).toContain(', under 0.1 DBUs, most on cluster "shared analytics"')
+  expect(evidenceLines(JOB.evidence)[0]).toContain('(periodic), 181.8 hours on all-purpose compute, about 1,818.2 DBUs')
+})
+
+test('when no check could run, the pane, the notice and the status line say nothing was checked, not that nothing was found', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const checks = ['Migrate Classic/Pro to Serverless', 'Over-Sized Warehouse', 'Idle Cluster Detection', 'Job Running on All-Purpose Compute']
+  // One check listed twice (one per workspace) is still one check.
+  answer.metadata.skipped = [...checks, checks[3]].map(check => ({ check, reason: 'INSUFFICIENT_PERMISSIONS' }))
+  answer.metadata.report = { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
+  const { clock, toasts, statuses } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  expect(toasts.at(-1)).toBe('Databricks savings check: none of the 4 checks could run, so nothing was checked.')
+  expect(String(statuses.at(-1) ?? '')).toContain('nothing was checked')
+  for (const full of [false, true]) {
+    const ui = full ? await mountFull($) : await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^None of the 4 checks could run, so nothing was checked\.$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /No savings found|-?\d+ of 4 checks that ran/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('a check skipped in two workspaces counts once in the verdict', () => {
+  expect(skippedChecks({ skipped: ['Idle Cluster Detection (refused)', 'Idle Cluster Detection (time limit)'] })).toBe(1)
+})
+
+for (const [name, options] of [
+  ['prints no version', { version: '' }],
+  ['does not answer', { versionRejects: 'timed out after 15000 ms' }],
+] as const) {
+  test(`a --version that ${name} says the version could not be read; nothing else runs`, async ($, on) => {
+    const { clock, runs, toasts } = await start($, on, options)
+    await savings($)
+    await clock.settle()
+    expect(runs).toEqual([])
+    expect(toasts.at(-1)).toContain("altimate-code's version could not be read, so the savings check was not started.")
+    expect(toasts.at(-1)).not.toContain('It is ')
+  })
+}
+
+test('a version printed with the CLI name in front still starts the check', async ($, on) => {
+  const { clock, runs } = await start($, on, { version: `altimate-code ${SAVINGS_MIN_ALTIMATE_CODE}` })
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+})
+
+for (const command of ['echo databricks bundle deploy', 'grep databricks clusters notes.txt', 'git commit -m "databricks jobs"']) {
+  test(`a command that only names databricks (${command}) offers nothing`, async ($, on) => {
+    const { clock } = await start($, on)
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount(BAND)
+    expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+    await band.unmount()
+  })
+}
+
+for (const command of ['databricks jobs list', 'ls; databricks clusters list', 'make build || databricks bundle validate', 'A=1 B=2 databricks warehouses list']) {
+  test(`a command that runs databricks (${command}) offers the check`, async ($, on) => {
+    const { clock } = await start($, on)
+    await $.tool.call({ tool: 'Bash', command })
+    await clock.settle()
+    const band = await $.ui.mount(BAND)
+    expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+    await band.unmount()
+  })
+}
+
+test('the same warehouse id in two workspaces keeps two baselines, and only the flagged one is kept', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  classic.workspace_id = '111'
+  answer.metadata.warehouses.push({ ...classic, workspace_id: '222', name: 'Classic in 222', size: 'LARGE', window_cost: 500 })
+  answer.metadata.report.findings.forEach((one: any) => (one.workspace_id = '111'))
+  const { clock, store } = await start($, on, { answer, now: Date.parse('2026-11-18T10:00:00Z') })
+  await savings($)
+  await clock.settle()
+  expect(store.get('savings-baseline:dbxmega:111:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: 27.544375 })
+  expect(store.has('savings-baseline:dbxmega:222:wh-classic')).toBe(false)
+  expect(store.has('savings-baseline:dbxmega:wh-classic')).toBe(false)
+})
+
+test('a baseline in one workspace says nothing about the same warehouse id in another', async ($, on) => {
+  // Workspace 111's Classic was SMALL; workspace 222's warehouse with that id is LARGE and never was flagged.
+  const store = { 'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: one.id === 'wh-classic' ? '222' : '111', size: one.id === 'wh-classic' ? 'LARGE' : one.size }))
+  const { clock } = await start($, on, { answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: / → .* since 2026-11-10/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('two resized warehouses draw the observed-spend note once, after both lines', async ($, on) => {
+  const store = {
+    'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 },
+    'savings-baseline:dbxmega:wh-xs': { date: '2026-11-10', type: 'SERVERLESS', size: 'SMALL', windowCost: 300 },
+  }
+  const resized = JSON.parse(JSON.stringify(ANSWER))
+  resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
+  const { clock } = await start($, on, { answer: resized, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  const changes = texts.filter(text => / since 2026-11-10\. Observed spend: /.test(text))
+  expect(changes).toHaveLength(2)
+  const note = 'Billed in different weeks, so a change in workload moves these too: not a measured saving.'
+  expect(texts.filter(text => text === note)).toHaveLength(1)
+  expect(texts.indexOf(note)).toBe(texts.indexOf(changes[1]) + 1)
+  await ui.unmount()
+})
+
+// --- What a resize line claims, how wide a slim title is, and which change line a drafted fix replaces.
+
+for (const [when, costNow, costThen] of [
+  ['now', null, 27.54],
+  ['when it was flagged', 13.77, null],
+] as const) {
+  test(`a resized warehouse whose cost the answer did not give ${when} gets no "$0" spend line`, async ($, on) => {
+    const answer = JSON.parse(JSON.stringify(ANSWER))
+    const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+    classic.size = 'X_SMALL'
+    if (costNow === null) delete classic.window_cost
+    else classic.window_cost = costNow
+    const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: costThen } }
+    const { clock } = await start($, on, { answer, store })
+    await savings($)
+    await clock.settle()
+    const ui = await mountFull($)
+    expect(await ui.find({ type: 'Text', text: /→ X-SMALL CLASSIC since 2026-11-10/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /\$0(\.00)? (a month )?(before|after)/ })).toBeUndefined()
+    await ui.unmount()
+  })
+}
+
+test('a flagged warehouse the answer gives no cost for is remembered without one', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost
+  const { clock, store } = await start($, on, { answer, now: Date.parse('2026-11-18T10:00:00Z') })
+  await savings($)
+  await clock.settle()
+  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', type: 'CLASSIC', size: 'SMALL', windowCost: null })
+})
+
+test('a slim title with a long check name stays within the slim width, keeping the platform and the amount', () => {
+  const view = { platform: 'databricks' } as any
+  const finding = { resourceName: 'analytics-shared-warehouse-for-the-finance-team', title: 'Migrate Classic/Pro to Serverless, with a much longer check title than any today', monthlyMin: 1200, monthlyMax: 3400 } as any
+  for (const width of [SLIM_WIDTH, 60]) {
+    const line = slimTitle(view, finding, width)
+    expect(line.length).toBeLessThanOrEqual(width)
+    expect(line).toContain(' · Databricks · ')
+    expect(line).toMatch(/\$1,200–\$3,400/)
+    expect(line.startsWith('analytic')).toBe(true)
+  }
+  // A short title and name read whole, as before.
+  expect(slimTitle(view, { ...finding, resourceName: 'Classic', title: 'Over-Sized Warehouse' })).toMatch(/^Classic · Databricks · Over-Sized Warehouse · /)
+})
+
+test('a drafted fix replaces the change line of its own warehouse only, not of another with the same name', async ($, on) => {
+  const store = {
+    [FIX_KEY]: FIX,
+    'savings-baseline:dbxmega:wh-classic': { date: '2026-11-01', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 },
+    'savings-baseline:dbxmega:wh-classic-2': { date: '2026-11-01', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 },
+  }
+  const answer = resizedAnswer('2026-11-18', 14)
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  answer.metadata.warehouses.push({ ...classic, id: 'wh-classic-2' })
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  // The fixed one has its fix line instead; the other, also called Classic, keeps its change line.
+  expect(texts.filter(text => /^Classic: changed to X-SMALL CLASSIC since /.test(text))).toHaveLength(1)
+  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
   await ui.unmount()
 })

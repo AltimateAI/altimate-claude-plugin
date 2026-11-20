@@ -83,7 +83,13 @@ export function fixChanged(fix: FixRecord, view: SavingsView): boolean | null {
 
 /** What a run says became of a drafted fix. */
 export function fixProgress(fix: FixRecord, view: SavingsView): SavingsFixLine {
-  const line = (state: SavingsFixLine['state'], text: string): SavingsFixLine => ({ resourceId: fix.resourceId, resourceName: fix.resourceName, state, text: `${fix.resourceName}: ${text}` })
+  const line = (state: SavingsFixLine['state'], text: string): SavingsFixLine => ({
+    resourceId: fix.resourceId,
+    workspaceId: fix.workspaceId ?? null,
+    resourceName: fix.resourceName,
+    state,
+    text: `${fix.resourceName}: ${text}`,
+  })
   const flagged = isFlagged(fix, view, fix.config === null)
   const drafted = `fix drafted ${fix.date}`
   const days = windowDays(view.window)

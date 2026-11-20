@@ -211,7 +211,8 @@ export type RunToolOptions = {
  */
 export async function runTool($: EngineInterface, name: string, args: Record<string, unknown>, options: RunToolOptions = {}) {
   const { until, write = false } = options
-  const cliOnly = options.cliOnly === true || write
+  // An environment or a daemon bypass is only honoured by the CLI: the MCP server would drop both silently.
+  const cliOnly = options.cliOnly === true || write || options.noDaemon === true || options.env !== undefined
   // With a deadline, nothing starts once it has passed, and the CLI is stopped at it.
   const left = async () => {
     const ms = until === undefined ? TOOL_TIMEOUT_MS : until - (await $.clock.now())

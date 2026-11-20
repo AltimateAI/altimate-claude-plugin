@@ -12,6 +12,17 @@ import { count, windowDays } from './savings-format'
 export const HOSTED_CHECK_COUNT: Record<SavingsPlatform, number> = { databricks: 13, snowflake: 11 }
 export const LOCAL_CHECK_COUNT = 4
 
+/**
+ * How many of the local checks did not run, each once: an entry is "Check name (reason)", and one check can be
+ * listed once per workspace. Databricks only: a Snowflake entry can cover several checks, or be about warehouses.
+ */
+export function skippedChecks(view: Pick<SavingsView, 'skipped'>): number {
+  return Math.min(LOCAL_CHECK_COUNT, new Set(view.skipped.map(one => one.replace(/ \(.*$/s, ''))).size)
+}
+
+/** No local check ran, so nothing was checked: a verdict must not read as "nothing found". */
+export const nothingRan = (view: Pick<SavingsView, 'platform' | 'skipped'>) => view.platform === 'databricks' && skippedChecks(view) >= LOCAL_CHECK_COUNT
+
 type Facts = { warehouses: number; billedNothing: number | null; clusters: number | null; jobs: number | null; queries: number | null; queriesOn: string | null; days: number }
 type Check = { id: string; name: string; reads: (facts: Facts) => string }
 
