@@ -2,6 +2,7 @@
 // baseline (and, where a fix is followed, a drafted fix) remembers; it becomes text only when a line is drawn.
 
 import type { WarehouseConfig } from '../types'
+import { oneLine } from './savings-text'
 
 export type Setting = keyof WarehouseConfig
 
@@ -9,14 +10,7 @@ export type Setting = keyof WarehouseConfig
 export const SETTINGS: readonly Setting[] = ['size', 'type']
 
 /** A value as the CLI gave it, on one line; null when it gave none. */
-function read(value: unknown): string | null {
-  if (typeof value !== 'string' && typeof value !== 'number') return null
-  const text = String(value)
-    .replace(/\p{Cf}/gu, '')
-    .replace(/[\s\p{Cc}]+/gu, ' ')
-    .trim()
-  return text || null
-}
+const read = (value: unknown) => (typeof value === 'string' || typeof value === 'number' ? oneLine(value) || null : null)
 
 /** A warehouse row's settings as this run read them. */
 export const configOf = (row: Partial<Record<Setting, unknown>>): WarehouseConfig => ({ size: read(row.size), type: read(row.type) })
@@ -49,6 +43,3 @@ export const configLabel = (config: WarehouseConfig, settings: readonly Setting[
   settings
     .flatMap(setting => (config[setting] === null ? [] : [shown[setting](config[setting]!)]))
     .join(' ')
-
-/** The settings a line names, as words: `size and type`, `size`. */
-export const settingsNoun = (settings: readonly Setting[]) => settings.join(' and ')

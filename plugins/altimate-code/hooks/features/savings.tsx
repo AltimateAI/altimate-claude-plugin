@@ -11,6 +11,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 import type { SavingsView, WarehouseConfig } from '../../types'
 import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
 import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig } from '../savings-config'
+import { oneLine } from '../savings-text'
 import { SHELLS, leaderEnd, shellScript, simpleCommands } from '../shell'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -187,12 +188,6 @@ const approxTenths = (value: unknown) => {
   const shown = tenths(value)
   return shown === UNDER_TENTH || shown === '?' ? shown : `about ${shown}`
 }
-/** Free text from the workspace on one line, with control and invisible characters gone: one of them can blank the pane. */
-const oneLine = (value: unknown) =>
-  String(value ?? '')
-    .replace(/\p{Cf}/gu, '')
-    .replace(/[\s\p{Cc}]+/gu, ' ')
-    .trim()
 /** A workspace name as shown: cleaned, or the id when nothing printable is left. */
 const shownName = (name: unknown, id: unknown) => oneLine(name) || oneLine(id)
 /** In double quotes, so a name cannot pass for the text around it. */
@@ -483,9 +478,11 @@ export async function trackChanges(
     // A /clear while the baselines were read: this run keeps nothing.
     if (!live()) return []
     const now = configOf(warehouse)
+    // A cost the answer did not give is no amount: no line is drawn from it, and no baseline kept with it.
+    const windowCost = typeof warehouse.window_cost === 'number' && Number.isFinite(warehouse.window_cost) ? warehouse.window_cost : null
     // Only a setting both runs read can have changed, and the line names only those.
     const changed = stored ? changedSettings(stored.config, now) : []
-    if (stored && changed.length > 0) {
+    if (stored && changed.length > 0 && windowCost !== null) {
       const named = comparable(stored.config, now)
       changes.push({
         // Names repeat across workspaces, so with several read the line names its own.
@@ -494,17 +491,17 @@ export async function trackChanges(
         to: configLabel(now, named),
         since: stored.date,
         monthlyBefore: (stored.windowCost * 30) / (stored.days ?? windowDays(view.window)),
-        monthlyNow: (warehouse.window_cost * 30) / windowDays(view.window),
+        monthlyNow: (windowCost * 30) / windowDays(view.window),
       })
     }
     // In one workspace an id is unambiguous, so it is matched alone: the finding or the warehouse may lack the workspace id.
     const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flaggedIds.has(warehouse.id))
-    if (!stored && isFlagged) {
-      await $.store.set(key, { date: today, config: now, windowCost: warehouse.window_cost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
+    if (!stored && isFlagged && windowCost !== null) {
+      await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
     }
-    // A setting the baseline did not know is filled from the first run that reads it, and a known one is never
-    // overwritten, so a later change of it shows.
-    if (stored && changed.length === 0 && learns(stored.config, now)) {
+    // A setting the baseline did not know is filled from the first run that reads it, whatever else changed, and a
+    // known one is never overwritten, so a later change of it shows.
+    if (stored && learns(stored.config, now)) {
       await $.store.set(key, { ...stored, config: mergeConfig(stored.config, now) } satisfies Baseline).catch(() => undefined)
     }
   }
