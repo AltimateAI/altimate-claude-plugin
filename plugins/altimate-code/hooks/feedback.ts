@@ -11,7 +11,7 @@
 import type { EngineInterface, On, PluginOptions } from 'claude-code'
 
 import { MISSING_BINARY, parseVersion } from './altimate-cli'
-import { redactValues } from './dbt-mods-core'
+import { redactionForms, redactionValues } from './dbt-mods-core'
 import { dbtModsDoctorFacts } from './dbt-mods'
 import { asVersion, forgetProblem, problemNoted, type DoctorFacts } from './last-problem'
 import { pluginVersion } from './usage'
@@ -38,67 +38,97 @@ const SETTINGS: ReadonlyArray<readonly [string, string]> = [
 ]
 
 // ─── Redaction ────────────────────────────────────────────────────────────────────────────────────────
+//
+// Every rule reads the text as it was written and only reports spans to cut; the spans are merged and cut in one pass. A rule never
+// sees another rule's mask, so one cannot hide a key, a value or a path from another (a profile value that is also a key's name,
+// a secret that begins like a path).
 
 const MASK = '‹redacted›'
-// A line that ends in a credential key with a YAML block-scalar header (`password: |`, `secret: >- # note`): the value is the indented lines after it.
-const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?[ \t]*:[ \t]*)`
+const HOME_MASK = '<path under home>'
+
+type Span = { start: number; end: number; home: boolean }
+
+const CREDENTIAL_KEY = String.raw`(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?`
+// A YAML line of a credential key: a block-scalar header (`password: |`, `secret: >- # note`) takes the indented lines after it, and a plain value
+// (`password: correct horse battery staple`) is the rest of its line.
+const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?${CREDENTIAL_KEY}["']?[ \t]*:[ \t]*)`
 const BLOCK_HEADER = new RegExp(String.raw`${KEY_LINE}[|>][+-]?\d?[ \t]*(?:#.*)?$`, 'i')
-// `password: correct horse battery staple`: on a YAML line the value is the rest of the line, spaces and all.
 const PLAIN_VALUE = new RegExp(String.raw`${KEY_LINE}(?![|>"'])(\S.*)$`, 'i')
 
-/** Cuts out a YAML value under a credential key: the rest of its line, or the indented lines (blank ones between them too) after a block-scalar header. */
-export function redactBlockScalars(text: string): string {
+/** Each pattern's group 1, when it has one, is text that stays (a key, a scheme); the rest of the match is cut. */
+const SECRET_PATTERNS: RegExp[] = [
+  /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bsk-[A-Za-z0-9_-]{16,}/g,
+  /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
+  /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
+  /\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{4,}/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
+  /\b((?:proxy-)?authorization["']?\s*[:=]\s*)[^\n]+/gi,
+  /\b((?:Bearer|Basic|Digest|Token)\s+)[A-Za-z0-9._~+/=-]{8,}/g,
+  // user:password@host in a connection string or URL.
+  /(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+(?=@)/gi,
+  // A connection string's password: a quoted or braced value to its own closing delimiter (ODBC `PWD={a b};`, `}}` is a literal brace), or a
+  // value that runs to the next `;`, spaces included; the last field of a string (after a `;`, or alone on its line) runs to the end of the line.
+  /((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\})*\}|[^;\n]*(?=;))/gi,
+  /((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)[^;\n]*$/gim,
+  // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
+  // backslash escape or a doubled quote is inside it) or the rest of the word, up to a `;` that starts the next `key=` field.
+  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|(?:[^\s;]|;(?!\w+=))+)`, 'gi'),
+  // A long unbroken run of key-like characters.
+  /\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g,
+]
+
+function patternSpans(text: string): Span[] {
+  const spans: Span[] = []
+  for (const pattern of SECRET_PATTERNS) {
+    for (const match of text.matchAll(pattern)) {
+      const start = match.index + (match[1]?.length ?? 0)
+      const end = match.index + match[0].length
+      if (end > start) spans.push({ start, end, home: false })
+    }
+  }
+  return spans
+}
+
+/** The YAML values under credential keys: the rest of a line, or the indented lines (blank ones between them too) after a block-scalar header. */
+function yamlSpans(text: string): Span[] {
+  const spans: Span[] = []
   const lines = text.split('\n')
-  const out: string[] = []
+  let offset = 0
+  const starts = lines.map(line => {
+    const at = offset
+    offset += line.length + 1
+    return at
+  })
+  const bare = (line: string) => line.replace(/\r$/, '')
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.replace(/\r$/, '')
-    const plain = PLAIN_VALUE.exec(line)
-    if (plain) {
-      out.push(`${plain[1]}${MASK}`)
+    const line = bare(lines[i]!)
+    const plainValue = PLAIN_VALUE.exec(line)
+    if (plainValue) {
+      spans.push({ start: starts[i]! + plainValue[1]!.length, end: starts[i]! + line.length, home: false })
       continue
     }
     const header = BLOCK_HEADER.exec(line)
-    if (!header) {
-      out.push(lines[i]!)
-      continue
-    }
-    out.push(`${header[1]}${MASK}`)
-    let end = i
+    if (!header) continue
+    let last = i
     for (let next = i + 1; next < lines.length; next++) {
-      if (/^[ \t]+\S/.test(lines[next]!)) end = next
+      if (/^[ \t]+\S/.test(lines[next]!)) last = next
       else if (!/^[ \t]*\r?$/.test(lines[next]!)) break
     }
-    i = end
+    spans.push({ start: starts[i]! + header[1]!.length, end: starts[last]! + bare(lines[last]!).length, home: false })
+    i = last
   }
-  return out.join('\n')
+  return spans
 }
-const SECRET_PATTERNS: Array<[RegExp, string]> = [
-  [/\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g, MASK],
-  [/\bgithub_pat_[A-Za-z0-9_]{20,}/g, MASK],
-  [/\bsk-[A-Za-z0-9_-]{16,}/g, MASK],
-  [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, MASK],
-  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, MASK],
-  [/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{4,}/g, MASK],
-  [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, MASK],
-  [/\b((?:proxy-)?authorization["']?\s*[:=])[^\n]*/gi, `$1 ${MASK}`],
-  [/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g, `$1 ${MASK}`],
-  // user:password@host in a connection string or URL.
-  [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, `$1${MASK}@`],
-  // A connection string's password: a quoted or braced value to its own closing delimiter (ODBC `PWD={a b};`, `}}` is a literal brace), or a
-  // value that runs to the next `;`, spaces included; the last field of a string (after a `;`, or alone on its line) runs to the end of the line.
-  [/((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\})*\}|[^;\n]*(?=;))/gi, `$1${MASK}`],
-  [/((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?!‹redacted›)[^;\n]*$/gim, `$1${MASK}`],
-  // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
-  // backslash escape or a doubled quote is inside it) or the rest of the word. A YAML block scalar is cut whole first (redactBlockScalars).
-  [/((?<![\w.-])[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?\s*[:=]\s*)(?!‹redacted›)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\S+)/gi, `$1${MASK}`],
-  // A long unbroken run of key-like characters.
-  [/\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g, MASK],
-]
 
-/** The text with every token, key, password and connection-string credential cut out. */
-export function redactSecrets(text: string): string {
-  // The patterns read the text as written, before the profile's own values are cut out: a value that is also a key's name ("password") would hide the key from them.
-  return redactValues(SECRET_PATTERNS.reduce((out, [pattern, to]) => out.replace(pattern, to), redactBlockScalars(text)))
+/** Every place a value of the dbt profile the plugin holds appears, in any of the forms dbt may print it. */
+function valueSpans(text: string): Span[] {
+  const spans: Span[] = []
+  for (const form of new Set(redactionValues().flatMap(redactionForms))) {
+    for (let at = text.indexOf(form); at !== -1; at = text.indexOf(form, at + form.length)) spans.push({ start: at, end: at + form.length, home: false })
+  }
+  return spans
 }
 
 const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -121,20 +151,59 @@ function homeForms(homes: readonly string[]): string[] {
 }
 
 const PATH_SEGMENT = `(?:[^\\s'"\`<>()\\\\/]|'(?=[A-Za-z0-9])|\\([^\\s()'"\`<>]*\\))`
-// The rest of a path after its home folder: segments, and a space inside one when a separator follows within three words
+// The rest of a path after its home folder: segments, and a space inside one when a separator follows within eight words
 // ("Client Files/acme"). A path that ends in a space-separated word ("Client Files") is cut at the space unless it is quoted.
 const PATH_TAIL = `(?:[\\\\/]${PATH_SEGMENT}*(?: (?=(?:${PATH_SEGMENT}+ ){0,7}${PATH_SEGMENT}+[\\\\/])${PATH_SEGMENT}+)*)*`
 
-/** Every path under the home folder, and every `~/…` path, replaced whole: a quoted one up to its closing quote, an unquoted one with the spaces inside its folder names. */
-export function withoutHome(text: string, homes: readonly string[]): string {
+/** Every path under the home folder, and every `~/…` path: a quoted one up to its own closing quote (a quote of another kind, or an escaped one, is part of the name), an unquoted one with the spaces inside its folder names. */
+function homeSpans(text: string, homes: readonly string[]): Span[] {
+  const spans: Span[] = []
   // `~` stands for the home folder whoever the user is, so it counts only before a separator.
   const forms = [...homeForms(homes).map(form => escapeRegex(form)), '(?<![\\w.~/\\\\-])~(?=[\\\\/])']
-  return forms.reduce((out, home) => {
-    // A quoted path runs to its own closing quote (a quote of another kind, or an escaped one, is part of the name).
-    return ['"', "'", '`']
-      .reduce((text, quote) => text.replace(new RegExp(`${quote}${home}(?:[^${quote}\\n\\\\]|\\\\.)*${quote}`, 'gi'), `${quote}<path under home>${quote}`), out)
-      .replace(new RegExp(`${home}${PATH_TAIL}`, 'gi'), '<path under home>')
-  }, text)
+  for (const home of forms) {
+    for (const quote of ['"', "'", '`']) {
+      for (const match of text.matchAll(new RegExp(`${quote}${home}(?:[^${quote}\\n\\\\]|\\\\.)*${quote}`, 'gi'))) spans.push({ start: match.index + 1, end: match.index + match[0].length - 1, home: true })
+    }
+    for (const match of text.matchAll(new RegExp(`${home}${PATH_TAIL}`, 'gi'))) spans.push({ start: match.index, end: match.index + match[0].length, home: true })
+  }
+  return spans
+}
+
+/** The text with every span cut: overlapping and touching spans become one, and say "redacted" unless every part was a home path. */
+function cut(text: string, spans: Span[]): string {
+  const sorted = spans.filter(span => span.end > span.start).sort((a, b) => a.start - b.start || b.end - a.end)
+  const merged: Span[] = []
+  for (const span of sorted) {
+    const last = merged[merged.length - 1]
+    if (last && span.start <= last.end) {
+      last.end = Math.max(last.end, span.end)
+      last.home = last.home && span.home
+    } else merged.push({ ...span })
+  }
+  let out = ''
+  let at = 0
+  for (const span of merged) {
+    out += text.slice(at, span.start) + (span.home ? HOME_MASK : MASK)
+    at = span.end
+  }
+  return out + text.slice(at)
+}
+
+const secretSpans = (text: string) => [...patternSpans(text), ...yamlSpans(text), ...valueSpans(text)]
+
+/** The text with every token, key, password, connection-string credential and value of the dbt profile cut out. */
+export function redactSecrets(text: string): string {
+  return cut(text, secretSpans(text))
+}
+
+/** The text with every path under the home folder, and every `~/…` path, cut out. */
+export function withoutHome(text: string, homes: readonly string[]): string {
+  return cut(text, homeSpans(text, homes))
+}
+
+/** Secrets and home paths together, found in the text as written. */
+export function redactAll(text: string, homes: readonly string[]): string {
+  return cut(text, [...secretSpans(text), ...homeSpans(text, homes)])
 }
 
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g
@@ -148,7 +217,7 @@ export const MAX_INPUT = 100_000
  * so a secret that straddles the cut is gone whole. The person's other words are kept.
  */
 export function cleanDescription(text: string, homes: readonly string[]): string {
-  const clean = withoutHome(redactSecrets(plain(text).trim()), homes)
+  const clean = redactAll(plain(text).trim(), homes)
   return Array.from(clean.trim()).slice(0, MAX_DESCRIPTION).join('')
 }
 
@@ -284,7 +353,7 @@ async function openLink($: EngineInterface, url: string): Promise<boolean> {
 
 /** A reason gh gave, in one short line: secrets and home-folder paths out. */
 async function reasonOf($: EngineInterface, text: string): Promise<string> {
-  return firstLine(withoutHome(redactSecrets(text), await homesOf($)))
+  return firstLine(redactAll(text, await homesOf($)))
 }
 
 async function linkAnswer($: EngineInterface, draft: Draft, lead: string, dry: boolean): Promise<string> {

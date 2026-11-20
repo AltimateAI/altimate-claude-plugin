@@ -178,7 +178,10 @@ test('a home path with a space in a folder name is replaced whole, quoted or not
   expect(withoutHome(`"${HOME}/Client Files/acme/models/payroll.sql"`, [HOME])).toBe('"<path under home>"')
   expect(withoutHome(`'${HOME}/Client Files'`, [HOME])).toBe("'<path under home>'")
   expect(withoutHome(`open ${HOME}/Client Files/acme/models/payroll.sql with password`, [HOME])).toBe('open <path under home> with password')
-  expect(withoutHome('C:/Users/Alice/Client Files/x.sql and C:\\Users\\Alice\\Client Files\\y.sql', ['C:\\Users\\Alice'])).toBe('<path under home> and <path under home>')
+  expect(withoutHome('C:/Users/Alice/Client Files/x.sql', ['C:\\Users\\Alice'])).toBe('<path under home>')
+  expect(withoutHome('C:\\Users\\Alice\\Client Files\\y.sql', ['C:\\Users\\Alice'])).toBe('<path under home>')
+  // Two paths close together may be cut as one: more is cut, never less.
+  expect(withoutHome('C:/Users/Alice/Client Files/x.sql and C:\\Users\\Alice\\Client Files\\y.sql', ['C:\\Users\\Alice'])).not.toMatch(/Client|x\.sql|y\.sql/)
 })
 
 // ─── The link ─────────────────────────────────────────────────────────────────────────────────────────
@@ -613,6 +616,17 @@ test('a quoted password with a semicolon inside, and a last unquoted connection-
   expect(out).not.toMatch(/alpha|omega|correct|horse|battery|staple|y-secret|last words/)
   expect(out).toContain('Server=db;Password=‹redacted›')
   expect(out).toContain('and more')
+})
+
+test('the rules read the text as written: a profile value that is a key name or a home folder, or the base of a long key, cannot hide anything', () => {
+  const key = `${'Ab1/'.repeat(21)}Zz+/Qw==`
+  setRedactions(ROOT, [key, HOME, 'password'])
+  try {
+    const out = cleanDescription(`"${HOME}/work/acme/models/fct_orders.sql" key=${key} password=hunter2-production-key`, [HOME])
+    expect(out).not.toMatch(/work|acme|fct_orders|Ab1|Zz|hunter2|production/)
+  } finally {
+    clearRedactions()
+  }
 })
 
 test('ADO.NET doubled quotes inside a quoted password are part of it, and a profile value that is also a key name does not hide the key', () => {
