@@ -874,6 +874,29 @@ test('the band\'s Run /savings pressed while a typed /savings check is going sta
   await clock.settle()
 })
 
+test('a check from before a /clear that ends after it does not free the new conversation\'s check', async ($, on) => {
+  const options: any = {}
+  const { clock, runs } = await start($, on, options)
+  let finishOld = () => {}
+  options.hold = new Promise<void>(done => (finishOld = done))
+  await savings($)
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  let finishNew = () => {}
+  options.hold = new Promise<void>(done => (finishNew = done))
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  // The old check ends: the new one is still going, and still the only one.
+  finishOld()
+  await clock.settle()
+  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  finishNew()
+  await clock.settle()
+})
+
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const { clock } = await start($, on, { files })
