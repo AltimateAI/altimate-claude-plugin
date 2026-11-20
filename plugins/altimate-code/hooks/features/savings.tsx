@@ -1361,9 +1361,13 @@ export function register(on: On, _context: FeatureContext) {
       return { text: `The ${name} is already running in the side pane.` }
     }
     // A /clear while the list or the busy state was read: nothing is marked running for the new conversation.
-    if (at !== generation) return { text: `The conversation was cleared before the ${name} started. Run /savings again.` }
+    const cleared = { text: `The conversation was cleared before the ${name} started. Run /savings again.` }
+    if (at !== generation) return cleared
     await update($, busyAtom, now => (at === generation ? busyOf(asked || null, connections) : now))
+    // A /clear during the write or while the pane opens: no pane, no run, and no claim that one is running.
+    if (at !== generation) return cleared
     const opened = await openPane($)
+    if (at !== generation) return cleared
     later($, () => runCheck($, asked || null, at))
     if (opened && opened.isPlaced === false) {
       return { text: `Running the ${name}. The terminal is too narrow for the side pane, so the result comes as a notice; widen the window to see the details.` }
