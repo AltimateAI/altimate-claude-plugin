@@ -604,7 +604,13 @@ const sizeOrNull = (value: string | null | undefined) => value ?? null
  * cost. The windows are different weeks, so a change in workload moves the amounts too: they are not a
  * saving measured with the workload held constant.
  */
-export async function trackChanges($: EngineInterface, view: SavingsView, warehouses: ToolWarehouse[], today: string): Promise<SavingsView['changes']> {
+export async function trackChanges(
+  $: EngineInterface,
+  view: SavingsView,
+  warehouses: ToolWarehouse[],
+  today: string,
+  live: () => boolean = () => true,
+): Promise<SavingsView['changes']> {
   // Without the connection's name one connection's baselines could be read as another's, so none are kept.
   const connection = view.connection
   if (!connection) return []
@@ -622,6 +628,8 @@ export async function trackChanges($: EngineInterface, view: SavingsView, wareho
     if (seen.has(key)) continue
     seen.add(key)
     const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
+    // A /clear while the baselines were read: this run keeps nothing.
+    if (!live()) return []
     const windowCost = typeof warehouse.window_cost === 'number' ? warehouse.window_cost : null
     const changed = stored && (stored.size !== sizeOrNull(warehouse.size) || stored.type !== warehouse.type)
     // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
@@ -983,7 +991,7 @@ async function openPane($: EngineInterface) {
 }
 
 /** What became of each fix drafted on this connection, as of this run, noting the run that first sees a change. */
-async function fixesFor($: EngineInterface, view: SavingsView, today: string): Promise<SavingsFixLine[]> {
+async function fixesFor($: EngineInterface, view: SavingsView, today: string, live: () => boolean = () => true): Promise<SavingsFixLine[]> {
   const lines: SavingsFixLine[] = []
   const prefix = `${FIX_PREFIX}${keyOf(view)}:`
   for (const key of await $.store.keys().catch(() => [] as string[])) {
@@ -999,6 +1007,8 @@ async function fixesFor($: EngineInterface, view: SavingsView, today: string): P
       const { changedSeen: _gone, ...rest } = held
       fix = rest
     }
+    // A /clear while the fixes were read: this run writes nothing back.
+    if (!live()) return []
     if (fix !== held) await $.store.set(key, fix).catch(() => undefined)
     lines.push(fixProgress(fix, view))
   }
@@ -1022,10 +1032,14 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
       return { platform, why: explain((metadata?.error ?? (tooOldCli(raw) ? raw : result.text || raw)) || 'no answer', connection, platform) }
     }
     const today = dayOf(await $.clock.now())
+    if (!live()) return null
     view.scope = scopeOf(platform, connections?.find(one => one.name === view.connection), view.connection)
     view.identity = identityOf(platform, view.connection ? (await configuredFacts($))[view.connection] : undefined, await sessionRoot($))
-    view.changes = await trackChanges($, view, metadata?.warehouses ?? [], today)
-    view.fixes = await fixesFor($, view, today)
+    if (!live()) return null
+    view.changes = await trackChanges($, view, metadata?.warehouses ?? [], today, live)
+    if (!live()) return null
+    view.fixes = await fixesFor($, view, today, live)
+    if (!live()) return null
     // A drafted fix says what became of that warehouse; the older "since first flagged" line would repeat it.
     // Across workspaces a fix matches its own warehouse's line by id and workspace; in one workspace by id,
     // since a finding (and so its fix) can lack the workspace id its warehouse carries.
@@ -1056,19 +1070,23 @@ async function runCheck($: EngineInterface, asked: string | null, at: number) {
   const live = () => mine === generation
   lastAsked = asked
   offered = true
+  // Every write of this run lands only while it is current, checked inside the write, and every notice only
+  // then: a /clear at any await below leaves the new conversation's state as the clear left it.
   // Every run opens slim again, whether it answers or is refused.
-  await update($, expandedAtom, () => false)
+  await update($, expandedAtom, now => (live() ? false : now))
   const refuse = async (platform: SavingsPlatform, name: string, why: { text: string; recovery: string }) => {
-    await update($, messagesAtom, () => [{ platform, ...why }])
-    notify($, `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${why.text} ${why.recovery}`)
+    await update($, messagesAtom, now => (live() ? [{ platform, ...why }] : now))
+    if (live()) notify($, `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${why.text} ${why.recovery}`)
   }
   try {
-    await update($, messagesAtom, () => [])
-    await update($, bandAtom, () => null)
-    await update($, sharedAtom, () => null)
+    await update($, messagesAtom, now => (live() ? [] : now))
+    await update($, bandAtom, now => (live() ? null : now))
+    await update($, sharedAtom, now => (live() ? null : now))
+    if (!live()) return
     await drawStatus($)
     const until = (await $.clock.now()) + RUN_BUDGET_MS
     const known = await read($, connectionsAtom)
+    if (!live()) return
     // A CLI that cannot be started at all goes to the install message below; one that does not answer is unreadable.
     const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY).catch(error => {
       if (MISSING_BINARY.test(String(error))) throw error
@@ -1108,10 +1126,11 @@ async function runCheck($: EngineInterface, asked: string | null, at: number) {
     const connections = (await listConnections($)) ?? known
     if (!live()) return
     const targets = targetsFor(asked, connections)
-    await update($, busyAtom, () => busyFor(targets))
+    await update($, busyAtom, now => (live() ? busyFor(targets) : now))
     const answers = await Promise.all(targets.map(target => checkOne($, target, connections, until, live)))
     if (!live()) return
     const now = await $.clock.now()
+    if (!live()) return
     const notices: string[] = []
     const refusals: { platform: SavingsPlatform; text: string; recovery: string }[] = []
     const fresh: Record<string, SavingsKept> = {}
@@ -1121,7 +1140,8 @@ async function runCheck($: EngineInterface, asked: string | null, at: number) {
       if ('view' in answer) {
         const kept: SavingsKept = { savedAt: now, view: answer.view }
         fresh[keyOf(answer.view)] = kept
-        // Each answer is offered to the store, whether or not an earlier one fit.
+        // Each answer is offered to the store, whether or not an earlier one fit; none after a /clear.
+        if (!live()) return
         const saved = await $.store.set(`${REPORT_PREFIX}${keyOf(answer.view)}`, kept).then(() => true, () => false)
         if (!saved) unsaved = true
         notices.push(summary(answer.view))
@@ -1130,14 +1150,15 @@ async function runCheck($: EngineInterface, asked: string | null, at: number) {
         notices.push(`${PLATFORM_NAME[answer.platform]} savings check: ${answer.why.text} ${answer.why.recovery}`)
       }
     }
-    await update($, whatIfAtom, () => null)
-    await update($, messagesAtom, () => refusals)
-    await update($, reportsAtom, kept => ({ ...kept, ...fresh }))
-    if (unsaved) await update($, sharedAtom, () => ({ text: 'This answer could not be kept on this machine (the plugin store is full): the next session shows the last one that was, if any.' }))
-    if (notices.length > 0) notify($, notices.join(' '))
+    await update($, whatIfAtom, now => (live() ? null : now))
+    await update($, messagesAtom, now => (live() ? refusals : now))
+    await update($, reportsAtom, kept => (live() ? { ...kept, ...fresh } : kept))
+    if (unsaved) await update($, sharedAtom, now => (live() ? { text: 'This answer could not be kept on this machine (the plugin store is full): the next session shows the last one that was, if any.' } : now))
+    if (notices.length > 0 && live()) notify($, notices.join(' '))
   } catch (error) {
     if (!live()) return
     const platform = targetsFor(asked, await read($, connectionsAtom))[0]!.platform
+    if (!live()) return
     const why = MISSING_BINARY.test(String(error))
       ? { text: 'altimate-code is not installed.', recovery: `Install it (\`npm install -g altimate-code\`), add a ${PLATFORM_NAME[platform]} connection, then run /savings again.` }
       : explain(String(error), asked, platform)
