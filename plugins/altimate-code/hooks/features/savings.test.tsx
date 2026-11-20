@@ -1126,7 +1126,22 @@ test('a baseline in one workspace is read for that workspace only, though anothe
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
   expect(texts.filter(text => / → .* since 2026-11-10/.test(text))).toEqual([
-    'Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
+    'Classic (workspace 111): SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
+  ])
+  await ui.unmount()
+})
+
+test('a size the CLI did not read is left out of the change line, not drawn as "?"', async ($, on) => {
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: null, windowCost: 27.54 } }
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
+  const { clock } = await start($, on, { answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual([
+    'Classic: CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
   ])
   await ui.unmount()
 })

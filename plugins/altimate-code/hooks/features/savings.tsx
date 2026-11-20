@@ -244,6 +244,9 @@ export function evidenceLines(evidence: Record<string, unknown> | undefined, day
   }
 }
 
+/** A warehouse's size and type as the change line shows them; a size the CLI did not read is left out, not drawn as "?". */
+const configOf = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSize) ? size(warehouseSize) : '', oneLine(type)].filter(Boolean).join(' ')
+
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
   return String(value ?? '')
@@ -477,9 +480,10 @@ export async function trackChanges(
     const changed = stored && (stored.size !== warehouse.size || stored.type !== warehouse.type)
     if (stored && changed) {
       changes.push({
-        name: shownName(warehouse.name, warehouse.id),
-        from: `${size(stored.size)} ${stored.type}`,
-        to: `${size(warehouse.size)} ${warehouse.type}`,
+        // Names repeat across workspaces, so with several read the line names its own.
+        name: `${shownName(warehouse.name, warehouse.id)}${several ? ` (workspace ${oneLine(warehouse.workspace_id)})` : ''}`,
+        from: configOf(stored.size, stored.type),
+        to: configOf(warehouse.size, warehouse.type),
         since: stored.date,
         monthlyBefore: (stored.windowCost * 30) / (stored.days ?? windowDays(view.window)),
         monthlyNow: (warehouse.window_cost * 30) / windowDays(view.window),
