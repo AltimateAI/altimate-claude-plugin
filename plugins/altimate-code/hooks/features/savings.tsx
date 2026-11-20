@@ -18,7 +18,7 @@ import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
 import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from '../savings-fixes'
-import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
+import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
   type ConnectionFacts,
@@ -507,7 +507,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
   }
   const pricing = metadata.price?.source === 'rate_sheet' && typeof metadata.price.per_credit === 'number' ? `your account's $${metadata.price.per_credit.toFixed(2)} a credit` : 'list price'
   const counted = new Set([...queries.keys()].map(id => inventory.find(row => row.id === id)?.type ?? null))
-  return {
+  const view: SavingsView = {
     platform,
     connection: metadata.warehouse ?? null,
     identity: '',
@@ -520,14 +520,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
     // (its query may still be running), or because core refused its facts.
     skipped: (metadata.skipped ?? []).map(one => oneLine(one.reason ? `${one.check} (${one.reason.trim().replace(/\.$/, '')})` : one.check)),
     limited: (metadata.limited ?? []).map(oneLine),
-    // A missing amount is drawn as '?'; a missing count is the findings' resources, each once.
-    total: {
-      min: report.total.monthly_min,
-      max: report.total.monthly_max,
-      resources: known(report.total.resources)
-        ? Number(report.total.resources)
-        : new Set(report.findings.map(one => `${one.workspace_id ?? ''}/${one.resource_type}/${one.resource_id}`)).size,
-    },
+    total: { min: Number(report.total.monthly_min), max: Number(report.total.monthly_max), resources: Number(report.total.resources) },
     findings: report.findings.map(one => {
       const warehouse = isWarehouse(one.resource_type) ? inventory.find(row => row.id === one.resource_id) : undefined
       return {
@@ -582,6 +575,11 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
     queriesOn: counted.size === 1 ? [...counted][0]! : null,
     fixes: [],
   }
+  // A total missing a figure is the findings' own, added up as several kept answers are: each priced
+  // resource once, at its largest saving. The headline then matches the "+N" line, and a finding with no
+  // dollar estimate never makes it "$0 a month".
+  if (![report.total.monthly_min, report.total.monthly_max, report.total.resources].every(known)) view.total = findingsTotal([view])
+  return view
 }
 
 /**

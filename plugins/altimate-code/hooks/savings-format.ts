@@ -102,9 +102,13 @@ export const resourceKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: 
 /** Whether a finding's range is larger than another's: by its high end, then its low end. */
 export const largerSaving = (a: { min: number; max: number }, b: { min: number; max: number }) => a.max > b.max || (a.max === b.max && a.min > b.min)
 
-/** What several kept answers add up to a month: each resource once, at its largest saving, even when two connections read the same account. */
+/** What several kept answers add up to a month: one answer's own total, or their findings' added up. */
 export function combinedTotal(views: readonly SavingsView[]): { min: number; max: number; resources: number } {
-  if (views.length === 1) return views[0]!.total
+  return views.length === 1 ? views[0]!.total : findingsTotal(views)
+}
+
+/** What the answers' priced findings add up to a month: each resource once, at its largest saving, even when two connections read the same account. */
+export function findingsTotal(views: readonly SavingsView[]): { min: number; max: number; resources: number } {
   const best = new Map<string, { min: number; max: number }>()
   for (const view of views) {
     for (const one of view.findings) {

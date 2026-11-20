@@ -2957,7 +2957,7 @@ test('an answer without a total is no report rather than a failed run', () => {
   expect(toView(answer.metadata)).toBeNull()
 })
 
-test('a total missing its amounts or count still draws its findings, with ? for the amounts', async ($, on) => {
+test('a total missing its amounts or count is the findings\' own, and still draws them', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   delete answer.metadata.report.total.monthly_min
   delete answer.metadata.report.total.monthly_max
@@ -2965,7 +2965,8 @@ test('a total missing its amounts or count still draws its findings, with ? for 
   const { clock, toasts } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  expect(toasts.at(-1)).toBe('Databricks savings check: ? a month on 1 resource.')
+  // The fixture's one priced finding, counted once at its largest saving.
+  expect(toasts.at(-1)).toMatch(/^Databricks savings check: \$80\.64–\$101 a month on 1 resource/)
   const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^Classic · Migrate Classic\/Pro to Serverless · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /failed/ })).toBeUndefined()
@@ -3198,4 +3199,12 @@ test('a finding without a title is drawn in the slim view too, with a plain one'
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^Classic · Databricks · Savings finding · / })).toBeDefined()
   await ui.unmount()
+})
+
+test('a total without its count, over findings with no dollar estimate, is never "$0 a month"', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.report.total = { monthly_min: 0, monthly_max: 0 }
+  const second = { ...answer.metadata.report.findings[0], resource_id: 'wh-other', resource_name: 'Other' }
+  answer.metadata.report.findings = [answer.metadata.report.findings[0], second].map((one: any) => ({ ...one, monthly_min: 0, monthly_max: 0 }))
+  expect(toView(answer.metadata)?.total).toEqual({ min: 0, max: 0, resources: 0 })
 })
