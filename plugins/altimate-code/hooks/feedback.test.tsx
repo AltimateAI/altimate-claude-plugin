@@ -582,6 +582,14 @@ test('credential keys with a prefix or suffix (DBT_PASSWORD, access_token), YAML
   expect(out).toContain('user: bob')
 })
 
+test('a YAML block scalar under a credential key is cut whole: comments on its header, blank lines inside it, folded and literal', () => {
+  const out = redactSecrets(['password: | # database password', '  correct-horse', '', '  battery-staple', 'client_secret: >- # note', '    folded', 'next: kept', '- db_token: |', '    listed-secret', 'last: kept too'].join('\n'))
+  expect(out).not.toMatch(/correct|battery|folded|listed/)
+  expect(out).toContain('next: kept')
+  expect(out).toContain('last: kept too')
+  expect(out.split('\n')[0]).toBe('password: ‹redacted›')
+})
+
 test('a profile value that YAML writes with doubled apostrophes is cut out too', () => {
   setRedactions(ROOT, ["alpha'omega-secret"])
   try {
