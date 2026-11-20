@@ -191,6 +191,8 @@ type Options = {
   files?: Record<string, string>
   /** `$.fs.read` waits for what this returns before it answers: given the path and how many times it was read. */
   readHold?: (path: string, count: number) => Promise<void> | undefined
+  /** `$.prompt.fill` waits for this before it answers. */
+  fillHold?: Promise<void>
   /** Whether the prompt box takes a fill. */
   canFill?: boolean
   /** What `$.store` holds when the session starts. */
@@ -221,9 +223,10 @@ async function start($: any, on: any, options: Options = {}) {
     store.set(e.key, e.value)
     return { value: undefined }
   })
-  on('prompt.fill', (_: unknown, e: { text: string }) => {
+  on('prompt.fill', async (_: unknown, e: { text: string }) => {
     if (options.canFill === false) return { isFilled: false, reason: 'no_composer' }
     fills.push(e.text)
+    if (options.fillHold) await options.fillHold
     return { isFilled: true }
   })
   on('command.register', () => ({ value: { command: 'savings' } }))
@@ -1139,8 +1142,9 @@ test('a baseline in one workspace is read for that workspace only, though anothe
 })
 
 // Each setting, known or not before and after, the same or not: what the baseline keeps, and the line the pane draws.
-// The other setting is either known and the same on both sides, or unknown before and read now: a read in which a
-// known setting changed fills nothing, since its values are the warehouse after the change.
+// The other setting is either known and the same on both sides, or unknown before and read now. The baseline is one
+// run's read: a run that reads every setting it knew, finds none changed and reads more replaces it whole, with its
+// own date and cost; any other run leaves it as it was.
 const SETTING_CASES = [
   { setting: 'size', a: 'SMALL', b: 'X_SMALL', other: 'type', otherValue: 'CLASSIC' },
   { setting: 'type', a: 'CLASSIC', b: 'PRO', other: 'size', otherValue: 'SMALL' },
@@ -1162,11 +1166,12 @@ for (const { setting, a, b, other, otherValue } of SETTING_CASES) {
             await started.clock.settle()
             // Changed: only a setting known on both sides, with different values.
             const changed = before === 'known' && after === 'known' && !same
-            // Merge: a known setting is never overwritten; an unknown one takes what this run read, unless this run
-            // saw a change.
-            const kept = (started.store.get(key) as any).config
-            expect(kept[setting]).toBe(before === 'known' ? a : changed || after === 'unknown' ? null : now[setting])
-            expect(kept[other]).toBe(otherBefore === 'known' ? otherValue : changed ? null : otherValue)
+            const covered = before === 'unknown' || after === 'known'
+            const learned = (before === 'unknown' && after === 'known') || otherBefore === 'unknown'
+            const replaced = !changed && covered && learned
+            const kept = started.store.get(key) as any
+            expect(kept.config).toEqual(replaced ? { size: now.size ?? null, type: now.type ?? null } : { size: was.size ?? null, type: was.type ?? null })
+            expect(kept.date === '2026-11-10').toBe(!replaced)
             // The line names only the settings known on both sides.
             const named = (['size', 'type'] as const).filter(one => was[one] !== null && now[one] !== null)
             const label = (config: Record<string, string | null>) => named.map(one => (one === 'size' ? config.size!.replace(/_/g, '-') : config.type!)).join(' ')
@@ -1197,6 +1202,89 @@ test('a setting the baseline did not know is not filled from a read in which ano
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(['Classic: CLASSIC → PRO since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'])
+  await ui.unmount()
+})
+
+test('a run that reads every setting the baseline knew, with none changed, replaces it whole: date and spend too', async ($, on) => {
+  // Kept on 2026-11-10 with the size unknown. A resize in between could not be seen, so the size this run reads is
+  // the warehouse now: the baseline takes it with this run's date and spend, never the old week's.
+  const key = 'savings-baseline:dbxmega:wh-classic'
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  Object.assign(classic, { size: 'MEDIUM', type: 'CLASSIC' })
+  const { clock, store } = await start($, on, { answer, store: { [key]: { date: '2026-11-10', config: { size: null, type: 'CLASSIC' }, windowCost: 99, days: 7 } } })
+  await savings($)
+  await clock.settle()
+  const kept = store.get(key) as any
+  expect(kept.config).toEqual({ size: 'MEDIUM', type: 'CLASSIC' })
+  expect(kept.date).not.toBe('2026-11-10')
+  expect(kept.windowCost).toBe(Number(classic.window_cost))
+})
+
+test('a run that misses a setting the baseline knew leaves it as it was, whatever else it reads', async ($, on) => {
+  const key = 'savings-baseline:dbxmega:wh-classic'
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: null, type: 'PRO' })
+  const stored = { date: '2026-11-10', config: { size: 'SMALL', type: null }, windowCost: 27.54 }
+  const { clock, store } = await start($, on, { answer, store: { [key]: stored } })
+  await savings($)
+  await clock.settle()
+  expect(store.get(key)).toEqual(stored)
+})
+
+test('Draft the fix pressed just before a run starts still fills the prompt box and says so', async ($, on) => {
+  const { clock, fills, toasts } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'fix-0' })
+  await savings($)
+  await clock.settle()
+  expect(fills).toHaveLength(1)
+  expect(toasts.filter(text => text.startsWith('The fix request is in your prompt box'))).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('Draft the fix whose prompt box is filled across a /clear says nothing in the new conversation', async ($, on) => {
+  let release = () => {}
+  const fillHold = new Promise<void>(done => (release = done))
+  const { clock, fills, toasts } = await start($, on, { fillHold })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  await clock.settle()
+  expect(fills).toHaveLength(1)
+  expect(toasts.filter(text => /prompt box/.test(text))).toEqual([])
+  await ui.unmount()
+})
+
+test('a bundle file nested under resources/ is Databricks config for the band', async ($, on) => {
+  const files = { [`${ROOT}/resources/jobs/nightly.job.yml`]: 'resources:\n  jobs:\n    nightly:\n      job_clusters:\n        - new_cluster:\n            node_type_id: i3.xlarge\n' }
+  const { clock } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/jobs/nightly.job.yml`, old_string: 'i3', new_string: 'm5' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Databricks compute in play/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('an answer whose window has no end, or whose connection name carries a line break, draws neither', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.window = { start: answer.metadata.window.start }
+  answer.metadata.warehouse = 'dbx\nmega'
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const line = texts.find(text => / days/.test(text) && /connection/.test(text))
+  expect(line).toBeDefined()
+  expect(line).not.toMatch(/undefined|\n/)
+  expect(line).toContain('connection dbx mega')
   await ui.unmount()
 })
 
@@ -1284,7 +1372,7 @@ test('a flagged warehouse the answer gives no cost for keeps no baseline', async
   expect(store.has('savings-baseline:dbxmega:wh-classic')).toBe(false)
 })
 
-test('a baseline an older version kept as strings loads as fully unknown: no line, and this run fills it', async ($, on) => {
+test('a baseline an older version kept as strings loads as fully unknown: no line, and this run replaces it', async ($, on) => {
   const key = 'savings-baseline:dbxmega:wh-classic'
   const store = { [key]: { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
   const answer = JSON.parse(JSON.stringify(ANSWER))
@@ -1295,7 +1383,11 @@ test('a baseline an older version kept as strings loads as fully unknown: no lin
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: / since 2026-11-10\./ })).toBeUndefined()
   await ui.unmount()
-  expect(kept.get(key)).toEqual({ date: '2026-11-10', config: { size: 'X_SMALL', type: 'CLASSIC' }, windowCost: 27.54 })
+  // This run's read, with its own date and spend: nothing of the string baseline is kept.
+  const now = kept.get(key) as any
+  expect(now.config).toEqual({ size: 'X_SMALL', type: 'CLASSIC' })
+  expect(now.date).not.toBe('2026-11-10')
+  expect(now.windowCost).toBe(Number(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost))
 })
 
 test('after a run that failed, the band does not quote the answer the pane no longer shows', async ($, on) => {

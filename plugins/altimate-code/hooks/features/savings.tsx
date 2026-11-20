@@ -10,7 +10,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { SavingsView, WarehouseConfig } from '../../types'
 import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
-import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig } from '../savings-config'
+import { changedSettings, comparable, configLabel, configOf, covers, learns, loadConfig } from '../savings-config'
 import { oneLine } from '../savings-text'
 import { SHELLS, leaderEnd, shellScript, simpleCommands } from '../shell'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
@@ -82,6 +82,9 @@ const whatIfAtom = atom({ plugin: 'altimate-code', key: 'savingsWhatIf' } as con
 // Each run takes a number; /clear, a resume or a reload moves it on, so a run still waiting on
 // Databricks when the conversation changed never writes its report into the new one.
 let generation = 0
+// The conversation's number: a /clear, a resume or a logout starts the next. What a press or a tool call writes into
+// the conversation (the prompt box, the band, a toast) is dropped once it moved on. A run starting does not move it.
+let conversation = 0
 let lastConnection: string | null = null
 // Set from a press that starts a run (Run again, the band's Run /savings) until that run ends.
 let pressQueued = false
@@ -89,7 +92,7 @@ let pressQueued = false
 let offered = false
 
 // Files that define Databricks compute: bundles, their resources, Terraform. Read only when one is edited.
-const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/[^/]+\.ya?ml|[^/]+\.tf)$/i
+const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/(?:[^/]+\/)*[^/]+\.ya?ml|[^/]+\.tf)$/i
 // What marks such a file, or a command, as about warehouses or clusters.
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 // What marks a file as Databricks config at all: a Terraform `databricks_` resource, or a bundle.
@@ -361,8 +364,9 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const counted = Number(metadata.workspaces_checked)
   const workspaces = Number.isInteger(counted) && counted > 0 ? Math.max(counted, listed) : listed
   return {
-    connection: metadata.warehouse ?? null,
-    window: metadata.window,
+    connection: oneLine(metadata.warehouse) || null,
+    // Core always sends both ends; a missing one reads as unknown, never "undefined".
+    window: { start: oneLine(metadata.window.start), end: oneLine(metadata.window.end) },
     checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0, workspaces: Math.max(1, workspaces) },
     // Each with the CLI's reason: a check can be skipped for a refused read, for the run's time limit
     // (its query may still be running), or because core refused its facts.
@@ -499,10 +503,11 @@ export async function trackChanges(
     if (!stored && isFlagged && windowCost !== null) {
       await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
     }
-    // A setting the baseline did not know is filled from the first run that reads it with nothing known changed, and
-    // a known one is never overwritten, so a later change of it shows (`mergeConfig`).
-    if (stored && learns(stored.config, now)) {
-      await $.store.set(key, { ...stored, config: mergeConfig(stored.config, now) } satisfies Baseline).catch(() => undefined)
+    // The baseline is one run's read: its settings, date and cost all come from that run, so a setting is never
+    // paired with another run's spend. A run that reads every setting it knew, finds none changed and reads one
+    // more replaces it whole; a run that saw a change, or missed a setting, leaves it as it was.
+    if (stored && windowCost !== null && learns(stored.config, now) && covers(stored.config, now)) {
+      await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
     }
   }
   return changes
@@ -668,12 +673,22 @@ async function runCheck($: EngineInterface, connection: string | null, asked: nu
   }
 }
 
+/**
+ * A press runs on the clock after the event that delivered it, so one landing just before a /clear would act in the
+ * new conversation: it runs only if the conversation it was pressed in is still the current one, and is given it.
+ */
+function whenPressed($: EngineInterface, work: (pressedIn: number) => Promise<unknown>) {
+  const pressedIn = conversation
+  later($, async () => {
+    if (pressedIn === conversation) await work(pressedIn)
+  })
+}
+
 /** Puts the finding's fix request in the prompt box; nothing is sent until the person presses Enter. */
-async function draftFix($: EngineInterface, finding: SavingsView['findings'][number], at: number) {
-  // Pressed before a /clear: the new conversation's prompt box gets no request from the old one.
-  if (at !== generation) return
+async function draftFix($: EngineInterface, finding: SavingsView['findings'][number], pressedIn: number) {
   const filled = await $.prompt.fill({ text: finding.fixRequest }).catch(() => null)
-  if (at !== generation) return
+  // A /clear while the box was filled replaced its text: nothing is said about it in the new conversation.
+  if (pressedIn !== conversation) return
   $.ui.toast(
     filled?.isFilled
       ? 'The fix request is in your prompt box: edit it, or press Enter to have Claude draft the change.'
@@ -689,7 +704,7 @@ export function mentions(text: string, name: string | null | undefined): boolean
 }
 
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
-async function bandFor($: EngineInterface, text: string, at: number, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
+async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string; offer: boolean } | null> {
   // After a run that failed, the pane shows only why: the band does not quote the answer the pane hides.
   const report = (await read($, messageAtom)) ? null : await read($, reportAtom)
   const matches = (report?.findings ?? []).filter(one => mentions(text, one.matchName) || (one.resourceType !== 'job' && mentions(text, one.resourceId)))
@@ -698,13 +713,20 @@ async function bandFor($: EngineInterface, text: string, at: number, aboutComput
   const workspaces = new Set(
     matches.filter(one => one.resourceType === named?.resourceType && (one.matchName === named.matchName || one.resourceId === named.resourceId)).map(one => one.workspaceId ?? ''),
   )
-  if (named && workspaces.size > 1) return { text: `${named.resourceName} has findings in ${workspaces.size} workspaces. /savings shows each.` }
-  if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
+  if (named && workspaces.size > 1) return { text: `${named.resourceName} has findings in ${workspaces.size} workspaces. /savings shows each.`, offer: false }
+  if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.`, offer: false }
   if (report || offered || !aboutCompute) return null
-  // A /clear while the answer was read: the new conversation keeps its own once-a-session offer.
-  if (at !== generation) return null
-  offered = true
-  return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection; it starts the SQL warehouse if it is stopped, which bills).' }
+  return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection; it starts the SQL warehouse if it is stopped, which bills).', offer: true }
+}
+
+/**
+ * Puts a band line above the prompt, unless the conversation `at` names has ended since: the line, and the spending
+ * of the once-a-session offer, belong to the conversation the file or command was in.
+ */
+async function showBand($: EngineInterface, band: { text: string; offer: boolean } | null, at: number) {
+  if (!band || at !== conversation) return
+  if (band.offer) offered = true
+  await update($, bandAtom, () => ({ text: band.text }))
 }
 
 /** Adds this feature's own hooks. */
@@ -785,7 +807,7 @@ export function register(on: On, _context: FeatureContext) {
         <Box flexDirection="column">
           <Text bold>Databricks savings check</Text>
           <Text dimColor>
-            {checkedText(report)} · the {windowDays(report.window)} days to {report.window.end}
+            {checkedText(report)} · the {windowDays(report.window)} days{report.window.end ? ` to ${report.window.end}` : ''}
             {report.connection ? ` · connection ${report.connection}` : ''}
           </Text>
           <Text dimColor>Read-only, with your own connection. Nothing was sent to Altimate.</Text>
@@ -821,10 +843,7 @@ export function register(on: On, _context: FeatureContext) {
                 </Text>
               ))}
               <Box>
-                <Button key={`fix-${at}`} label="Draft the fix" onPress={() => {
-                    const at = generation
-                    later($, () => draftFix($, one, at))
-                  }} />
+                <Button key={`fix-${at}`} label="Draft the fix" onPress={() => whenPressed($, pressedIn => draftFix($, one, pressedIn))} />
               </Box>
             </Box>
           </Box>
@@ -840,7 +859,7 @@ export function register(on: On, _context: FeatureContext) {
                   <Button
                     key={`whatif-${at}-${k}`}
                     label={`${c.label} ${dollars(c.monthlyCost)}${c.fits === false ? ' ⚠' : ''}`}
-                    onPress={() => later($, () => update($, whatIfAtom, () => ({ workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label })))}
+                    onPress={() => whenPressed($, () => update($, whatIfAtom, () => ({ workspaceId: one.workspaceId, resourceId: one.resourceId, label: c.label })))}
                   />
                 ))}
               </Box>
@@ -897,6 +916,7 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 /** A /clear, a resume or a logout: forget the report and any run still waiting. */
 export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   generation += 1
+  conversation += 1
   lastConnection = null
   offered = false
   pressQueued = false
@@ -924,7 +944,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
           })
         }
       />
-      <Button key="savings-hide" label="Hide" onPress={() => later($, () => update($, bandAtom, () => null))} />
+      <Button key="savings-hide" label="Hide" onPress={() => whenPressed($, () => update($, bandAtom, () => null))} />
     </Box>
   )
 }
@@ -960,20 +980,18 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
   if (!runsDatabricksCompute(e.command)) return
   // The conversation the command ran in: a /clear from here on keeps its line out of the new one.
-  const at = generation
+  const at = conversation
   // A databricks warehouses, clusters, bundle or jobs command is about compute whatever its words.
-  const band = await bandFor($, e.command, at, true)
-  if (band) await update($, bandAtom, now => (at === generation ? band : now))
+  await showBand($, await bandFor($, e.command, true), at)
 }
 
 export async function editAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<ContextLines> {
   if (!DATABRICKS_CONFIG.test(file.path.replace(/\\/g, '/'))) return
   // The conversation the edit was made in: a /clear from here on keeps its line out of the new one.
-  const at = generation
+  const at = conversation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
-  if (!DATABRICKS_TEXT.test(text) || at !== generation) return
-  const band = await bandFor($, text, at)
-  if (band) await update($, bandAtom, now => (at === generation ? band : now))
+  if (!DATABRICKS_TEXT.test(text)) return
+  await showBand($, await bandFor($, text), at)
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}

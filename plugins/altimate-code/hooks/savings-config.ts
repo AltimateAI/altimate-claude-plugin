@@ -31,16 +31,15 @@ export const comparable = (was: WarehouseConfig, now: WarehouseConfig) => SETTIN
 export const changedSettings = (was: WarehouseConfig, now: WarehouseConfig) => comparable(was, now).filter(setting => was[setting] !== now[setting])
 
 /**
- * Per setting, a later read fills one that was unknown and never overwrites one that was known; but only from a
- * read in which no known setting changed. A read after a change shows the warehouse as it is now, so its value
- * for a setting not known before would record a state nobody saw: that setting stays unknown.
+ * Whether `now` reads more than `was` without contradicting it: a setting `was` did not know is known, and no
+ * setting known to both changed. A read after a change shows the warehouse as it is now, so it teaches nothing
+ * about the state before.
  */
-export const mergeConfig = (was: WarehouseConfig, now: WarehouseConfig): WarehouseConfig =>
-  changedSettings(was, now).length > 0 ? was : { size: was.size ?? now.size, type: was.type ?? now.type }
-
-/** Whether a merge would teach `was` anything. */
 export const learns = (was: WarehouseConfig, now: WarehouseConfig) =>
   changedSettings(was, now).length === 0 && SETTINGS.some(setting => was[setting] === null && now[setting] !== null)
+
+/** Whether `now` knows every setting `was` knows, so it can stand for `was` whole. */
+export const covers = (was: WarehouseConfig, now: WarehouseConfig) => SETTINGS.every(setting => was[setting] === null || now[setting] !== null)
 
 const shown: Record<Setting, (value: string) => string> = { size: value => value.replace(/_/g, '-'), type: value => value }
 
