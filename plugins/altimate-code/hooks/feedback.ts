@@ -41,14 +41,23 @@ const SETTINGS: ReadonlyArray<readonly [string, string]> = [
 
 const MASK = '‹redacted›'
 // A line that ends in a credential key with a YAML block-scalar header (`password: |`, `secret: >- # note`): the value is the indented lines after it.
-const BLOCK_HEADER = /^([ \t]*(?:-[ \t]+)?[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?[ \t]*:[ \t]*)[|>][+-]?\d?[ \t]*(?:#.*)?$/i
+const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?[ \t]*:[ \t]*)`
+const BLOCK_HEADER = new RegExp(String.raw`${KEY_LINE}[|>][+-]?\d?[ \t]*(?:#.*)?$`, 'i')
+// `password: correct horse battery staple`: on a YAML line the value is the rest of the line, spaces and all.
+const PLAIN_VALUE = new RegExp(String.raw`${KEY_LINE}(?![|>"'])(\S.*)$`, 'i')
 
-/** Cuts out the indented lines (blank ones between them too) that follow a credential key's YAML block-scalar header. */
+/** Cuts out a YAML value under a credential key: the rest of its line, or the indented lines (blank ones between them too) after a block-scalar header. */
 export function redactBlockScalars(text: string): string {
   const lines = text.split('\n')
   const out: string[] = []
   for (let i = 0; i < lines.length; i++) {
-    const header = BLOCK_HEADER.exec(lines[i]!.replace(/\r$/, ''))
+    const line = lines[i]!.replace(/\r$/, '')
+    const plain = PLAIN_VALUE.exec(line)
+    if (plain) {
+      out.push(`${plain[1]}${MASK}`)
+      continue
+    }
+    const header = BLOCK_HEADER.exec(line)
     if (!header) {
       out.push(lines[i]!)
       continue

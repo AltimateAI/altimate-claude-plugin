@@ -590,6 +590,13 @@ test('a YAML block scalar under a credential key is cut whole: comments on its h
   expect(out.split('\n')[0]).toBe('password: ‹redacted›')
 })
 
+test('a YAML credential under a quoted key, or with a value of several words, is cut whole', () => {
+  const out = redactSecrets(['password: correct horse battery staple', '"password": |', '  quoted-key-secret', "'db_token': >-", '  folded-quoted', '  - secret: two words here', 'name: kept'].join('\n'))
+  expect(out).not.toMatch(/correct|horse|staple|quoted-key|folded-quoted|two words/)
+  expect(out).toContain('name: kept')
+  expect(out.split('\n')[0]).toBe('password: ‹redacted›')
+})
+
 test('a profile value that YAML writes with doubled apostrophes is cut out too', () => {
   setRedactions(ROOT, ["alpha'omega-secret"])
   try {
