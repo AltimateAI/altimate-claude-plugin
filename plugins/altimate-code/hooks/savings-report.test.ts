@@ -218,6 +218,13 @@ test('the limit named is the one that query has', () => {
   expect(limitedText({ platform: 'databricks', limited: [] })).toBeNull()
 })
 
+test('each section and the total name the window the check read, not a fixed week', () => {
+  const html = savingsReportHtml([kept(view({ window: { start: '2026-11-04', end: '2026-11-18', days: 14 } }))], 'now', URL)
+  expect(html).toContain('the 14 days to 2026-11-18')
+  expect(html).toContain("the last 14 days' rate")
+  expect(html).not.toContain('the 7 days')
+})
+
 test('each section says when it was checked', () => {
   expect(savingsReportHtml([{ savedAt: Date.parse('2026-11-12T08:00:00Z'), view: view() }], 'now', URL)).toContain('checked 2026-11-12')
 })

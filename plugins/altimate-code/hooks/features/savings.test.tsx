@@ -536,8 +536,9 @@ test('without altimate-code the pane says how to install it', async ($, on) => {
   await clock.settle()
   const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^altimate-code is not installed\.$/ })).toBeDefined()
-  // The scoped package the CLI ships as, as the plugin's other install hints name it.
-  expect(await ui.find({ type: 'Text', text: /^Install it \(`npm i -g @altimateai\/altimate-code`\), add a Databricks connection/ })).toBeDefined()
+  // The scoped package the CLI ships as, as the plugin's other install hints name it. With no connection list read,
+  // no platform is named: it could be the wrong one.
+  expect(await ui.find({ type: 'Text', text: /^Install it \(`npm i -g @altimateai\/altimate-code`\), add a Databricks or Snowflake connection/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -946,6 +947,40 @@ test('/savings that finds a check running, which ends while its pane opens, says
   await clock.settle()
 })
 
+test('a band press while a typed /savings reads its connection list starts nothing: the typed connection is read', async ($, on) => {
+  // Holds the command's read of the connection list, which comes after its claim: the band's press runs meanwhile.
+  let armed = false
+  let reached = () => {}
+  const reading = new Promise<void>(resolve => (reached = resolve))
+  let release = () => {}
+  const released = new Promise<void>(resolve => (release = resolve))
+  const hook = on as any
+  hook('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    if (!armed || e.key !== 'savingsConnections') return next(e)
+    armed = false
+    const before = await next(e)
+    reached()
+    await released
+    return before
+  })
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  const { clock, runs } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  await band.press({ key: 'savings-run' })
+  await band.unmount()
+  armed = true
+  const saying = savings($, 'prod_dbx')
+  await reading
+  await clock.settle()
+  release()
+  expect((await saying).text).toMatch(/^Running the /)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect(runs[0]!.argv.join(' ')).toContain('prod_dbx')
+})
+
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const { clock } = await start($, on, { files })
@@ -1308,7 +1343,8 @@ test('an altimate-code older than the check is never started for it: only `--ver
   expect(versionRuns.length).toBe(1)
   expect(runs).toEqual([])
   const ui = await mountFull($)
-  expect(await ui.find({ type: 'Text', text: /^This altimate-code has no Databricks savings check\.$/ })).toBeDefined()
+  // No connection list was read, so no platform is named.
+  expect(await ui.find({ type: 'Text', text: /^This altimate-code has no savings check\.$/ })).toBeDefined()
   expect(toasts.at(-1)).toContain(`It is 0.12.11; update it to ${SAVINGS_MIN_ALTIMATE_CODE} or later`)
   await ui.unmount()
 })

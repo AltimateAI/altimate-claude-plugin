@@ -1199,13 +1199,13 @@ async function runCheck($: EngineInterface, mine: { asked: string | null }) {
   offered = true
   // Every write of this run lands only while it is current, checked inside the write, and every notice only
   // then: a /clear at any await below leaves the new conversation's state as the clear left it.
-  // Every run opens slim again, whether it answers or is refused.
-  await update($, expandedAtom, now => (live() ? false : now))
   const refuse = async (platform: SavingsPlatform, name: string, why: { text: string; recovery: string }) => {
     await update($, messagesAtom, now => (live() ? [{ platform, ...why }] : now))
     if (live()) notify($, `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${why.text} ${why.recovery}`)
   }
   try {
+    // Every run opens slim again, whether it answers or is refused.
+    await update($, expandedAtom, now => (live() ? false : now))
     await update($, messagesAtom, now => (live() ? [] : now))
     await update($, bandAtom, now => (live() ? null : now))
     await update($, sharedAtom, now => (live() ? null : now))
@@ -1226,10 +1226,12 @@ async function runCheck($: EngineInterface, mine: { asked: string | null }) {
     const version = releaseOf(printed)
     if (source || !version || !supportsSavings(version)) {
       const targets = targetsFor(asked, known)
-      const noCheck = `This altimate-code has no ${checkName(targets)}.`
+      // Until the connection list is read no platform is named: it could be the wrong one.
+      const name = known ? checkName(targets) : 'savings check'
+      const noCheck = `This altimate-code has no ${name}.`
       await refuse(
         targets[0]!.platform,
-        checkName(targets),
+        name,
         source
           ? {
               text: noCheck,
@@ -1284,12 +1286,15 @@ async function runCheck($: EngineInterface, mine: { asked: string | null }) {
     if (notices.length > 0 && live()) notify($, notices.join(' '))
   } catch (error) {
     if (!live()) return
-    const platform = targetsFor(asked, await read($, connectionsAtom))[0]!.platform
+    const known = await read($, connectionsAtom)
+    const platform = targetsFor(asked, known)[0]!.platform
     if (!live()) return
+    // Until the connection list is read no platform is named: it could be the wrong one.
+    const kind = known ? PLATFORM_NAME[platform] : 'Databricks or Snowflake'
     const why = MISSING_BINARY.test(String(error))
-      ? { text: 'altimate-code is not installed.', recovery: `Install it (\`${INSTALL}\`), add a ${PLATFORM_NAME[platform]} connection, then run /savings again.` }
+      ? { text: 'altimate-code is not installed.', recovery: `Install it (\`${INSTALL}\`), add a ${kind} connection, then run /savings again.` }
       : explain(String(error), asked, platform)
-    await refuse(platform, checkName([{ platform, connection: null }]), why)
+    await refuse(platform, known ? checkName([{ platform, connection: null }]) : 'savings check', why)
   } finally {
     // A dropped run leaves the running flag as the /clear left it. The claim is let go only once the flag is
     // cleared, so a run claimed next never has its flag cleared by this one, and is let go even when that write
@@ -1312,8 +1317,13 @@ async function startPressedRun($: EngineInterface, asked: string | null, at: num
   if (claim || at !== generation) return
   const mine = { asked }
   claim = mine
-  const connections = await read($, connectionsAtom)
-  await update($, busyAtom, now => (claim === mine ? busyOf(asked, connections) : now))
+  // A read or running-flag write that fails lets the claim go, as /savings does: no run was started to let go of it.
+  const release = (error: unknown): never => {
+    if (claim === mine) claim = null
+    throw error
+  }
+  const connections = await read($, connectionsAtom).catch(release)
+  await update($, busyAtom, now => (claim === mine ? busyOf(asked, connections) : now)).catch(release)
   await runCheck($, mine)
 }
 
@@ -1534,7 +1544,12 @@ export function register(on: On, _context: FeatureContext) {
     const inConversation = conversation
     const mine = { asked: asked || null }
     if (!going) claim = mine
-    const connections = await read($, connectionsAtom)
+    // A read or running-flag write that fails lets the claim go: no run was scheduled to let go of it.
+    const release = (error: unknown): never => {
+      if (claim === mine) claim = null
+      throw error
+    }
+    const connections = await read($, connectionsAtom).catch(release)
     const targets = targetsFor(asked || null, connections)
     // Until the list is read (a run reads it first) no platform is named: it could be the wrong one.
     const name = connections ? checkName(targets) : 'savings check'
@@ -1551,11 +1566,6 @@ export function register(on: On, _context: FeatureContext) {
       return { text: `The ${name} is already running in the side pane.${other}` }
     }
     if (claim !== mine) return cleared
-    // A running-flag write that fails lets the claim go: no run was scheduled to let go of it.
-    const release = (error: unknown): never => {
-      if (claim === mine) claim = null
-      throw error
-    }
     await update($, busyAtom, now => (claim === mine ? busyOf(asked || null, connections) : now)).catch(release)
     if (claim !== mine) return cleared
     const opened = await openPane($)
