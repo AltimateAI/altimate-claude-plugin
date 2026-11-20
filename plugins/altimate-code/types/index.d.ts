@@ -634,13 +634,14 @@ export interface CteProfileState {
 export type SavingsView = {
   /** The altimate-code connection that ran the check. */
   connection: string | null
-  /** The SQL warehouse its queries ran on. */
-  ranOn: string | null
   /** The days the check read (YYYY-MM-DD, UTC). */
   window: { start: string; end: string }
   /** What was read; `workspaces` counts the Databricks workspaces the run read warehouses, clusters or jobs from. */
   checked: { warehouses: number; clusters: number; jobs: number; workspaces: number }
-  /** Checks whose system tables the connection could not read. */
+  /**
+   * Checks that did not run in full, each as "Check name (the CLI's reason)": the connection could not read
+   * its system tables, the run hit its time limit (its query may still be running), or core refused its facts.
+   */
   skipped: string[]
   /** What a query read only the first 10,000 of, e.g. `jobs`. */
   limited: string[]
@@ -668,7 +669,6 @@ export type SavingsView = {
   whatIf: {
     resourceId: string
     resourceName: string
-    currentLabel: string
     currentMonthly: number
     choices: { label: string; monthlyCost: number; monthlySaving: number; fits: boolean; cores: number; coresNeeded: number }[]
   }[]

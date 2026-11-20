@@ -1101,3 +1101,23 @@ test('a baseline in one workspace says nothing about the same warehouse id in an
   expect(await ui.find({ type: 'Text', text: / → .* since 2026-11-10/ })).toBeUndefined()
   await ui.unmount()
 })
+
+test('two resized warehouses draw the observed-spend note once, after both lines', async ($, on) => {
+  const store = {
+    'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 },
+    'savings-baseline:dbxmega:wh-xs': { date: '2026-11-10', type: 'SERVERLESS', size: 'SMALL', windowCost: 300 },
+  }
+  const resized = JSON.parse(JSON.stringify(ANSWER))
+  resized.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
+  const { clock } = await start($, on, { answer: resized, store })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  const changes = texts.filter(text => / since 2026-11-10\. Observed spend: /.test(text))
+  expect(changes).toHaveLength(2)
+  const note = 'Billed in different weeks, so a change in workload moves these too: not a measured saving.'
+  expect(texts.filter(text => text === note)).toHaveLength(1)
+  expect(texts.indexOf(note)).toBe(texts.indexOf(changes[1]) + 1)
+  await ui.unmount()
+})

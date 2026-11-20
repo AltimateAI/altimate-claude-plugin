@@ -62,6 +62,9 @@ const NO_SAVINGS_CHECK = 'This altimate-code has no Databricks savings check.'
 // An altimate-code connection name; anything else could read as a CLI flag.
 const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
+/** The savings tool's arguments: the connection asked for, and the go-ahead the person gave by typing /savings. */
+const savingsArgs = (connection: string | null) => (connection ? { warehouse: connection, confirm: true } : { confirm: true })
+
 const ADD_CONNECTION =
   'Add a Databricks connection to altimate-code (in ~/.altimate-code/connections.json: type "databricks", server_hostname, the http_path of a SQL warehouse and an access_token), then run /savings again.'
 
@@ -90,8 +93,11 @@ const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
 const DATABRICKS_COMMAND = /(?:^|[;&|(\n])\s*(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*databricks\s+(?:warehouses|clusters|bundle|jobs)\b/
 const BAND_READ_LIMIT = 200_000
 
+/** An amount rounded as it is shown: to the cent, or to the dollar. */
+const roundMoney = (value: number, cents: boolean) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
+
 function money(value: number, cents: boolean): string {
-  const rounded = cents ? Math.round(value * 100) / 100 : Math.round(value)
+  const rounded = roundMoney(value, cents)
   const [whole, fraction] = rounded.toFixed(cents ? 2 : 0).split('.')
   return `$${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fraction ? `.${fraction}` : ''}`
 }
@@ -106,8 +112,7 @@ export function dollars(value: number): string {
  * less"), and a small gap between large amounts is not shown as $0. */
 export function compared(was: number, now: number): { was: string; now: string; gap: string } {
   const cents = Math.abs(was) < 100 || Math.abs(now) < 100 || Math.abs(was - now) < 100
-  const round = (value: number) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
-  return { was: money(was, cents), now: money(now, cents), gap: money(Math.abs(round(was) - round(now)), cents) }
+  return { was: money(was, cents), now: money(now, cents), gap: money(Math.abs(roundMoney(was, cents) - roundMoney(now, cents)), cents) }
 }
 
 function range(min: number, max: number): string {
@@ -288,8 +293,6 @@ type ToolMetadata = {
   }
 }
 
-const RESOURCE_NOUN: Record<string, string> = { sql_warehouse: 'SQL warehouse', cluster: 'cluster', job: 'job' }
-
 /** The tool's answer as the pane draws it, or null when it is not a report. */
 export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const report = metadata?.report
@@ -302,7 +305,6 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const workspaces = Number.isInteger(counted) && counted > 0 ? Math.max(counted, listed) : listed
   return {
     connection: metadata.warehouse ?? null,
-    ranOn: metadata.ran_on ?? null,
     window: metadata.window,
     checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0, workspaces: Math.max(1, workspaces) },
     // Each with the CLI's reason: a check can be skipped for a refused read, for the run's time limit
@@ -327,7 +329,6 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
     whatIf: (report.what_if ?? []).map(one => ({
       resourceId: one.resource_id,
       resourceName: shownName(one.resource_name, one.resource_id),
-      currentLabel: one.current_label,
       currentMonthly: one.current_monthly_cost,
       choices: one.choices.map(choice => ({
         label: size(choice.label),
@@ -414,7 +415,7 @@ export function explain(error: string, connection: string | null = null): { text
       recovery: 'The check reads system.billing, system.compute, system.query and system.lakeflow: ask a workspace admin for SELECT on those schemas, then run /savings again.',
     }
   }
-  const args = JSON.stringify(connection ? { warehouse: connection, confirm: true } : { confirm: true })
+  const args = JSON.stringify(savingsArgs(connection))
   return {
     text: `The savings check failed: ${error.split('\n')[0]!.slice(0, 300)}`,
     recovery: `Run /savings again; if it fails again, run the same check in a terminal: \`ALTIMATE_ASSESSMENT_MODE=true ALTIMATE_TELEMETRY_DISABLED=true altimate tool run finops_databricks_savings --args '${args}' --json --no-daemon\`.`,
@@ -487,8 +488,7 @@ async function runCheck($: EngineInterface, connection: string | null) {
       return
     }
     // Typing /savings is the user's go-ahead, which the tool asks for before it queries the warehouse.
-    const args = connection ? { warehouse: connection, confirm: true } : { confirm: true }
-    const result = await runTool($, TOOL, args, { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
+    const result = await runTool($, TOOL, savingsArgs(connection), { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
     if (!live()) return
     const metadata = result.metadata as ToolMetadata | null
     const view = toView(metadata)
@@ -622,15 +622,15 @@ export function register(on: On, _context: FeatureContext) {
           </Text>
           <Text dimColor>Read-only, with your own connection. Nothing was sent to Altimate.</Text>
         </Box>
-        {report.changes.map((one, at) => {
-          const amounts = compared(one.monthlyBefore, one.monthlyNow)
-          return (
-            <Box key={`change-${at}`} flexDirection="column">
-              <Text>{`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${amounts.was} a month before, ${amounts.now} after.`}</Text>
-              <Text dimColor>Billed in different weeks, so a change in workload moves these too: not a measured saving.</Text>
-            </Box>
-          )
-        })}
+        {report.changes.length > 0 ? (
+          <Box flexDirection="column" key="changes">
+            {report.changes.map((one, at) => {
+              const amounts = compared(one.monthlyBefore, one.monthlyNow)
+              return <Text key={`change-${at}`}>{`${one.name}: ${one.from} → ${one.to} since ${one.since}. Observed spend: ${amounts.was} a month before, ${amounts.now} after.`}</Text>
+            })}
+            <Text dimColor>Billed in different weeks, so a change in workload moves these too: not a measured saving.</Text>
+          </Box>
+        ) : null}
         {report.total.resources > 0 ? (
           <Box flexDirection="column">
             <Text bold color="success">
