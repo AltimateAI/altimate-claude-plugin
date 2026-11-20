@@ -34,7 +34,7 @@ export function shellScript(words: readonly string[], at: number): string | null
   }
   if (words[i] === '--') i++
   if (script) return words[i] ?? ''
-  const c = words.findIndex((word, k) => k > at && /^-[a-z]*c$/.test(word))
+  const c = words.findIndex((word, k) => k > at && /^-[A-Za-z]*c[A-Za-z]*$/.test(word))
   return c < 0 ? null : (words[c + 1] ?? '')
 }
 
