@@ -374,6 +374,8 @@ test('without altimate-code the pane says how to install it', async ($, on) => {
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^altimate-code is not installed\.$/ })).toBeDefined()
+  // The scoped package the CLI ships as, as the plugin's other install hints name it.
+  expect(await ui.find({ type: 'Text', text: /^Install it \(`npm i -g @altimateai\/altimate-code`\), add a Databricks connection/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -461,6 +463,9 @@ test('each refusal altimate-code gives is explained in the person\'s terms', () 
   expect(explain('Connection "dbx" does not go through a SQL warehouse. Its http_path must name one').recovery).toContain('/sql/1.0/warehouses/<id>')
   expect(explain("This altimate-code build's altimate-core has no Databricks savings rules. Update altimate-code, then try again.").text).toContain('no Databricks savings check')
   expect(explain('socket hang up').text).toBe('The savings check failed: socket hang up')
+  // The CLI's error text can carry a warehouse's: control and invisible characters go, as they do for names.
+  expect(explain('socket\u001b[2J\u0007 hang\u200b up').text).toBe('The savings check failed: socket [2J hang up')
+  expect(explain('[PERMISSION_DENIED]\u0007 no\u200b access').text).toBe('A query was refused: [PERMISSION_DENIED] no access')
   // The terminal fallback runs the same check: the same connection, the same go-ahead, and the
   // switches that keep it from contacting Altimate.
   expect(explain('socket hang up', 'prod_dbx').recovery).toContain(
@@ -1378,9 +1383,10 @@ test('a what-if row without its choices, or a choice without its figures, is lef
   await ui.unmount()
 })
 
-test('a cluster whose auto-termination the answer does not give reads "?", not "off"', () => {
+test('auto-termination core sends as null reads "off", as core and the CLI count it; one the answer leaves out reads "?"', () => {
   const evidence = { kind: 'idle_cluster', idle_ratio: 0.9, active_days: 3, total_cost: 12 }
   expect(evidenceLines(evidence)[1]).toMatch(/^Auto-termination \?; /)
+  expect(evidenceLines({ ...evidence, auto_termination_minutes: null })[1]).toMatch(/^Auto-termination off; /)
   expect(evidenceLines({ ...evidence, auto_termination_minutes: 0 })[1]).toMatch(/^Auto-termination off; /)
   expect(evidenceLines({ ...evidence, auto_termination_minutes: 120 })[1]).toMatch(/^Auto-termination 120 minutes; /)
 })
@@ -1777,7 +1783,7 @@ function coreAnswer() {
       jobs_checked: DATABRICKS_FACTS.jobs.length,
       workspaces_checked: 2,
       skipped: [],
-      warehouses: DATABRICKS_FACTS.warehouses.map(one => ({ id: one.warehouse_id, workspace_id: one.workspace_id, name: one.warehouse_name, type: one.warehouse_type, size: one.warehouse_size, window_cost: one.total_cost })),
+      warehouses: DATABRICKS_FACTS.warehouses.map(one => ({ id: one.warehouse_id, workspace_id: one.workspace_id, name: one.warehouse_name, type: one.warehouse_type, size: (one as { warehouse_size?: string }).warehouse_size ?? null, window_cost: one.total_cost })),
       report: JSON.parse(JSON.stringify(DATABRICKS_REPORT)),
     },
   }
@@ -1803,6 +1809,10 @@ test('every finding kind core returns is drawn from its own fields: no "?", "und
     expect(pane.some(text => text.startsWith(`${one.resource_name} (workspace ${one.workspace_id}) · ${one.title} · $`))).toBe(true)
   }
   expect(pane).toContain('All-purpose cluster 100% idle across 5 active days (zombie), average worker CPU 3%, peak 10%')
+  // Core's nulls: no auto-termination setting is off, no size is left out, and a pattern core names `unknown` is not shown.
+  expect(pane).toContain('All-purpose cluster 50% idle across 4 active days, average worker CPU 20%, peak 70%')
+  expect(pane).toContain('Auto-termination off; $400.00 billed on all-purpose compute over 7 days')
+  expect(pane).toContain('PRO warehouse, 92% idle over 5.6 running hours (900 queries)')
   expect(pane).toContain('$0.750 a DBU now; a job cluster would be about $0.450 (estimated: the workspace billed no jobs compute)')
   expect(pane.filter(text => UNREAL.test(text))).toEqual([])
 
@@ -1825,7 +1835,8 @@ test('every finding kind core returns is drawn from its own fields: no "?", "und
   await clock.settle()
   const band = await $.ui.mount(BAND)
   const line = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)).find(text => text.startsWith('synth_pro'))
-  expect(line).toBe('synth_pro: Over-Sized Warehouse, $5,400–$9,450 a month to save. /savings shows why.')
+  // With several workspaces read, the band names the one whose finding it shows: names and ids can repeat across them.
+  expect(line).toBe('synth_pro (workspace 1001): Over-Sized Warehouse, $5,400–$9,450 a month to save. /savings shows why.')
   await band.unmount()
 })
 

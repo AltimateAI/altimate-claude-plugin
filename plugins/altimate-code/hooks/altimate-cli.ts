@@ -70,7 +70,7 @@ export function compareVersions(a: string, b: string): number {
   return 0
 }
 
-const INSTALL = 'npm i -g @altimateai/altimate-code'
+export const INSTALL = 'npm i -g @altimateai/altimate-code'
 
 /**
  * What to tell the person about the altimate-code on PATH, or null when it is current, a preview build, or
