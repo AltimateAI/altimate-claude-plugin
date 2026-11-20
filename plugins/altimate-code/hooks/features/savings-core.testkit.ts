@@ -1,7 +1,8 @@
 // For tests: what core's savings rules return, captured from core's compiled binding (`databricksSavings` and
 // `snowflakeSavings`) called with the synthetic facts below. It has every finding kind each platform has,
-// Snowflake's Underutilized Cluster among them with no dollar estimate, and what-if rows for one warehouse id
-// in two workspaces. Regenerate by passing the facts, as JSON, to the binding the CLI ships.
+// Snowflake's Underutilized Cluster among them with no dollar estimate; a cluster with no auto-termination
+// setting and a warehouse with no size (core sends null for both); and what-if rows for one warehouse id in
+// two workspaces. Regenerate by passing the facts, as JSON, to the binding the CLI ships.
 
 /** The `DatabricksSavingsInput` core was given. */
 export const DATABRICKS_FACTS = {
@@ -50,6 +51,26 @@ export const DATABRICKS_FACTS = {
       "no_queue_query_pct": 1
     },
     {
+      "warehouse_id": "wh-synth-nosize",
+      "workspace_id": "1002",
+      "warehouse_name": "synth_nosize",
+      "warehouse_type": "PRO",
+      "wall_clock_uptime_sec": 20000,
+      "cluster_weighted_uptime_sec": 20000,
+      "idle_ratio": 0.92,
+      "total_dbu_consumed": 60,
+      "total_cost": 42,
+      "price_per_dbu": 0.7,
+      "serverless_price_per_dbu": 0.7,
+      "total_query_count": 900,
+      "parallelism_query_count": 900,
+      "parallelism_ratio_p50": 0.5,
+      "parallelism_ratio_p99": 1,
+      "parallelism_ratio_max": 2,
+      "no_spill_query_pct": 1,
+      "no_queue_query_pct": 1
+    },
+    {
       "warehouse_id": "wh-synth-pro",
       "workspace_id": "1001",
       "warehouse_name": "synth_pro",
@@ -83,6 +104,18 @@ export const DATABRICKS_FACTS = {
       "avg_cpu_active_pct": 3,
       "peak_cpu_active_pct": 10,
       "total_cost": 900
+    },
+    {
+      "cluster_id": "cl-synth-noterm",
+      "workspace_id": "1002",
+      "cluster_name": "synth_noterm",
+      "total_node_minutes": 9000,
+      "active_util_days": 4,
+      "total_worker_minutes": 8000,
+      "idle_node_minutes": 4000,
+      "avg_cpu_active_pct": 20,
+      "peak_cpu_active_pct": 70,
+      "total_cost": 400
     }
   ],
   "jobs": [
@@ -200,6 +233,30 @@ export const DATABRICKS_REPORT = {
       "workspace_id": "1001"
     },
     {
+      "check_id": "ap_idle_cluster",
+      "daily_max": 17.142857142857142,
+      "daily_min": 8.571428571428571,
+      "evidence": {
+        "active_days": 4,
+        "auto_termination_minutes": null,
+        "avg_cpu_active_pct": 20,
+        "idle_pattern": "unknown",
+        "idle_ratio": 0.5,
+        "kind": "idle_cluster",
+        "peak_cpu_active_pct": 70,
+        "total_cost": 400,
+        "wasted_cost": 200
+      },
+      "monthly_max": 514.2857142857142,
+      "monthly_min": 257.1428571428571,
+      "resource_id": "cl-synth-noterm",
+      "resource_name": "synth_noterm",
+      "resource_type": "cluster",
+      "severity": "medium",
+      "title": "Idle Cluster Detection",
+      "workspace_id": "1002"
+    },
+    {
       "check_id": "wh_classic_pro_to_serverless",
       "daily_max": 8.828571428571427,
       "daily_min": 7.062857142857142,
@@ -278,6 +335,32 @@ export const DATABRICKS_REPORT = {
       "workspace_id": "1002"
     },
     {
+      "check_id": "wh_classic_pro_to_serverless",
+      "daily_max": 5.5200000000000005,
+      "daily_min": 4.416,
+      "evidence": {
+        "current_dbu_cost": 42,
+        "idle_ratio": 0.92,
+        "kind": "serverless",
+        "price_per_dbu": 0.7,
+        "projected_serverless_dbu_cost": 3.3599999999999977,
+        "serverless_price_per_dbu": 0.7,
+        "total_query_count": 900,
+        "wall_clock_uptime_hours": 5.555555555555555,
+        "warehouse_size": null,
+        "warehouse_type": "PRO",
+        "wasted_cost": 38.64
+      },
+      "monthly_max": 165.60000000000002,
+      "monthly_min": 132.48000000000002,
+      "resource_id": "wh-synth-nosize",
+      "resource_name": "synth_nosize",
+      "resource_type": "sql_warehouse",
+      "severity": "critical",
+      "title": "Migrate Classic/Pro to Serverless",
+      "workspace_id": "1002"
+    },
+    {
       "check_id": "wh_oversized",
       "daily_max": 4.3999999999999995,
       "daily_min": 2.5142857142857142,
@@ -334,9 +417,9 @@ export const DATABRICKS_REPORT = {
   ],
   "lookback_days": 7,
   "total": {
-    "monthly_max": 13880.485714285714,
-    "monthly_min": 8028.042857142857,
-    "resources": 6
+    "monthly_max": 14560.37142857143,
+    "monthly_min": 8417.665714285713,
+    "resources": 8
   },
   "what_if": [
     {
@@ -403,6 +486,23 @@ export const DATABRICKS_REPORT = {
       "current_monthly_cost": 212.14285714285714,
       "resource_id": "wh-synth-classic",
       "resource_name": "synth_classic",
+      "workspace_id": "1002"
+    },
+    {
+      "choices": [
+        {
+          "cores": 0,
+          "cores_needed": 2,
+          "fits": true,
+          "label": "SERVERLESS",
+          "monthly_cost": 14.39999999999999,
+          "monthly_saving": 165.60000000000002
+        }
+      ],
+      "current_label": "size unknown (PRO)",
+      "current_monthly_cost": 180,
+      "resource_id": "wh-synth-nosize",
+      "resource_name": "synth_nosize",
       "workspace_id": "1002"
     },
     {

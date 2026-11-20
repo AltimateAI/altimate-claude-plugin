@@ -13,7 +13,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { SavingsConnection, SavingsFinding, SavingsFixLine, SavingsKept, SavingsPlatform, SavingsView, SavingsWarehouseRef } from '../../types'
-import { MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
+import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
 import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
@@ -218,7 +218,8 @@ export function evidenceLines(evidence: Record<string, unknown> | undefined, day
   switch (evidence.kind) {
     case 'serverless':
       return [
-        `${oneLine(evidence.warehouse_type) || 'SQL'} ${size(evidence.warehouse_size)} warehouse, ${percent(evidence.idle_ratio)} idle over ${fixed(evidence.wall_clock_uptime_hours, 1)} running hours (${count(evidence.total_query_count)} queries)`,
+        // Core sends no size for a warehouse whose facts lacked one: the line leaves it out.
+        `${oneLine(evidence.warehouse_type) || 'SQL'}${oneLine(evidence.warehouse_size) ? ` ${size(evidence.warehouse_size)}` : ''} warehouse, ${percent(evidence.idle_ratio)} idle over ${fixed(evidence.wall_clock_uptime_hours, 1)} running hours (${count(evidence.total_query_count)} queries)`,
         `$${fixed(evidence.current_dbu_cost, 2)} in DBUs over ${days} days; serverless would bill $${fixed(evidence.projected_serverless_dbu_cost, 2)} for the busy time alone`,
       ]
     case 'over_sized':
@@ -229,8 +230,10 @@ export function evidenceLines(evidence: Record<string, unknown> | undefined, day
       ]
     case 'idle_cluster':
       return [
-        `All-purpose cluster ${percent(evidence.idle_ratio)} idle across ${count(evidence.active_days)} active days${oneLine(evidence.idle_pattern) ? ` (${oneLine(evidence.idle_pattern).replace(/_/g, ' ')})` : ''}, average worker CPU ${percentOf(evidence.avg_cpu_active_pct)}, peak ${percentOf(evidence.peak_cpu_active_pct)}`,
-        `Auto-termination ${known(evidence.auto_termination_minutes) ? (Number(evidence.auto_termination_minutes) > 0 ? `${count(evidence.auto_termination_minutes)} minutes` : 'off') : '?'}; $${fixed(evidence.total_cost, 2)} billed on all-purpose compute over ${days} days`,
+        // Core names the pattern `unknown` when none fits: that adds nothing to the line.
+        `All-purpose cluster ${percent(evidence.idle_ratio)} idle across ${count(evidence.active_days)} active days${oneLine(evidence.idle_pattern) && oneLine(evidence.idle_pattern) !== 'unknown' ? ` (${oneLine(evidence.idle_pattern).replace(/_/g, ' ')})` : ''}, average worker CPU ${percentOf(evidence.avg_cpu_active_pct)}, peak ${percentOf(evidence.peak_cpu_active_pct)}`,
+        // Core sends null when the cluster has no auto-termination setting, which it counts as off, as the CLI does.
+        `Auto-termination ${evidence.auto_termination_minutes === null ? 'off' : known(evidence.auto_termination_minutes) ? (Number(evidence.auto_termination_minutes) > 0 ? `${count(evidence.auto_termination_minutes)} minutes` : 'off') : '?'}; $${fixed(evidence.total_cost, 2)} billed on all-purpose compute over ${days} days`,
       ]
     case 'job_on_all_purpose': {
       // A trigger or host cluster the answer does not name is left out, not printed as "undefined" or "".
@@ -679,7 +682,7 @@ export function explain(error: string, connection: string | null = null, platfor
     return { text: `altimate-code has no ${name} connection.`, recovery: ADD_CONNECTION[platform] }
   }
   if (/is not configured\. Available warehouses/.test(error)) {
-    return { text: error.replace(/ Pass one of those.*$/, ''), recovery: `Run /savings <connection> with one of those names, or /savings to use the first ${name} connection.` }
+    return { text: oneLine(error.replace(/ Pass one of those.*$/, '')), recovery: `Run /savings <connection> with one of those names, or /savings to use the first ${name} connection.` }
   }
   if (/is not available for \S+ warehouses/.test(error)) {
     return { text: `That connection is not a ${name} one.`, recovery: `Run /savings <connection> with a ${name} connection, or /savings to use the first one.` }
@@ -695,7 +698,7 @@ export function explain(error: string, connection: string | null = null, platfor
   }
   if ((platform === 'snowflake' ? /Insufficient privileges|not authorized/i : /TABLE_OR_VIEW_NOT_FOUND|PERMISSION_DENIED|INSUFFICIENT_PERMISSIONS/).test(error)) {
     return {
-      text: `A query was refused: ${error.split('\n')[0]!.slice(0, 200)}`,
+      text: `A query was refused: ${oneLine(error.split('\n')[0]).slice(0, 200)}`,
       recovery:
         platform === 'snowflake'
           ? 'The check reads SNOWFLAKE.ACCOUNT_USAGE: ask an account admin to grant your role IMPORTED PRIVILEGES on the SNOWFLAKE database, then run /savings again.'
@@ -704,7 +707,7 @@ export function explain(error: string, connection: string | null = null, platfor
   }
   const args = JSON.stringify(savingsArgs(connection))
   return {
-    text: `The savings check failed: ${error.split('\n')[0]!.slice(0, 300)}`,
+    text: `The savings check failed: ${oneLine(error.split('\n')[0]).slice(0, 300)}`,
     recovery: `Run /savings again; if it fails again, run the same check in a terminal: \`ALTIMATE_ASSESSMENT_MODE=true ALTIMATE_TELEMETRY_DISABLED=true altimate tool run ${TOOLS[platform]} --args '${args}' --json --no-daemon\`.`,
   }
 }
@@ -1059,7 +1062,7 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
     return {
       platform,
       why: MISSING_BINARY.test(String(error))
-        ? { text: 'altimate-code is not installed.', recovery: `Install it (\`npm install -g altimate-code\`), add a ${PLATFORM_NAME[platform]} connection, then run /savings again.` }
+        ? { text: 'altimate-code is not installed.', recovery: `Install it (\`${INSTALL}\`), add a ${PLATFORM_NAME[platform]} connection, then run /savings again.` }
         : explain(String(error), connection, platform),
     }
   }
@@ -1166,7 +1169,7 @@ async function runCheck($: EngineInterface, asked: string | null, at: number) {
     const platform = targetsFor(asked, await read($, connectionsAtom))[0]!.platform
     if (!live()) return
     const why = MISSING_BINARY.test(String(error))
-      ? { text: 'altimate-code is not installed.', recovery: `Install it (\`npm install -g altimate-code\`), add a ${PLATFORM_NAME[platform]} connection, then run /savings again.` }
+      ? { text: 'altimate-code is not installed.', recovery: `Install it (\`${INSTALL}\`), add a ${PLATFORM_NAME[platform]} connection, then run /savings again.` }
       : explain(String(error), asked, platform)
     await refuse(platform, checkName([{ platform, connection: null }]), why)
   } finally {
@@ -1274,7 +1277,7 @@ async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_
   const named = kept
     .flatMap(({ view }) => view.findings.map(one => ({ one, byId: view.platform === 'databricks' && one.resourceType !== 'job' })))
     .find(({ one, byId }) => mentions(text, one.matchName) || (byId && mentions(text, one.resourceId)))?.one
-  if (named) return { text: `${named.resourceName}: ${named.title}, ${named.monthlyMax > 0 ? `${range(named.monthlyMin, named.monthlyMax)} a month to save` : 'no dollar estimate'}. /savings shows why.` }
+  if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${named.monthlyMax > 0 ? `${range(named.monthlyMin, named.monthlyMax)} a month to save` : 'no dollar estimate'}. /savings shows why.` }
   if (kept.length > 0 || offered || !aboutCompute) return null
   offered = true
   return { text: 'Databricks compute in play: check its warehouses, clusters and jobs for savings with /savings (read-only, on your own connection; it starts the SQL warehouse if it is stopped, which bills).' }
