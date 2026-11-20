@@ -1918,7 +1918,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
           })
         }}
       />
-      <Button key="savings-hide" label="Hide" onPress={() => whenPressed($, pressedIn => update($, bandAtom, now => (pressedIn === conversation ? null : now)))} />
+      <Button key="savings-hide" label="Hide" onPress={() => whenPressed($, () => update($, bandAtom, () => null))} />
     </Box>,
   )
 }
