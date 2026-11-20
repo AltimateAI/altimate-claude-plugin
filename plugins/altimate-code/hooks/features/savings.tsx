@@ -11,6 +11,7 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 import type { SavingsView } from '../../types'
 import { MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
+import { simpleCommands } from './health'
 import type { BandUi, FeatureContext } from './index'
 
 const COMMAND = 'savings'
@@ -98,20 +99,15 @@ const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
 
 /**
  * Whether a shell line runs the Databricks CLI's `warehouses`, `clusters`, `bundle` or `jobs` command,
- * rather than only naming it (`echo databricks bundle deploy`, a commit message). Quoted text is data;
- * the line is split into its simple commands, and each is read past assignments, shell keywords and
- * wrappers with their flags (`sudo -E`, `time`, `then`) to the program it runs. That program must be
- * `databricks` (or a path to it); its own global flags (`-p prod`, `--profile=x`) come before the command.
- * A line that opens a heredoc is not read: where its body ends is the shell's to say, so it offers nothing,
- * as the dbt command reader does with one.
+ * rather than only naming it (`echo databricks bundle deploy`, a commit message). The line's simple
+ * commands come from the shell reader the push check uses (`simpleCommands`): quoted text and comments
+ * are data, a heredoc's body is text unless a shell runs it, and a `$(…)` or backtick runs its own. Each
+ * command is read past assignments, shell keywords and wrappers with their flags (`sudo -E`, `time`,
+ * `then`) to the program it runs. That program must be `databricks` (or a path to it); its own global
+ * flags (`-p prod`, `--profile=x`) come before the command.
  */
 export function runsDatabricksCompute(line: string): boolean {
-  const unquoted = line.replace(/"[^"]*"|'[^']*'/g, '""')
-  // `<<<` is a here-string, a word on the same line, not a heredoc.
-  if (/(?<!<)<<(?!<)/.test(unquoted)) return false
-  // Backticks run a command too, so they end one as `(` does.
-  for (const simple of unquoted.split(/&&|\|\||[;&|(){}`\n]/)) {
-    const words = simple.trim().split(/\s+/).filter(Boolean)
+  for (const words of simpleCommands(line)) {
     let at = 0
     // Any run of assignments, keywords and wrappers, each wrapper with its flags and their separate values.
     while (at < words.length) {
@@ -202,7 +198,7 @@ const quoted = (value: string) => `"${value.replace(/"/g, "'")}"`
 const DAY_MS = 86_400_000
 
 /** A finding's title on one line; one the answer leaves out reads as a plain one. */
-const titleOf = (finding: Pick<ToolFinding, 'title'>) => oneLine(finding.title) || 'Savings finding'
+const titleOf = (finding: Pick<ToolFinding, 'title'>) => oneLine(finding.title) || 'Savings opportunity'
 
 /** Days a window covers, from its YYYY-MM-DD ends; 7 when they cannot be read. */
 export function windowDays(window: { start: string; end: string }): number {
@@ -399,7 +395,7 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
       .map(one => ({
         resourceId: one.resource_id,
         resourceName: shownName(one.resource_name, one.resource_id),
-        currentMonthly: one.current_monthly_cost,
+        currentMonthly: Number(one.current_monthly_cost),
         choices: one.choices
           // Serverless is priced without a size, so only a sized choice needs the cores its queries need.
           .filter(
@@ -410,11 +406,12 @@ export function toView(metadata: ToolMetadata | null): SavingsView | null {
           )
           .map(choice => ({
             label: size(choice.label),
-            monthlyCost: choice.monthly_cost,
-            monthlySaving: choice.monthly_saving,
+            // The answer's figures as numbers: the pane formats them (`toFixed`), and the filter above lets numeric strings through.
+            monthlyCost: Number(choice.monthly_cost),
+            monthlySaving: Number(choice.monthly_saving),
             fits: choice.fits,
-            cores: choice.cores,
-            coresNeeded: choice.cores_needed,
+            cores: Number(choice.cores),
+            coresNeeded: Number(choice.cores_needed),
           })),
       }))
       .filter(one => one.choices.length > 0),

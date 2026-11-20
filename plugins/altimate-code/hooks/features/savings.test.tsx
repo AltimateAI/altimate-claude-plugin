@@ -1387,6 +1387,7 @@ test('the command reader reads past every wrapper, its flags\' values and assign
   }
   // A heredoc that only writes the command somewhere runs nothing.
   expect(runsDatabricksCompute('cat > deploy.sh <<EOF\ndatabricks bundle deploy\nEOF')).toBe(false)
+  expect(runsDatabricksCompute("cat <<'EOF'\ndatabricks jobs list\nEOF\ndatabricks bundle deploy")).toBe(true)
 })
 
 test('an answer without a total is no report rather than a failed run', () => {
@@ -1539,18 +1540,28 @@ test('a what-if row whose every choice lacks its figures is left out, not drawn 
   await ui.unmount()
 })
 
-test('a line that opens a heredoc is not read, whatever its terminator or how many it opens; a here-string is no heredoc', () => {
+test('heredoc bodies, comments and shifts are read as the shell reads them', () => {
+  // A body is text, whatever its terminator or however many a line opens; what follows it is read.
   for (const line of [
-    "cat <<'EOF'\ndatabricks jobs list\nEOF\ndatabricks bundle deploy",
     'cat <<-EOF\n\tdatabricks bundle deploy\n\tEOF',
     'cat <<A <<B\nbodyA\nA\ndatabricks bundle deploy\nB',
     'cat <<END-OF-FILE > deploy.sh\ndatabricks bundle deploy\nEND-OF-FILE',
     'cat <<\\EOF\ndatabricks bundle deploy\nEOF',
+    "# don't ship yet\ncat > x.sh <<'EOF'\ndatabricks bundle deploy\nEOF",
+    'ls # ; databricks bundle deploy',
   ]) {
     expect(runsDatabricksCompute(line)).toBe(false)
   }
-  expect(runsDatabricksCompute('cat <<< "x"\ndatabricks bundle deploy')).toBe(true)
-  expect(runsDatabricksCompute('echo "a << b" && databricks jobs list')).toBe(true)
+  for (const line of [
+    'cat <<-EOF\n\tbody\n\tEOF\ndatabricks bundle deploy',
+    'cat <<< "x"\ndatabricks bundle deploy',
+    'echo "a << b" && databricks jobs list',
+    'echo $((1 << 2)) && databricks bundle deploy',
+    // A heredoc fed to a shell is that shell's script.
+    'bash <<EOF\ndatabricks bundle deploy\nEOF',
+  ]) {
+    expect(runsDatabricksCompute(line)).toBe(true)
+  }
 })
 
 test('editing a Terraform file that is not Databricks config names no finding, even one whose name it holds', async ($, on) => {
@@ -1568,12 +1579,26 @@ test('editing a Terraform file that is not Databricks config names no finding, e
 test('a finding without a title is drawn with a plain one, not "undefined"', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   delete answer.metadata.report.findings[0].title
-  expect(toViewOf(answer.metadata)?.findings[0]?.title).toBe('Savings finding')
+  expect(toViewOf(answer.metadata)?.findings[0]?.title).toBe('Savings opportunity')
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^Classic · Savings finding · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Classic · Savings opportunity · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /undefined/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('what-if figures sent as numeric strings are drawn as numbers when a size is pressed', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const choice = answer.metadata.report.what_if[0].choices[1]
+  for (const field of ['cores', 'cores_needed', 'monthly_cost', 'monthly_saving']) choice[field] = String(choice[field])
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'whatif-0-1' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^At X-SMALL: \$59\.02 a month instead of \$118\.05, \$59\.03 less\. Its 16 cores cover the 7 its queries need/ })).toBeDefined()
   await ui.unmount()
 })
