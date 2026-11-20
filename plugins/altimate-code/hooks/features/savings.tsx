@@ -109,7 +109,7 @@ function terraformCode(source: string): string {
   let i = 0
   while (i < text.length) {
     const rest = text.slice(i)
-    const heredoc = /^<<-?([A-Za-z_]\w*)[ \t]*\r?\n/.exec(rest)
+    const heredoc = /^<<-?([A-Za-z_][\w-]*)[ \t]*\r?\n/.exec(rest)
     if (heredoc) {
       const end = new RegExp(`^[ \\t]*${heredoc[1]}[ \\t]*$`, 'm').exec(rest.slice(heredoc[0].length))
       i += end ? heredoc[0].length + end.index + end[0].length : rest.length
