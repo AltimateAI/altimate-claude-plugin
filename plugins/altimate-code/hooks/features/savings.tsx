@@ -688,8 +688,6 @@ export async function trackChanges(
   const connection = view.connection
   if (!connection) return []
   const flaggedWarehouses = view.findings.filter(one => isWarehouse(one.resourceType))
-  const flagged = new Set(flaggedWarehouses.map(one => `${one.workspaceId ?? ''}/${one.resourceId}`))
-  const flaggedIds = new Set(flaggedWarehouses.map(one => one.resourceId))
   const several = view.checked.workspaces > 1
   const changes: SavingsView['changes'] = []
   const seen = new Set<string>()
@@ -731,8 +729,9 @@ export async function trackChanges(
         monthlyNow: (windowCost * 30) / windowDays(view.window),
       })
     }
-    // In one workspace an id is unambiguous, so it is matched alone: the finding or the warehouse may lack the workspace id.
-    const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flaggedIds.has(warehouse.id))
+    // The finding's warehouse, matched as a drafted fix's is (`sameWorkspace`): with one workspace read, a side that
+    // names no workspace matches, but two that name different ones do not.
+    const isFlagged = flaggedWarehouses.some(one => one.resourceId === warehouse.id && sameWorkspace(warehouse.workspace_id, one.workspaceId, several))
     if (!stored && isFlagged) {
       await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
     }
@@ -977,18 +976,27 @@ export const TOP_FINDINGS = 3
 /** A finding with its answer, and its place in the full view, which keys its Draft the fix button in both views. */
 export type RankedFinding = { view: SavingsView; finding: SavingsFinding; at: number }
 
-/** Every finding across the answers, largest first: by the high end of its monthly saving, then the low end, then its name. */
+/**
+ * Every finding across the answers, largest first: by the high end of its monthly saving, then the low end, then its
+ * name. Of two copies of one finding (two connections that read one workspace), the one whose own answer holds a
+ * drafted fix for it comes first, so the copy shown is the one its fix line and its Draft the fix button belong to.
+ */
 export function rankFindings(views: readonly SavingsView[]): RankedFinding[] {
   let at = 0
   const all = views.flatMap(view => view.findings.map(finding => ({ view, finding, at: at++ })))
+  const unfixed = (one: RankedFinding) => (one.view.fixes.some(line => sameResource(one.view, one.finding, line)) ? 0 : 1)
   return all.sort(
     (a, b) =>
       b.finding.monthlyMax - a.finding.monthlyMax ||
       b.finding.monthlyMin - a.finding.monthlyMin ||
       a.finding.resourceName.localeCompare(b.finding.resourceName) ||
+      unfixed(a) - unfixed(b) ||
       a.at - b.at,
   )
 }
+
+/** Two answers that count a resource once (`resourceKey`): the same platform and the same account. */
+const sameAccount = (a: SavingsView, b: SavingsView) => a.platform === b.platform && (a.scope ?? null) === (b.scope ?? null)
 
 /** Every finding across the answers, largest first, each once: two connections that read one workspace list its findings twice. */
 export function distinctFindings(views: readonly SavingsView[]): RankedFinding[] {
@@ -1594,7 +1602,8 @@ export function register(on: On, _context: FeatureContext) {
       // A drafted fix's line goes under its resource; one whose resource has no finding now (the fix may
       // have cleared it) is shown on its own, after the top findings.
       // A fix whose resource is not among the findings shown (not flagged now, or below the top few) is listed on its own.
-      const unflagged = views.flatMap(view => view.fixes.filter(line => !top.some(one => one.view === view && sameResource(view, one.finding, line))))
+      // A line of another connection that reads the same workspace belongs to the copy shown, not to the list.
+      const unflagged = views.flatMap(view => view.fixes.filter(line => !top.some(one => sameAccount(one.view, view) && sameResource(view, one.finding, line))))
       return cleanTree(
         <Box flexDirection="column" gap={1}>
           {refusals}

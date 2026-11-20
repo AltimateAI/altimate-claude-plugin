@@ -331,6 +331,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('store.set', async (_: unknown, e: { key: string; value: unknown }) => {
     if (e.key.startsWith('savings-baseline:')) await options.onStep?.('baseline write')
+    if (e.key.startsWith('savings-fix:')) await options.onStep?.('fix write')
     if (options.storeFull || options.storeRefuses?.(e.key)) return { deny: 'the store is over its limit' }
     store.set(e.key, e.value)
     return { value: undefined }
@@ -2847,7 +2848,7 @@ test('Draft the fix pressed just before a run starts still fills the prompt box 
 test('Draft the fix whose prompt box is filled across a /clear says nothing in the new conversation', async ($, on) => {
   let release = () => {}
   const fillHold = new Promise<void>(done => (release = done))
-  const { clock, fills, toasts } = await start($, on, { fillHold })
+  const { clock, fills, toasts, store } = await start($, on, { fillHold })
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -2858,6 +2859,71 @@ test('Draft the fix whose prompt box is filled across a /clear says nothing in t
   await clock.settle()
   expect(fills).toHaveLength(1)
   expect(toasts.filter(text => /prompt box/.test(text))).toEqual([])
+  // The /clear replaced the box's text: the request is not followed by a later run.
+  expect([...store.keys()].filter(key => key.startsWith('savings-fix:'))).toEqual([])
+  await ui.unmount()
+})
+
+test('Draft the fix whose record is written across a /clear says nothing in the new conversation', async ($, on) => {
+  let release = () => {}
+  const held = new Promise<void>(done => (release = done))
+  const { clock, toasts } = await start($, on, { onStep: async step => (step === 'fix write' ? held : undefined) })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  await clock.settle()
+  expect(toasts.filter(text => /prompt box/.test(text))).toEqual([])
+  await ui.unmount()
+})
+
+test('with two connections on one workspace, a fix drafted from the one listed second stays under the finding the slim view shows', async ($, on) => {
+  // A second, smaller finding on another warehouse puts a line listed on its own after both titles.
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  // The answers are listed by connection name, so `dbxmega` comes after `classic`: its copy is the one to prefer.
+  const store = { [`savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-classic`]: FIX }
+  const { clock } = await start($, on, { list: BOTH, answer, now: Date.parse('2026-11-18T10:00:00Z'), store })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(titles).toHaveLength(2)
+  expect(texts[titles[0]!]).toContain('Classic')
+  expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
+  await ui.unmount()
+})
+
+test('with two connections on one workspace that both drafted the fix, its line shows once, under the finding', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  const store = {
+    [`savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-classic`]: FIX,
+    [`savings-fix:project:${ROOT}/classic::sql_warehouse:wh-classic`]: { ...FIX, date: '2026-11-02' },
+  }
+  const { clock } = await start($, on, { list: BOTH, answer, now: Date.parse('2026-11-18T10:00:00Z'), store })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
   await ui.unmount()
 })
 
