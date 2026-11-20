@@ -699,6 +699,7 @@ declare module 'claude-code' {
       dbtFailure: FailureView | null
       /** The environment doctor's answer for the session's dbt project. */
       dbtDoctor: DoctorView | null
+      dbtFilesChanged: number
       /** The query the results pane shows. */
       dbtResult: QueryResult | null
       /** Earlier queries and bookmarks, newest first, for the results pane. */

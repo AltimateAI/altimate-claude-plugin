@@ -1519,49 +1519,43 @@ async function manifestCheck($: EngineInterface, root: string): Promise<{ check:
   return { check, staleFiles }
 }
 
+// Bumped by every edit and shell command: the doctor's manifest line is read again from the files after one,
+// and the doctor's pane, which reads it, is drawn again.
+let fileChanges = 0
+const filesChangedAtom = atom({ plugin: 'altimate-code', key: 'dbtFilesChanged' } as const, 0)
+
+async function filesChanged($: EngineInterface) {
+  fileChanges++
+  await update($, filesChangedAtom, n => n + 1)
+}
+// The last manifest line read from the files, with what it was read for (project, manifest mtime, changes so far).
+let manifestRead: { key: string; check: DoctorCheck; staleFiles: string[] } | null = null
+
 /**
- * After a tool call that may have changed the project's files (an edit, a shell command): the doctor's manifest
- * line is read again, so a doctor shown before the change no longer says the manifest is current.
+ * The doctor's manifest line as the files are now, read on demand when the doctor is shown: the manifest's mtime
+ * against the project's files (one bounded stat pass), kept until the doctor runs again, the manifest is rewritten or
+ * a tool call may have changed a file. Nothing is published to the doctor's state, so no older read can overwrite a newer one.
  */
-async function recheckDoctorManifest($: EngineInterface) {
-  // Marked first: a doctor running now that publishes what it read before this change reads the manifest again
-  // when it is done, even if it finishes while this read of its state is under way.
-  recheckWhenIdle = true
+async function manifestNow($: EngineInterface, root: string): Promise<{ check: DoctorCheck; staleFiles: string[] }> {
+  const target = await targetOf($, root)
+  const stat = await $.fs.stat(`${target}/manifest.json`).catch(() => null)
+  const key = `${root}\u0000${stat?.mtimeMs ?? 'none'}\u0000${fileChanges}`
+  if (manifestRead?.key === key) return manifestRead
+  const read = await manifestCheck($, root)
+  read.check.detail = redactValues(read.check.detail)
+  if (read.check.fix) read.check.fix = redactValues(read.check.fix)
+  manifestRead = { key, ...read }
+  return read
+}
+
+/** The doctor as shown: its last run, with the manifest line as the files are now. */
+async function doctorNow($: EngineInterface): Promise<DoctorView | null> {
   const view = await read($, doctorAtom)
-  if (!view || view.busy) return
-  recheckWhenIdle = false
-  const seq = ++manifestSeq
-  const { check, staleFiles } = await manifestCheck($, view.root)
-  // A newer read (another change, or the doctor itself) has the say.
-  if (seq !== manifestSeq) return
-  check.detail = redactValues(check.detail)
-  if (check.fix) check.fix = redactValues(check.fix)
-  let landed = false
-  await update($, doctorAtom, prev => {
-    // Run again when a write loses to another: only the attempt that is written counts.
-    landed = false
-    // Checked again here: a newer read may have landed while this update waited its turn.
-    if (!prev || prev.root !== view.root || prev.busy || seq !== manifestSeq) return prev
-    landed = true
-    return { ...prev, checks: prev.checks.map(one => (one.id === 'manifest' ? check : one)), staleFiles }
-  })
-  if (!landed && seq === manifestSeq) {
-    recheckWhenIdle = true
-    if (!(await read($, doctorAtom))?.busy) drainDoctorRecheck($)
-  }
+  if (!view || view.busy || !view.checks.some(one => one.id === 'manifest')) return view
+  await read($, filesChangedAtom)
+  const { check, staleFiles } = await manifestNow($, view.root)
+  return { ...view, checks: view.checks.map(one => (one.id === 'manifest' ? check : one)), staleFiles }
 }
-
-/** When the doctor is idle again: a change made while it was busy has its manifest line read now. */
-function drainDoctorRecheck($: EngineInterface) {
-  if (!recheckWhenIdle) return
-  recheckWhenIdle = false
-  later($, () => recheckDoctorManifest($))
-}
-
-// Each read of the manifest's freshness, by the doctor or after a change: only the newest one is shown.
-let manifestSeq = 0
-// A change arrived while the doctor was running: the manifest is read again once it is done.
-let recheckWhenIdle = false
 
 async function runDoctor($: EngineInterface, root: string, connection = false): Promise<DoctorView> {
   const previous = await read($, doctorAtom)
@@ -1628,8 +1622,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail, fix: has ? null : 'dbt deps' })
   }
 
-  // Manifest freshness. A read after a change that is still going is outdated by this one.
-  const doctorSeq = ++manifestSeq
+  // Manifest freshness.
   const manifest = await manifestCheck($, root)
   checks.push(manifest.check)
   const staleFiles = manifest.staleFiles
@@ -1653,17 +1646,10 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     check.detail = redactValues(check.detail)
     if (check.fix) check.fix = redactValues(check.fix)
   }
-  let view: DoctorView = { root, checks, at: await $.clock.now(), staleFiles, busy: null }
-  await update($, doctorAtom, prev => {
-    // A newer read of the manifest (after a change, or another doctor) has the say on its line.
-    if (doctorSeq !== manifestSeq && prev?.root === root) {
-      const newer = prev.checks.find(one => one.id === 'manifest')
-      if (newer) view = { ...view, checks: view.checks.map(one => (one.id === 'manifest' ? newer : one)), staleFiles: prev.staleFiles }
-    }
-    return view
-  })
-  // A change while it ran (the connection test can take minutes): its manifest line is read again.
-  drainDoctorRecheck($)
+  const view: DoctorView = { root, checks, at: await $.clock.now(), staleFiles, busy: null }
+  // What the pane shows next is read from the files again, not from before this run.
+  manifestRead = null
+  await update($, doctorAtom, () => view)
   return view
 }
 
@@ -1814,7 +1800,6 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
               // Parsing without the packages would only fail again: say what deps said and stop.
               if (deps === SKIPPED || deps.exitCode !== 0) {
                 await update($, doctorAtom, view => (view ? { ...view, busy: null } : view))
-                drainDoctorRecheck($)
                 if (deps !== SKIPPED) $.ui.toast(`✖ dbt deps failed · ${dbtTail(deps, 1).slice(0, 160)}`, { timeoutMs: 8000 })
                 return
               }
@@ -1945,7 +1930,7 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
   const start = takeStart(startKey(e, command))
   // A command may have changed the checked model.
   later($, () => recheck($, null))
-  later($, () => recheckDoctorManifest($))
+  await filesChanged($)
   const invocations = dbtCommands(command)
   if (invocations.length === 0) return pendingLines(agentId)
   const asked = start?.asked ?? generation
@@ -2011,7 +1996,7 @@ function pendingLines(agentId: string | null): string[] {
 /** After a model Claude edited: compile it and run it against the warehouse, then check its columns. */
 export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string }): Promise<string[]> {
   if (!enabled || !EDIT_TOOLS.has(e.tool)) return []
-  later($, () => recheckDoctorManifest($))
+  await filesChanged($)
   const path = normalize(file.path)
   // The conversation this edit belongs to, taken before the edit ran, so a /clear during it is seen.
   const asked = takeStart(startKey(e, path))?.asked ?? generation
@@ -2317,7 +2302,8 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
 
   on('ui.render', { component: 'Pane', requestId: DOCTOR_PANE }, async ($, e) => {
     const { Box, Button, Text } = $.ui.resolve(e)
-    const doctor = await read($, doctorAtom)
+    // The manifest line as the files are now: the pane may have been open since before Claude's edits.
+    const doctor = await doctorNow($)
     if (!doctor) return (
       <Box flexDirection="column">
         <Text dimColor>No dbt project checked yet. Run /dbt-doctor in a dbt project.</Text>
