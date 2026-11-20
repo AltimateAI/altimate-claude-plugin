@@ -1184,7 +1184,7 @@ async function startPressedRun($: EngineInterface, asked: string | null, at: num
     const connections = await read($, connectionsAtom)
     // Checked again after the reads: a /clear meanwhile must not leave the check marked running.
     if (at !== generation) return
-    await update($, busyAtom, () => busyOf(asked, connections))
+    await update($, busyAtom, now => (at === generation ? busyOf(asked, connections) : now))
   } finally {
     pressStarting = false
   }
@@ -1362,7 +1362,7 @@ export function register(on: On, _context: FeatureContext) {
     }
     // A /clear while the list or the busy state was read: nothing is marked running for the new conversation.
     if (at !== generation) return { text: `The conversation was cleared before the ${name} started. Run /savings again.` }
-    await update($, busyAtom, () => busyOf(asked || null, connections))
+    await update($, busyAtom, now => (at === generation ? busyOf(asked || null, connections) : now))
     const opened = await openPane($)
     later($, () => runCheck($, asked || null, at))
     if (opened && opened.isPlaced === false) {
