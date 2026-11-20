@@ -2712,7 +2712,8 @@ test('an over-sized finding with no target size asks for a smaller size, with no
 })
 
 test('a source build is refused though a runtime note on stderr names a version', async ($, on) => {
-  const { clock, runs, toasts } = await start($, on, { version: 'local', versionStderr: 'warning: node v22.1.0 is deprecated\n' })
+  // A version before `local` on stdout too: only the source-build check refuses this one.
+  const { clock, runs, toasts } = await start($, on, { version: `${SAVINGS_MIN_ALTIMATE_CODE}\nlocal`, versionStderr: 'warning: node v22.1.0 is deprecated\n' })
   await savings($)
   await clock.settle()
   expect(runs).toEqual([])
@@ -2861,7 +2862,8 @@ test('a cluster whose auto-termination the answer does not give reads "?", not "
 // --- The merged head's review: the startup probe, saving every answer, slim fix lines, Snowflake gaps, baseline costs.
 
 test('at session start a source build is not listed from, whatever its stderr names', async ($, on) => {
-  const { atStart } = await start($, on, { list: BOTH, version: 'local', versionStderr: 'warning: node v22.1.0 is deprecated\n' })
+  // A version before `local` on stdout too: only the source-build check keeps this one out.
+  const { atStart } = await start($, on, { list: BOTH, version: `${SAVINGS_MIN_ALTIMATE_CODE}\nlocal`, versionStderr: 'warning: node v22.1.0 is deprecated\n' })
   expect(atStart.listRuns).toBe(0)
 })
 
@@ -2926,6 +2928,88 @@ test('a drafted fix hides the change line of its own workspace\'s warehouse, not
   const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
   expect(texts.filter(text => /^Classic in 222: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
+  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(0)
+  await ui.unmount()
+})
+
+test('the command reader reads past every wrapper, its flags\' values and assignments, and the remaining keywords', () => {
+  for (const line of [
+    'env FOO=1 databricks bundle deploy',
+    'sudo VAR=1 databricks bundle deploy',
+    'sudo -u root databricks warehouses list',
+    'env -u VAR databricks clusters list',
+    'nohup env FOO=1 databricks jobs list',
+    'sudo env databricks warehouses list',
+    'if databricks jobs list; then echo ok; fi',
+    'while databricks jobs list; do sleep 1; done',
+    'echo `databricks bundle deploy`',
+    'xargs databricks clusters get',
+  ]) {
+    expect(runsDatabricksCompute(line)).toBe(true)
+  }
+  // A heredoc that only writes the command somewhere runs nothing.
+  expect(runsDatabricksCompute('cat > deploy.sh <<EOF\ndatabricks bundle deploy\nEOF')).toBe(false)
+  expect(runsDatabricksCompute("cat <<'EOF'\ndatabricks jobs list\nEOF\ndatabricks bundle deploy")).toBe(true)
+})
+
+test('an answer without a total, or a finding without evidence, is no report rather than a failed run', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.total
+  expect(toView(answer.metadata)).toBeNull()
+  expect(evidenceLines(undefined)).toEqual([])
+})
+
+test('a sized what-if choice without its cores or fit is left out', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const choices = answer.metadata.report.what_if[0].choices
+  delete choices[1].cores
+  delete choices[2].fits
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(((await ui.find({ key: 'whatif-0-0' })) as any)?.props.label).toBe('SERVERLESS $17.24')
+  expect(await ui.find({ key: 'whatif-0-1' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /undefined/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the checked line says one warehouse, cluster or job in the singular', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses_checked = 1
+  answer.metadata.clusters_checked = 0
+  answer.metadata.jobs_checked = 1
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^1 SQL warehouse, 0 all-purpose clusters and 1 job · / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a what-if row whose every choice lacks its figures is left out, not drawn with no buttons', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  for (const choice of answer.metadata.report.what_if[0].choices) delete choice.monthly_cost
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^What if Classic / })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Press a size to see/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('in one workspace a drafted fix hides its warehouse\'s change line though only the warehouse names the workspace', async ($, on) => {
+  const store = { [FIX_KEY]: FIX, 'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-01', type: 'CLASSIC', size: 'SMALL', windowCost: 27.54 } }
+  const answer = resizedAnswer('2026-11-18', 14)
+  // The warehouses carry the workspace id; the fix (from a finding) does not.
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  expect(texts.filter(text => /^Classic: changed to X-SMALL CLASSIC since /.test(text))).toHaveLength(1)
   expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(0)
   await ui.unmount()
 })

@@ -138,7 +138,9 @@ const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
 const DATABRICKS_SUBCOMMANDS = new Set(['warehouses', 'clusters', 'bundle', 'jobs'])
 // Words the shell runs another command after: keywords, and wrappers whose own flags come before it.
-const SHELL_LEADS = new Set(['then', 'do', 'else', '!', 'time', 'nohup', 'env', 'sudo', 'command', 'exec'])
+const SHELL_LEADS = new Set(['if', 'elif', 'while', 'until', 'then', 'do', 'else', '!', 'time', 'nohup', 'env', 'sudo', 'command', 'exec', 'xargs'])
+const isAssignment = (word: string) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)
+const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
 
 /**
  * Whether a shell line runs the Databricks CLI's `warehouses`, `clusters`, `bundle` or `jobs` command,
@@ -148,19 +150,28 @@ const SHELL_LEADS = new Set(['then', 'do', 'else', '!', 'time', 'nohup', 'env', 
  * `databricks` (or a path to it); its own global flags (`-p prod`, `--profile=x`) come before the command.
  */
 export function runsDatabricksCompute(line: string): boolean {
-  const unquoted = line.replace(/"[^"]*"|'[^']*'/g, '""')
-  for (const simple of unquoted.split(/&&|\|\||[;&|(){}\n]/)) {
+  // A heredoc's body is data written somewhere, not commands this line runs.
+  const withoutHeredocs = line.replace(/<<-?\s*(['"]?)(\w+)\1[^\n]*\n[\s\S]*?(?:\n\2(?=\n|$)|$)/g, '')
+  const unquoted = withoutHeredocs.replace(/"[^"]*"|'[^']*'/g, '""')
+  // Backticks run a command too, so they end one as `(` does.
+  for (const simple of unquoted.split(/&&|\|\||[;&|(){}`\n]/)) {
     const words = simple.trim().split(/\s+/).filter(Boolean)
     let at = 0
+    // Any run of assignments, keywords and wrappers, each wrapper with its flags and their separate values.
     while (at < words.length) {
       const word = words[at]!
-      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) at++
+      if (isAssignment(word)) at++
       else if (SHELL_LEADS.has(word)) {
         at++
-        while (words[at]?.startsWith('-')) at++
+        while (words[at]?.startsWith('-')) {
+          const flag = words[at]!
+          at++
+          const next = words[at]
+          if (!flag.includes('=') && next && !next.startsWith('-') && !isAssignment(next) && !SHELL_LEADS.has(next) && !isDatabricks(next)) at++
+        }
       } else break
     }
-    if (!/(^|\/)databricks$/.test(words[at] ?? '')) continue
+    if (!isDatabricks(words[at] ?? '')) continue
     at++
     while (words[at]?.startsWith('-')) {
       const flag = words[at]!
@@ -199,7 +210,8 @@ const shownName = (name: unknown, id: unknown) => oneLine(name) || oneLine(id)
 const quoted = (value: string) => `"${value.replace(/"/g, "'")}"`
 
 /** What a finding rests on, one short line each, from the measured values core returned. */
-export function evidenceLines(evidence: Record<string, unknown>, days = 7): string[] {
+export function evidenceLines(evidence: Record<string, unknown> | undefined, days = 7): string[] {
+  if (!evidence) return []
   switch (evidence.kind) {
     case 'serverless':
       return [
@@ -332,7 +344,7 @@ const SNOWFLAKE_DEFINES = 'Terraform snowflake_warehouse, or SQL'
 
 /** The change a finding points at, the noun for its resource, and where the change is written. */
 function changeOf(finding: ToolFinding): { noun: string; change: string; defines: string; otherwise: string } {
-  const e = finding.evidence
+  const e = finding.evidence ?? {}
   const id = oneLine(finding.resource_id)
   switch (e.kind) {
     case 'serverless':
@@ -468,7 +480,7 @@ function dailyCostOf(finding: ToolFinding, windowCost: number | null | undefined
 /** The tool's answer as the pane draws it, or null when it is not a report. */
 export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform = 'databricks'): SavingsView | null {
   const report = metadata?.report
-  if (!metadata?.success || !report || !Array.isArray(report.findings) || !metadata.window) return null
+  if (!metadata?.success || !report || !Array.isArray(report.findings) || !report.total || !metadata.window) return null
   const days = report.lookback_days || windowDays(metadata.window)
   const inventory = (metadata.warehouses ?? []).map(one => ({
     id: one.id,
@@ -534,7 +546,12 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
         currentMonthly: one.current_monthly_cost,
         choices: one.choices
           // Serverless is priced without a size, so only a sized choice needs the cores its queries need.
-          .filter(choice => known(choice.monthly_cost) && known(choice.monthly_saving) && (choice.label === 'SERVERLESS' || known(choice.cores_needed)))
+          .filter(
+            choice =>
+              known(choice.monthly_cost) &&
+              known(choice.monthly_saving) &&
+              (choice.label === 'SERVERLESS' || (known(choice.cores_needed) && known(choice.cores) && typeof choice.fits === 'boolean')),
+          )
           .map(choice => ({
             label: size(choice.label),
             monthlyCost: choice.monthly_cost,
@@ -543,7 +560,8 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
             cores: choice.cores,
             coresNeeded: choice.cores_needed,
           })),
-      })),
+      }))
+      .filter(one => one.choices.length > 0),
     changes: [],
     inventory,
     queryCount: queries.size > 0 ? [...queries.values()].reduce((sum, one) => sum + one, 0) : null,
@@ -660,7 +678,8 @@ export function explain(error: string, connection: string | null = null, platfor
 function checkedText(view: SavingsView): string {
   if (view.platform === 'snowflake') return `${count(view.checked.warehouses)} warehouse${view.checked.warehouses === 1 ? '' : 's'}`
   const across = view.checked.workspaces > 1 ? ` in ${view.checked.workspaces} workspaces` : ''
-  return `${view.checked.warehouses} SQL warehouses, ${view.checked.clusters} all-purpose clusters and ${view.checked.jobs} jobs${across}`
+  const many = (value: number, one: string) => `${value} ${one}${value === 1 ? '' : 's'}`
+  return `${many(view.checked.warehouses, 'SQL warehouse')}, ${many(view.checked.clusters, 'all-purpose cluster')} and ${many(view.checked.jobs, 'job')}${across}`
 }
 
 /** How many findings an answer has that carry no dollar figure. */
@@ -988,7 +1007,10 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
     view.changes = await trackChanges($, view, metadata?.warehouses ?? [], today)
     view.fixes = await fixesFor($, view, today)
     // A drafted fix says what became of that warehouse; the older "since first flagged" line would repeat it.
-    view.changes = view.changes.filter(change => !view.fixes.some(fix => fix.resourceId === change.resourceId && (fix.workspaceId ?? null) === change.workspaceId))
+    // Across workspaces a fix matches its own warehouse's line by id and workspace; in one workspace by id,
+    // since a finding (and so its fix) can lack the workspace id its warehouse carries.
+    const several = view.checked.workspaces > 1
+    view.changes = view.changes.filter(change => !view.fixes.some(fix => fix.resourceId === change.resourceId && (!several || (fix.workspaceId ?? null) === change.workspaceId)))
     return live() ? { view } : null
   } catch (error) {
     if (!live()) return null
