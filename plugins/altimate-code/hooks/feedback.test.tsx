@@ -629,6 +629,12 @@ test('the rules read the text as written: a profile value that is a key name or 
   }
 })
 
+test('a password inside a JSON string that is itself JSON-escaped is cut whole', () => {
+  const out = redactSecrets(JSON.stringify({ message: JSON.stringify({ password: 'hunter2-prod', user: 'bob' }) }))
+  expect(out).not.toContain('hunter2')
+  expect(redactSecrets(JSON.stringify({ message: JSON.stringify({ message: JSON.stringify({ api_key: 'deep-secret-value' }) }) }))).not.toContain('deep-secret')
+})
+
 test('ADO.NET doubled quotes inside a quoted password are part of it, and a profile value that is also a key name does not hide the key', () => {
   const out = redactSecrets('Server=db;Password="alpha""omega-secret";Encrypt=yes')
   expect(out).not.toMatch(/alpha|omega/)

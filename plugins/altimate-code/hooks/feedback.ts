@@ -51,7 +51,7 @@ type Span = { start: number; end: number; home: boolean }
 const CREDENTIAL_KEY = String.raw`(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?`
 // A YAML line of a credential key: a block-scalar header (`password: |`, `secret: >- # note`) takes the indented lines after it, and a plain value
 // (`password: correct horse battery staple`) is the rest of its line.
-const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?${CREDENTIAL_KEY}["']?[ \t]*:[ \t]*)`
+const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?[ \t]*:[ \t]*)`
 const BLOCK_HEADER = new RegExp(String.raw`${KEY_LINE}[|>][+-]?\d?[ \t]*(?:#.*)?$`, 'i')
 const PLAIN_VALUE = new RegExp(String.raw`${KEY_LINE}(?![|>"'])(\S.*)$`, 'i')
 
@@ -74,7 +74,7 @@ const SECRET_PATTERNS: RegExp[] = [
   /((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)[^;\n]*$/gim,
   // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
   // backslash escape or a doubled quote is inside it) or the rest of the word, up to a `;` that starts the next `key=` field.
-  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|(?:[^\s;]|;(?!\w+=))+)`, 'gi'),
+  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|(?:[^\s;]|;(?!\w+=))+)`, 'gi'),
   // A long unbroken run of key-like characters.
   /\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g,
 ]
