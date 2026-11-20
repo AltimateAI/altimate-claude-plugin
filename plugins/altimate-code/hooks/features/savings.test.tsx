@@ -2592,7 +2592,22 @@ test('a baseline in one workspace is read for that workspace only, though anothe
   const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
   expect(texts.filter(text => / → .* since 2026-11-10/.test(text))).toEqual([
-    'Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
+    'Classic (workspace 111): SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
+  ])
+  await ui.unmount()
+})
+
+test('a size the CLI did not read is left out of the change line, not drawn as "?"', async ($, on) => {
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', type: 'CLASSIC', size: null, windowCost: 27.54 } }
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'X_SMALL'
+  const { clock } = await start($, on, { answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual([
+    'Classic: CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
   ])
   await ui.unmount()
 })
@@ -2966,8 +2981,8 @@ test('a drafted fix hides the change line of its own workspace\'s warehouse, not
   await clock.settle()
   const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
-  expect(texts.filter(text => /^Classic in 222: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
-  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(0)
+  expect(texts.filter(text => /^Classic in 222 \(workspace 222\): SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
+  expect(texts.filter(text => /^Classic( \(workspace 111\))?: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(0)
   await ui.unmount()
 })
 
@@ -3569,6 +3584,21 @@ test('every finding kind core returns is drawn from its own fields: no "?", "und
   const line = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)).find(text => text.startsWith('synth_pro'))
   // With several workspaces read, the band names the one whose finding it shows: names and ids can repeat across them.
   expect(line).toBe('synth_pro (workspace 1001): Over-Sized Warehouse, $5,400–$9,450 a month to save. /savings shows why.')
+  await band.unmount()
+})
+
+test('a name flagged in two workspaces is not pinned on one of them by the band', async ($, on) => {
+  // Core flags synth_classic in workspaces 1001 and 1002; a Terraform file does not say which it deploys to.
+  expect(new Set(DATABRICKS_REPORT.findings.filter(one => one.resource_name === 'synth_classic').map(one => one.workspace_id))).toEqual(new Set(['1001', '1002']))
+  const files = { [`${ROOT}/infra/classic.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "synth_classic"\n  cluster_size = "Small"\n}\n' }
+  const { clock } = await start($, on, { answer: coreAnswer(), files })
+  await savings($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/classic.tf`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  const texts = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => text.startsWith('synth_classic'))).toEqual(['synth_classic has findings in 2 workspaces. /savings shows each.'])
   await band.unmount()
 })
 

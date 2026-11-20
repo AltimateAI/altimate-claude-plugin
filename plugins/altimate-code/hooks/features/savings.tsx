@@ -327,6 +327,9 @@ function factOf(evidence: Record<string, unknown>, title: string): string {
 const sameResource = (finding: Pick<SavingsFinding, 'resourceType' | 'resourceId' | 'workspaceId'>, line: Pick<SavingsFixLine, 'resourceType' | 'resourceId' | 'workspaceId'>) =>
   finding.resourceType === line.resourceType && finding.resourceId === line.resourceId && (finding.workspaceId ?? null) === (line.workspaceId ?? null)
 
+/** A warehouse's size and type as the change line shows them; a size the CLI did not read is left out, not drawn as "?". */
+const configOf = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSize) ? size(warehouseSize) : '', oneLine(type)].filter(Boolean).join(' ')
+
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
   return String(value ?? '')
@@ -650,9 +653,10 @@ export async function trackChanges(
       changes.push({
         resourceId: warehouse.id,
         workspaceId: warehouse.workspace_id ?? null,
-        name: shownName(warehouse.name, warehouse.id),
-        from: `${size(stored.size)} ${stored.type}`,
-        to: `${size(warehouse.size)} ${warehouse.type}`,
+        // Names repeat across workspaces, so with several read the line names its own.
+        name: `${shownName(warehouse.name, warehouse.id)}${several ? ` (workspace ${oneLine(warehouse.workspace_id)})` : ''}`,
+        from: configOf(stored.size, stored.type),
+        to: configOf(warehouse.size, warehouse.type),
         since: stored.date,
         monthlyBefore: (stored.windowCost * 30) / (stored.days ?? windowDays(view.window)),
         monthlyNow: (windowCost * 30) / windowDays(view.window),
@@ -1274,9 +1278,19 @@ export function mentions(text: string, name: string | null | undefined): boolean
 async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
   const kept = keptViews(liveKept(await read($, reportsAtom), await $.clock.now()))
   // An id only counts where it is long enough to mean something: a Snowflake id is a small number, a job's too.
-  const named = kept
-    .flatMap(({ view }) => view.findings.map(one => ({ one, byId: view.platform === 'databricks' && one.resourceType !== 'job' })))
-    .find(({ one, byId }) => mentions(text, one.matchName) || (byId && mentions(text, one.resourceId)))?.one
+  const matches = kept
+    .flatMap(({ view }) => view.findings.map(one => ({ one, view, byId: view.platform === 'databricks' && one.resourceType !== 'job' })))
+    .filter(({ one, byId }) => mentions(text, one.matchName) || (byId && mentions(text, one.resourceId)))
+  const named = matches[0]?.one
+  // A file does not say which workspace or account it deploys to: a name flagged in several is not pinned on one of them.
+  // Two connections that read the same workspace list its findings twice; they count once.
+  const same = matches.filter(({ one }) => one.resourceType === named?.resourceType && (one.matchName === named.matchName || one.resourceId === named.resourceId))
+  const places = new Set(same.map(({ one, view }) => `${view.platform}:${view.scope ?? ''}:${one.workspaceId ?? ''}`))
+  if (named && places.size > 1) {
+    const platforms = new Set(same.map(({ view }) => view.platform))
+    const where = platforms.size > 1 ? 'places' : platforms.has('snowflake') ? 'Snowflake accounts' : 'workspaces'
+    return { text: `${named.resourceName} has findings in ${places.size} ${where}. /savings shows each.` }
+  }
   if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${named.monthlyMax > 0 ? `${range(named.monthlyMin, named.monthlyMax)} a month to save` : 'no dollar estimate'}. /savings shows why.` }
   if (kept.length > 0 || offered || !aboutCompute) return null
   offered = true
