@@ -86,7 +86,7 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, `$1${MASK}@`],
   // A connection string's password: a quoted or braced value to its own closing delimiter (ODBC `PWD={a b};`, `}}` is a literal brace), or a
   // value that runs to the next `;`, spaces included; the last field of a string (after a `;`, or alone on its line) runs to the end of the line.
-  [/((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\})*\}|[^;\n]*(?=;))/gi, `$1${MASK}`],
+  [/((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\})*\}|[^;\n]*(?=;))/gi, `$1${MASK}`],
   [/((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?!‹redacted›)[^;\n]*$/gim, `$1${MASK}`],
   // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
   // backslash escape or a doubled quote is inside it) or the rest of the word. A YAML block scalar is cut whole first (redactBlockScalars).
@@ -97,7 +97,8 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
 
 /** The text with every token, key, password and connection-string credential cut out. */
 export function redactSecrets(text: string): string {
-  return SECRET_PATTERNS.reduce((out, [pattern, to]) => out.replace(pattern, to), redactBlockScalars(redactValues(text)))
+  // The patterns read the text as written, before the profile's own values are cut out: a value that is also a key's name ("password") would hide the key from them.
+  return redactValues(SECRET_PATTERNS.reduce((out, [pattern, to]) => out.replace(pattern, to), redactBlockScalars(text)))
 }
 
 const escapeRegex = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
