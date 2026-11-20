@@ -2024,3 +2024,18 @@ test('a shell command that runs past a minute still has the model it changed fou
   expect(finds.at(-1)).toContain('-mmin')
   expect(finds.at(-1)![finds.at(-1)!.indexOf('-mmin') + 1]).toBe('-2')
 })
+
+test('a shell command in a session opened above its dbt project looks for changed models in the projects below', async ($, on) => {
+  const finds: string[][] = []
+  const { clock } = await start($, on, {
+    noRootProject: true,
+    sqlFiles: { 'analytics/dbt_project.yml': "name: 'shop'\n", 'analytics/models/orders.sql': 'select 1' },
+    shell: argv => {
+      if (argv[0] === 'find') finds.push([...argv])
+      return argv[0] === 'find' ? { exitCode: 0, stdout: '' } : undefined
+    },
+  })
+  await $.tool.call({ tool: 'Bash', command: "python3 -c \"print('rewrite')\"" })
+  await clock.settle()
+  expect(finds.at(-1)?.[1]).toBe(`${ROOT}/analytics/models`)
+})

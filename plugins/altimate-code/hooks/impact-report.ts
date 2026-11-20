@@ -126,6 +126,8 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
         const word = token[2]?.toLowerCase()
         if (word && !token[1] && CLAUSE_WORDS.has(word)) {
           clauses[clauses.length - 1] = word
+          // `from (`, `in (`: the parenthesis opens a level in that clause.
+          if (token[3]) clauses.push(word)
           continue
         }
         const filtering = clauses.some(one => FILTERS.has(one))

@@ -637,6 +637,9 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   expect(valueCandidates(single, single.replace('> 0', '> 100'))).toEqual([])
   const exists = 'select {{ cols }} from raw\nwhere exists (select 1) and\n  paid_amount > 0'
   expect(valueCandidates(exists, exists.replace('> 0', '> 100'))).toEqual([])
+  // A subquery right after FROM keeps the levels balanced: a predicate after it is still a filter.
+  const sub = 'select {{ cols }} from (select * from raw) r where\n  paid_amount > 0'
+  expect(valueCandidates(sub, sub.replace('> 0', '> 100'))).toEqual([])
   const inline = 'select\n  paid_amount /* cents */\nfrom raw'
   expect(valueCandidates(inline, inline.replace('cents', 'dollars'))).toEqual([])
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')

@@ -602,9 +602,10 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
     const names = listing.exitCode === 0 ? listedNames(listing.stdout) : []
     if (names.length === 1) name = names[0]!
   }
-  if (!name && viaRunner) {
-    // From the project that installs the package and no manifest there that lists the file: dbt names the file's
-    // model and its version (the file's name need not be the model's), so only the edited model runs. `ls` runs no query.
+  if (viaRunner) {
+    // From the project that installs the package, dbt names the file's model and its version as they are now (a saved
+    // manifest there can predate a version moving to another file; the file's name need not be the model's), so only
+    // the edited model runs. `ls` runs no query.
     const listing = await run1(['ls', '--select', pkg ? `package:${pkg}` : 'fqn:*', '--resource-type', 'model', '--output', 'json', '--output-keys', 'name version original_file_path', '--log-format', 'text'])
     if (listing === SKIPPED) return replaced()
     if (cannotRun(listing)) return notChecked(NO_DBT)

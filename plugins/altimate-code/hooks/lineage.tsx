@@ -1181,8 +1181,11 @@ async function bashChanged($: EngineInterface, start: BashStart): Promise<{ file
     const dirs = models.map(one => (one === '.' ? root : `${root}/${one}`))
     if (!dirs.length) continue
     const listed = await $.process.run(['find', ...dirs, '-name', '*.sql', '-type', 'f', '-mmin', `-${minutes}`], { timeoutMs: 10_000 }).catch(() => null)
+    const found = (listed?.stdout ?? '').split('\n').map(one => one.trim()).filter(Boolean)
+    // Nothing touched: no git call either.
+    if (!found.length) continue
     const top = (await $.process.run(['git', '-C', root, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 }).catch(() => null))?.stdout.trim() ?? ''
-    for (const file of (listed?.stdout ?? '').split('\n').map(one => one.trim()).filter(Boolean)) {
+    for (const file of found) {
       if (files.length >= MAX_BASH_MODELS) return files
       if (/[\\/](?:target|dbt_packages|dbt_modules)[\\/]/.test(file.slice(root.length)) || !isModelPath(root, models, file)) continue
       const stat = await $.fs.stat(file).catch(() => null)

@@ -698,8 +698,12 @@ test('an edit is compiled and run against the warehouse; column drift from schem
 
 kitTest('an undocumented column is the edit\'s only when the edit names it and the SQL before did not', () => {
   const before = 'select id, amount / 100 as amount from {{ ref("raw") }}'
-  // A rewritten expression keeps its column: not a new gap. A column from a macro or `*` is not the edit's either.
-  expect(undocumentedByEdit(['amount', 'x_passthrough'], before, 'select id, amount from {{ ref("raw") }}', null)).toEqual({ fresh: [], old: ['amount', 'x_passthrough'] })
+  // A rewritten expression keeps its column: not a new gap. A column no list names is not the edit's either when the
+  // edit only rewrote a named item's line.
+  const lines = 'select\n  id,\n  amount / 100 as amount\nfrom {{ ref("raw") }}'
+  expect(undocumentedByEdit(['amount', 'x_passthrough'], lines, lines.replace('amount / 100 as amount', 'amount as amount'), null)).toEqual({ fresh: [], old: ['amount', 'x_passthrough'] })
+  // An edit that changed anything else (here the whole statement on one line): such a column counts as the edit's.
+  expect(undocumentedByEdit(['amount', 'x_passthrough'], before, 'select id, amount from {{ ref("raw") }}', null)).toEqual({ fresh: ['x_passthrough'], old: ['amount'] })
   // A new or renamed column is.
   expect(undocumentedByEdit(['amount_cents'], before, 'select id, amount as amount_cents from {{ ref("raw") }}', null)).toEqual({ fresh: ['amount_cents'], old: [] })
   // An earlier check that returned it: there before.
@@ -748,6 +752,18 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // Only the `{% set %}` lists the model's own list renders name its outputs; one a CTE renders does not.
   const inner = '{% set cols %}id, amount{% endset %}\nwith raw as (select 1 as id, 10 as amount),\n src as (select {{ cols }} from raw)\nselect id from src'
   expect(undocumentedByEdit(['amount'], inner, inner.replace('select id from src', 'select id, amount from src'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A `{% set %}` list a CTE renders, read through `select *`: a column added to it is new.
+  const viaCte = '{% set cols %}id{% endset %}\nwith src as (select {{ cols }} from raw)\nselect * from src'
+  expect(undocumentedByEdit(['amount'], viaCte, viaCte.replace('{% set cols %}id{% endset %}', '{% set cols %}id, amount{% endset %}'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A CTE's declared column names are what `select *` returns.
+  const declared = 'with src(id, old_name) as (select id, amount from raw) select * from src'
+  expect(undocumentedByEdit(['new_name'], declared, declared.replace('old_name', 'new_name'), ['id', 'old_name'])).toEqual({ fresh: ['new_name'], old: [] })
+  // A keyword inside a quoted alias does not end the list.
+  const quoted = 'select id as "from", amount from raw'
+  expect(undocumentedByEdit(['tax'], quoted, quoted.replace('amount from', 'amount, tax from'), ['from', 'amount'])).toEqual({ fresh: ['tax'], old: [] })
+  // Jinja alternatives each name outputs.
+  const branches = '{% if is_incremental() %}\nselect id, amount from new_rows\n{% else %}\nselect id from all_rows\n{% endif %}'
+  expect(undocumentedByEdit(['amount'], branches, branches.replace('select id, amount from new_rows', 'select id, amount  from new_rows'), null)).toEqual({ fresh: [], old: ['amount'] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -881,6 +897,8 @@ test('from integration_tests the package repo\'s own dbt is used, and a versione
   const versioned = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], version: 2 } } }
   const { clock, runs, cwds } = await start($, on, {
     show: { rows: [{ order_id: 1, amount: 10 }], node: 'orders.v2' },
+    // The saved manifest there still maps the file to version 2; dbt ls says what it is now.
+    listed: [{ name: 'orders', version: 1, original_file_path: 'models/orders_v1.sql' } as any, { name: 'orders', version: 2, original_file_path: 'models/orders.sql' } as any],
     files: {
       'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
       'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
@@ -928,6 +946,24 @@ test('after /clear, a gap an edit made in the last conversation is not this conv
   const note = later.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
   expect(note).not.toContain('- returned but not documented in schema.yml: amount_cents')
   expect(note).toContain('already undocumented before this edit')
+})
+
+test('from integration_tests, a saved manifest that maps the file to an older version is not trusted: dbt ls says which version it is now', async ($, on) => {
+  const stale = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], version: 1 } } }
+  const { clock, runs } = await start($, on, {
+    show: { rows: [{ order_id: 1, amount: 10 }], node: 'orders.v2' },
+    listed: [{ name: 'orders', version: 1, original_file_path: 'models/orders_v1.sql' } as any, { name: 'orders', version: 2, original_file_path: 'models/orders.sql' } as any],
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+      'integration_tests/target/manifest.json': JSON.stringify(stale),
+    },
+  })
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  expect(runs.find(argv => argv[1] === 'show')!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
 })
 
 test('a project whose packages are not installed gets a one-line note, not a failure, when nothing installs it elsewhere', async ($, on) => {
@@ -980,6 +1016,8 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   const twice = { nodes: { 'model.s.current_orders': { resource_type: 'model', name: 'current_orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
   expect(hardcodedRelations('select * from orders', twice, self)).toEqual([])
   expect(hardcodedRelations('select * from archive.orders', twice, self)).toEqual([{ relation: 'archive.orders', use: "{{ ref('archived_orders') }}" }])
+  // A FROM inside a function call names no relation.
+  expect(hardcodedRelations("select extract(day from orders) as d, trim(both ' ' from stg_orders) as t from {{ ref('x') }}", manifest, self)).toEqual([])
   // The model itself takes part: its own bare name shared with another relation is ambiguous, and never advice.
   const own = { nodes: { 'model.s.orders': { resource_type: 'model', name: 'orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
   expect(hardcodedRelations('select * from orders', own, 'model.s.orders')).toEqual([])
