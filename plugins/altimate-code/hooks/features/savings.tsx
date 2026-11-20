@@ -1090,7 +1090,9 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
   const at = conversation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
   if (!isDatabricksConfig(file.path, text)) return
-  await showBand($, await bandFor($, text, COMPUTE_WORDS.test(text)), at)
+  // A Terraform file's comments and heredoc bodies say nothing about what it declares.
+  const code = /\.tf$/i.test(file.path) ? terraformCode(text) : text
+  await showBand($, await bandFor($, code, COMPUTE_WORDS.test(code)), at)
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}

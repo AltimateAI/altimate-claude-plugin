@@ -2251,6 +2251,16 @@ test('a lookback the answer sends as a string is still the window\'s length', as
   await ui.unmount()
 })
 
+test('a Terraform file whose only compute words are in a comment gets no offer', async ($, on) => {
+  const files = { [`${ROOT}/infra/notebook.tf`]: 'resource "databricks_notebook" "n" {\n  path = "/n"\n}\n# shared cluster\n' }
+  const { clock } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/notebook.tf`, old_string: '/n', new_string: '/m' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+  await band.unmount()
+})
+
 test('a Helm or Kubernetes file under a resources/ folder is not Databricks config, whatever its words', async ($, on) => {
   const files = {
     [`${ROOT}/deploy/resources/values.yaml`]: 'resources:\n  limits:\n    cpu: 1\n  requests:\n    memory: 1Gi\n# runs on the shared cluster\nkafka:\n  clusters:\n    - main\nenv:\n  - name: DATABRICKS_HOST\n    value: x\n',
