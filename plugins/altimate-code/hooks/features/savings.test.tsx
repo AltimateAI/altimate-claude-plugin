@@ -1855,6 +1855,21 @@ test('every finding kind core returns is drawn from its own fields: no "?", "und
   await band.unmount()
 })
 
+test('a name flagged in two workspaces is not pinned on one of them by the band', async ($, on) => {
+  // Core flags synth_classic in workspaces 1001 and 1002; a Terraform file does not say which it deploys to.
+  expect(new Set(DATABRICKS_REPORT.findings.filter(one => one.resource_name === 'synth_classic').map(one => one.workspace_id))).toEqual(new Set(['1001', '1002']))
+  const files = { [`${ROOT}/infra/classic.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "synth_classic"\n  cluster_size = "Small"\n}\n' }
+  const { clock } = await start($, on, { answer: coreAnswer(), files })
+  await savings($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/classic.tf`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  const texts = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => text.startsWith('synth_classic'))).toEqual(['synth_classic has findings in 2 workspaces. /savings shows each.'])
+  await band.unmount()
+})
+
 test('a what-if choice opens only its own warehouse when two workspaces share the warehouse id and the choice', async ($, on) => {
   const [first, second] = DATABRICKS_REPORT.what_if
   // Core's own answer: one id, the same choices, two workspaces.

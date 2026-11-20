@@ -680,7 +680,13 @@ export function mentions(text: string, name: string | null | undefined): boolean
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
 async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string } | null> {
   const report = await read($, reportAtom)
-  const named = report?.findings.find(one => mentions(text, one.matchName) || (one.resourceType !== 'job' && mentions(text, one.resourceId)))
+  const matches = (report?.findings ?? []).filter(one => mentions(text, one.matchName) || (one.resourceType !== 'job' && mentions(text, one.resourceId)))
+  const named = matches[0]
+  // A file does not say which workspace it deploys to: a name flagged in several is not pinned on one of them.
+  const workspaces = new Set(
+    matches.filter(one => one.resourceType === named?.resourceType && (one.matchName === named.matchName || one.resourceId === named.resourceId)).map(one => one.workspaceId ?? ''),
+  )
+  if (named && workspaces.size > 1) return { text: `${named.resourceName} has findings in ${workspaces.size} workspaces. /savings shows each.` }
   if (named) return { text: `${named.resourceName}${named.workspace ? ` (workspace ${named.workspace})` : ''}: ${named.title}, ${range(named.monthlyMin, named.monthlyMax)} a month to save. /savings shows why.` }
   if (report || offered || !aboutCompute) return null
   offered = true
