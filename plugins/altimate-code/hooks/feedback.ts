@@ -52,7 +52,7 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g, `$1 ${MASK}`],
   // user:password@host in a connection string or URL.
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, `$1${MASK}@`],
-  [/\b((?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|authorization)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, `$1${MASK}`],
+  [/\b((?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|authorization)["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\S+)/gi, `$1${MASK}`],
   // A long unbroken run of key-like characters.
   [/\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g, MASK],
 ]
@@ -81,17 +81,18 @@ function homeForms(homes: readonly string[]): string[] {
   return [...forms].sort((a, b) => b.length - a.length)
 }
 
-const PATH_SEGMENT = `[^\\s'"\`<>()\\\\/]`
+const PATH_SEGMENT = `(?:[^\\s'"\`<>()\\\\/]|'(?=[A-Za-z0-9]))`
 // The rest of a path after its home folder: segments, and a space inside one when a separator follows within three words
 // ("Client Files/acme"). A path that ends in a space-separated word ("Client Files") is cut at the space unless it is quoted.
-const PATH_TAIL = `(?:[\\\\/]${PATH_SEGMENT}*(?: (?=(?:${PATH_SEGMENT}+ ){0,2}${PATH_SEGMENT}+[\\\\/])${PATH_SEGMENT}+)*)*`
+const PATH_TAIL = `(?:[\\\\/]${PATH_SEGMENT}*(?: (?=(?:${PATH_SEGMENT}+ ){0,7}${PATH_SEGMENT}+[\\\\/])${PATH_SEGMENT}+)*)*`
 
 /** Every path under the home folder replaced whole: a quoted one up to its closing quote, an unquoted one with the spaces inside its folder names. */
 export function withoutHome(text: string, homes: readonly string[]): string {
   return homeForms(homes).reduce((out, form) => {
     const home = escapeRegex(form)
-    return out
-      .replace(new RegExp(`(["'\`])${home}[^"'\`\\n]*\\1`, 'gi'), '$1<path under home>$1')
+    // A quoted path runs to its own closing quote (a quote of another kind, or an escaped one, is part of the name).
+    return ['"', "'", '`']
+      .reduce((text, quote) => text.replace(new RegExp(`${quote}${home}(?:[^${quote}\\n\\\\]|\\\\.)*${quote}`, 'gi'), `${quote}<path under home>${quote}`), out)
       .replace(new RegExp(`${home}${PATH_TAIL}`, 'gi'), '<path under home>')
   }, text)
 }
@@ -353,10 +354,10 @@ export async function answer($: EngineInterface, args: string): Promise<string> 
   const withProblem = new RegExp(`(?:^|\\s)${WITH_ERROR}(?=\\s|$)`).test(text)
   const description = text.replace(new RegExp(`(?:^|\\s)${WITH_ERROR}(?=\\s|$)`, 'g'), ' ').trim()
   if (!description) return usage
-  if (description.length > MAX_INPUT) return `That is too long (over ${MAX_INPUT} characters). Say it shorter; nothing was drafted or sent.`
-  // The draft shown before is gone from this moment: a confirmation while this one is being built sends nothing.
+  // The draft shown before is gone from this moment, whatever follows: a confirmation while this one is being built, or after it is refused, sends nothing.
   pending = null
   const mine = ++epoch
+  if (description.length > MAX_INPUT) return `That is too long (over ${MAX_INPUT} characters). Say it shorter; nothing was drafted or sent.`
   const homes = await homesOf($)
   const facts = await collectFacts($, { withProblem }, { doctor: await dbtModsDoctorFacts($).catch(() => null), settings })
   // A discard, a send, another description or the end of the session while the facts were read: this draft is not kept.
