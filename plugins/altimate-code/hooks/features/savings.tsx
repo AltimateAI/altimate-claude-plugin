@@ -18,7 +18,7 @@ import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig } from '../savings-config'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
-import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, mergedConfig, sameWorkspace, type FixRecord } from '../savings-fixes'
+import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, mergedConfig, readsAllKnown, sameWorkspace, type FixRecord } from '../savings-fixes'
 import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
@@ -1031,8 +1031,9 @@ async function fixesFor($: EngineInterface, view: SavingsView, today: string, li
     const changed = fixChanged(held, view)
     let fix = held
     if (changed === true && !held.changedSeen) fix = { ...held, changedSeen: today }
-    // A run that cannot tell leaves the day as it was.
-    if (changed === false && held.changedSeen) {
+    // A run that cannot tell leaves the day as it was, and so does one that did not read every setting the fix
+    // knows: the change it saw may be in the one this run did not read.
+    if (changed === false && held.changedSeen && readsAllKnown(held, view)) {
       const { changedSeen: _gone, ...rest } = held
       fix = rest
     }

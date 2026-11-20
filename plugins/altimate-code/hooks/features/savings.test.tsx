@@ -2696,6 +2696,25 @@ for (const { setting, a, b, other } of SETTING_CASES) {
   }
 }
 
+test('a change a fix saw is kept when a later run does not read the setting that changed', async ($, on) => {
+  // Seen resized on 2026-11-10; this run reads no size, so it cannot say the resize was undone.
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = null
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(FIX_KEY) as any).changedSeen).toBe('2026-11-10')
+})
+
+test('a change a fix saw is cleared when a later run reads every setting and finds it undone', async ($, on) => {
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'SMALL'
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(FIX_KEY) as any).changedSeen).toBeUndefined()
+})
+
 test('a fix drafted before the size was read keeps the first size a later run reads, and its line compares only the type', async ($, on) => {
   const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), store: { [FIX_KEY]: { ...FIX, changedSeen: undefined, config: { size: null, type: 'CLASSIC' } } } })
   await savings($)

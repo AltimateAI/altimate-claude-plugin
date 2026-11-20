@@ -110,6 +110,16 @@ export function fixChanged(fix: FixRecord, view: SavingsView): boolean | null {
   return checkPartial(fix, view) ? null : !isFlagged(fix, view, true)
 }
 
+/** Whether this run read every setting the kept fix knows: only then can it say a change it saw before is undone. */
+export function readsAllKnown(fix: FixRecord, view: SavingsView): boolean {
+  const was = keptConfig(fix)
+  if (was === null) return true
+  const row = rowOf(fix, view)
+  if (!row) return false
+  const now = configOf(row)
+  return SETTINGS.every(setting => was[setting] === null || now[setting] !== null)
+}
+
 /**
  * The settings a kept fix holds after this run: each one it did not know is filled from what this run read, and
  * none it knew is overwritten. Null when the run teaches it nothing.
