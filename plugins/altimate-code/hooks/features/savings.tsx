@@ -147,7 +147,7 @@ const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses
 /**
  * Whether an edited file is Databricks config, decided by its kind first:
  * - a bundle's `databricks.yml` always is;
- * - a Terraform file is when it declares a `databricks_` resource or data source;
+ * - a Terraform file is when it declares a `databricks_` resource or data source (its label quoted or not);
  * - a YAML file under `resources/` is when its top-level `resources:` block, in the block style bundles are written
  *   in, lists jobs, pipelines, clusters or SQL warehouses. The block is read line by line, comments dropped, and
  *   ends at the next top-level key, so a container's `resources:` limits in a Kubernetes or Helm file, or a
@@ -157,7 +157,7 @@ const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses
 export function isDatabricksConfig(path: string, text: string): boolean {
   const file = path.replace(/\\/g, '/')
   if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
-  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"databricks_/m.test(text)
+  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"?databricks_/m.test(text)
   if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null
