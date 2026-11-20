@@ -190,6 +190,8 @@ type Options = {
   store?: Record<string, unknown>
   /** The tool run rejects with this, as `$.process.run` does on its timeout. */
   runRejects?: string
+  /** `altimate --version` rejects with this, as `$.process.run` does on its timeout. */
+  versionRejects?: string
 }
 
 async function start($: any, on: any, options: Options = {}) {
@@ -234,6 +236,7 @@ async function start($: any, on: any, options: Options = {}) {
     const [, command, , tool] = e.argv
     if (command === '--version') {
       if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
+      if (options.versionRejects) return { deny: options.versionRejects }
       versionRuns.push({ env: e.init?.env })
       return { value: { exitCode: 0, stdout: `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: '' } }
     }
@@ -898,10 +901,12 @@ test('an altimate-code older than the check is never started for it: only `--ver
 
 test('a version that cannot be read, or a source build, is refused; the first release with the check runs it', async ($, on) => {
   // A source build prints `local` whatever its age, old checkouts without assessment mode included.
-  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local']) {
+  // A prerelease of the minimum is older than it, as semver orders them; a preview build (0.0.0-…) is older still.
+  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12-beta.1', '0.0.0-main-202611191200']) {
     expect(supportsSavings(version)).toBe(false)
   }
-  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', '0.12.12-beta.1']) {
+  // Read as the status line reads it: the last version printed, with or without the CLI's name or a runtime note.
+  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', 'altimate-code 0.12.12', 'node v22.1.0\n0.12.13']) {
     expect(supportsSavings(version)).toBe(true)
   }
   const local = await start($, on, { version: 'local' })
@@ -1025,4 +1030,25 @@ test('when no check could run, the pane and the notice say nothing was checked, 
 
 test('a check skipped in two workspaces counts once in the verdict', () => {
   expect(checksNotRun({ skipped: ['Idle Cluster Detection (refused)', 'Idle Cluster Detection (time limit)'] })).toBe(1)
+})
+
+for (const [name, options] of [
+  ['prints no version', { version: '' }],
+  ['does not answer', { versionRejects: 'timed out after 15000 ms' }],
+] as const) {
+  test(`a --version that ${name} says the version could not be read; nothing else runs`, async ($, on) => {
+    const { clock, runs, toasts } = await start($, on, options)
+    await savings($)
+    await clock.settle()
+    expect(runs).toEqual([])
+    expect(toasts.at(-1)).toContain("altimate-code's version could not be read, so the savings check was not started.")
+    expect(toasts.at(-1)).not.toContain('It is ')
+  })
+}
+
+test('a version printed with the CLI name in front still starts the check', async ($, on) => {
+  const { clock, runs } = await start($, on, { version: `altimate-code ${SAVINGS_MIN_ALTIMATE_CODE}` })
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(1)
 })

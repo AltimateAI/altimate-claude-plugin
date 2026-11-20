@@ -9,7 +9,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { SavingsView } from '../../types'
-import { MISSING_BINARY, later, runAltimate, runTool } from '../altimate-cli'
+import { MISSING_BINARY, compareVersions, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
 
@@ -46,18 +46,18 @@ export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.12'
 const VERSION_TIMEOUT_MS = 15_000
 
 /**
- * Whether `altimate --version` names a release the check may start. A source build prints `local`
- * whatever its age (an old checkout without assessment mode does too), so it is refused like any
- * version that cannot be read; a build made with the release script carries its version.
+ * Whether what `altimate --version` printed names a release the check may start. The version is read as
+ * the status line reads it (the last version printed, so `altimate-code 0.12.12` or a runtime note before
+ * it still reads), and compared as semver does: a prerelease of the minimum is older than it. A source
+ * build prints `local` whatever its age (an old checkout without assessment mode does too), so it is
+ * refused like any version that cannot be read; a build made with the release script carries its version.
  */
-export function supportsSavings(version: string): boolean {
-  const parts = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version)
-  if (!parts) return false
-  const have = parts.slice(1, 4).map(Number)
-  const need = SAVINGS_MIN_ALTIMATE_CODE.split('.').map(Number)
-  for (let at = 0; at < 3; at++) if (have[at] !== need[at]) return have[at]! > need[at]!
-  return true
+export function supportsSavings(printed: string): boolean {
+  const version = parseVersion(printed)
+  return version !== null && compareVersions(version, SAVINGS_MIN_ALTIMATE_CODE) >= 0
 }
+
+const NO_SAVINGS_CHECK = 'This altimate-code has no Databricks savings check.'
 
 // An altimate-code connection name; anything else could read as a CLI flag.
 const CONNECTION_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -383,7 +383,7 @@ const tooOldCli = (output: string) => /\bCommands:/.test(output) && /altimate(-c
 /** The refusal in the person's terms, with the step that fixes it. */
 export function explain(error: string, connection: string | null = null): { text: string; recovery: string } {
   if (tooOldCli(error) || /^Unknown tool: finops_databricks_savings/.test(error) || /has no Databricks savings rules/.test(error)) {
-    return { text: 'This altimate-code has no Databricks savings check.', recovery: 'Update altimate-code (`altimate upgrade`), then run /savings again.' }
+    return { text: NO_SAVINGS_CHECK, recovery: 'Update altimate-code (`altimate upgrade`), then run /savings again.' }
   }
   if (/requires a configured warehouse|not supported by any of your configured warehouses/.test(error)) {
     return { text: 'altimate-code has no Databricks connection.', recovery: ADD_CONNECTION }
@@ -456,17 +456,27 @@ async function runCheck($: EngineInterface, connection: string | null) {
     await update($, messageAtom, () => null)
     await update($, bandAtom, () => null)
     const until = (await $.clock.now()) + RUN_BUDGET_MS
-    const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY)
+    // A CLI that cannot be started at all goes to the install message below; one that does not answer is unreadable.
+    const printed = await runAltimate($, ['--version'], VERSION_TIMEOUT_MS, LOCAL_ONLY).catch(error => {
+      if (MISSING_BINARY.test(String(error))) throw error
+      return { stdout: '', stderr: '' }
+    })
     if (!live()) return
-    const version = String(printed.stdout ?? '').trim().split('\n').pop()?.trim() ?? ''
-    if (!supportsSavings(version)) {
-      const why = {
-        text: 'This altimate-code has no Databricks savings check.',
-        recovery:
-          version === 'local'
-            ? `It is a source build, which does not show whether it has assessment mode; use a released altimate-code ${SAVINGS_MIN_ALTIMATE_CODE} or later, then run /savings again.`
-            : `${version ? `It is ${version}; u` : 'U'}pdate it to ${SAVINGS_MIN_ALTIMATE_CODE} or later (\`altimate upgrade\`), then run /savings again.`,
-      }
+    // As the status line reads it: the version on stdout, else one printed only on stderr.
+    const version = parseVersion(String(printed.stdout ?? '')) ?? parseVersion(String(printed.stderr ?? ''))
+    if (!version || !supportsSavings(version)) {
+      const source = String(printed.stdout ?? '').trim().split('\n').pop()?.trim() === 'local'
+      const why = source
+        ? {
+            text: NO_SAVINGS_CHECK,
+            recovery: `It is a source build, which does not show whether it has assessment mode; use a released altimate-code ${SAVINGS_MIN_ALTIMATE_CODE} or later, then run /savings again.`,
+          }
+        : version
+          ? { text: NO_SAVINGS_CHECK, recovery: `It is ${version}; update it to ${SAVINGS_MIN_ALTIMATE_CODE} or later (\`altimate upgrade\`), then run /savings again.` }
+          : {
+              text: "altimate-code's version could not be read, so the savings check was not started.",
+              recovery: `Run \`altimate --version\` in a terminal: if it prints no version, or one older than ${SAVINGS_MIN_ALTIMATE_CODE}, update altimate-code (\`altimate upgrade\`), then run /savings again.`,
+            }
       await update($, messageAtom, () => why)
       $.ui.toast(`Databricks savings check: ${why.text} ${why.recovery}`)
       return
