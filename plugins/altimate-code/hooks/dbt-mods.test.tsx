@@ -773,6 +773,15 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // Quoted CTE names keep their identity: `select * from "two"` reads two's columns, not one's.
   const quotedCtes = 'with "one" as (select id from raw), "two" as (select id, amount from raw)\nselect * from "one"'
   expect(undocumentedByEdit(['amount'], quotedCtes, quotedCtes.replace('select * from "one"', 'select * from "two"'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A Jinja flag that turns a column on: named before in a branch that did not run, so the column is the edit's.
+  const flag = '{% set include_amount = false %}\nselect id,\n{% if include_amount %}\n  amount,\n{% endif %}\n  status\nfrom raw'
+  expect(undocumentedByEdit(['amount'], flag, flag.replace('false', 'true'), ['id', 'status'])).toEqual({ fresh: ['amount'], old: [] })
+  // A changed CTE line with two items is not one output's item, even when it ends with an output's name.
+  const twoItems = 'with raw as (select 1 as id, 10 as amount),\na as (\n  select id\n  from raw\n), b as (select id from raw)\nselect a.* exclude (id), b.id\nfrom a join b using (id)'
+  expect(undocumentedByEdit(['amount'], twoItems, twoItems.replace('  select id\n', '  select amount, id\n'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A CTE declared inside a subquery does not shadow the query's own.
+  const shadow = 'with raw as (select 1 as id, 10 as amount),\nsrc as (select id from raw)\nselect * from src\nwhere exists (\n  with src as (select id, amount from raw)\n  select 1 from src\n)'
+  expect(undocumentedByEdit(['amount'], shadow, shadow.replace('src as (select id from raw)', 'src as (select id, amount from raw)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })

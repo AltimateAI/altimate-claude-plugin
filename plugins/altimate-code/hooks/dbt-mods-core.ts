@@ -958,10 +958,22 @@ function itemName(item: string): string | null {
   return found ? found.toLowerCase() : null
 }
 
+/** The paren depth at a position of masked SQL. */
+function depthAt(code: string, at: number): number {
+  let depth = 0
+  for (let i = 0; i < at; i++) {
+    if (code[i] === '(') depth++
+    else if (code[i] === ')') depth = Math.max(0, depth - 1)
+  }
+  return depth
+}
+
 /** The CTEs of a model's SQL, by name: each body as written, and the column names it declares (`name(a, b) as`). */
 function ctesOf(sql: string, code: string): Map<string, { raw: string; declared: string[] | null }> {
   const out = new Map<string, { raw: string; declared: string[] | null }>()
   for (const match of code.matchAll(new RegExp(String.raw`(${PART})\s*(\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))) {
+    // Only this query's own CTEs, at its top level: one declared inside a subquery is that subquery's.
+    if (depthAt(code, match.index!) > 0) continue
     let depth = 1
     const open = match.index! + match[0].length
     let i = open
@@ -1055,12 +1067,15 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     if (mine.has(key)) return false
     if (returned.has(key)) return true
     if (!was || !now) return false
+    // A Jinja expression or tag changed (a flag that turns on a column, a macro's arguments): what the SQL names before
+    // may not have run, so nothing but the last check's columns counts as there before.
+    if (jinjaOf(before!) !== jinjaOf(after!)) return false
     // Named after the edit: there before only when it was named before too.
     if (now.names.has(key) || nowSet.has(key)) return was.names.has(key) || wasSet.has(key)
     // Named nowhere (through a `*` the SQL does not resolve, or a macro): there before only when no Jinja expression or
     // tag changed and every line the edit changed either rewrote a named output's select item or sits in a clause that
     // adds no column (WHERE, GROUP BY, HAVING, QUALIFY, ORDER BY, LIMIT).
-    return jinjaOf(before!) === jinjaOf(after!) && onlyNamedItems(before!, after!, new Set([...was.names, ...wasSet]), new Set([...now.names, ...nowSet]))
+    return onlyNamedItems(before!, after!, new Set([...was.names, ...wasSet]), new Set([...now.names, ...nowSet]))
   }
   return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
 }
@@ -1095,7 +1110,11 @@ function onlyNamedItems(before: string, after: string, was: Set<string>, now: Se
   const quietAfter = columnlessLines(after)
   const item = (line: string, names: Set<string>, quiet: Set<string>) => {
     if (quiet.has(line)) return true
-    const name = itemName(line.replace(/^,\s*/, '').replace(/,\s*$/, ''))
+    // One select item and nothing else: no second item (a comma inside it), and no clause keyword on the line.
+    const one = line.replace(/^,\s*/, '').replace(/,\s*$/, '')
+    const code = masked(one)
+    if (topItems(code).length !== 1 || /\b(?:select|from|join|where|with|union|group|order|having|qualify|limit)\b/i.test(code)) return false
+    const name = itemName(one)
     return !!name && names.has(name)
   }
   return added.every(line => item(line, now, quietAfter)) && removed.every(line => item(line, was, quietBefore))
