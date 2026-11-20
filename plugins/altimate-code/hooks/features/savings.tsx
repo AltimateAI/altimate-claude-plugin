@@ -1292,10 +1292,14 @@ async function runCheck($: EngineInterface, mine: { asked: string | null }) {
     await refuse(platform, checkName([{ platform, connection: null }]), why)
   } finally {
     // A dropped run leaves the running flag as the /clear left it. The claim is let go only once the flag is
-    // cleared, so a run claimed next never has its flag cleared by this one.
-    await update($, busyAtom, now => (live() ? null : now))
-    if (live()) await drawStatus($)
-    if (claim === mine) claim = null
+    // cleared, so a run claimed next never has its flag cleared by this one, and is let go even when that write
+    // or the status line fails.
+    try {
+      await update($, busyAtom, now => (live() ? null : now))
+      if (live()) await drawStatus($)
+    } finally {
+      if (claim === mine) claim = null
+    }
   }
 }
 
@@ -1538,15 +1542,21 @@ export function register(on: On, _context: FeatureContext) {
     const cleared = { text: `The conversation was cleared before the ${name} started. Run /savings again.` }
     if (going) {
       await openPane($)
-      // While the list was read or the pane opened, a /clear dropped that check, or it ended.
-      if (conversation !== inConversation) return cleared
-      if (claim !== going) return { text: `The ${name} just finished: its result is in the side pane.` }
+      // While the list was read or the pane opened, a /clear dropped that check, or it ended (and another may have
+      // started).
+      if (conversation !== inConversation) return { text: `The conversation was cleared while the ${name} ran. Run /savings again.` }
+      if (claim === null) return { text: `The ${name} just finished: its result is in the side pane.` }
       // One asked for a connection the running check is not reading, typed or not, is to be asked again.
       const other = (asked || null) !== going.asked ? ` Run /savings${asked ? ` ${asked}` : ''} again when it finishes.` : ''
       return { text: `The ${name} is already running in the side pane.${other}` }
     }
     if (claim !== mine) return cleared
-    await update($, busyAtom, now => (claim === mine ? busyOf(asked || null, connections) : now))
+    // A running-flag write that fails lets the claim go: no run was scheduled to let go of it.
+    const release = (error: unknown): never => {
+      if (claim === mine) claim = null
+      throw error
+    }
+    await update($, busyAtom, now => (claim === mine ? busyOf(asked || null, connections) : now)).catch(release)
     if (claim !== mine) return cleared
     const opened = await openPane($)
     if (claim !== mine) return cleared
