@@ -894,7 +894,12 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   if (structure.nested) return []
   const controlled = [...jinjaControlled(sql), ...structure.blocks]
   // Each CTE with the stretch of SQL it is visible in: the parentheses around its WITH, or the whole model.
-  const ctes = [...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => ({ name: unquote(one[1]!), scope: enclosing(text, one.index!) }))
+  // (Visible after its own body: inside it, and before it, the name is the table.)
+  const ctes = [...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => {
+    const scope = enclosing(text, one.index!)
+    const body = enclosing(text, one.index! + one[0].length)
+    return { name: unquote(one[1]!), scope: [Math.min(scope[1], body[1] + 1), scope[1]] as [number, number] }
+  })
   const isCte = (name: string, at: number) => ctes.some(one => one.name === name && at >= one.scope[0] && at < one.scope[1])
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   // A spelling two relations share (a bare name in two schemas) is ambiguous: null, never flagged.
@@ -1077,7 +1082,9 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
   for (const select of heads) {
     const next = selects.find(at => at > select) ?? code.length
     const from = topLevel(code, 'from', select + 6)
-    const listEnd = from < 0 || from > next ? next : from
+    // The list ends at its FROM, or at a set operation when it has none (`select 1 as id union all …`).
+    const setOp = topLevel(code.slice(0, next), '(?:union|intersect|except|minus)', select + 6)
+    const listEnd = Math.min(...[from, setOp].filter(at => at >= 0 && at < next), next)
     out.spans.push([base + select, base + listEnd])
     const list = code.slice(select + 6, listEnd)
     const lead = /^\s*(?:distinct|all)\b/i.exec(list)?.[0].length ?? 0
@@ -1218,9 +1225,6 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     if (!was || !now || !wasSet || !nowSet || wasSet.reassigned || nowSet.reassigned) return false
     // Quoted identifiers (case-sensitive names) are outside what this reading compares: the column is the edit's.
     if (quotedIdentifiers) return false
-    // A Jinja expression or tag changed (a flag that turns on a column, a macro's arguments): what the SQL names before
-    // may not have run, so nothing but the last check's columns counts as there before.
-    if (jinjaOf(before!) !== jinjaOf(after!)) return false
     // Jinja control flow (`{% if %}`, `{% for %}`) anywhere decides what runs: outside what this reading supports, so
     // the column counts as the edit's.
     if (conditionalJinja) return false
@@ -1230,8 +1234,10 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     // Named in the model's own list after the edit: there before only when that list named it before too (outside
     // Jinja that may not run).
     if (afterSide.names.has(key) || now.maybe.has(key) || nowSet.maybe.has(key)) return beforeSide.names.has(key)
-    // Named on neither side (a macro or a `*` fills it): there before only when every line the edit changed is a named
-    // output's item or a clause that adds no column.
+    // Named on neither side (a macro or a `*` fills it): there before only when no Jinja expression or tag changed (a
+    // macro's arguments, the relation a `*` reads) and every line the edit changed is a named output's item or a clause
+    // that adds no column.
+    if (jinjaOf(before!) !== jinjaOf(after!)) return false
     return !was.maybe.has(key) && !wasSet.maybe.has(key) && !beforeSide.names.has(key) && onlyItems(beforeSide, afterSide)
   }
   const verdicts = new Map(undocumented.map(one => [one, old(one)]))

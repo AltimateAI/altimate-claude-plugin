@@ -647,6 +647,9 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   // A function's argument on its own line is part of an item, not an output: no candidate rather than a wrong one.
   const coalesced = "{% set cols %}\npaid_amount,\nallowed_amount,\nunits,\ncoalesce(\n  paid_amount,\n  allowed_amount\n) as total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
   expect(valueCandidates(coalesced, coalesced.replace('  allowed_amount\n)', '  units\n)'))).toEqual([])
+  // Two items on the changed line: which changed is not said, so no candidate.
+  const two = "{% set cols %}\npaid_amount + allowed_amount as total_amount, units as units\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
+  expect(valueCandidates(two, two.replace('allowed_amount as', 'allowed_amount * 2 as'))).toEqual([])
   const inline = 'select\n  paid_amount /* cents */\nfrom raw'
   expect(valueCandidates(inline, inline.replace('cents', 'dollars'))).toEqual([])
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')

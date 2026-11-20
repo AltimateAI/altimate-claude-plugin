@@ -155,7 +155,9 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
     // bare column (`, med.paid_amount`). An unaliased expression names no output; its operands are inputs, not outputs.
     const alias = /\bas\s+["`]?\s*([A-Za-z_]\w*)\s*["`]?\s*,?\s*$/i.exec(one.key)?.[1]?.toLowerCase()
     const bare = one.inside ? undefined : /^,?\s*(?:[A-Za-z_]\w*\s*\.\s*)*([A-Za-z_]\w*)\s*,?$/.exec(one.key)?.[1]?.toLowerCase()
-    const output = alias ?? bare
+    // A line with more than one item (a comma between values) does not say which item changed: no candidate from it.
+    const several = /,/.test(one.key.replace(/^\s*,|,\s*$/g, ''))
+    const output = several ? undefined : (alias ?? bare)
     if (output && !NOT_COLUMNS.has(output)) counts.set(output, (counts.get(output) ?? 0) + 1)
   }
   return [...counts].sort((a, b) => b[1] - a[1]).slice(0, max).map(([name]) => name)
