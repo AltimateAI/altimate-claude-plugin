@@ -4295,3 +4295,19 @@ test('the model-context toast counts the columns schema.yml lists as such, in th
   expect(toasts.find(one => one.startsWith('◆ model context · orders'))).toMatch(/^◆ model context · orders: table · 1 column in schema\.yml · \d+ tests? · depth/)
   expect(result.context[0]).toContain('- columns schema.yml lists (1; the model may return more):')
 })
+
+kitTest('with info_toasts off, model context and a passing check raise no toast; the transcript line, the band and a failure toast stay', { options: { dbt_mods: true, info_toasts: false } }, async ($: any, on: any) => {
+  const logs: string[] = []
+  const { clock, toasts } = await start($, on, { logs, show: { rows: [{ order_id: 1, order_total: 10 }] } })
+  const read: any = await $.tool.call({ tool: 'Read', file_path: ORDERS })
+  await clock.settle()
+  expect(read.context[0]).toContain('dbt model context for orders')
+  expect(logs).toContain("model-context · added to Claude's context: orders.sql")
+  const edited: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'as amount', new_string: 'as order_total' })
+  await clock.settle()
+  expect(edited.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: order_total')
+  expect(toasts.filter(one => /model context|compiled and validated|dbt doctor · /.test(one) && !one.startsWith('⚕'))).toEqual([])
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /Compile & validate/ })).toBeDefined()
+  await band.unmount()
+})

@@ -854,7 +854,11 @@ async function recheck($: EngineInterface, edited: string | null = null) {
     const { view, current, newest } = await compileAndValidate($, check.root, `${check.root}/${check.file}`, asked)
     if (!current()) return
     // The toast points at the band: only the check the band shows may say so.
-    if (view.status !== 'running' && newest()) $.ui.toast(`${STATUS_ICON[view.status]} ${view.model} changed · checked again against the warehouse`, { timeoutMs: 6000 })
+    if (view.status !== 'running' && newest()) {
+      const text = `${STATUS_ICON[view.status]} ${view.model} changed · checked again against the warehouse`
+      if (view.status === 'error') $.ui.toast(text, { timeoutMs: 6000 })
+      else infoToast($, text, 6000)
+    }
   } finally {
     rechecking = false
     const waiting = forcedWhileBusy
@@ -1660,7 +1664,8 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
     const view = await runDoctor($, root)
     const { bad, text } = doctorSummary(view)
     noteDoctor(root, view, asked)
-    $.ui.toast(`${bad.length ? '⚕' : '✓'} dbt doctor · ${text}`, { timeoutMs: 8000 })
+    if (bad.length) $.ui.toast(`⚕ dbt doctor · ${text}`, { timeoutMs: 8000 })
+    else infoToast($, `✓ dbt doctor · ${text}`, 8000)
   })
 }
 
@@ -1792,6 +1797,13 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
 
 /** Whether the dbt helpers are on: the `dbt_mods` option, read when the plugin registers them (off until then). */
 let enabled = false
+// The `info_toasts` setting: off, a toast that only repeats what the transcript or the band shows is not raised.
+let infoToasts = true
+
+/** A toast that repeats what the transcript or the band above the prompt already shows: raised only with `info_toasts` on. */
+function infoToast($: EngineInterface, text: string, timeoutMs: number) {
+  if (infoToasts) $.ui.toast(text, { timeoutMs })
+}
 
 /** What a call needs from before it ran: taken in `callStart`, used in the after phase of the same call. */
 type Start = {
@@ -1955,14 +1967,15 @@ export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; ag
       // Landed, and still the newest check of this file in this conversation.
       if (landed && landed.current()) {
         // The toast points at the band, so only the check the band shows may say so.
-        if (landed.newest()) $.ui.toast(
-          landed.view.status === 'error'
-            ? `✖ ${landed.view.model} · dbt could not compile or run it · see the band`
-            : landed.view.status === 'partial'
+        if (landed.newest() && landed.view.status === 'error') $.ui.toast(`✖ ${landed.view.model} · dbt could not compile or run it · see the band`, { timeoutMs: 6000 })
+        else if (landed.newest())
+          infoToast(
+            $,
+            landed.view.status === 'partial'
               ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : `not checked: ${landed.view.reason}`}`
               : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
-          { timeoutMs: 6000 },
-        )
+            6000,
+          )
         return landed.note ? [landed.note] : []
       }
       // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
@@ -1985,7 +1998,7 @@ export async function dbtModsReadOrEditAfter($: EngineInterface, e: { tool: stri
   if (e.tool === 'Read' && /\.sql$/i.test(path)) {
     const found = await modelNote($, path, agentId ?? undefined).catch(() => null)
     if (found) {
-      $.ui.toast(found.toast, { timeoutMs: 6000 })
+      infoToast($, found.toast, 6000)
       $.ui.log(`model-context · added to Claude's context: ${basename(path)}`)
       return [found.note, ...pendingLines(agentId)]
     }
@@ -2035,6 +2048,8 @@ export async function bandDbtMods($: EngineInterface, ui: { Box: any; Button: an
 export function registerDbtMods(on: On, context: { options: PluginOptions }) {
   // The dbt helpers can be turned off in the plugin's settings; they run the project's own dbt.
   enabled = (context.options as { dbt_mods?: boolean } | undefined)?.dbt_mods !== false
+  const info = (context.options as { info_toasts?: boolean | string } | undefined)?.info_toasts
+  infoToasts = info !== false && info !== 'false'
   if (!enabled) return
 
   // The doctor's findings go with the first prompt after they land.
