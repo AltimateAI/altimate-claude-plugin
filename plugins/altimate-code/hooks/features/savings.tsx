@@ -118,7 +118,7 @@ export function isDatabricksPath(path: string): boolean {
 export function isDatabricksConfig(path: string, text: string): boolean {
   const file = path.replace(/\\/g, '/')
   if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
-  if (/\.tf$/i.test(file)) return /^[ \t]*(?:provider|resource|data)[ \t]+"?databricks(?:_[a-z_]+)?"?/m.test(text)
+  if (/\.tf$/i.test(file)) return /^\uFEFF?[ \t]*(?:provider|resource|data)[ \t]+"?databricks/m.test(text)
   if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null

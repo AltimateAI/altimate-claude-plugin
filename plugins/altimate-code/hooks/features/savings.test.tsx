@@ -2174,6 +2174,7 @@ test('Databricks config is decided by the file: a bundle root, a Terraform datab
     ['proj/databricks.yaml', 'include:\n  - resources/*.yml\n'],
     ['infra/bi.tf', 'resource "databricks_sql_endpoint" "bi" {\n  cluster_size = "Small"\n}\n'],
     ['infra/bi.tf', 'data "databricks_sql_warehouse" "bi" {\n  name = "bi"\n}\n'],
+    ['infra/bom.tf', '\uFEFFresource "databricks_job" "nightly" {\n}\n'],
     ['infra/provider.tf', 'provider "databricks" {\n  host = var.host\n}\n'],
     ['infra/job.tf', 'resource databricks_job nightly {\n  name = "nightly"\n}\n'],
     ['resources/jobs.yml', 'resources:\n  jobs:\n    nightly: {}\n'],
