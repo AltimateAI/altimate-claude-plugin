@@ -110,7 +110,8 @@ const ROWS_KEPT = 200
 
 const reportsAtom = atom({ plugin: 'altimate-code', key: 'savingsReports' } as const, {} as Record<string, SavingsKept>, { shape: 'savings-reports-1' })
 const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, null as { label: string; detail: string } | null)
-const messagesAtom = atom({ plugin: 'altimate-code', key: 'savingsMessages' } as const, [] as { platform: SavingsPlatform; text: string; recovery: string }[])
+// A refusal about no one platform (a connection name that is neither) carries none.
+const messagesAtom = atom({ plugin: 'altimate-code', key: 'savingsMessages' } as const, [] as { platform: SavingsPlatform | null; text: string; recovery: string }[])
 const bandAtom = atom({ plugin: 'altimate-code', key: 'savingsBand' } as const, null as { text: string } | null)
 // The alternative pressed in the pane's what-if row: which warehouse, and which choice.
 // A warehouse id can repeat across the workspaces one connection reads, and two connections can list the same
@@ -1219,7 +1220,7 @@ async function runCheck($: EngineInterface, mine: { asked: string | null; name?:
   offered = true
   // Every write of this run lands only while it is current, checked inside the write, and every notice only
   // then: a /clear at any await below leaves the new conversation's state as the clear left it.
-  const refuse = async (platform: SavingsPlatform, name: string, why: { text: string; recovery: string }) => {
+  const refuse = async (platform: SavingsPlatform | null, name: string, why: { text: string; recovery: string }) => {
     await update($, messagesAtom, now => (live() ? [{ platform, ...why }] : now))
     if (live()) notify($, `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${why.text} ${why.recovery}`)
   }
@@ -1271,15 +1272,18 @@ async function runCheck($: EngineInterface, mine: { asked: string | null; name?:
       )
       return
     }
-    // Asked afresh: a connection added since the session started counts.
-    const connections = (await listConnections($)) ?? known
+    // Asked afresh: a connection added since the session started counts. Only this read's own list can say a
+    // name is not a connection: an older one may predate it.
+    const listedNow = await listConnections($)
+    const connections = listedNow ?? known
     if (!live()) return
-    // A name the list does not hold is no connection at all: nothing is run for it.
-    if (asked && connections && !connections.some(one => one.name === asked)) {
-      const names = connections.map(one => one.name)
-      await refuse('databricks', 'savings check', {
-        text: `altimate-code has no connection named ${asked}.`,
-        recovery: names.length > 0 ? `Run /savings for every connection, or /savings <connection> with one of: ${names.join(', ')}.` : 'Add a Databricks or Snowflake connection to altimate-code, then run /savings again.',
+    const listed = asked && listedNow ? listedNow.find(one => one.name === asked) : undefined
+    // A name the list does not hold, or holds as another kind, is no connection the check can read: nothing runs.
+    if (asked && listedNow && listed?.platform == null) {
+      const usable = listedNow.filter(one => one.platform !== null).map(one => one.name)
+      await refuse(null, 'savings check', {
+        text: listed ? `altimate-code's connection ${asked} is neither a Databricks nor a Snowflake one.` : `altimate-code has no connection named ${asked}.`,
+        recovery: usable.length > 0 ? `Run /savings for every connection, or /savings <connection> with one of: ${usable.join(', ')}.` : 'Add a Databricks or Snowflake connection to altimate-code, then run /savings again.',
       })
       return
     }
@@ -1583,8 +1587,9 @@ export function register(on: On, _context: FeatureContext) {
       await openPane($)
       // While the list was read or the pane opened, a /clear dropped that check, or it ended (and another may have
       // started).
-      // The running check is named as it was asked for, not as this request would be.
-      const running = going.name ?? 'savings check'
+      // The running check is named as it was asked for, not as this request would be: the one holding the claim
+      // now, which may have started while the pane opened.
+      const running = (claim ?? going).name ?? 'savings check'
       if (conversation !== inConversation) return { text: `The conversation was cleared while the ${running} ran. Run /savings again.` }
       if (claim === null) return { text: `The ${running} just finished: its result is in the side pane.` }
       // One asked for a connection the running check is not reading, typed or not, is to be asked again.

@@ -225,6 +225,12 @@ test('each section and the total name the window the check read, not a fixed wee
   expect(html).not.toContain('the 7 days')
 })
 
+test('a refusal about no one platform is not filed under one', () => {
+  const html = savingsReportHtml([kept(view())], 'now', URL, [{ platform: null, text: 'altimate-code has no connection named typo.' }])
+  expect(html).toContain('The last check did not finish: altimate-code has no connection named typo.')
+  expect(html).not.toContain('The last Databricks check did not finish')
+})
+
 test('each section says when it was checked', () => {
   expect(savingsReportHtml([{ savedAt: Date.parse('2026-11-12T08:00:00Z'), view: view() }], 'now', URL)).toContain('checked 2026-11-12')
 })

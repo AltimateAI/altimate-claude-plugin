@@ -17,7 +17,7 @@ ul{margin:6px 0 0;padding-left:18px}table{border-collapse:collapse;width:100%;ma
 td.n,th.n{text-align:right;font-variant-numeric:tabular-nums}a{color:inherit}.gap{color:var(--dim)}`
 
 /** The page, from the kept answers. `builtAt` is written on it as given. */
-export function savingsReportHtml(kept: readonly SavingsKept[], builtAt: string, signupUrl: string, failed: readonly { platform: SavingsPlatform; text: string }[] = []): string {
+export function savingsReportHtml(kept: readonly SavingsKept[], builtAt: string, signupUrl: string, failed: readonly { platform: SavingsPlatform | null; text: string }[] = []): string {
   const views = kept.map(one => one.view)
   const total = combinedTotal(views)
   const findings = distinctFindingCount(views)
@@ -75,7 +75,7 @@ ${one.choices.map(c => `<tr><td>${escape(c.label)}</td><td class="n">${escape(do
 <div class="dim">Built ${escape(builtAt)} on this machine from read-only checks on your own connections. Nothing was sent to Altimate.</div>
 <p class="total">${total.resources > 0 ? `${escape(range(total.min, total.max))} a month` : findings > 0 ? `${findings} finding${findings === 1 ? '' : 's'}, no dollar estimate` : nothingChecked ? 'Nothing was checked' : 'No savings found'}</p>
 <div class="dim">${total.resources > 0 ? `on ${total.resources} resource${total.resources === 1 ? '' : 's'}, ${priced} and the last ${windows.join(' and ')} days' rate, each counted once at its largest saving` : findings > 0 ? 'see each finding below' : nothingChecked ? 'none of the checks could run: see why below' : 'by the checks that ran'}${partial && !nothingChecked ? '. Some checks did not run in full: see below.' : ''}</div>
-${failed.map(one => `<p class="gap">The last ${escape(PLATFORM_NAME[one.platform])} check did not finish: ${escape(one.text)}</p>`).join('\n')}
+${failed.map(one => `<p class="gap">The last ${one.platform ? `${escape(PLATFORM_NAME[one.platform])} ` : ''}check did not finish: ${escape(one.text)}</p>`).join('\n')}
 ${sections.join('\n')}
 <p><a href="${escape(signupUrl)}">See every check in Altimate</a></p>
 </main></body></html>

@@ -2436,7 +2436,37 @@ test('/savings with a name the connection list does not hold runs no check, and 
   await clock.settle()
   expect(runs).toEqual([])
   expect(snowflakeRuns).toEqual([])
-  expect(toasts.at(-1)).toBe('Savings check: altimate-code has no connection named sf_prod. Run /savings for every connection, or /savings <connection> with one of: dbxmega, classic, sfmega, sfother, scratch.')
+  expect(toasts.at(-1)).toBe('Savings check: altimate-code has no connection named sf_prod. Run /savings for every connection, or /savings <connection> with one of: dbxmega, classic, sfmega, sfother.')
+})
+
+test('/savings with a listed connection of another kind runs no check and says what it is not', async ($, on) => {
+  const { clock, runs, snowflakeRuns, toasts } = await start($, on, { list: BOTH })
+  await savings($, 'scratch')
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(snowflakeRuns).toEqual([])
+  expect(toasts.at(-1)).toBe("Savings check: altimate-code's connection scratch is neither a Databricks nor a Snowflake one. Run /savings for every connection, or /savings <connection> with one of: dbxmega, classic, sfmega, sfother.")
+})
+
+test('a name missing from the list read at session start still runs when this run cannot read the list', async ($, on) => {
+  const options: any = { list: DATABRICKS_ONLY }
+  const { clock, runs } = await start($, on, options)
+  // The connection was added after the session started, and this run's list read fails.
+  options.listError = 'Failed to list warehouses'
+  await savings($, 'newdbx')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect(runs[0]!.argv.join(' ')).toContain('newdbx')
+})
+
+test('without altimate-code, with both kinds of connection, the install message names neither one', async ($, on) => {
+  const { clock, toasts } = await start($, on, { list: BOTH, missingCli: true })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /add a Databricks or Snowflake connection, then run \/savings again\.$/ })).toBeDefined()
+  await ui.unmount()
+  expect(toasts.at(-1)).toMatch(/^Savings check: altimate-code is not installed\./)
 })
 
 test('a connection the list could not tell the kind of, refused as not Databricks, is not sent to a Databricks one', async ($, on) => {

@@ -838,7 +838,8 @@ declare module 'claude-code' {
       /** What /savings is doing now; null when it is idle. */
       savingsBusy: { label: string; detail: string } | null
       /** Why a platform has no answer to show: the check's refusal and the step that fixes it. */
-      savingsMessages: { platform: SavingsPlatform; text: string; recovery: string }[]
+      // A refusal about no one platform (a connection name that is neither) carries none.
+      savingsMessages: { platform: SavingsPlatform | null; text: string; recovery: string }[]
       /** The line above the prompt when the session touches Databricks config; null when there is none. */
       savingsBand: { text: string } | null
       /** The alternative pressed in the pane's what-if row; null when none is. */
