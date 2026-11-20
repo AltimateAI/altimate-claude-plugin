@@ -958,6 +958,17 @@ function itemName(item: string): string | null {
   return found ? found.toLowerCase() : null
 }
 
+// ─── Reading a model's SQL without an engine: what is supported ─────────────────────────────────────────────────
+// The documentation-gap attribution (undocumentedByEdit), the hardcoded-relation check (hardcodedRelations) and the
+// value-change candidates (impact-report.ts valueCandidates) read SQL and Jinja as text. Supported: plain SQL with
+// ref()/source() and `{{ var }}` expressions; CTEs (quoted names, declared column lists); a final select list of named
+// items, `*` / `t.*` from one CTE or chain of CTEs, UNION (first branch); `{% set %}` column lists the final list
+// renders; WHERE / GROUP BY / HAVING / QUALIFY / ORDER BY / LIMIT edits. Outside it: Jinja control flow (`{% if %}`,
+// `{% for %}`), macros that generate columns, `*` with modifiers or over joins, dialect quoting beyond "", `` and
+// '', and anything the text reading cannot place. Outside the supported set the answer is the conservative one: an
+// undocumented column counts as the edit's (a warning, never "it was there before"), no relation is flagged as
+// hardcoded, and a value change says "values may change", never a count of 0.
+
 /** The paren depth at a position of masked SQL. */
 function depthAt(code: string, at: number): number {
   let depth = 0
@@ -1089,6 +1100,10 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   const nowSet = after === null || !now ? null : setBlocks(after, now.vars)
   const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
   const mine = new Set(ours.map(one => one.toLowerCase()))
+  const conditionalJinja = [before, after].some(text => text !== null && jinjaControlled(text).length > 0)
+  // Whether the edit only rewrote named outputs' items and column-less clauses: one diff for the whole edit.
+  let itemsOnly: boolean | null = null
+  const onlyItems = (b: { names: Set<string>; spans: [number, number][] }, a: { names: Set<string>; spans: [number, number][] }) => (itemsOnly ??= onlyNamedItems(before!, after!, b, a))
   const old = (name: string) => {
     const key = name.toLowerCase()
     if (mine.has(key)) return false
@@ -1097,6 +1112,9 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     // A Jinja expression or tag changed (a flag that turns on a column, a macro's arguments): what the SQL names before
     // may not have run, so nothing but the last check's columns counts as there before.
     if (jinjaOf(before!) !== jinjaOf(after!)) return false
+    // Jinja control flow (`{% if %}`, `{% for %}`) anywhere decides what runs: outside what this reading supports, so
+    // the column counts as the edit's.
+    if (conditionalJinja) return false
     const sides = (o: Outputs, set: { names: Set<string>; spans: [number, number][] }) => ({ names: new Set([...o.names, ...set.names]), spans: [...o.spans, ...set.spans] })
     const beforeSide = sides(was, wasSet)
     const afterSide = sides(now, nowSet)
@@ -1105,9 +1123,10 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     if (afterSide.names.has(key) || now.maybe.has(key) || nowSet.maybe.has(key)) return beforeSide.names.has(key)
     // Named on neither side (a macro or a `*` fills it): there before only when every line the edit changed is a named
     // output's item or a clause that adds no column.
-    return !was.maybe.has(key) && !wasSet.maybe.has(key) && !beforeSide.names.has(key) && onlyNamedItems(before!, after!, beforeSide, afterSide)
+    return !was.maybe.has(key) && !wasSet.maybe.has(key) && !beforeSide.names.has(key) && onlyItems(beforeSide, afterSide)
   }
-  return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
+  const verdicts = new Map(undocumented.map(one => [one, old(one)]))
+  return { fresh: undocumented.filter(one => !verdicts.get(one)), old: undocumented.filter(one => verdicts.get(one)) }
 }
 
 /** The names in the comma lists of a model's `{% set name %}…{% endset %}` blocks for the variables in `only`, and where those lists are (offsets). */
@@ -1164,8 +1183,8 @@ function onlyNamedItems(before: string, after: string, was: { names: Set<string>
   }
   const quietBefore = columnlessLines(before)
   const quietAfter = columnlessLines(after)
-  const item = (line: { text: string; at: number }, side: { names: Set<string>; spans: [number, number][] }, quiet: Set<string>) => {
-    if (quiet.has(line.text)) return true
+  const item = (line: { text: string; at: number }, side: { names: Set<string>; spans: [number, number][] }, quiet: Set<number>) => {
+    if (quiet.has(line.at)) return true
     if (!side.spans.some(([from, to]) => line.at >= from && line.at < to)) return false
     // One select item and nothing else: no second item (a comma inside it), and no clause keyword on the line.
     const one = line.text.replace(/^,\s*/, '').replace(/,\s*$/, '')
@@ -1181,13 +1200,16 @@ function onlyNamedItems(before: string, after: string, was: { names: Set<string>
 const COLUMNLESS = new Set(['where', 'group', 'having', 'qualify', 'order', 'limit'])
 const CLAUSES = new Set(['select', 'from', 'join', 'on', 'using', 'where', 'group', 'having', 'qualify', 'order', 'limit', 'union', 'window'])
 
-/** The lines (trimmed) of a model whose every word sits in a clause that adds no column, at any paren depth. */
-function columnlessLines(sql: string): Set<string> {
+/** Where the lines of a model start (offset of their first non-space character) whose every word sits in a clause that adds no column, at any paren depth. */
+function columnlessLines(sql: string): Set<number> {
   const code = masked(sql).split('\n')
   const raw = sql.split('\n')
   const clauses: string[] = ['']
-  const out = new Set<string>()
+  const out = new Set<number>()
+  let offset = 0
   code.forEach((line, n) => {
+    const at = offset + raw[n]!.indexOf(raw[n]!.trim())
+    offset += raw[n]!.length + 1
     let words = 0
     let quiet = true
     for (const token of line.matchAll(/\(|\)|[A-Za-z_]\w*|[^\s()]/g)) {
@@ -1211,7 +1233,7 @@ function columnlessLines(sql: string): Set<string> {
       words++
       if (!clauses.some(one => COLUMNLESS.has(one))) quiet = false
     }
-    if (words && quiet) out.add(raw[n]!.trim())
+    if (words && quiet) out.add(at)
   })
   return out
 }

@@ -789,6 +789,11 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   const moved = 'with a as (\n  select id,\n  amount\n  from raw\n), b as (\n  select id\n  from raw\n)\nselect a.* exclude (amount), b.*\nfrom a join b using (id)'
   const movedAfter = moved.replace('  select id,\n  amount\n', '  select id\n').replace('  select id\n  from raw\n)\nselect', '  select id,\n  amount\n  from raw\n)\nselect')
   expect(undocumentedByEdit(['amount'], moved, movedAfter, ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A line whose text also appears in a GROUP BY is judged where it is: a new select item stays the edit's.
+  expect(undocumentedByEdit(['amount'], 'select\n  id\nfrom raw\ngroup by\n  id', 'select\n  id,\n  amount\nfrom raw\ngroup by\n  id', ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // Jinja control flow anywhere (a set-block list rendered under `{% if %}`) is outside what is read: the column is the edit's.
+  const gated = '{% set cols %}id, amount{% endset %}\nselect\n  id\n  {% if var("x") %}, {{ cols }}{% endif %}\nfrom raw'
+  expect(undocumentedByEdit(['amount'], gated, gated.replace('  id\n', '  id \n'), null)).toEqual({ fresh: ['amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
