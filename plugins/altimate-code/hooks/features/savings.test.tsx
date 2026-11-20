@@ -2239,13 +2239,16 @@ test('the slim view shows the three largest findings across both platforms, larg
   await ui.unmount()
 })
 
-test('the +N line counts exactly the findings behind Show all, and sums their ranges', async ($, on) => {
+test('the +N line counts the findings behind Show all, and the total is the three shown plus what it adds', async ($, on) => {
   const { clock } = await start($, on, { list: BOTH, ...SIX })
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  // Mid $10–$30, Small $1–$5 and NoDollar with none: three findings, $11–$35.
-  expect(await ui.find({ type: 'Text', text: /^\+ 3 smaller findings, \$11\.00–\$35\.00 a month$/ })).toBeDefined()
+  // Mid $10–$30, Small $1–$5 and NoDollar with none: three findings, adding $11–$35.
+  expect(await ui.find({ type: 'Text', text: /^\+ 3 smaller findings, adding \$11\.00–\$35\.00 a month to the total$/ })).toBeDefined()
+  // Zeta $100–$200, Alpha $50–$200 and Beta $50–$200 shown, plus $11–$35: $211–$635, each resource once.
+  expect(await ui.find({ type: 'Text', text: /^\$211–\$635 a month$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^each resource counted once, at its largest saving$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^(Mid|Small|NoDollar) · / })).toBeUndefined()
   // The checks not run, across both platforms: 9 Databricks and 7 Snowflake.
   expect(await ui.find({ type: 'Text', text: /^Altimate runs 16 more checks on these platforms\.$/ })).toBeDefined()
@@ -2285,16 +2288,38 @@ test('a new run starts slim again, after Show all', async ($, on) => {
   await full.unmount()
 })
 
-test('with three findings or fewer there is no +N line, and Show all still opens the detail', async ($, on) => {
-  const { clock } = await start($, on)
+test('when every finding is shown there is no +N line, and Show all still opens the detail', async ($, on) => {
+  const answer = databricksWith([
+    { name: 'Zeta', min: 100, max: 200 },
+    { name: 'Alpha', min: 50, max: 200 },
+    { name: 'Mid', min: 10, max: 30 },
+  ])
+  answer.metadata.report.total = { monthly_min: 160, monthly_max: 430, resources: 3 }
+  answer.metadata.report.what_if = JSON.parse(JSON.stringify(ANSWER)).metadata.report.what_if
+  const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await titles(ui)).toHaveLength(2)
+  expect(await titles(ui)).toHaveLength(3)
   expect(await ui.find({ type: 'Text', text: /^\+ / })).toBeUndefined()
   await ui.press({ key: 'more' })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /^What if Classic/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a shown resource\'s other findings are behind Show all, and already in the total', async ($, on) => {
+  // Classic has two findings; the total counts it once, at its larger one.
+  const { clock } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await titles(ui)).toEqual(['Classic · Databricks · Migrate Classic/Pro to Serverless · $80.64–$101 a month'])
+  expect(await ui.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\+ 1 smaller finding, already in the total$/ })).toBeDefined()
+  await ui.press({ key: 'more' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Classic · Over-Sized Warehouse · / })).toBeDefined()
   await ui.unmount()
 })
 
@@ -2316,16 +2341,22 @@ test('on the live Snowflake answer the slim view shows its three largest, the re
   const { clock } = await start($, on, { list: 'Name | Type | Database\nsnowflake | snowflake | A', snowflake: SNOWFLAKE_CAPTURE, env: { HOME }, files })
   await savings($)
   await clock.settle()
-  // The expected order and the hidden sum, from the capture itself.
+  // From the capture itself: each warehouse at its largest finding, largest first.
   const raw = [...(SNOWFLAKE_CAPTURE.metadata.report.findings as any[])].sort(
     (a, b) => b.monthly_max - a.monthly_max || b.monthly_min - a.monthly_min || String(a.resource_name).localeCompare(String(b.resource_name)),
   )
-  const hidden = raw.slice(3)
-  const sum = (key: 'monthly_min' | 'monthly_max') => hidden.reduce((total, one) => total + one[key], 0)
+  const largest = raw.filter((one, at) => raw.findIndex(other => other.resource_id === one.resource_id) === at)
+  const rest = largest.slice(3)
+  const sum = (rows: any[], key: 'monthly_min' | 'monthly_max') => rows.reduce((total, one) => total + one[key], 0)
+  const total = SNOWFLAKE_CAPTURE.metadata.report.total
+  // The three shown and what the +N line adds are the whole total, to the cent.
+  expect(Math.abs(sum(largest.slice(0, 3), 'monthly_min') + sum(rest, 'monthly_min') - total.monthly_min)).toBeLessThan(0.005)
+  expect(Math.abs(sum(largest.slice(0, 3), 'monthly_max') + sum(rest, 'monthly_max') - total.monthly_max)).toBeLessThan(0.005)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect((await titles(ui)).map((one: string) => one.split(' · ')[0])).toEqual(raw.slice(0, 3).map(one => one.resource_name))
+  expect((await titles(ui)).map((one: string) => one.split(' · ')[0])).toEqual(largest.slice(0, 3).map(one => one.resource_name))
+  expect(await ui.find({ type: 'Text', text: /^\$342–\$489 a month$/ })).toBeDefined()
   const smaller = (await ui.find({ type: 'Text', text: /^\+ 6 smaller findings, / })) as any
-  expect(smaller?.text).toBe(`+ 6 smaller findings, ${dollars(sum('monthly_min'))}–${dollars(sum('monthly_max'))} a month`)
+  expect(smaller?.text).toBe(`+ 6 smaller findings, adding ${dollars(sum(rest, 'monthly_min'))}–${dollars(sum(rest, 'monthly_max'))} a month to the total`)
   expect(await ui.find({ type: 'Text', text: /^Altimate runs 7 more checks on this platform\.$/ })).toBeDefined()
   for (const line of (await ui.findAll({ type: 'Text' })) as any[]) expect({ line: line.text, fits: line.text.length <= SLIM_WIDTH }).toEqual({ line: line.text, fits: true })
   await ui.unmount()

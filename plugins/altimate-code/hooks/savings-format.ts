@@ -1,5 +1,5 @@
 // How /savings writes money, days and platforms, shared by the pane, the tool-row note and the report.
-import type { SavingsPlatform, SavingsView } from '../types'
+import type { SavingsFinding, SavingsPlatform, SavingsView } from '../types'
 
 export const PLATFORM_NAME: Record<SavingsPlatform, string> = { databricks: 'Databricks', snowflake: 'Snowflake' }
 export const PLATFORMS: readonly SavingsPlatform[] = ['databricks', 'snowflake']
@@ -87,6 +87,13 @@ export function limitedText(view: Pick<SavingsView, 'platform' | 'limited'>): st
   return `Only ${parts.join(' and ')} were read; any beyond them were not checked.`
 }
 
+/** The key a resource is counted once under across the kept answers: two connections that read the same account share it. */
+export const resourceKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: Pick<SavingsFinding, 'workspaceId' | 'resourceType' | 'resourceId'>) =>
+  `${view.platform}:${view.scope ?? ''}:${one.workspaceId ?? ''}:${one.resourceType}:${one.resourceId}`
+
+/** Whether a finding's range is larger than another's: by its high end, then its low end. */
+export const largerSaving = (a: { min: number; max: number }, b: { min: number; max: number }) => a.max > b.max || (a.max === b.max && a.min > b.min)
+
 /** What several kept answers add up to a month: each resource once, at its largest saving, even when two connections read the same account. */
 export function combinedTotal(views: readonly SavingsView[]): { min: number; max: number; resources: number } {
   if (views.length === 1) return views[0]!.total
@@ -94,9 +101,10 @@ export function combinedTotal(views: readonly SavingsView[]): { min: number; max
   for (const view of views) {
     for (const one of view.findings) {
       if (one.monthlyMax <= 0) continue
-      const key = `${view.platform}:${view.scope ?? ''}:${one.workspaceId ?? ''}:${one.resourceType}:${one.resourceId}`
+      const key = resourceKey(view, one)
       const held = best.get(key)
-      if (!held || one.monthlyMax > held.max) best.set(key, { min: one.monthlyMin, max: one.monthlyMax })
+      const saving = { min: one.monthlyMin, max: one.monthlyMax }
+      if (!held || largerSaving(saving, held)) best.set(key, saving)
     }
   }
   let min = 0

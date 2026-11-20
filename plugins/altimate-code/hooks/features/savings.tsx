@@ -18,7 +18,7 @@ import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT } from '../savings-checks'
 import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, type FixRecord } from '../savings-fixes'
-import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, size, windowDays } from '../savings-format'
+import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
   type ConnectionFacts,
@@ -735,7 +735,7 @@ const checkName = (targets: readonly Target[]) => (targets.length === 1 ? `${PLA
 
 /** The slim view's lines stay within this many columns, so none wraps at the pane's usual width. */
 export const SLIM_WIDTH = 84
-/** How many findings the slim view shows, largest first; the rest are behind Show all. */
+/** How many resources the slim view shows, largest first, each at its largest finding; the rest are behind Show all. */
 export const TOP_FINDINGS = 3
 
 /** A finding with its answer, and its place in the full view, which keys its Draft the fix button in both views. */
@@ -754,13 +754,39 @@ export function rankFindings(views: readonly SavingsView[]): RankedFinding[] {
   )
 }
 
-/** The line for the findings behind Show all: how many, and the sum of their monthly ranges. Null when there are none. */
-export function smallerLine(hidden: readonly RankedFinding[]): string | null {
-  if (hidden.length === 0) return null
-  const min = hidden.reduce((sum, one) => sum + one.finding.monthlyMin, 0)
-  const max = hidden.reduce((sum, one) => sum + one.finding.monthlyMax, 0)
-  const plural = hidden.length === 1 ? '' : 's'
-  return max > 0 ? `+ ${hidden.length} smaller finding${plural}, ${range(min, max)} a month` : `+ ${hidden.length} more finding${plural}, no dollar estimate`
+/**
+ * What the slim view shows, counted the way the total is: each resource once, at its largest finding. The
+ * top resources by that finding are shown; every other finding is behind Show all. `adds` is what the
+ * resources not shown add to the total, so the shown amounts plus `adds` are the total.
+ */
+export function slimFindings(views: readonly SavingsView[]): { top: RankedFinding[]; hidden: number; hiddenPriced: number; adds: { min: number; max: number } } {
+  const ranked = rankFindings(views)
+  const seen = new Set<string>()
+  const largest = ranked.filter(one => {
+    const key = resourceKey(one.view, one.finding)
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  const top = largest.slice(0, TOP_FINDINGS)
+  const rest = largest.slice(TOP_FINDINGS).filter(one => one.finding.monthlyMax > 0)
+  const shown = new Set(top)
+  return {
+    top,
+    hidden: ranked.length - top.length,
+    hiddenPriced: ranked.filter(one => !shown.has(one) && one.finding.monthlyMax > 0).length,
+    adds: { min: rest.reduce((sum, one) => sum + one.finding.monthlyMin, 0), max: rest.reduce((sum, one) => sum + one.finding.monthlyMax, 0) },
+  }
+}
+
+/** The line for the findings behind Show all: how many, and what they add to the total. Null when there are none. */
+export function smallerLine(slim: Pick<ReturnType<typeof slimFindings>, 'hidden' | 'hiddenPriced' | 'adds'>): string | null {
+  const { hidden, hiddenPriced, adds } = slim
+  if (hidden === 0) return null
+  const plural = hidden === 1 ? '' : 's'
+  if (adds.max > 0) return `+ ${hidden} smaller finding${plural}, adding ${range(adds.min, adds.max)} a month to the total`
+  // Each one is on a resource above, which the total counts once at its largest finding, or has no figure.
+  return hiddenPriced > 0 ? `+ ${hidden} smaller finding${plural}, already in the total` : `+ ${hidden} more finding${plural}, no dollar estimate`
 }
 
 /** `text` within `width` columns: cut at the last clause (", " or "; ") that fits, else at a word, with "…". */
@@ -1199,23 +1225,17 @@ export function register(on: On, _context: FeatureContext) {
     if (!expanded) {
       // The slim view: the largest few findings, each with one fact to check, and the rest behind Show all.
       const views = kept.map(one => one.view)
-      const ranked = rankFindings(views)
-      const top = ranked.slice(0, TOP_FINDINGS)
-      const smaller = smallerLine(ranked.slice(TOP_FINDINGS))
+      const slim = slimFindings(views)
+      const top = slim.top
+      const findings = top.length + slim.hidden
+      const smaller = smallerLine(slim)
       const total = combinedTotal(views)
       const days = [...new Set(views.map(view => windowDays(view.window)))].sort((a, b) => a - b)
       const names = views.map(view => view.connection ?? PLATFORM_NAME[view.platform])
       const oldest = dayOf(Math.min(...kept.map(one => one.savedAt)))
       const platforms = new Set(views.map(view => view.platform)).size
-      // A drafted fix's line goes under the first of the top findings on its resource; one whose resource
-      // has no finding now (the fix may have cleared it) is shown on its own, after the top findings.
-      const topFirst = new Set<string>()
-      const firstOnResource = top.map(({ view, finding }) => {
-        const key = `${view.platform}/${finding.resourceId}`
-        const first = !topFirst.has(key)
-        topFirst.add(key)
-        return first
-      })
+      // A drafted fix's line goes under its resource; one whose resource has no finding now (the fix may
+      // have cleared it) is shown on its own, after the top findings.
       const unflagged = views.flatMap(view => view.fixes.filter(line => !view.findings.some(one => one.resourceId === line.resourceId)))
       return cleanTree(
         <Box flexDirection="column" gap={1}>
@@ -1226,11 +1246,14 @@ export function register(on: On, _context: FeatureContext) {
             {oldest !== today ? <Text dimColor>{`Kept from ${oldest}: nothing is checked again until you run /savings.`}</Text> : null}
           </Box>
           {total.resources > 0 ? (
-            <Text bold color="success">
-              {range(total.min, total.max)} a month
-            </Text>
-          ) : ranked.length > 0 ? (
-            <Text bold>{findingCount(ranked.length)}</Text>
+            <Box gap={1}>
+              <Text bold color="success">
+                {range(total.min, total.max)} a month
+              </Text>
+              <Text dimColor>each resource counted once, at its largest saving</Text>
+            </Box>
+          ) : findings > 0 ? (
+            <Text bold>{findingCount(findings)}</Text>
           ) : (
             <Box flexDirection="column">
               {views.map((view, at) => {
@@ -1239,13 +1262,13 @@ export function register(on: On, _context: FeatureContext) {
               })}
             </Box>
           )}
-          {top.map(({ view, finding, at }, rank) => (
+          {top.map(({ view, finding, at }) => (
             <Box key={`finding-${at}`} flexDirection="column">
               <Text bold>{slimTitle(view, finding)}</Text>
               <Box flexDirection="column" paddingLeft={2}>
                 {finding.evidence[0] ? <Text dimColor>{fitLine(finding.evidence[0], SLIM_WIDTH - 2)}</Text> : null}
                 {view.fixes
-                  .filter(line => firstOnResource[rank] && line.resourceId === finding.resourceId)
+                  .filter(line => line.resourceId === finding.resourceId)
                   .map((line, row) => (
                     <Text key={`fix-line-${at}-${row}`} color={line.state === 'measuring' || line.state === 'lower' ? undefined : 'warning'} dimColor={line.state === 'measuring'}>
                       {line.text}

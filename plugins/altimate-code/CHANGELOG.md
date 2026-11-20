@@ -19,7 +19,7 @@ All notable changes to this plugin will be documented in this file.
 - After a drafted fix: Draft the fix keeps the resource, its daily cost and the date; later runs say it is unchanged, `measuring (n of 7 days)`, or its observed spend a day before and after, from billing (different weeks, so never called saved).
 - The pane names the hosted product's checks that did not run, with counts from your own run and one button to Altimate; Share report writes a self-contained local HTML page.
 - Snowflake: with both kinds of connection, `/savings` runs `finops_snowflake_savings` too and the pane has a section for each.
-- The pane opens slim on every run: the total, the three largest findings across both platforms with one fact each, a line for the smaller ones (how many, and their summed range) and the count of checks Altimate runs beyond these. Show all opens the full detail (every finding and its evidence, what-ifs, checks not run, Run again); Share report keeps the full detail.
+- The pane opens slim on every run: the total (each resource counted once, at its largest saving), the three resources with the largest saving across both platforms with one fact each, a line for the other findings (how many, and what the resources not shown add to the total, so the lines add up to the total) and the count of checks Altimate runs beyond these. Show all opens the full detail (every finding and its evidence, what-ifs, checks not run, Run again); Share report keeps the full detail.
 - A finished check raises no notice while Claude is working; it comes when the turn ends.
 - `runTool` takes an environment and `noDaemon` for one CLI run, and hands back a CLI's raw output when it is not an answer (an altimate-code too old for the tool gets "update").
 
