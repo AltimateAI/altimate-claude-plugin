@@ -829,6 +829,17 @@ test('from integration_tests, a file whose model dbt does not list there runs no
   expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- not checked: dbt has no model for this file in the project that installs this package')
 })
 
+test('a column whose documentation an edit removed is the edit\'s gap, though the model returned it before', async ($, on) => {
+  // amount was documented and returned; the edit removes it from schema.yml.
+  const undocumented = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], columns: { order_id: { name: 'order_id' } } } } }
+  const { clock } = await start($, on, { show: { rows: [{ order_id: 1, amount: 10 }] }, built: () => [{ order_id: 1, amount: 10 }], manifestAfterShow: undocumented, files: { 'target/manifest.json': JSON.stringify(MANIFEST) } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).toContain('- returned but not documented in schema.yml: amount')
+  expect(note).not.toContain('already undocumented')
+})
+
 test('after /clear, the next conversation compares with the model as built again, not with the last conversation\'s edits', async ($, on) => {
   const show: Options['show'] = { rows: [{ order_id: 1, amount: 10, amount_cents: 1000 }] }
   let built: Record<string, unknown>[] = [{ order_id: 1, amount: 10 }]

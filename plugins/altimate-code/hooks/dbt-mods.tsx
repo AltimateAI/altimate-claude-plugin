@@ -104,7 +104,8 @@ let doctorNoteDue: string | null = null
 const queues = new Map<string, Promise<unknown>>()
 // The newest check per file: an older one of the same file landing late does not overwrite it.
 const checkSeq = new Map<string, number>()
-// The columns each model's last check got back, by project and file, less the gaps an edit made: a column there is not a new gap.
+// The columns each model's last check found returned and undocumented, less the gaps an edit made, by project and
+// file: a column there is not a new gap. (One documented then and undocumented now is: its documentation went.)
 const lastReturned = new Map<string, string[]>()
 // Models whose columns undocumented from before an edit were said once in this conversation: not said again.
 const oldGapsSaid = new Set<string>()
@@ -732,12 +733,18 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
             : documented.length === 0
               ? 'schema.yml documents no columns for this model'
               : null
-  // What the model returned before this edit, from the warehouse: the last check's columns, else (its first check this
-  // conversation) the columns dbt shows of the model's relation as it was built. No SQL is read for it.
+  // What was undocumented before this edit, from the warehouse: the last check's older gaps, else (its first check this
+  // conversation) the columns dbt shows of the model's relation as it was built that the manifest from before did not
+  // document. No SQL is read for it.
   // Asked only when there is an undocumented column to tell apart.
   // (An ephemeral model has no relation of its own: dbt would inline its edited SQL, so there is nothing from before.)
   const ephemeral = (node?.node?.config?.materialized ?? known?.node?.config?.materialized) === 'ephemeral'
-  const earlier = lastReturned.get(fileKey) ?? (drift.undocumented.length && returned && named && !errors.length && !ephemeral ? await builtColumns($, place, run1, pkg, named, node?.node?.version ?? known?.node?.version, viaRunner, `${scratch}/baseline`) : null)
+  // Of those, only the ones undocumented then count as older gaps: a column whose documentation the edit removed is new.
+  const builtBefore = lastReturned.has(fileKey) || !(drift.undocumented.length && returned && named && !errors.length && !ephemeral) ? null : await builtColumns($, place, run1, pkg, named, node?.node?.version ?? known?.node?.version, viaRunner, `${scratch}/baseline`)
+  const documentedBefore = known ? Object.values<any>(known.node.columns ?? {}) : null
+  const earlier =
+    lastReturned.get(fileKey) ??
+    (builtBefore && documentedBefore ? columnDrift(documentedBefore.map(one => String(one.name)), builtBefore, documentedBefore.filter(one => one.quote === true).map(one => String(one.name))).undocumented : null)
   // Only the columns this edit left undocumented are its gaps; ones undocumented before it are said once, quietly.
   const gaps = undocumentedByEdit(drift.undocumented, earlier, editGaps.get(fileKey) ?? [])
   // Only the newest check of this file records what it found: an older one finishing late does not erase a newer edit's gaps.
@@ -749,7 +756,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // The model's parents count as known, and through an ephemeral parent (inlined by dbt) that parent's own.
   const hardcoded = compiled && node && after ? await hardcodedReads($, `${scratch}/manifest.json`, compiled, node.id, readThroughRefs(after.manifest, node.id)) : []
   // A gap this session's edit made stays the edit's on the next check, until schema.yml or the model closes it.
-  if (returned && current()) lastReturned.set(fileKey, returned.filter(one => !gaps.fresh.includes(one)))
+  if (returned && current()) lastReturned.set(fileKey, gaps.old)
   const said = oldGapsSaid.has(fileKey)
   if (gaps.old.length && current()) oldGapsSaid.add(fileKey)
   const status: CheckView['status'] = errors.length ? 'error' : hardcoded.length ? 'warn' : reason ? 'partial' : drift.missing.length || gaps.fresh.length ? 'warn' : 'ok'

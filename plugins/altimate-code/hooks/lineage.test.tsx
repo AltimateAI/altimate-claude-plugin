@@ -239,6 +239,8 @@ async function start($: any, on: any, options: Options = {}) {
     const result = options.toolResult?.(e)
     // A denial is the hook's own answer, not a result.
     if (result && typeof result === 'object' && 'deny' in result) return result
+    // A failed call: the host's own isError beside its output.
+    if (result && typeof result === 'object' && 'isError' in result) return { result: { stdout: (result as any).text }, isError: true, text: (result as any).text }
     return { result: result ?? { ok: true } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
@@ -2052,4 +2054,24 @@ test('a shell command in a dbt project also looks in the projects below it', asy
   await $.tool.call({ tool: 'Bash', command: "python3 -c \"print('rewrite')\"" })
   await clock.settle()
   expect(finds.map(one => one[1])).toEqual([`${ROOT}/models`, `${ROOT}/analytics/models`])
+})
+
+test('a shell command that fails after rewriting a model (python3 … && dbt test) still gets the impact note', async ($, on) => {
+  const before = 'select sum(amount) as revenue from orders'
+  let text = before
+  let changed = 1
+  const { clock } = await start($, on, {
+    fileText: path => (path === FILE ? text : undefined),
+    fileMtime: path => (path === FILE ? changed : undefined),
+    shell: argv => (argv[0] === 'find' ? { exitCode: 0, stdout: changed > 1 ? `${FILE}\n` : '' } : argv[0] === 'git' && argv[3] === 'rev-parse' ? { exitCode: 0, stdout: `${ROOT}\n` } : argv[0] === 'git' && argv[3] === 'show' ? { exitCode: 0, stdout: before } : undefined),
+    toolResult: e => {
+      if (e.tool !== 'Bash') return undefined
+      text = 'select sum(amount) - sum(refunds) as revenue from orders'
+      changed = Number.MAX_SAFE_INTEGER
+      return { isError: true, text: 'dbt test: 1 failure' }
+    },
+  })
+  const result: any = await $.tool.call({ tool: 'Bash', command: `python3 rewrite.py models/fct_orders.sql && dbt test` })
+  await clock.settle()
+  expect(result.context?.some((one: string) => one.startsWith('Altimate lineage for'))).toBe(true)
 })

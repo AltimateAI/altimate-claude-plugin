@@ -1359,7 +1359,8 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     const result = await next(e)
     // Any tool may have changed the shown model's file (Edit, a shell command): one stat says so.
     later($, () => recheckStale($))
-    if (result.deny || result.isError) return result
+    // A shell command that failed may still have changed models first (`python3 rewrite.py && dbt test`): looked at too.
+    if (result.deny || (result.isError && !bash)) return result
     // The model files the shell command changed: the pane follows the first, and each gets the impact note an Edit gets.
     const bashNotes: ImpactNote[] = []
     if (bash) {
@@ -1380,6 +1381,11 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
           if (showEditImpact) $.ui.log(note.toast)
         }
       }
+    }
+    if (result.isError) {
+      const fresh = bashNotes.filter(one => !contextGiven.has(one.key))
+      for (const one of fresh) contextGiven.add(one.key)
+      return fresh.length ? ({ ...result, context: [...(result.context ?? []), ...fresh.map(one => one.context)] } as typeof result) : result
     }
     // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
     if (file && EDIT_TOOLS.has(e.tool) && /(\.sql|\.py|dbt_project\.yml)$/i.test(file)) clearSqlGraphs()
