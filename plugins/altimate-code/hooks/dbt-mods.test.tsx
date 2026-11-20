@@ -794,6 +794,9 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // Jinja control flow anywhere (a set-block list rendered under `{% if %}`) is outside what is read: the column is the edit's.
   const gated = '{% set cols %}id, amount{% endset %}\nselect\n  id\n  {% if var("x") %}, {{ cols }}{% endif %}\nfrom raw'
   expect(undocumentedByEdit(['amount'], gated, gated.replace('  id\n', '  id \n'), null)).toEqual({ fresh: ['amount'], old: [] })
+  // A `{% set %}` variable set twice: which value renders is not read, so the column is the edit's.
+  const twice = '{% set cols %}id, amount{% endset %}\n{% set cols %}id{% endset %}\nselect {{ cols }} from raw'
+  expect(undocumentedByEdit(['amount'], twice, twice.replace('{% set cols %}id{% endset %}', '{% set cols %}id, amount{% endset %}'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -1065,6 +1068,9 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   expect(hardcodedRelations('select * from archive.orders', twice, self)).toEqual([{ relation: 'archive.orders', use: "{{ ref('archived_orders') }}" }])
   // A FROM inside a function call names no relation.
   expect(hardcodedRelations("select extract(day from orders) as d, trim(both ' ' from stg_orders) as t from {{ ref('x') }}", manifest, self)).toEqual([])
+  // A keyword inside a quoted alias, and text inside Jinja control flow, are not read as relations.
+  expect(hardcodedRelations('select 1 as "from stg_orders"', manifest, self)).toEqual([])
+  expect(hardcodedRelations("{% if false %}select * from main.stg_orders{% else %}select * from {{ ref('stg_orders') }}{% endif %}", manifest, self)).toEqual([])
   // The model itself takes part: its own bare name shared with another relation is ambiguous, and never advice.
   const own = { nodes: { 'model.s.orders': { resource_type: 'model', name: 'orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
   expect(hardcodedRelations('select * from orders', own, 'model.s.orders')).toEqual([])

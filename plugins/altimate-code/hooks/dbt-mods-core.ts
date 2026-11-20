@@ -842,7 +842,8 @@ function inQuery(code: string, at: number): boolean {
 
 /** SQL with its comments gone and its string literals emptied, so neither is read as code. */
 function sqlCode(sql: string): string {
-  return sql.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (one.startsWith("'") ? "''" : ' '))
+  // The same length, so positions in it are positions in the SQL.
+  return sql.replace(/'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (one.startsWith("'") ? `'${' '.repeat(one.length - 2)}'` : one.replace(/[^\n]/g, ' ')))
 }
 
 // The use the model's own relation gets in the index: it is never advice.
@@ -859,7 +860,12 @@ const unquote = (part: string) => part.trim().replace(/^["`\[]|["`\]]$/g, '').to
  * string literals and the model's own CTEs are left out; the model itself is never flagged.
  */
 export function hardcodedRelations(sql: string, manifest: any, selfId?: string | null): { relation: string; use: string }[] {
-  const text = sqlCode(sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, ' __jinja__ '))
+  // Jinja becomes a same-length `_j___` word, so a relation right after it is never taken for one, and positions hold.
+  const text = sqlCode(sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, one => `_j${'_'.repeat(Math.max(0, one.length - 2))}`.slice(0, one.length)))
+  // Keywords inside quoted identifiers (`as "from x"`) are no keywords: matched on a copy with their letters hidden.
+  const hidden = text.replace(/"(?:[^"]|"")*"|`[^`]*`/g, one => `${one[0]}${'_'.repeat(Math.max(0, one.length - 2))}${one[one.length - 1]}`)
+  // Text inside Jinja control flow may not run (out of what is read): nothing there is flagged.
+  const controlled = jinjaControlled(sql)
   const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   // A spelling two relations share (a bare name in two schemas) is ambiguous: null, never flagged.
@@ -894,13 +900,14 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
     add(id, node, `{{ ref(${pkg}'${node.name}'${pinned}) }}`)
   }
   const found = new Map<string, { relation: string; use: string }>()
-  for (const match of text.matchAll(RELATION_AFTER)) {
+  for (const match of hidden.matchAll(RELATION_AFTER)) {
     // A FROM inside a function's parentheses (`extract(day from x)`, `trim(both ' ' from y)`) names no relation:
     // only one at the top level or in a subquery's own parentheses does.
-    if (!inQuery(text, match.index!)) continue
-    const written = match[1]!
+    if (!inQuery(hidden, match.index!) || controlled.some(([a, b]) => match.index! >= a && match.index! < b)) continue
+    const start = match.index! + match[0].indexOf(match[1]!)
+    const written = text.slice(start, start + match[1]!.length)
     const parts = written.split(/\s*\.\s*/).map(unquote)
-    if (parts.includes('__jinja__') || (parts.length === 1 && ctes.has(parts[0]!))) continue
+    if (parts.some(one => /^_j_*$/.test(one)) || (parts.length === 1 && ctes.has(parts[0]!))) continue
     const hit = known.get(parts.join('.'))
     if (hit?.use === SELF) continue
     if (hit && !found.has(hit.use)) found.set(hit.use, { relation: written.replace(/\s+/g, ''), use: hit.use })
@@ -1108,7 +1115,7 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     const key = name.toLowerCase()
     if (mine.has(key)) return false
     if (returned.has(key)) return true
-    if (!was || !now || !wasSet || !nowSet) return false
+    if (!was || !now || !wasSet || !nowSet || wasSet.reassigned || nowSet.reassigned) return false
     // A Jinja expression or tag changed (a flag that turns on a column, a macro's arguments): what the SQL names before
     // may not have run, so nothing but the last check's columns counts as there before.
     if (jinjaOf(before!) !== jinjaOf(after!)) return false
@@ -1130,8 +1137,13 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
 }
 
 /** The names in the comma lists of a model's `{% set name %}…{% endset %}` blocks for the variables in `only`, and where those lists are (offsets). */
-function setBlocks(sql: string, only: Set<string>): { names: Set<string>; maybe: Set<string>; spans: [number, number][] } {
-  const out = { names: new Set<string>(), maybe: new Set<string>(), spans: [] as [number, number][] }
+function setBlocks(sql: string, only: Set<string>): { names: Set<string>; maybe: Set<string>; spans: [number, number][]; reassigned: boolean } {
+  const out = { names: new Set<string>(), maybe: new Set<string>(), spans: [] as [number, number][], reassigned: false }
+  // A variable set more than once (`{% set cols %}` twice, or `{% set cols = … %}` too): which value renders is
+  // outside what is read.
+  const counts = new Map<string, number>()
+  for (const one of sql.matchAll(/\{%-?\s*set\s+(\w+)\b/gi)) counts.set(one[1]!, (counts.get(one[1]!) ?? 0) + 1)
+  out.reassigned = [...only].some(name => (counts.get(name) ?? 0) > 1)
   const conditional = jinjaControlled(sql)
   for (const block of sql.matchAll(/(\{%-?\s*set\s+(\w+)\s*-?%\})([\s\S]*?)\{%-?\s*endset\s*-?%\}/gi)) {
     if (!only.has(block[2]!)) continue

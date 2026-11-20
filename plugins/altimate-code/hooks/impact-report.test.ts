@@ -640,6 +640,9 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   // A subquery right after FROM keeps the levels balanced: a predicate after it is still a filter.
   const sub = 'select {{ cols }} from (select * from raw) r where\n  paid_amount > 0'
   expect(valueCandidates(sub, sub.replace('> 0', '> 100'))).toEqual([])
+  // A changed item's own alias comes before its operands.
+  const totals = '{% set cols %}\npaid_amount,\nallowed_amount,\nunits,\npaid_amount + allowed_amount + units as total_amount\n{% endset %}\nselect {{ cols }} from x'
+  expect(valueCandidates(totals, totals.replace('+ units as', '+ units * 2 as'))[0]).toBe('total_amount')
   const inline = 'select\n  paid_amount /* cents */\nfrom raw'
   expect(valueCandidates(inline, inline.replace('cents', 'dollars'))).toEqual([])
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')

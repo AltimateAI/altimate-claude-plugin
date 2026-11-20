@@ -149,6 +149,9 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
       left.set(one.key, n - 1)
       continue
     }
+    // A changed item's own alias first (`… as total_amount`): the output whose value changed, over its operands.
+    const alias = /\bas\s+([A-Za-z_]\w*)\s*,?\s*$/i.exec(one.key)?.[1]?.toLowerCase()
+    if (alias && one.names.includes(alias)) counts.set(alias, (counts.get(alias) ?? 0) + 1000)
     for (const name of one.names) counts.set(name, (counts.get(name) ?? 0) + 1)
   }
   return [...counts].sort((a, b) => b[1] - a[1]).slice(0, max).map(([name]) => name)
