@@ -62,7 +62,7 @@ type Options = {
   /** Holds the folder lookup while it returns a promise. */
   holdCwd?: () => Promise<void> | undefined
   /** Called when the Bash command itself runs, between the gate and the after-phase. */
-  onCall?: () => void
+  onCall?: () => Promise<void> | void
   /** Called at each project lookup; a promise it returns holds the lookup. */
   onExists?: () => Promise<void> | void
   /** The environment the plugin reads, which turns the usage events on (none set) or off; unset, they are not sent. */
@@ -125,8 +125,8 @@ async function start($: any, on: any, options: Options, session: { isInteractive
   on('fs.read', () => ({ value: '' }))
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
-  on('tool.call', () => {
-    options.onCall?.()
+  on('tool.call', async () => {
+    await options.onCall?.()
     return { result: { ok: true } }
   })
   let run = 0
@@ -740,6 +740,8 @@ test('a comment never hides the push that follows it, and a push inside a commen
   expect(isGitPush('echo x # ; git push')).toBe(false)
   expect(isGitPush('git status # git push')).toBe(false)
   expect(isGitPush('echo a#b && git push')).toBe(true)
+  expect(isGitPush('echo ${#arr[@]}; git push')).toBe(true)
+  expect(isGitPush('echo $# ${#x}; git push')).toBe(true)
 })
 
 test('an unnamed YAML file edited before the baseline lands does not empty the baseline', async ($, on) => {
@@ -1068,6 +1070,53 @@ test('the band line and the report', () => {
 
 test('the push gate waits for less than the tool chain gives a phase, so a held push is never given up on', () => {
   expect(GATE_WAIT_MS).toBeLessThan(PHASE_TIMEOUT_MS)
+})
+
+test('a Bash call that finishes while another is running leaves the other its own start folder', async ($, on) => {
+  let inner = false
+  const options: Options = {
+    runs: [[], [NEW_STG]],
+    cwd: `${ROOT}/models`,
+    onCall: async () => {
+      if (inner) return
+      inner = true
+      await $.tool.call({ ...command('ls'), tool_use_id: 'b' })
+    },
+  }
+  const { clock, calls, toasts } = await start($, on, options)
+  await $.tool.call({ ...command(`cd staging && sed -i 's/a/b/' stg_orders.sql`), tool_use_id: 'a' })
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+let stall = false
+
+test('a command with its own cd whose start folder could not be read in time is read from the session root', async ($, on) => {
+  const never = new Promise<void>(() => {})
+  const { clock, calls, toasts } = await start($, on, { runs: [[], [NEW_STG]], cwd: `${ROOT}/models/staging`, holdCwd: () => (stall ? never : undefined) })
+  stall = true
+  const pending = $.tool.call(command(`cd models/staging && sed -i 's/a/b/' stg_orders.sql`))
+  await clock.advance(GATE_WAIT_MS + 100)
+  await pending
+  stall = false
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · stg_orders: hard coded references · /health'])
+})
+
+test('a YAML file no insight names, edited after the baseline, counts every model as edited', async ($, on) => {
+  const { clock, calls, toasts } = await start($, on, { runs: [[OLD_STG, OLD_FCT], [OLD_STG, OLD_FCT, NEW_FCT]] })
+  await $.tool.call(edit(`${ROOT}/models/_sources.yml`))
+  await endTurn($, clock, 't1')
+  expect(calls).toHaveLength(2)
+  expect(toasts).toEqual(['◆ 1 new health issue · fct_orders: model fanout · /health'])
+})
+
+test('with the push gate on, a session opened above its dbt project holds nothing', { options: { healthBlocksPush: true } }, async ($, on) => {
+  await start($, on, { runs: [[]], projects: [`${ROOT}/dbt`] })
+  const allowed: any = await $.tool.call(command(`cd dbt && echo x > models/a.sql && git push`))
+  expect(allowed?.deny).toBeUndefined()
 })
 
 test('with the push gate on, a held push sends one health_push_gate held usage event, and /health one opened', { options: { healthBlocksPush: true } }, async ($, on) => {
