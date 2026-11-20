@@ -22,6 +22,7 @@ export function savingsReportHtml(kept: readonly SavingsKept[], builtAt: string,
   const total = combinedTotal(views)
   const findings = views.reduce((sum, view) => sum + view.findings.length, 0)
   const partial = failed.length > 0 || views.some(view => view.skipped.length > 0 || view.limited.length > 0)
+  const nothingChecked = views.length > 0 && views.every(nothingRan)
   const prices = [...new Set(views.map(view => view.pricing))]
   const priced = prices.length === 1 ? `at ${escape(prices[0])}` : 'at the prices shown for each platform'
   const sections = kept.map(({ savedAt, view }) => {
@@ -70,8 +71,8 @@ ${one.choices.map(c => `<tr><td>${escape(c.label)}</td><td class="n">${escape(do
 <body><main>
 <h1>Warehouse savings report</h1>
 <div class="dim">Built ${escape(builtAt)} on this machine from read-only checks on your own connections. Nothing was sent to Altimate.</div>
-<p class="total">${total.resources > 0 ? `${escape(range(total.min, total.max))} a month` : findings > 0 ? `${findings} finding${findings === 1 ? '' : 's'}, no dollar estimate` : views.length > 0 && views.every(nothingRan) ? 'Nothing was checked' : 'No savings found'}</p>
-<div class="dim">${total.resources > 0 ? `on ${total.resources} resource${total.resources === 1 ? '' : 's'}, ${priced} and the measured week's rate, each counted once at its largest saving` : findings > 0 ? 'see each finding below' : 'by the checks that ran'}${partial ? '. Some checks did not run in full: see below.' : ''}</div>
+<p class="total">${total.resources > 0 ? `${escape(range(total.min, total.max))} a month` : findings > 0 ? `${findings} finding${findings === 1 ? '' : 's'}, no dollar estimate` : nothingChecked ? 'Nothing was checked' : 'No savings found'}</p>
+<div class="dim">${total.resources > 0 ? `on ${total.resources} resource${total.resources === 1 ? '' : 's'}, ${priced} and the measured week's rate, each counted once at its largest saving` : findings > 0 ? 'see each finding below' : nothingChecked ? 'none of the checks could run: see why below' : 'by the checks that ran'}${partial && !nothingChecked ? '. Some checks did not run in full: see below.' : ''}</div>
 ${failed.map(one => `<p class="gap">The last ${escape(PLATFORM_NAME[one.platform])} check did not finish: ${escape(one.text)}</p>`).join('\n')}
 ${sections.join('\n')}
 <p><a href="${escape(signupUrl)}">See every check in Altimate</a></p>

@@ -244,3 +244,12 @@ test('the report\'s fit column says what the pane does: only an explicit fits: f
   expect(html).not.toContain('no: queries would queue')
   expect(html).toContain('no size to fit: it scales with its queries')
 })
+
+test('when no check could run, the subtitle says so rather than "by the checks that ran"', () => {
+  const none = view({ findings: [], whatIf: [], total: { min: 0, max: 0, resources: 0 }, skipped: ['Migrate Classic/Pro to Serverless (refused)', 'Over-Sized Warehouse (refused)', 'Idle Cluster Detection (refused)', 'Job Running on All-Purpose Compute (refused)'] })
+  const html = savingsReportHtml([kept(none)], 'now', URL)
+  expect(html).toContain('Nothing was checked')
+  expect(html).toContain('none of the checks could run: see why below')
+  expect(html).not.toContain('by the checks that ran')
+  expect(html).not.toContain('Some checks did not run in full')
+})

@@ -3175,3 +3175,27 @@ test('a drafted job fix that shares a warehouse finding\'s id is not drawn under
   expect(((await ui.findAll({ type: 'Text' })) as any[]).filter(one => /^Classic: no longer flagged since /.test(one.text))).toHaveLength(1)
   await ui.unmount()
 })
+
+test('a finding without a title is drawn with a plain one, not "undefined"', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.findings[0].title
+  expect(toView(answer.metadata)?.findings[0]?.title).toBe('Savings finding')
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Classic · Savings finding · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /undefined/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a finding without a title is drawn in the slim view too, with a plain one', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  for (const one of answer.metadata.report.findings) delete one.title
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Classic · Databricks · Savings finding · / })).toBeDefined()
+  await ui.unmount()
+})
