@@ -103,8 +103,9 @@ const XARGS_VALUE_OPTIONS = new Set(['-n', '-I', '-P', '-L', '-s', '-d', '-E', '
  * are data, a heredoc's body is text unless a shell runs it, and a `$(…)` or backtick runs its own. Each
  * command's program is found by the same reader's leader scan (assignments, `sudo -u x`, `nice -n 10`,
  * `time`, `then`…), and past `xargs` with its options. A shell's `-c` script is read as a line of its own,
- * as the push check reads it. The program must be `databricks` (or a path to it); its own global flags
- * (`-p prod`, `--profile=x`) come before the command.
+ * found from the shell's own options only (`shellScript`); the push check keeps its own wider `-c` rule for
+ * its gate. The program must be `databricks` (or a path to it); its own global flags (`-p prod`,
+ * `--profile=x`) come before the command.
  */
 export function runsDatabricksCompute(line: string): boolean {
   for (const words of simpleCommands(line)) {
@@ -669,13 +670,16 @@ export function register(on: On, _context: FeatureContext) {
     if (asked && !CONNECTION_NAME.test(asked)) {
       return { text: `"${asked}" is not a connection name. Run /savings, or /savings <connection> with an altimate-code Databricks connection.` }
     }
+    // The generation the run is asked in, before anything waits: a /clear from here on drops the run.
+    const at = generation
     if (await read($, busyAtom)) {
       await openPane($)
       return { text: 'The Databricks savings check is already running in the side pane.' }
     }
+    // A /clear while the busy state was read: nothing is marked running for the new conversation.
+    if (at !== generation) return { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
     await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
     const opened = await openPane($)
-    const at = generation
     later($, () => runCheck($, asked || null, at))
     if (opened && opened.isPlaced === false) {
       return { text: 'Running the Databricks savings check. The terminal is too narrow for the side pane, so the result comes as a notice; widen the window to see the details.' }

@@ -171,6 +171,8 @@ function failure(error: string) {
 }
 
 type Options = {
+  /** Runs while the pane opens, before the engine answers. */
+  onOpen?: () => Promise<void>
   answer?: unknown
   /** `tool run` exits 1 with this answer, as altimate-code does for a tool it does not have. */
   error?: unknown
@@ -221,7 +223,10 @@ async function start($: any, on: any, options: Options = {}) {
   on('turn.complete', (_: unknown, e: { answer: string }) => ({ text: e.answer }))
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
-  on('ui.open', () => ({ value: options.isPlaced === false ? { isPlaced: false } : {} }))
+  on('ui.open', async () => {
+    await options.onOpen?.()
+    return { value: options.isPlaced === false ? { isPlaced: false } : {} }
+  })
   on('ui.close', () => ({ value: undefined }))
   on('ui.log', () => ({ value: undefined }))
   on('ui.toast', (_: unknown, e: { text: string }) => {
@@ -1694,4 +1699,21 @@ test('Run again pressed in the same tick as a /clear starts nothing, and /saving
   await clock.settle()
   expect(runs.length).toBe(2)
   expect(toasts.filter(text => text.startsWith('Databricks savings check')).length).toBe(2)
+})
+
+test('a /clear while /savings opens its pane drops that run, and the next /savings runs as usual', async ($, on) => {
+  const options: any = {}
+  const { clock, runs, versionRuns } = await start($, on, options)
+  // The pane opens across a /clear: the session ends before the command goes on.
+  options.onOpen = async () => {
+    options.onOpen = undefined
+    await $.session.end({ reason: 'clear' } as any)
+  }
+  await savings($)
+  await clock.settle()
+  expect(versionRuns.length + runs.length).toBe(0)
+  const said = await savings($)
+  expect(String((said as any)?.text)).not.toContain('already running')
+  await clock.settle()
+  expect(runs.length).toBe(1)
 })
