@@ -1055,7 +1055,13 @@ function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<u
       if (!live() || claim) return
       const run = { connection: lastConnection }
       claim = run
-      await update($, busyAtom, now => (claim === run ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now))
+      // A running-flag write that fails lets the claim go, as /savings does: no run was started to let go of it.
+      await update($, busyAtom, now => (claim === run ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now)).catch(
+        (error: unknown) => {
+          if (claim === run) claim = null
+          throw error
+        },
+      )
       await runCheck($, run)
     } finally {
       if (pressQueued === mine) pressQueued = null
