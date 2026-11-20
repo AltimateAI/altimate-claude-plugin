@@ -4296,7 +4296,10 @@ test('the model-context toast counts the columns schema.yml lists as such, in th
   expect(result.context[0]).toContain('- columns schema.yml lists (1; the model may return more):')
 })
 
-kitTest('with info_toasts off, model context and a passing check raise no toast; the transcript line, the band and a failure toast stay', { options: { dbt_mods: true, info_toasts: false } }, async ($: any, on: any) => {
+/** The dbt helpers with `info_toasts` off. */
+const quiet = { options: { dbt_mods: true, info_toasts: false } }
+
+kitTest('with info_toasts off, model context and a passing check raise no toast; the transcript line, the band and a failure toast stay', quiet, async ($: any, on: any) => {
   const logs: string[] = []
   const { clock, toasts } = await start($, on, { logs, show: { rows: [{ order_id: 1, order_total: 10 }] } })
   const read: any = await $.tool.call({ tool: 'Read', file_path: ORDERS })
@@ -4312,7 +4315,6 @@ kitTest('with info_toasts off, model context and a passing check raise no toast;
   await band.unmount()
 })
 
-const quiet = { options: { dbt_mods: true, info_toasts: false } }
 
 kitTest('with info_toasts off, a passing doctor raises no toast; a doctor that finds a problem still does', quiet, async ($: any, on: any) => {
   const { clock, toasts } = await start($, on, { interactive: true })
