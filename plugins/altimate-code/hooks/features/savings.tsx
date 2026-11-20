@@ -122,7 +122,10 @@ function terraformCode(source: string): string {
       i += (/^[^\n]*/.exec(rest) as RegExpExecArray)[0].length
     } else if (rest.startsWith('/*')) {
       const end = rest.indexOf('*/', 2)
-      i += end === -1 ? rest.length : end + 2
+      const length = end === -1 ? rest.length : end + 2
+      // The line breaks inside it stay, so what follows the comment is where it was.
+      code += rest.slice(0, length).replace(/[^\n]/g, '')
+      i += length
     } else {
       code += text[i]
       i += 1
