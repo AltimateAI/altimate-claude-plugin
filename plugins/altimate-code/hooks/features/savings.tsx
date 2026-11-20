@@ -141,10 +141,35 @@ let pressStarting = false
 const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/(?:[^/]+\/)*[^/]+\.ya?ml|[^/]+\.tf)$/i
 // What marks such a file, or a command, as about warehouses or clusters.
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
-// What marks a file as Databricks config at all: a Terraform `databricks_` resource, a bundle's top-level `bundle:`,
-// or a top-level `resources:` holding a bundle's compute (jobs, pipelines, clusters, SQL warehouses). A container's
-// `resources:` limits, as in a Kubernetes or Helm file, sit under it with `limits:` and `requests:`, not those.
-const DATABRICKS_TEXT = /databricks_|^bundle:|^resources:[ \t]*$[\s\S]*?^[ \t]+(?:jobs|pipelines|clusters|sql_warehouses):[ \t]*$/im
+// The bundle resource kinds that hold compute.
+const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses'])
+
+/**
+ * Whether a file is Databricks config at all: a Terraform `databricks_` resource, a bundle's top-level `bundle:`, or a
+ * top-level `resources:` whose own block holds one of a bundle's compute kinds. The block is read line by line, its
+ * comments dropped, and ends at the next top-level key, so a container's `resources:` limits in a Kubernetes or Helm
+ * file, or a `clusters:` under another top-level key, is not one. Anything else is not Databricks config.
+ */
+export function isDatabricksConfig(text: string): boolean {
+  if (/databricks_/i.test(text) || /^bundle:/m.test(text)) return true
+  let inResources = false
+  let childIndent: number | null = null
+  for (const line of text.split(/\r?\n/)) {
+    const bare = line.replace(/(^|\s)#.*$/, '').trimEnd()
+    if (!bare.trim()) continue
+    const indent = bare.length - bare.trimStart().length
+    if (indent === 0) {
+      inResources = /^resources:$/.test(bare)
+      childIndent = null
+      continue
+    }
+    if (!inResources) continue
+    childIndent ??= indent
+    const key = /^([a-z_]+):$/.exec(bare.trim())?.[1]
+    if (indent === childIndent && key && BUNDLE_COMPUTE.has(key)) return true
+  }
+  return false
+}
 const DATABRICKS_SUBCOMMANDS = new Set(['warehouses', 'clusters', 'bundle', 'jobs'])
 const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
 // xargs options that take their value as the next word (`-n 1`, `-I {}`, `-P 4`; BSD's `-J %`, `-R`, `-S`).
@@ -1340,7 +1365,7 @@ export function mentions(text: string, name: string | null | undefined): boolean
 }
 
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
-async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && DATABRICKS_TEXT.test(text)): Promise<{ text: string; offer: boolean } | null> {
+async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && isDatabricksConfig(text)): Promise<{ text: string; offer: boolean } | null> {
   const kept = keptViews(liveKept(await read($, reportsAtom), await $.clock.now()))
   // An id only counts where it is long enough to mean something: a Snowflake id is a small number, a job's too.
   const matches = kept
@@ -1875,7 +1900,7 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
   // The conversation the edit was made in: a /clear from here on keeps its line out of the new one.
   const at = conversation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
-  if (!DATABRICKS_TEXT.test(text)) return
+  if (!isDatabricksConfig(text)) return
   await showBand($, await bandFor($, text), at)
 }
 
