@@ -33,6 +33,8 @@ export function nodeOf(id: string, node: any): GraphNode {
     label: type === 'exposure' ? node?.label || node?.name || id : null,
     type,
     path: node?.original_file_path ?? null,
+    // The schema.yml that describes it (dbt writes `<package>://<path>`): its tests and columns come from there.
+    ...(typeof node?.patch_path === 'string' ? { yml: node.patch_path.replace(/^[^:/]+:\/\//, '') } : {}),
     materialized: node?.config?.materialized ?? null,
     relation: relationOf(node),
     columns,
@@ -324,7 +326,7 @@ export function testsOnColumn(graph: LineageGraph, id: string, column: string): 
   return tests.filter(([test, node]) => {
     // dbt and warehouses fold unquoted names: REVENUE typed is the yml's revenue, and "amount" is amount.
     if (bareName(node?.testColumn) !== bareName(column)) return false
-    if (node.testOn) return node.testOn === id
+    if (node?.testOn) return node.testOn === id
     const parents = graph.parents[test] ?? []
     return parents.length > 0 && parents.every(parent => parent === id)
   }).length

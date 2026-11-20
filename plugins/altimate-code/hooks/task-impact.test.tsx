@@ -3,14 +3,15 @@ import { expect, mock, test } from 'claude-code/testing'
 import { MIN_ALTIMATE_CODE } from './altimate-cli'
 import { DOWN, UP, embedded } from './impact-report.test'
 import { nothingToReport } from './inert-features'
+import { TUVA_MEDICAL_CLAIM_SQL, TUVA_MODEL_LEVEL, TUVA_PAID_AMOUNT } from './tuva-answer.fixture'
 
 const ROOT = '/repo'
 const MANIFEST = `${ROOT}/target/manifest.json`
 // The manifest copies carry the session's id: read from the copy the task start made.
 let RUNS: string[][] = []
-const tag = () => RUNS.map(one => (one[0] === 'cp' ? /\/manifest-before\.([^/]+)\.json$/.exec(one[2] ?? '')?.[1] : undefined)).find(Boolean) ?? ''
-const snapshot = () => `${ROOT}/target/.altimate-lineage/manifest-before.${tag()}.json`
-const frozen = () => `${ROOT}/target/.altimate-lineage/task-manifest.${tag()}.json`
+const tag = () => RUNS.map(one => (one[0] === 'cp' ? /\/\.altimate-manifest-before\.([^/]+)\.json$/.exec(one[2] ?? '')?.[1] : undefined)).find(Boolean) ?? ''
+const snapshot = () => `${ROOT}/target/.altimate-manifest-before.${tag()}.json`
+const frozen = () => `${ROOT}/target/.altimate-task-manifest.${tag()}.json`
 const TASK_FILE = `${ROOT}/target/.altimate-lineage/last-task.json`
 const REPORT = `${ROOT}/target/.altimate-lineage/report.html`
 const MODEL = `${ROOT}/models/fct_orders.sql`
@@ -49,8 +50,9 @@ type Options = {
   conversation?: () => number
   turns?: () => number
   /** The CLI's whole answer for a call, in place of the usual one. */
-  answer?: (args: Record<string, any>) => { status: string; output: string; metadata: Record<string, unknown> } | undefined
+  answer?: (args: Record<string, any>) => Answer | undefined | Promise<Answer | undefined>
 }
+type Answer = { status: string; output: string; metadata: Record<string, unknown> }
 
 /**
  * A dbt project at /repo in a git repo, its files held in memory (edits apply to them), altimate-code
@@ -139,7 +141,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
   on('session.usage', () => ({ value: { startedAt: options.conversation?.() ?? 1_000 } }))
   on('session.turns', () => ({ value: options.turns?.() ?? 1 }))
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const argv = [...e.argv]
     const inert = nothingToReport(argv)
     if (inert) return { value: inert }
@@ -150,7 +152,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin === 'altimate') {
       const args = JSON.parse(String(argv[argv.indexOf('--args') + 1] ?? '{}'))
       if (options.cliFails) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'no', metadata: {} }), stderr: '' } }
-      const own = options.answer?.(args)
+      const own = await options.answer?.(args)
       if (own) {
         tools.push(args)
         return ok(JSON.stringify(own))
@@ -213,12 +215,13 @@ async function start($: any, on: any, options: Options = {}) {
 
 const directional = (tools: Record<string, any>[]) => tools.filter(one => one.direction)
 
-test('a task start copies the manifest aside, never reading it', async ($, on) => {
+test('a task start copies the manifest aside, never reading it, in target/ itself so altimate-code finds the project above it', async ($, on) => {
   const { runs, turn } = await start($, on)
   await turn('t1', async () => {})
-  expect(runs).toContainEqual(['mkdir', '-p', `${ROOT}/target/.altimate-lineage`])
   expect(runs).toContainEqual(['cp', MANIFEST, snapshot()])
-  expect(runs.findIndex(one => one[0] === 'mkdir')).toBeLessThan(runs.findIndex(one => one[0] === 'cp'))
+  // altimate-code takes the folder above the manifest's as the project (a seed's CSV header): a copy one folder
+  // deeper traced nothing through a `select *` from a seed.
+  expect(snapshot().replace(/\/[^/]+$/, '')).toBe(`${ROOT}/target`)
 })
 
 test("each session's manifest copies carry its id, so another session's task never replaces them; a task's end clears copies a day old", async ($, on) => {
@@ -236,7 +239,9 @@ test("each session's manifest copies carry its id, so another session's task nev
   expect(runs).toContainEqual(['mv', '-f', snapshot(), frozen()])
   expect(directional(tools).every(one => one.manifest_path === frozen())).toBe(true)
   const clear = runs.findIndex(one => one[0] === 'find')
-  expect(runs[clear]).toEqual(['find', `${ROOT}/target/.altimate-lineage`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', '+1440', '-delete'])
+  expect(runs[clear]).toEqual(['find', `${ROOT}/target`, '-maxdepth', '1', '-name', '.altimate-*manifest*.json', '-mmin', '+1440', '-delete'])
+  // Copies an older version kept below target/.altimate-lineage go too.
+  expect(runs[clear + 1]).toEqual(['find', `${ROOT}/target/.altimate-lineage`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', '+1440', '-delete'])
   expect(clear).toBeLessThan(runs.findIndex(one => one[0] === 'mv'))
 })
 
@@ -516,7 +521,7 @@ test('a change to no output column falls back to the model-level count', async (
   expect(directional(tools)).toEqual([{ manifest_path: frozen(), model: 'stg_payments', change_type: 'modify', direction: 'downstream' }])
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: 'stg_payments · 6 downstream models at model level' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: '  no output column changed: the model-level count stands' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '  values may change downstream; the model-level count stands' })).toBeDefined()
   await band.unmount()
   await $.command.run({ command: 'lineage-report', args: '' } as any)
   expect(embedded(writes.get(REPORT)!).focuses[0]).toMatchObject({ model: 'stg_payments', column: null, modelLevel: 6 })
@@ -965,4 +970,86 @@ test('a model the task created, which the manifest from before it lacks, has its
   expect(line).toContain('region_revenue')
   expect(line).toContain('region  not in the manifest from before the task (new in it?): its reach is unknown, not zero')
   expect(line).not.toContain('update altimate-code')
+})
+
+test('a value change names the columns the manifest has that reach downstream; one that reaches nothing is left out, never shown as 0', async ($, on) => {
+  const answerFor = (column: string, reach: number) => ({
+    status: 'ok',
+    output: 'Impact',
+    metadata: {
+      model_level: 2,
+      column_answer: {
+        version: 1, focus: { model: 'model.shop.fct_orders', column }, direction: 'downstream',
+        nodes: [{ id: 'model.shop.fct_orders', name: 'fct_orders' }, { id: 'model.shop.rpt', name: 'rpt' }],
+        columns: [{ model: 0, column, hop: 0 }, ...(reach ? [{ model: 1, column, hop: 1, end: true }] : [])],
+        counts: { columns: reach, models: reach ? 1 : 0, ends: reach, hops: reach ? 1 : 0, may_carry_models: 0, model_level: 2 },
+        unresolved: [], may_carry: [],
+      },
+    },
+  })
+  const { turn, clock } = await start($, on, {
+    answer: args => (args.direction === 'downstream' && args.column ? answerFor(args.column, args.column === 'total_amount' ? 1 : 0) : undefined),
+  })
+  const sql = (expr: string) => `{% set cols %}\npaid_amount,\nunits,\n${expr} as total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}`
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: MODEL, content: sql('paid_amount + units') })
+  })
+  await turn('t2', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'paid_amount + units as', new_string: 'paid_amount + units * 2 as' })
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /values may change in total_amount → reaches 1 column in 1 model/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /values may change in (paid_amount|units)/ })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /reaches 0 column/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a value change on Tuva: the band says tracing until the trace answers, never that the model-level count stands, then the reach impact-first gave', async ($, on) => {
+  const CLAIM = `${ROOT}/models/core/final/core__medical_claim.sql`
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const ok = (metadata: Record<string, unknown>) => ({ status: 'ok', output: 'Impact', metadata })
+  const { files, clock } = await start($, on, {
+    answer: async args => {
+      if (args.model !== 'core__medical_claim' || !args.direction) return undefined
+      if (!args.column) return ok(TUVA_MODEL_LEVEL)
+      if (args.column !== 'paid_amount') return ok({ ...TUVA_MODEL_LEVEL, column_answer_error: `no column ${args.column}` })
+      await held
+      return ok(TUVA_PAID_AMOUNT)
+    },
+  })
+  files[CLAIM] = TUVA_MEDICAL_CLAIM_SQL
+  await $.turn.start({ text: 'treat negative paid_amount as 0', turnId: 't1' })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: CLAIM, old_string: '    , med.paid_amount\n', new_string: '    , case when med.paid_amount < 0 then 0 else med.paid_amount end as paid_amount\n' })
+  await clock.settle()
+  await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // While paid_amount is traced: no line that reads as the answer.
+  expect(await band.find({ type: 'Text', text: /model-level count stands/ })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: '  tracing…' })).toBeDefined()
+  release()
+  await clock.settle()
+  expect(await band.find({ type: 'Text', text: 'core__medical_claim · 97 downstream models at model level' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^  values may change in paid_amount → reaches 124 columns in 13 models/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /model-level count stands/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a task that changes four output columns traces three and says one more changed', async ($, on) => {
+  const NEW_MODEL = `${ROOT}/models/marts/monthly_region_revenue.sql`
+  const { turn, logs } = await start($, on, {
+    answer: args => (args.model === 'monthly_region_revenue' ? { status: 'ok', output: 'Model "monthly_region_revenue" not found in manifest.', metadata: { success: false, truncated: false } } : undefined),
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: NEW_MODEL, content: 'select\n  region,\n  order_month,\n  count(*) as orders,\n  sum(amount) as revenue\nfrom {{ ref("fct_orders") }}\ngroup by 1, 2\n' })
+  })
+  const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
+  expect(line.match(/new in it\?/g)?.length).toBe(3)
+  expect(line).toContain('+ 1 more changed column, not traced here (/lineage-report monthly_region_revenue.<column> traces one)')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: '  + 1 more changed column, not traced here (/lineage-report monthly_region_revenue.<column> traces one)' })).toBeDefined()
+  await band.unmount()
 })
