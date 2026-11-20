@@ -10,8 +10,8 @@ import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallRes
 
 import type { SavingsView } from '../../types'
 import { MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
+import { leaderEnd, simpleCommands } from '../shell'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
-import { simpleCommands } from './health'
 import type { BandUi, FeatureContext } from './index'
 
 const COMMAND = 'savings'
@@ -92,9 +92,6 @@ const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 // What marks a file as Databricks config at all: a Terraform `databricks_` resource, or a bundle.
 const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
 const DATABRICKS_SUBCOMMANDS = new Set(['warehouses', 'clusters', 'bundle', 'jobs'])
-// Words the shell runs another command after: keywords, and wrappers whose own flags come before it.
-const SHELL_LEADS = new Set(['if', 'elif', 'while', 'until', 'then', 'do', 'else', '!', 'time', 'nohup', 'env', 'sudo', 'command', 'exec', 'xargs'])
-const isAssignment = (word: string) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(word)
 const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
 
 /**
@@ -102,26 +99,18 @@ const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
  * rather than only naming it (`echo databricks bundle deploy`, a commit message). The line's simple
  * commands come from the shell reader the push check uses (`simpleCommands`): quoted text and comments
  * are data, a heredoc's body is text unless a shell runs it, and a `$(…)` or backtick runs its own. Each
- * command is read past assignments, shell keywords and wrappers with their flags (`sudo -E`, `time`,
- * `then`) to the program it runs. That program must be `databricks` (or a path to it); its own global
- * flags (`-p prod`, `--profile=x`) come before the command.
+ * command's program is found by the same reader's leader scan (assignments, `sudo -u x`, `nice -n 10`,
+ * `time`, `then`…), and past `xargs` and its flags. That program must be `databricks` (or a path to it);
+ * its own global flags (`-p prod`, `--profile=x`) come before the command.
  */
 export function runsDatabricksCompute(line: string): boolean {
   for (const words of simpleCommands(line)) {
-    let at = 0
-    // Any run of assignments, keywords and wrappers, each wrapper with its flags and their separate values.
-    while (at < words.length) {
-      const word = words[at]!
-      if (isAssignment(word)) at++
-      else if (SHELL_LEADS.has(word)) {
-        at++
-        while (words[at]?.startsWith('-')) {
-          const flag = words[at]!
-          at++
-          const next = words[at]
-          if (!flag.includes('=') && next && !next.startsWith('-') && !isAssignment(next) && !SHELL_LEADS.has(next) && !isDatabricks(next)) at++
-        }
-      } else break
+    let at = leaderEnd(words)
+    // `xargs` runs the command after its flags as well; the push check has no need to read past it.
+    while (words[at] === 'xargs') {
+      at++
+      while (words[at]?.startsWith('-')) at++
+      at += leaderEnd(words.slice(at))
     }
     if (!isDatabricks(words[at] ?? '')) continue
     at++
@@ -170,7 +159,8 @@ const percent = (share: unknown) => (known(share) ? `${Math.round(Number(share) 
 const percentOf = (value: unknown) => (known(value) ? `${Math.round(Number(value))}%` : '?')
 const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
 /** A figure the answer gave: not missing, empty or something that reads as NaN. */
-const known = (value: unknown) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+const known = (value: unknown) =>
+  typeof value === 'number' ? Number.isFinite(value) : typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))
 /** A whole count; one the answer lacks reads "?", not 0. */
 const count = (value: unknown) => (known(value) ? Math.round(Number(value)).toLocaleString('en-US') : '?')
 const UNDER_TENTH = 'under 0.1'
