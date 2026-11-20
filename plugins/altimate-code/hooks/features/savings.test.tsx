@@ -804,8 +804,8 @@ test('/savings typed while a band press\'s run is going says it is running, and 
   await band.unmount()
   await clock.settle()
   expect(runs.length).toBe(1)
-  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
-  expect((await savings($, 'prod_dbx')).text).toBe('The Databricks savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
+  expect((await savings($)).text).toBe('The savings check is already running in the side pane.')
+  expect((await savings($, 'prod_dbx')).text).toBe('The savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
   expect(runs.length).toBe(1)
   finish()
   await clock.settle()
@@ -841,7 +841,7 @@ test('/savings <connection> typed after a band press decided to run is told that
   const settling = clock.settle()
   await writing
   const said = await savings($, 'prod_dbx')
-  expect(said.text).toBe('The Databricks savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
+  expect(said.text).toBe('The savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
   release()
   await settling
   await clock.settle()
@@ -869,7 +869,7 @@ test('the band\'s Run /savings pressed while a typed /savings check is going sta
   expect(runs.length).toBe(2)
   await band.unmount()
   // A bare /savings meanwhile asks for the first connection, which the running check is not reading.
-  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane. Run /savings again when it finishes.')
+  expect((await savings($)).text).toBe('The savings check is already running in the side pane. Run /savings again when it finishes.')
   finish()
   await clock.settle()
 })
@@ -890,7 +890,7 @@ test('a check from before a /clear that ends after it does not free the new conv
   // The old check ends: the new one is still going, and still the only one.
   finishOld()
   await clock.settle()
-  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
+  expect((await savings($)).text).toBe('The savings check is already running in the side pane.')
   await clock.settle()
   expect(runs.length).toBe(2)
   finishNew()
