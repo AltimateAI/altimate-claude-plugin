@@ -608,6 +608,13 @@ test('connection-string passwords are cut whole: braced, multi-word, and an Azur
   expect(out).toContain('AccountName=acme')
 })
 
+test('a quoted password with a semicolon inside, and a last unquoted connection-string password with spaces, are cut whole', () => {
+  const out = redactSecrets(['password="alpha;omega-secret"', 'Server=db;Password=correct horse battery staple', "pwd='x;y-secret' and more", 'Server=db;Password=last words here;'].join('\n'))
+  expect(out).not.toMatch(/alpha|omega|correct|horse|battery|staple|y-secret|last words/)
+  expect(out).toContain('Server=db;Password=‹redacted›')
+  expect(out).toContain('and more')
+})
+
 test('a profile value that YAML writes with doubled apostrophes is cut out too', () => {
   setRedactions(ROOT, ["alpha'omega-secret"])
   try {
