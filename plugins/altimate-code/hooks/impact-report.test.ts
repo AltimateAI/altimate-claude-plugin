@@ -653,6 +653,11 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   // An operand on its own line inside a multi-line CASE is part of an item, not an output.
   const cased = "{% set cols %}\npaid_amount,\nunits,\ncase\n  when units > 0 then\n    paid_amount\n  else\n    units\nend as total\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
   expect(valueCandidates(cased, cased.replace('    units\nend', '    paid_amount\nend'))).toEqual([])
+  // An arithmetic continuation line is part of an item; a leading-comma item with a function call is one item.
+  const arith = "{% set cols %}\npaid_amount,\nunits,\npaid_amount +\n  units\nas total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('raw') }}"
+  expect(valueCandidates(arith, arith.replace('  units\nas', '  paid_amount\nas'))).toEqual([])
+  const leading = "{%- set cols -%}\n      med.claim_id\n    , med.paid_amount\n    , med.allowed_amount\n{%- endset -%}\nselect {{ cols }} from {{ ref('x') }} as med"
+  expect(valueCandidates(leading, leading.replace('    , med.paid_amount', '    , greatest(med.paid_amount, 0) as paid_amount'))).toEqual(['paid_amount'])
   const inline = 'select\n  paid_amount /* cents */\nfrom raw'
   expect(valueCandidates(inline, inline.replace('cents', 'dollars'))).toEqual([])
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')

@@ -1007,7 +1007,7 @@ function topItems(list: string): [number, number][] {
 /** An item's output name: its alias, or the column it is (`t.col`); quotes removed. Null for an expression with no alias. */
 function itemName(item: string): string | null {
   // Comments are not part of the item: `amount -- in cents` is named amount.
-  const bare = item.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (/^['"]/.test(one) ? one : ' ')).replace(/\s+/g, ' ').trim()
+  const bare = item.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|--[^\n]*|\/\*[\s\S]*?\*\//g, one => (/^['"]/.test(one) ? one : ' ')).replace(/\s+/g, ' ').trim().replace(/\s*;$/, '')
   const name = /\bas\s+(?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/i.exec(bare) ?? /[\s)](?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/.exec(bare) ?? /^(?:(?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*)\.)*(?:"([^"]+)"|`([^`]+)`|([A-Za-z_]\w*))$/.exec(bare)
   const found = name?.[1] ?? name?.[2] ?? name?.[3]
   return found ? found.toLowerCase() : null
@@ -1092,7 +1092,7 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
 
     let here = false
     // A list that is only Jinja renders (`{{ core }} {{ extra }}`, no comma between): each renders a `{% set %}` list.
-    const whole = sql.slice(select + 6 + lead, listEnd)
+    const whole = sql.slice(select + 6 + lead, listEnd).replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ')
     if (!list.slice(lead).trim() && /^\s*(?:\{\{-?\s*[A-Za-z_]\w*\s*-?\}\}\s*)+$/.test(whole)) for (const one of whole.matchAll(/\{\{-?\s*([A-Za-z_]\w*)\s*-?\}\}/g)) out.vars.add(one[1]!)
     // Items split with each `{{ … }}` kept as a word, so a bare render beside other items (`{{ cols }}, status`) stays one.
     const split = masked(sql.slice(select + 6, listEnd).replace(/\{\{[\s\S]*?\}\}/g, one => 'J'.repeat(one.length)))

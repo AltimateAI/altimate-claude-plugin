@@ -105,16 +105,31 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
   // The value parts of the SQL, one per line: the words outside any filtering, joining, grouping or ordering clause at
   // every paren depth, carried across lines. Comments, string literals and Jinja expressions are left out, so a
   // reworded comment or a changed threshold changes no value part.
-  const parts = (text: string): { key: string; names: string[]; inside: boolean }[] => {
+  const parts = (text: string): { key: string; names: string[]; inside: boolean; several: boolean }[] => {
     const code = text.replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}|\{\{[\s\S]*?\}\}|'(?:[^']|'')*'|--[^\n]*/g, one => one.replace(/[^\n]/g, ' '))
     const clauses: string[] = ['']
     let cases = 0
-    const out: { key: string; names: string[]; inside: boolean }[] = []
-    for (const line of code.split('\n')) {
+    const out: { key: string; names: string[]; inside: boolean; several: boolean }[] = []
+    const all = code.split('\n')
+    const near = (from: number, step: number) => {
+      for (let k = from + step; k >= 0 && k < all.length; k += step) if (all[k]!.trim()) return all[k]!.trim()
+      return null
+    }
+    for (const [n, line] of all.entries()) {
+      // A line is one whole item only when the item starts and ends on it: after a comma, a SELECT or a Jinja tag, and
+      // before a comma, the FROM, a clause or a tag. Else (an arithmetic or CASE continuation) it is part of an item.
+      const prev = near(n, -1)
+      const next = near(n, 1)
+      const whole = (!prev || /,\s*$/.test(prev) || /\b(?:select|distinct)\s*$/i.test(prev) || /%\}\s*$/.test(prev) || /^\s*,/.test(line)) &&
+        (/,\s*$/.test(line) || !next || /^(?:,|from\b|where\b|group\b|order\b|limit\b|union\b|\{%|\))/i.test(next))
       // A line that starts inside parentheses (a function's argument) or a CASE is part of an item, never an item of its own.
-      const inside = clauses.length > 1 || cases > 0
+      const inside = clauses.length > 1 || cases > 0 || !whole
       const words: string[] = []
       const names: string[] = []
+      // Commas at the line's own level, not inside its parentheses or CASE (a second item on the line).
+      const level = clauses.length
+      const caseLevel = cases
+      const commas: number[] = []
       for (const token of line.matchAll(/\(|\)|(?<![\w.])((?:[A-Za-z_]\w*\.)*)([A-Za-z_]\w*)\b(\s*\()?|[^\s\w()]+|\d+(?:\.\d+)?/g)) {
         const text = token[0]
         if (text === '(') {
@@ -136,12 +151,15 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
           continue
         }
         const filtering = clauses.some(one => FILTERS.has(one))
+        if (text.includes(',') && clauses.length === level && cases === caseLevel) commas.push(words.length)
         if (!filtering) words.push(text.replace(/\s+/g, ''))
         // A function's name (`sum(`) opens its arguments, in the same clause.
         if (token[3]) clauses.push(clauses[clauses.length - 1]!)
         if (!filtering && word && !token[3] && !NOT_COLUMNS.has(word) && word.length >= 2) names.push(word)
       }
-      if (words.length) out.push({ key: words.join(' '), names, inside })
+      // One item: no top-level comma but a leading or trailing one.
+      const several = commas.some(at => at > 0 && at < words.length - 1)
+      if (words.length) out.push({ key: words.join(' '), names, inside, several })
     }
     return out
   }
@@ -159,8 +177,7 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
     const alias = /\bas\s+["`]?\s*([A-Za-z_]\w*)\s*["`]?\s*,?\s*$/i.exec(one.key)?.[1]?.toLowerCase()
     const bare = one.inside ? undefined : /^,?\s*(?:[A-Za-z_]\w*\s*\.\s*)*([A-Za-z_]\w*)\s*,?$/.exec(one.key)?.[1]?.toLowerCase()
     // A line with more than one item (a comma between values) does not say which item changed: no candidate from it.
-    const several = /,/.test(one.key.replace(/^\s*,|,\s*$/g, ''))
-    const output = several ? undefined : (alias ?? bare)
+    const output = one.several ? undefined : (alias ?? bare)
     if (output && !NOT_COLUMNS.has(output)) counts.set(output, (counts.get(output) ?? 0) + 1)
   }
   return [...counts].sort((a, b) => b[1] - a[1]).slice(0, max).map(([name]) => name)

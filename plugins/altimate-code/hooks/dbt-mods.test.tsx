@@ -821,6 +821,10 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // With no FROM the list ends at ORDER BY; a `--` inside a string is not a comment.
   expect(undocumentedByEdit(['amount'], 'select 1 as id, 10 as amount\norder by id', 'select 1 as id, 10 as amount\norder by amount', null)).toEqual({ fresh: [], old: ['amount'] })
   expect(undocumentedByEdit(['marker'], "select id, '--' as marker from raw", "select id, '--'  as marker from raw", null)).toEqual({ fresh: [], old: ['marker'] })
+  // A statement terminator, or a comment beside a rendered list, does not hide a name.
+  expect(undocumentedByEdit(['amount'], 'select 1 as id, 10 as amount;', 'select 1 as id, 20 as amount;', null)).toEqual({ fresh: [], old: ['amount'] })
+  const commented = '{% set cols %}\n  id,\n  amount\n{% endset %}\nselect\n  {{ cols }} -- the list\nfrom {{ ref("raw") }}'
+  expect(undocumentedByEdit(['amount'], commented, commented.replace('  amount\n', '  amount * 2 as amount\n'), null)).toEqual({ fresh: [], old: ['amount'] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
