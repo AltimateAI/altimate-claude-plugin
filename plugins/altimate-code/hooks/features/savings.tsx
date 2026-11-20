@@ -79,8 +79,8 @@ const whatIfAtom = atom({ plugin: 'altimate-code', key: 'savingsWhatIf' } as con
 // Databricks when the conversation changed never writes its report into the new one.
 let generation = 0
 let lastConnection: string | null = null
-// Set from a Run again press until its run ends.
-let againQueued = false
+// Set from a press that starts a run (Run again, the band's Run /savings) until that run ends.
+let pressQueued = false
 // The once-a-session offer of /savings when the session first touches Databricks config.
 let offered = false
 
@@ -123,14 +123,15 @@ function range(min: number, max: number): string {
   return dollars(min) === dollars(max) ? dollars(max) : `${dollars(min)}–${dollars(max)}`
 }
 
-/** A figure the answer gave: not missing, empty or something that reads as NaN. */
-const known = (value: unknown) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
 /** A figure to `digits` decimals; one the answer lacks reads "?". */
 const fixed = (value: unknown, digits: number) => (known(value) ? Number(value).toFixed(digits) : '?')
 const percent = (share: unknown) => (known(share) ? `${Math.round(Number(share) * 100)}%` : '?')
 const percentOf = (value: unknown) => (known(value) ? `${Math.round(Number(value))}%` : '?')
 const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
-const count = (value: unknown) => Math.round(Number(value) || 0).toLocaleString('en-US')
+/** A figure the answer gave: not missing, empty or something that reads as NaN. */
+const known = (value: unknown) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+/** A whole count; one the answer lacks reads "?", not 0. */
+const count = (value: unknown) => (known(value) ? Math.round(Number(value)).toLocaleString('en-US') : '?')
 const UNDER_TENTH = 'under 0.1'
 /** One decimal; a figure that would round to 0.0 reads "under 0.1", and one the answer lacks reads "?". */
 const tenths = (value: unknown) => {
@@ -228,7 +229,9 @@ function changeOf(finding: ToolFinding): { noun: string; change: string; defines
     case 'over_sized':
       return {
         noun: 'Warehouse',
-        change: `resize it to ${apiSize(e.recommended_size)} (cluster_size "${apiSize(e.recommended_size)}")`,
+        change: apiSize(e.recommended_size)
+          ? `resize it to ${apiSize(e.recommended_size)} (cluster_size "${apiSize(e.recommended_size)}")`
+          : 'resize it to a smaller size its queries still fit (the check named no size)',
         defines: 'a Databricks bundle, Terraform databricks_sql_endpoint, or JSON',
         otherwise: `write the JSON for \`databricks warehouses edit ${id} --json\``,
       }
@@ -478,9 +481,10 @@ async function runCheck($: EngineInterface, connection: string | null) {
     })
     if (!live()) return
     // As the status line reads it: the version on stdout, else one printed only on stderr.
-    const version = parseVersion(String(printed.stdout ?? '')) ?? parseVersion(String(printed.stderr ?? ''))
-    if (!version || !supportsSavings(version)) {
-      const source = String(printed.stdout ?? '').trim().split('\n').pop()?.trim() === 'local'
+    // A source build prints `local`, whatever version a runtime note on stderr names.
+    const source = String(printed.stdout ?? '').trim().split('\n').pop()?.trim() === 'local'
+    const version = source ? null : (parseVersion(String(printed.stdout ?? '')) ?? parseVersion(String(printed.stderr ?? '')))
+    if (source || !version || !supportsSavings(version)) {
       const why = source
         ? {
             text: NO_SAVINGS_CHECK,
@@ -590,20 +594,7 @@ export function register(on: On, _context: FeatureContext) {
     const running = await read($, busyAtom)
     const message = await read($, messageAtom)
     const picked = await read($, whatIfAtom)
-    // A second press before the first one's run has started, or while it runs, starts nothing.
-    const again = () => {
-      if (againQueued) return
-      againQueued = true
-      later($, async () => {
-        try {
-          if (await read($, busyAtom)) return
-          await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
-          await runCheck($, lastConnection)
-        } finally {
-          againQueued = false
-        }
-      })
-    }
+    const again = () => pressRun($)
     const close = () => later($, () => $.ui.close({ id: PANE }))
     const buttons = (
       <Box gap={1} key="buttons">
@@ -707,7 +698,7 @@ export function register(on: On, _context: FeatureContext) {
                       ? `As serverless: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} less: it bills only while queries run.`
                       : `As serverless: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} more: its queries keep it busy most of the time.`
                     : choice.fits
-                      ? `At ${choice.label}: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} less. Its ${choice.cores} cores cover the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use).`
+                      ? `At ${choice.label}: ${amounts.now} a month instead of ${amounts.was}, ${amounts.gap} ${choice.monthlySaving > 0 ? 'less' : 'more'}. Its ${choice.cores} cores cover the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use).`
                       : `At ${choice.label}: ${dollars(choice.monthlyCost)} a month, but its ${choice.cores} cores are short of the ${choice.coresNeeded.toFixed(0)} its queries need (twice what 99% of them use): queries would queue.`}
                 </Text>
               ) : (
@@ -773,18 +764,31 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
         key="savings-run"
         label="Run /savings"
         onPress={() =>
-          later($, async () => {
+          pressRun($, async () => {
             await update($, bandAtom, () => null)
             await openPane($)
-            if (await read($, busyAtom)) return
-            await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
-            await runCheck($, lastConnection)
           })
         }
       />
       <Button key="savings-hide" label="Hide" onPress={() => later($, () => update($, bandAtom, () => null))} />
     </Box>
   )
+}
+
+/** A press that starts a run: a second press before the first one's run has started, or while it runs, starts nothing. */
+function pressRun($: EngineInterface, first?: () => Promise<unknown>) {
+  if (pressQueued) return
+  pressQueued = true
+  later($, async () => {
+    try {
+      await first?.()
+      if (await read($, busyAtom)) return
+      await update($, busyAtom, () => ({ label: "Checking the workspace's warehouses, clusters and jobs…" }))
+      await runCheck($, lastConnection)
+    } finally {
+      pressQueued = false
+    }
+  })
 }
 
 export async function bashRewrite($: EngineInterface, e: BashCall): Promise<string | null> {
@@ -796,7 +800,8 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
 }
 
 export async function bashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<ContextLines> {
-  if (!DATABRICKS_COMMAND.test(e.command)) return
+  // Quoted text (a commit message, an echo) is data: its `;` or `&&` separates no command.
+  if (!DATABRICKS_COMMAND.test(e.command.replace(/"[^"]*"|'[^']*'/g, '""'))) return
   // A databricks warehouses, clusters, bundle or jobs command is about compute whatever its words.
   const band = await bandFor($, e.command, true)
   if (band) await update($, bandAtom, () => band)
