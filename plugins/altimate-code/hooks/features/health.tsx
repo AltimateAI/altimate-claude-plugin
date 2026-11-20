@@ -16,7 +16,7 @@ import type { HealthInsight, HealthState } from '../../types'
 import { NOT_FOUND, later, runTool, within } from '../altimate-cli'
 import { featureUsed } from '../usage'
 import { setStatusPart } from '../status-line'
-import { SHELLS, leaderEnd, shellScript, simpleCommands } from '../shell'
+import { SHELLS, leaderEnd, simpleCommands } from '../shell'
 import { HEALTH_SCRATCH, SCRATCH_TARGET, targetPath } from '../dbt-mods-core'
 import type { BashCall, ContextLines, EditedFile, FileCall } from '../tool-chain'
 import type { BandUi, FeatureContext } from './index'
@@ -171,8 +171,8 @@ function pushes(words: readonly string[]): boolean {
   let i = start
   const bin = (words[i] ?? '').split('/').pop() ?? ''
   if (SHELLS.has(bin)) {
-    const script = shellScript(words, i)
-    return script !== null && isGitPush(script)
+    const c = words.findIndex((w, j) => j > i && /^-[a-z]*c$/.test(w))
+    return c >= 0 && c + 1 < words.length && isGitPush(words[c + 1]!)
   }
   if (bin !== 'git') return false
   for (i++; i < words.length && words[i]!.startsWith('-'); i++) if (GIT_VALUE_OPTIONS.has(words[i]!)) i++
@@ -208,8 +208,8 @@ export function filesWrittenBy(command: string): string[] {
     const args = words.slice(at + 1)
     if (bin === 'cd') cwd = args[0] && !args[0].startsWith('-') && !args[0].startsWith('~') ? from(args[0]) : ''
     else if (SHELLS.has(bin)) {
-      const script = shellScript(words, at)
-      if (script !== null) out.push(...filesWrittenBy(script).map(from))
+      const c = args.findIndex(w => /^-[a-z]*c$/.test(w))
+      if (c >= 0 && c + 1 < args.length) out.push(...filesWrittenBy(args[c + 1]!).map(from))
     } else if (WRITERS.has(bin)) out.push(...models(args))
     else if ((bin === 'sed' || bin === 'perl') && args.some(w => /^-[a-zA-Z]*i/.test(w) || w === '--in-place' || w.startsWith('--in-place='))) out.push(...models(args))
     else if (bin === 'git' && args.some(w => GIT_WRITERS.has(w))) out.push(...models(args))

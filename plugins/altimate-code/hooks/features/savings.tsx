@@ -515,8 +515,13 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
     checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0, workspaces: Math.max(1, workspaces) },
     // Each with the CLI's reason: a check can be skipped for a refused read, for the run's time limit
     // (its query may still be running), or because core refused its facts.
-    skipped: (metadata.skipped ?? []).map(one => oneLine(one.reason ? `${one.check} (${one.reason.trim().replace(/\.$/, '')})` : one.check)),
-    limited: (metadata.limited ?? []).map(oneLine),
+    skipped: (Array.isArray(metadata.skipped) ? metadata.skipped : []).map(one => {
+      // The CLI's reason can carry a warehouse's error text: one line, control characters dropped.
+      const check = oneLine(one?.check) || '?'
+      const reason = oneLine(one?.reason).replace(/\.$/, '')
+      return reason ? `${check} (${reason})` : check
+    }),
+    limited: (Array.isArray(metadata.limited) ? metadata.limited : []).map(oneLine),
     total: { min: Number(report.total.monthly_min), max: Number(report.total.monthly_max), resources: Number(report.total.resources) },
     findings: report.findings.map(one => {
       const warehouse = isWarehouse(one.resource_type) ? inventory.find(row => row.id === one.resource_id) : undefined
@@ -1039,8 +1044,13 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
   }
 }
 
-/** Runs the check the person asked for. Only `/savings` and the buttons they press come here. */
-async function runCheck($: EngineInterface, asked: string | null) {
+/**
+ * Runs the check the person asked for. Only `/savings` and the buttons they press come here. `at` is the
+ * generation when it was asked for: a /clear or a session end since then (even in the same tick, before this
+ * scheduled run started) drops it, so a late run never lands in the new conversation.
+ */
+async function runCheck($: EngineInterface, asked: string | null, at: number) {
+  if (at !== generation) return
   const mine = ++generation
   const live = () => mine === generation
   lastAsked = asked
@@ -1143,8 +1153,9 @@ async function runCheck($: EngineInterface, asked: string | null) {
  * A run a button asked for. It can start the warehouse, which bills, so of presses that land together only
  * the first starts one; the guard lasts only until the run is marked busy.
  */
-async function startPressedRun($: EngineInterface, asked: string | null) {
-  if (pressStarting) return
+async function startPressedRun($: EngineInterface, asked: string | null, at: number) {
+  // A /clear since the press drops it before anything is marked running.
+  if (pressStarting || at !== generation) return
   pressStarting = true
   try {
     if (await read($, busyAtom)) return
@@ -1153,7 +1164,7 @@ async function startPressedRun($: EngineInterface, asked: string | null) {
   } finally {
     pressStarting = false
   }
-  await runCheck($, asked)
+  await runCheck($, asked, at)
 }
 
 /** Keeps what "saved since" needs: the resource, what it cost a day, and the date. False when it could not be kept. */
@@ -1325,7 +1336,8 @@ export function register(on: On, _context: FeatureContext) {
     }
     await update($, busyAtom, () => busyOf(asked || null, connections))
     const opened = await openPane($)
-    later($, () => runCheck($, asked || null))
+    const at = generation
+    later($, () => runCheck($, asked || null, at))
     if (opened && opened.isPlaced === false) {
       return { text: `Running the ${name}. The terminal is too narrow for the side pane, so the result comes as a notice; widen the window to see the details.` }
     }
@@ -1358,7 +1370,10 @@ export function register(on: On, _context: FeatureContext) {
     const connections = await read($, connectionsAtom)
     const expanded = await read($, expandedAtom)
     const today = dayOf(now)
-    const again = () => later($, () => startPressedRun($, lastAsked))
+    const again = () => {
+      const at = generation
+      later($, () => startPressedRun($, lastAsked, at))
+    }
     const close = () => later($, () => $.ui.close({ id: PANE }))
     const share = () => later($, () => shareReport($))
     const altimate = () => later($, () => openAltimate($))
@@ -1676,13 +1691,14 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
       <Button
         key="savings-run"
         label="Run /savings"
-        onPress={() =>
+        onPress={() => {
+          const at = generation
           later($, async () => {
             await update($, bandAtom, () => null)
             await openPane($)
-            await startPressedRun($, lastAsked)
+            await startPressedRun($, lastAsked, at)
           })
-        }
+        }}
       />
       <Button key="savings-hide" label="Hide" onPress={() => later($, () => update($, bandAtom, () => null))} />
     </Box>,

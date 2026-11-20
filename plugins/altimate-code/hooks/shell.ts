@@ -19,7 +19,8 @@ const SHELL_VALUE_OPTIONS = new Set(['--rcfile', '--init-file'])
  * The script a shell runs from its `-c` option (alone or in a cluster: `-lc`, `-cx`, `-Ec`): the first word
  * after the shell's options, where a cluster ending in `o` or `O` (`-o pipefail`, `-euo pipefail`) takes the
  * next word as its value. Null when none of its options is `-c`, so `bash deploy.sh -c x` runs no script
- * here. `at` is where the shell's own name is.
+ * here. `at` is where the shell's own name is. Only the /savings offer reads a script with it; the push check
+ * keeps its own wider rule (any `-c` after the shell), since a push it misses is the unsafe outcome there.
  */
 export function shellScript(words: readonly string[], at: number): string | null {
   let script = false
@@ -196,7 +197,7 @@ export function simpleCommands(line: string): string[][] {
         const { body, next } = heredocBody(line, at, doc)
         at = next - 1
         const bin = (doc.owner[leaderEnd(doc.owner)] ?? '').split('/').pop() ?? ''
-        if (SHELLS.has(bin) && shellScript(doc.owner, leaderEnd(doc.owner)) === null) nested.push(...simpleCommands(body))
+        if (SHELLS.has(bin) && !doc.owner.some(w => /^-[a-z]*c$/.test(w))) nested.push(...simpleCommands(body))
         else if (!doc.quoted) nested.push(...substitutionsIn(body).flatMap(simpleCommands))
       }
       i = at
