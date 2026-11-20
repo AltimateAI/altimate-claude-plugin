@@ -811,6 +811,9 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   const nested = '{% set outer %}\n{% set inner %}id{% endset %}\nselect id, amount from s.orders\n{% endset %}\nselect id from raw'
   expect(undocumentedByEdit(['amount'], nested, nested.replace('\nselect id from raw', '\nselect id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
   expect(undocumentedByEdit(['amount'], '{% set cols %}amount{% endset %}\nselect {{ cols }} as total from raw', '{% set cols %}amount{% endset %}\nselect {{ cols }} as total, amount from raw', ['total'])).toEqual({ fresh: ['amount'], old: [] })
+  // A bare render beside other items still renders its list: an expression rewritten there keeps its column.
+  const mixed = '{% set cols %}\n  id,\n  amount\n{% endset %}\nselect {{ cols }}, status from {{ ref("raw") }}'
+  expect(undocumentedByEdit(['amount'], mixed, mixed.replace('  amount\n', '  amount * 2 as amount\n'), null)).toEqual({ fresh: [], old: ['amount'] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -1098,6 +1101,9 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   expect(hardcodedRelations('select * from main.stg_orders(1)', manifest, self)).toEqual([])
   expect(hardcodedRelations('select $$ from main.stg_orders $$ as note from raw', manifest, self)).toEqual([])
   expect(hardcodedRelations('{% set outer %}\n{% set inner %}id{% endset %}\nselect id from main.stg_orders\n{% endset %}\nselect id from raw', manifest, self)).toEqual([])
+  // A CTE declared inside a subquery does not hide the outer query's table of the same name.
+  const scoped = { nodes: { 'model.shop.orders5': { resource_type: 'model', name: 'orders5', relation_name: '"d"."main"."orders5"' } } }
+  expect(hardcodedRelations('select id from orders5\nwhere exists (\n  with orders5 as (select 1 as id)\n  select id from orders5\n)', scoped, self)).toEqual([{ relation: 'orders5', use: "{{ ref('orders5') }}" }])
   // A macro, or a `{% set %}` block, that may not be rendered here is not read.
   expect(hardcodedRelations('{% macro unused() %}\nselect id from main.stg_orders\n{% endmacro %}\nselect id from raw', manifest, self)).toEqual([])
   // The model itself takes part: its own bare name shared with another relation is ambiguous, and never advice.

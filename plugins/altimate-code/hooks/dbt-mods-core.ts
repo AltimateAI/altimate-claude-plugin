@@ -827,6 +827,29 @@ export function columnDrift(documented: string[], returned: string[], quoted: st
   }
 }
 
+/** The parenthesised group a position sits in, as offsets (inside the parentheses); the whole text at the top level. */
+function enclosing(code: string, at: number): [number, number] {
+  let depth = 0
+  let open = -1
+  for (let i = at - 1; i >= 0; i--) {
+    if (code[i] === ')') depth++
+    else if (code[i] === '(') {
+      if (depth === 0) {
+        open = i
+        break
+      }
+      depth--
+    }
+  }
+  if (open < 0) return [0, code.length]
+  depth = 0
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === '(') depth++
+    else if (code[i] === ')' && --depth === 0) return [open + 1, i]
+  }
+  return [open + 1, code.length]
+}
+
 /** Whether a position in SQL is at the top level or inside parentheses that hold a SELECT (a subquery). */
 function inQuery(code: string, at: number): boolean {
   let depth = 0
@@ -870,7 +893,9 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   // Blocks inside blocks are not followed: no advice at all rather than a guess.
   if (structure.nested) return []
   const controlled = [...jinjaControlled(sql), ...structure.blocks]
-  const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
+  // Each CTE with the stretch of SQL it is visible in: the parentheses around its WITH, or the whole model.
+  const ctes = [...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => ({ name: unquote(one[1]!), scope: enclosing(text, one.index!) }))
+  const isCte = (name: string, at: number) => ctes.some(one => one.name === name && at >= one.scope[0] && at < one.scope[1])
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   // A spelling two relations share (a bare name in two schemas) is ambiguous: null, never flagged.
   const known = new Map<string, { relation: string; use: string; exact: string[]; quoted: boolean[] } | null>()
@@ -919,7 +944,7 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
     const written = text.slice(start, start + match[1]!.length)
     const sqlParts = identifierParts(written)
     const parts = sqlParts.map(one => one.text.toLowerCase())
-    if (parts.some(one => /^_j_*$/.test(one)) || (parts.length === 1 && ctes.has(parts[0]!))) continue
+    if (parts.some(one => /^_j_*$/.test(one)) || (parts.length === 1 && isCte(parts[0]!, start))) continue
     const hit = known.get(parts.join('\u0000'))
     if (!hit || hit.use === SELF) continue
     // A quoted part names exactly that identifier, case and all. An unquoted one is folded by the warehouse, so it
@@ -1061,7 +1086,9 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
     // A list that is only Jinja renders (`{{ core }} {{ extra }}`, no comma between): each renders a `{% set %}` list.
     const whole = sql.slice(select + 6 + lead, listEnd)
     if (!list.slice(lead).trim() && /^\s*(?:\{\{-?\s*[A-Za-z_]\w*\s*-?\}\}\s*)+$/.test(whole)) for (const one of whole.matchAll(/\{\{-?\s*([A-Za-z_]\w*)\s*-?\}\}/g)) out.vars.add(one[1]!)
-    for (const [a, b] of topItems(list.slice(lead))) {
+    // Items split with each `{{ … }}` kept as a word, so a bare render beside other items (`{{ cols }}, status`) stays one.
+    const split = masked(sql.slice(select + 6, listEnd).replace(/\{\{[\s\S]*?\}\}/g, one => 'J'.repeat(one.length)))
+    for (const [a, b] of topItems(split.slice(lead))) {
       const bare = list.slice(lead + a, lead + b).replace(/\s+/g, ' ').trim()
       // `*`, `t.*`, and `* exclude (…)` / `* replace (…)`: columns the SQL does not name.
       if (/^(?:[\w"`]+\.)?\*(?:$|\s)/.test(bare)) {

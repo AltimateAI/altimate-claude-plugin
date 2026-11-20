@@ -105,11 +105,13 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
   // The value parts of the SQL, one per line: the words outside any filtering, joining, grouping or ordering clause at
   // every paren depth, carried across lines. Comments, string literals and Jinja expressions are left out, so a
   // reworded comment or a changed threshold changes no value part.
-  const parts = (text: string): { key: string; names: string[] }[] => {
+  const parts = (text: string): { key: string; names: string[]; inside: boolean }[] => {
     const code = text.replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}|\{\{[\s\S]*?\}\}|'(?:[^']|'')*'|--[^\n]*/g, one => one.replace(/[^\n]/g, ' '))
     const clauses: string[] = ['']
-    const out: { key: string; names: string[] }[] = []
+    const out: { key: string; names: string[]; inside: boolean }[] = []
     for (const line of code.split('\n')) {
+      // A line that starts inside parentheses (a function's argument) is part of an item, never an item of its own.
+      const inside = clauses.length > 1
       const words: string[] = []
       const names: string[] = []
       for (const token of line.matchAll(/\(|\)|(?<![\w.])((?:[A-Za-z_]\w*\.)*)([A-Za-z_]\w*)\b(\s*\()?|[^\s\w()]+|\d+(?:\.\d+)?/g)) {
@@ -136,7 +138,7 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
         if (token[3]) clauses.push(clauses[clauses.length - 1]!)
         if (!filtering && word && !token[3] && !NOT_COLUMNS.has(word) && word.length >= 2) names.push(word)
       }
-      if (words.length) out.push({ key: words.join(' '), names })
+      if (words.length) out.push({ key: words.join(' '), names, inside })
     }
     return out
   }
@@ -152,7 +154,7 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
     // The output a changed item makes: its alias (`… as total_amount`, quoted or not), or the column it is when it is a
     // bare column (`, med.paid_amount`). An unaliased expression names no output; its operands are inputs, not outputs.
     const alias = /\bas\s+["`]?\s*([A-Za-z_]\w*)\s*["`]?\s*,?\s*$/i.exec(one.key)?.[1]?.toLowerCase()
-    const bare = /^,?\s*(?:[A-Za-z_]\w*\s*\.\s*)*([A-Za-z_]\w*)\s*,?$/.exec(one.key)?.[1]?.toLowerCase()
+    const bare = one.inside ? undefined : /^,?\s*(?:[A-Za-z_]\w*\s*\.\s*)*([A-Za-z_]\w*)\s*,?$/.exec(one.key)?.[1]?.toLowerCase()
     const output = alias ?? bare
     if (output && !NOT_COLUMNS.has(output)) counts.set(output, (counts.get(output) ?? 0) + 1)
   }

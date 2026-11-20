@@ -644,6 +644,9 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   const totals = '{% set cols %}\npaid_amount,\nallowed_amount,\nunits,\npaid_amount + allowed_amount + units as total_amount\n{% endset %}\nselect {{ cols }} from x'
   expect(valueCandidates(totals, totals.replace('+ units as', '+ units * 2 as'))).toEqual(['total_amount'])
   expect(valueCandidates(totals.replace('as total_amount', 'as "total_amount"'), totals.replace('as total_amount', 'as "total_amount"').replace('+ units as', '+ units * 2 as'))).toEqual(['total_amount'])
+  // A function's argument on its own line is part of an item, not an output: no candidate rather than a wrong one.
+  const coalesced = "{% set cols %}\npaid_amount,\nallowed_amount,\nunits,\ncoalesce(\n  paid_amount,\n  allowed_amount\n) as total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}"
+  expect(valueCandidates(coalesced, coalesced.replace('  allowed_amount\n)', '  units\n)'))).toEqual([])
   const inline = 'select\n  paid_amount /* cents */\nfrom raw'
   expect(valueCandidates(inline, inline.replace('cents', 'dollars'))).toEqual([])
   const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')
