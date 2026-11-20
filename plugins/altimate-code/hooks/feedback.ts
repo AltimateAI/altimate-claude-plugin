@@ -41,7 +41,7 @@ const SETTINGS: ReadonlyArray<readonly [string, string]> = [
 
 const MASK = '‹redacted›'
 // A line that ends in a credential key with a YAML block-scalar header (`password: |`, `secret: >- # note`): the value is the indented lines after it.
-const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?[ \t]*:[ \t]*)`
+const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?[ \t]*:[ \t]*)`
 const BLOCK_HEADER = new RegExp(String.raw`${KEY_LINE}[|>][+-]?\d?[ \t]*(?:#.*)?$`, 'i')
 // `password: correct horse battery staple`: on a YAML line the value is the rest of the line, spaces and all.
 const PLAIN_VALUE = new RegExp(String.raw`${KEY_LINE}(?![|>"'])(\S.*)$`, 'i')
@@ -84,9 +84,11 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g, `$1 ${MASK}`],
   // user:password@host in a connection string or URL.
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, `$1${MASK}@`],
+  // A connection string's password: a braced value (ODBC `PWD={a b};`, `}}` is a literal brace) or a value that runs to the next `;`, spaces included.
+  [/((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:\{(?:[^}\n]|\}\})*\}|[^;\n]*(?=;))/gi, `$1${MASK}`],
   // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
   // backslash escape or a doubled quote is inside it) or the rest of the word. A YAML block scalar is cut whole first (redactBlockScalars).
-  [/((?<![\w.-])[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\S+)/gi, `$1${MASK}`],
+  [/((?<![\w.-])[\w.-]*?(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?["']?\s*[:=]\s*)(?!‹redacted›)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|\S+)/gi, `$1${MASK}`],
   // A long unbroken run of key-like characters.
   [/\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g, MASK],
 ]

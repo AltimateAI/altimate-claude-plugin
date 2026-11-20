@@ -597,6 +597,17 @@ test('a YAML credential under a quoted key, or with a value of several words, is
   expect(out.split('\n')[0]).toBe('password: ‹redacted›')
 })
 
+test('connection-string passwords are cut whole: braced, multi-word, and an Azure account key with slashes', () => {
+  const key = `${'Ab1/'.repeat(21)}Zz+/Qw==`
+  const out = redactSecrets(
+    ['Driver={ODBC Driver 18};Server=db;PWD={correct horse battery staple};Encrypt=yes', 'Server=db;Password=correct horse staple;User=bob', `DefaultEndpointsProtocol=https;AccountName=acme;AccountKey=${key};EndpointSuffix=core.windows.net`, 'PWD={a}}b c};x=1'].join('\n'),
+  )
+  expect(out).not.toMatch(/correct|horse|battery|staple|Ab1\/|Zz\+|b c/)
+  expect(out).toContain('Encrypt=yes')
+  expect(out).toContain('User=bob')
+  expect(out).toContain('AccountName=acme')
+})
+
 test('a profile value that YAML writes with doubled apostrophes is cut out too', () => {
   setRedactions(ROOT, ["alpha'omega-secret"])
   try {
