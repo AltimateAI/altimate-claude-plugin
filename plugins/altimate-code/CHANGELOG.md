@@ -14,7 +14,7 @@ All notable changes to this plugin will be documented in this file.
 - **Resolve** on a thread the lagging comment list still shows after it was resolved elsewhere is done (the thread is hidden) instead of answering "not an open thread"; a reply to such a thread says it is no longer open and reads the list again.
 
 ### Added
-- `/altimate-feedback <what happened>` drafts a GitHub issue for this plugin's repository from your words and a few facts the plugin knows (plugin, altimate-code and Claude Code versions, the altimate-code binary name, OS, dbt-core, adapter and Python versions when the dbt doctor has run, and the plugin's on/off settings), shows the exact title and body, and creates it only after `--confirm`: with `gh issue create` (labelled `feedback` when the repository has that label) when `gh` is installed and signed in, otherwise as a prefilled new-issue link. `--with-error` also attaches the last plugin error, redacted (secrets, paths, SQL and relation and model names removed); `--cancel` discards the draft.
+- `/altimate-feedback <what happened>` drafts a GitHub issue for this plugin's repository from your words and a few facts the plugin knows (plugin, altimate-code and Claude Code versions, the altimate-code binary name, OS, dbt-core, adapter and Python versions when the dbt doctor has run, and the plugin's on/off settings), shows the exact title and body, and creates it only after `--confirm`: with `gh issue create` (labelled `feedback` when the repository has that label) when `gh` is installed and signed in, otherwise as a prefilled new-issue link. `--with-error` also attaches the kind of the last plugin error (its type and code only, none of its message); `--cancel` discards the draft.
 
 ## [1.8.3] — 2026-11-19
 

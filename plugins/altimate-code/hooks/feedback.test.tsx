@@ -2,8 +2,8 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { nothingToReport } from './inert-features'
 import { setRedactions, clearRedactions } from './dbt-mods-core'
-import { MAX_URL, buildDraft, cleanDescription, cleanProblem, issueUrl, redactSecrets, titleOf, withoutHome, type Facts } from './feedback'
-import { doctorFacts } from './last-problem'
+import { MAX_URL, buildDraft, cleanDescription, issueUrl, redactSecrets, titleOf, withoutHome, type Facts } from './feedback'
+import { doctorFacts, errorKinds } from './last-problem'
 
 const HOME = '/Users/alice'
 const ROOT = '/Users/alice/work/acme_secret_project'
@@ -61,9 +61,9 @@ test('the title is the first line of the description, one line, at most 80 chara
   expect(long.endsWith('…')).toBe(true)
 })
 
-test('the last plugin error is a fenced block, labelled redacted, and cannot close its fence', () => {
-  const draft = buildDraft(facts({ problem: { source: 'dbt run failed', text: "boom ''' end" } }), 'x')
-  expect(draft.body).toContain('**Last plugin error** (dbt run failed; redacted)\n\n```text\nboom \'\'\' end\n```')
+test('the last plugin error is a fenced block that says it holds the error type and code only', () => {
+  const draft = buildDraft(facts({ problem: { source: 'dbt run failed', text: 'Database Error, 002003 (42S02)' } }), 'x')
+  expect(draft.body).toContain("**Last plugin error** (dbt run failed; the error's type and code only, none of its message)\n\n```text\nDatabase Error, 002003 (42S02)\n```")
   expect(draft.withProblem).toBe(true)
 })
 
@@ -103,11 +103,10 @@ test('tokens, passwords, connection-string credentials and keys are cut out of a
   expect(out).toContain('postgres://‹redacted›@db.example.com/x')
 })
 
-test('the values of the dbt profile that the plugin holds are cut out of the description and the error', () => {
+test('the values of the dbt profile that the plugin holds are cut out of the description', () => {
   setRedactions(ROOT, ['wh-pa55-phrase'])
   try {
     expect(cleanDescription('it failed with wh-pa55-phrase in the log', [HOME])).toBe('it failed with ‹redacted› in the log')
-    expect(cleanProblem('Database Error: login wh-pa55-phrase refused', [HOME])).not.toContain('wh-pa55-phrase')
   } finally {
     clearRedactions()
   }
@@ -128,32 +127,56 @@ test('the description keeps the person\'s own words but loses secrets and home p
   expect(cleanDescription('a\u0000b\u001b[31mc\r\nd', [HOME])).toBe('ab[31mc\nd')
 })
 
-test('an error is reduced: paths, SQL, relation and node names, secrets and home folders are all gone, in few short lines', () => {
+test('an error is kept as its type, code and fixed phrases only: no part of its message can reach the issue', () => {
   const raw = [
     `Database Error in model fct_orders (${ROOT}/models/fct_orders.sql)`,
-    `  002003 (42S02): SQL compilation error: Object 'ACME_DB.RAW.ORDERS' does not exist or not authorized.`,
-    '  select order_id, secret_column from raw.orders where token = abc',
-    '  compiled code at /private/tmp/target/run/acme/fct_orders.sql',
-    `  config ${HOME}/.dbt/settings.json password: fake-pw-value`,
-    '  relation "analytics"."marts"."fct_orders" missing',
-    ...Array.from({ length: 20 }, (_, i) => `extra line ${i}`),
+    "  002003 (42S02): SQL compilation error: Object 'ACME_DB.RAW.ORDERS' does not exist or not authorized.",
+    '  LINE 1: select private_column',
+    '  select\n  employee_ssn,\n  salary * 1.2\nfrom payroll',
+    "Model 'fct_orders' depends on a node named 'stg_payroll' which was not found",
+    `  config ${HOME}/Client Files/settings.json password: fake-pw-value Authorization: Basic dXNlcjpodW50ZXIy`,
+    'C:/work/payroll/models/orders.sql \\\\corp\\share\\hr.sql target/run/acme/models/fct_orders.sql',
+    'relation "analytics"."marts"."fct_orders" and private_schema.private_customers missing',
   ].join('\n')
-  const out = cleanProblem(raw, [HOME], ['fct_orders'])
-  for (const leaked of [ROOT, HOME, 'fct_orders', 'ACME_DB', 'RAW.ORDERS', 'secret_column', 'raw.orders', 'fake-pw-value', '/private/tmp', 'analytics', 'marts']) expect(out).not.toContain(leaked)
-  expect(out).toContain('<SQL omitted>')
-  expect(out).toContain('<path')
-  expect(out.split('\n').length).toBeLessThanOrEqual(6)
-  expect(out.length).toBeLessThanOrEqual(600)
+  const out = errorKinds(raw)
+  expect(out).toBe('Database Error, 002003 (42S02), SQL compilation error, does not exist, not authorized, not found')
+  for (const leaked of ['fct_orders', 'ACME', 'private', 'employee_ssn', 'salary', 'payroll', 'fake-pw-value', 'dXNl', 'Client', 'analytics', 'marts', 'corp', 'acme']) expect(out).not.toContain(leaked)
 })
 
-test('an error cut to length never ends in half a secret value of the profile', () => {
+test('the plugin host-call names and error codes are kept, and a lookalike that is not on the list is not', () => {
+  expect(errorKinds('HooksError: altimate-code: $.process.run(dbt) failed to start: ENOENT: Executable not found in $PATH')).toBe('HooksError, $.process.run, failed to start, ENOENT, not found')
+  expect(errorKinds('AcmePayrollError EXYZ 12345 (hello) $.acme.thing')).toBe('')
+  expect(errorKinds('TypeError TypeError ENOENT ENOENT')).toBe('TypeError, ENOENT')
+  expect(errorKinds('x'.repeat(100_000) + ' ENOENT')).toBe('')
+  expect(errorKinds(Array.from({ length: 30 }, (_, i) => `SQLSTATE ${10000 + i}`).join(' ')).split(', ').length).toBe(8)
+})
+
+test('a secret that straddles the length limit is gone whole, never left as a prefix', () => {
+  for (const secret of ['ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'Authorization: Bearer abcdefgh12345678xyz']) {
+    for (const pad of [3980, 3990, 3995, 3999, 4000]) {
+      const out = cleanDescription(`${'ok '.repeat(2000).slice(0, pad)}${secret}`, [HOME])
+      expect(out).not.toMatch(/ghp_|Bearer abc|abcdefgh/)
+    }
+  }
   setRedactions(ROOT, ['sup3r-long-warehouse-secret'])
   try {
-    const out = cleanProblem(`${'x '.repeat(3990)}sup3r-long-warehouse-sec`, [HOME])
-    expect(out).not.toContain('sup3r')
+    expect(cleanDescription(`${'x '.repeat(1995)}sup3r-long-warehouse-secret`, [HOME])).not.toContain('sup3r')
   } finally {
     clearRedactions()
   }
+})
+
+test('Basic and other authorization schemes are cut out whole, not only Bearer', () => {
+  const out = redactSecrets('Authorization: Basic dXNlcjpodW50ZXIy\nProxy-Authorization: Digest abcdefgh12345678\nsent Basic dXNlcjpodW50ZXIy twice')
+  expect(out).not.toMatch(/dXNl|abcdefgh/)
+  expect(out).toContain('Authorization: ‹redacted›')
+})
+
+test('a home path with a space in a folder name is replaced whole, quoted or not, and Windows paths in either slash style', () => {
+  expect(withoutHome(`"${HOME}/Client Files/acme/models/payroll.sql"`, [HOME])).toBe('"<path under home>"')
+  expect(withoutHome(`'${HOME}/Client Files'`, [HOME])).toBe("'<path under home>'")
+  expect(withoutHome(`open ${HOME}/Client Files/acme/models/payroll.sql with password`, [HOME])).toBe('open <path under home> with password')
+  expect(withoutHome('C:/Users/Alice/Client Files/x.sql and C:\\Users\\Alice\\Client Files\\y.sql', ['C:\\Users\\Alice'])).toBe('<path under home> and <path under home>')
 })
 
 // ─── The link ─────────────────────────────────────────────────────────────────────────────────────────
@@ -199,7 +222,7 @@ type Gh = {
   createTimesOut?: boolean
 }
 
-async function start($: any, on: any, options: { registerError?: string; gh?: Gh; env?: Record<string, string>; platform?: string; claude?: string } = {}) {
+async function start($: any, on: any, options: { holdVersion?: Promise<void>; registerError?: string; gh?: Gh; env?: Record<string, string>; platform?: string; claude?: string } = {}) {
   const clock = mock.clock(on)
   mock.env(on, { HOME, ...(options.env ?? {}) })
   const gh = options.gh ?? {}
@@ -207,7 +230,10 @@ async function start($: any, on: any, options: { registerError?: string; gh?: Gh
   const logs: string[] = []
   on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
   on('session.info', () => ({ value: { platform: options.platform ?? 'macos', isHosted: false } }))
-  on('session.version', () => ({ value: { version: options.claude ?? '2.1.329' } }))
+  on('session.version', async () => {
+    await options.holdVersion
+    return { value: { version: options.claude ?? '2.1.329' } }
+  })
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
   on('session.root', () => ({ value: ROOT }))
   on('session.cwd', () => ({ value: ROOT }))
@@ -446,17 +472,28 @@ test('--with-error with no error recorded says so and attaches nothing', async (
   expect(shownBody(text)).not.toContain('Last plugin error')
 })
 
-test('the last plugin error is attached only with --with-error, redacted, and without the file, model or relation names', async ($, on) => {
+test('the last plugin error is attached only with --with-error, as its type and code and none of its message', async ($, on) => {
   // A feature that fails is the plugin's own error: here the /defer registration fails, with a message naming a path, a relation and a token.
   const { run } = await start($, on, { registerError: `ENOENT: no such file ${ROOT}/target/manifest.json while reading 'ACME.RAW.ORDERS' (token ghp_abcdefghijklmnopqrstuvwxyz0123456789)` })
   const without = await run('it failed')
   expect(shownBody(without)).not.toContain('Last plugin error')
   const withError = await run('it failed --with-error')
   const body = shownBody(withError)
-  expect(body).toContain('**Last plugin error** (')
-  expect(body).toContain('failed; redacted)')
-  expect(body).toContain('ENOENT: no such file <path under home>')
-  for (const leaked of [HOME, 'manifest.json', 'ACME.RAW.ORDERS', 'ghp_abc']) expect(body).not.toContain(leaked)
+  expect(body).toContain("**Last plugin error** (defer sessionStart failed; the error's type and code only, none of its message)")
+  expect(body).toContain('```text\nHooksError, $.command.register, ENOENT\n```')
+  for (const leaked of [HOME, 'manifest.json', 'ACME', 'ghp_abc', 'no such file']) expect(body).not.toContain(leaked)
+})
+
+test('a draft still being built when it is discarded, or when the session ends, is not kept and cannot be sent', async ($, on) => {
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const { run, creates } = await start($, on, { holdVersion: held })
+  const building = run('slow draft')
+  await run('--cancel')
+  release()
+  expect(await building).toContain('replaced or discarded before it was ready')
+  expect(await run('--confirm')).toContain('no draft to send')
+  expect(creates()).toEqual([])
 })
 
 test('a new session starts with no draft', async ($, on) => {

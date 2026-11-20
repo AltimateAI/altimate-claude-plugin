@@ -762,7 +762,7 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
   if (generation !== mineGeneration) return null
   await update($, failureAtom, () => view)
   const names = failures.map(one => one.name)
-  noteProblem(`dbt ${verb} failed`, failures[0]!.message, names)
+  noteProblem(`dbt ${verb} failed`, failures[0]!.message)
   $.ui.toast(`✖ dbt ${verb} failed · ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` +${names.length - 3}` : ''} · Explain or Fix above the prompt`, { timeoutMs: 8000 })
   return view
 }

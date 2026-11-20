@@ -11,9 +11,9 @@
 import type { EngineInterface, On, PluginOptions } from 'claude-code'
 
 import { MISSING_BINARY, parseVersion } from './altimate-cli'
-import { redactValues, scrubDbt, withoutValueFragment } from './dbt-mods-core'
+import { redactValues } from './dbt-mods-core'
 import { dbtModsDoctorFacts } from './dbt-mods'
-import { MAX_RAW_PROBLEM, asVersion, forgetProblem, problemNoted, type DoctorFacts } from './last-problem'
+import { asVersion, forgetProblem, problemNoted, type DoctorFacts } from './last-problem'
 import { pluginVersion } from './usage'
 
 export const REPO = 'AltimateAI/altimate-claude-plugin'
@@ -23,8 +23,6 @@ export const LABEL = 'feedback'
 export const MAX_URL = 7000
 export const MAX_DESCRIPTION = 4000
 export const MAX_TITLE = 80
-export const MAX_PROBLEM_CHARS = 600
-export const MAX_PROBLEM_LINES = 6
 const DRY_RUN_ENV = 'ALTIMATE_FEEDBACK_DRY_RUN'
 const CLI_NAMES = ['altimate', 'altimate-code'] as const
 const CONFIRM = '--confirm'
@@ -50,7 +48,8 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\bxox[abprs]-[A-Za-z0-9-]{10,}/g, MASK],
   [/\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{4,}/g, MASK],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, MASK],
-  [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, `Bearer ${MASK}`],
+  [/\b((?:proxy-)?authorization["']?\s*[:=])[^\n]*/gi, `$1 ${MASK}`],
+  [/\b(Bearer|Basic|Digest|Token)\s+[A-Za-z0-9._~+/=-]{8,}/g, `$1 ${MASK}`],
   // user:password@host in a connection string or URL.
   [/(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+@/gi, `$1${MASK}@`],
   [/\b((?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|authorization)["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|\S+)/gi, `$1${MASK}`],
@@ -79,63 +78,34 @@ function homeForms(homes: readonly string[]): string[] {
   return [...forms].sort((a, b) => b.length - a.length)
 }
 
-/** Every path under the home folder, however long, replaced whole. */
+const PATH_SEGMENT = `[^\\s'"\`<>()\\\\/]`
+// The rest of a path after its home folder: segments, and a space inside one when a separator follows within three words
+// ("Client Files/acme"). A path that ends in a space-separated word ("Client Files") is cut at the space unless it is quoted.
+const PATH_TAIL = `(?:[\\\\/]${PATH_SEGMENT}*(?: (?=(?:${PATH_SEGMENT}+ ){0,2}${PATH_SEGMENT}+[\\\\/])${PATH_SEGMENT}+)*)*`
+
+/** Every path under the home folder replaced whole: a quoted one up to its closing quote, an unquoted one with the spaces inside its folder names. */
 export function withoutHome(text: string, homes: readonly string[]): string {
-  return homeForms(homes).reduce((out, form) => out.replace(new RegExp(`${escapeRegex(form)}(?:[\\\\/][^\\s'"\`<>()]*)?`, 'gi'), '<path under home>'), text)
-}
-
-/** Every absolute path of two or more parts (a POSIX path, `~/…`, or a drive path), replaced whole. */
-export function withoutPaths(text: string): string {
-  return text
-    .replace(/(?<![\w:/.~-])~\/[^\s'"`<>()]+/g, '<path>')
-    .replace(/(?<![\w:/.~-])\/[^\s'"`<>()/]+\/[^\s'"`<>()]*/g, '<path>')
-    .replace(/\b[A-Za-z]:\\[^\s'"`<>()]+/g, '<path>')
-}
-
-const SQL_LINE = /\b(?:select\b[^\n]*\bfrom\b|insert\s+into|delete\s+from|create\s+(?:or\s+replace\s+)?(?:temp(?:orary)?\s+)?(?:table|view)|merge\s+into|update\s+\S+\s+set|alter\s+table|drop\s+(?:table|view))\b|^\s*(?:select|with|from|where|join|(?:left|right|inner|outer|cross|full)\s+join|group\s+by|order\s+by|having|union|limit\s+\d+|on)\b\s*\S/i
-
-/** A line that reads as SQL is replaced by a fixed line; a dbt or warehouse error often quotes the statement. */
-export function withoutSql(text: string): string {
-  return text
-    .split('\n')
-    .map(line => (SQL_LINE.test(line) ? '<SQL omitted>' : line))
-    .join('\n')
-}
-
-/** Quoted or three-part relation names (`db.schema.table`, `"RAW"."ORDERS"`) and the names given. */
-function withoutNames(text: string, names: readonly string[]): string {
-  let out = text
-  for (const name of [...names].filter(one => one.length >= 2).sort((a, b) => b.length - a.length)) {
-    out = out.replace(new RegExp(`(?<![\\w])${escapeRegex(name)}(?![\\w])`, 'g'), '<name>')
-  }
-  return out
-    .replace(/(["'`])[A-Za-z_][\w$]*(?:\.[A-Za-z_][\w$]*){1,2}\1/g, '<identifier>')
-    .replace(/(?:"[\w$ -]+"|`[\w$ -]+`)(?:\.(?:"[\w$ -]+"|`[\w$ -]+`)){1,2}/g, '<identifier>')
-    .replace(/\b[A-Za-z_][\w$]*\.[A-Za-z_][\w$]*\.[A-Za-z_][\w$]*\b/g, '<identifier>')
+  return homeForms(homes).reduce((out, form) => {
+    const home = escapeRegex(form)
+    return out
+      .replace(new RegExp(`(["'\`])${home}[^"'\`\\n]*\\1`, 'gi'), '$1<path under home>$1')
+      .replace(new RegExp(`${home}${PATH_TAIL}`, 'gi'), '<path under home>')
+  }, text)
 }
 
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
 const plain = (text: string) => text.replace(/\r\n?/g, '\n').replace(CONTROL, '').replace(LONE_SURROGATE, '')
+/** The most of a description that is read: the rest is cut before anything is matched against it. */
+const MAX_READ = 100_000
 
-/** What the person typed, as it will be filed: secrets and home-folder paths out, cut to length. Their own words are otherwise kept. */
+/**
+ * What the person typed, as it will be filed: secrets and home-folder paths out of the whole text first, then cut to length,
+ * so a secret that straddles the cut is gone whole. The person's other words are kept.
+ */
 export function cleanDescription(text: string, homes: readonly string[]): string {
-  const cut = Array.from(plain(text).trim()).slice(0, MAX_DESCRIPTION).join('')
-  return withoutHome(redactSecrets(withoutValueFragment(cut)), homes)
-}
-
-/** A plugin error as it may be filed: nothing the plugin has not redacted or reduced, in at most a few short lines. */
-export function cleanProblem(raw: string, homes: readonly string[], names: readonly string[] = []): string {
-  const capped = withoutValueFragment(plain(raw).slice(0, MAX_RAW_PROBLEM))
-  const clean = withoutNames(withoutPaths(withoutSql(withoutHome(redactSecrets(scrubDbt(capped)), homes))), names)
-  const lines = clean
-    .split('\n')
-    .map(line => line.trim())
-    .filter(Boolean)
-    .slice(0, MAX_PROBLEM_LINES)
-  const joined = Array.from(lines.join('\n')).slice(0, MAX_PROBLEM_CHARS).join('')
-  // The text sits in a code fence: nothing in it may close the fence.
-  return joined.replace(/`{3,}/g, "'''")
+  const clean = withoutHome(redactSecrets(plain(text).trim().slice(0, MAX_READ)), homes)
+  return Array.from(clean.trim()).slice(0, MAX_DESCRIPTION).join('')
 }
 
 // ─── The facts ────────────────────────────────────────────────────────────────────────────────────────
@@ -178,7 +148,7 @@ export type Ask = { withProblem: boolean }
 
 /** Gathers the facts. A fact that cannot be read is left out or `unknown`, never an error. */
 export async function collectFacts($: EngineInterface, ask: Ask, extra: { doctor: DoctorFacts; settings: PluginOptions }): Promise<Facts> {
-  const [plugin, altimate, claudeCode, os, homes] = await Promise.all([
+  const [plugin, altimate, claudeCode, os] = await Promise.all([
     pluginVersion($).catch(() => 'unknown'),
     altimateFacts($).catch(() => null),
     $.session
@@ -189,16 +159,14 @@ export async function collectFacts($: EngineInterface, ask: Ask, extra: { doctor
       .info()
       .then(info => (OS.has(info.platform) ? info.platform : 'unknown'))
       .catch(() => 'unknown'),
-    homesOf($),
   ])
   const settings: Array<[string, boolean]> = []
   for (const [key, label] of SETTINGS) {
     const value = extra.settings[key]
     if (typeof value === 'boolean') settings.push([label, value])
   }
-  const noted = problemNoted()
-  const problem = ask.withProblem && noted ? { source: noted.source, text: cleanProblem(noted.raw, homes, noted.names) } : null
-  return { plugin, altimate, claudeCode, os, doctor: extra.doctor, settings, problem: problem && problem.text ? problem : null }
+  const problem = ask.withProblem ? problemNoted() : null
+  return { plugin, altimate, claudeCode, os, doctor: extra.doctor, settings, problem }
 }
 
 // ─── The draft ────────────────────────────────────────────────────────────────────────────────────────
@@ -230,7 +198,7 @@ export function buildDraft(facts: Facts, description: string): Draft {
     lines.push(`- dbt: ${parts.join(', ')}`)
   } else lines.push('- dbt: not checked this session')
   if (facts.settings.length) lines.push(`- Settings: ${facts.settings.map(([label, on]) => `${label} ${on ? 'on' : 'off'}`).join(', ')}`)
-  if (facts.problem) lines.push('', `**Last plugin error** (${facts.problem.source}; redacted)`, '', '```text', facts.problem.text, '```')
+  if (facts.problem) lines.push('', `**Last plugin error** (${facts.problem.source}; the error's type and code only, none of its message)`, '', '```text', facts.problem.text, '```')
   return { title: titleOf(description), body: lines.join('\n'), withProblem: !!facts.problem }
 }
 
@@ -333,6 +301,8 @@ export async function send($: EngineInterface, draft: Draft): Promise<string> {
 // ─── The command ──────────────────────────────────────────────────────────────────────────────────────
 
 let pending: Draft | null = null
+/** Moves on whenever a draft is discarded, replaced, sent or the session ends: a draft still being built for an earlier number is dropped. */
+let epoch = 0
 let sending = false
 let settings: PluginOptions = {}
 
@@ -360,6 +330,7 @@ export async function answer($: EngineInterface, args: string): Promise<string> 
   const text = args.trim()
   if (text === CANCEL) {
     const had = pending !== null
+    epoch++
     pending = null
     return had ? 'Discarded. Nothing was sent.' : 'There is no draft to discard.'
   }
@@ -367,6 +338,7 @@ export async function answer($: EngineInterface, args: string): Promise<string> 
     if (!pending) return `There is no draft to send. Start with /altimate-feedback <what happened>.`
     if (sending) return 'The issue is already being created.'
     const draft = pending
+    epoch++
     pending = null
     sending = true
     try {
@@ -378,8 +350,11 @@ export async function answer($: EngineInterface, args: string): Promise<string> 
   const withProblem = new RegExp(`(?:^|\\s)${WITH_ERROR}(?=\\s|$)`).test(text)
   const description = text.replace(new RegExp(`(?:^|\\s)${WITH_ERROR}(?=\\s|$)`, 'g'), ' ').trim()
   if (!description) return usage
+  const mine = ++epoch
   const homes = await homesOf($)
   const facts = await collectFacts($, { withProblem }, { doctor: await dbtModsDoctorFacts($).catch(() => null), settings })
+  // A discard, a send, another description or the end of the session while the facts were read: this draft is not kept.
+  if (mine !== epoch) return 'This draft was replaced or discarded before it was ready. Nothing was kept or sent.'
   pending = buildDraft(facts, cleanDescription(description, homes))
   const note = withProblem && !facts.problem ? 'No plugin error has been recorded this session, so none is attached.\n\n' : ''
   return note + preview(pending)
@@ -393,12 +368,14 @@ export function registerFeedback(on: On, context: { options: PluginOptions }) {
 
 /** After the session started: the command's place in the slash menu. A new session starts with no draft; an error a feature met while starting stays, as the last one. */
 export async function feedbackSessionStart($: EngineInterface) {
+  epoch++
   pending = null
   await $.command.register({ name: COMMAND, description: 'Draft a GitHub issue for this plugin from your words and a few redacted facts; created only after you confirm', argumentHint: '<what happened> [--with-error]' })
 }
 
 /** The conversation ended: no draft or error outlives it. */
 export function feedbackSessionEnd() {
+  epoch++
   pending = null
   forgetProblem()
 }
