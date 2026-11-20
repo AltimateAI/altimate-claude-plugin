@@ -1609,8 +1609,19 @@ test('the program is found past every leader the push check knows, and past xarg
     'sudo -u admin databricks warehouses list',
     '2>/dev/null databricks clusters list',
     'xargs -0 sudo databricks clusters get',
+    'xargs -n 1 databricks clusters get',
+    'xargs -I {} databricks jobs get {}',
+    'xargs -P 4 databricks clusters get',
+    "bash -c 'databricks bundle deploy'",
+    'sh -lc "databricks jobs list"',
   ]) {
     expect(runsDatabricksCompute(line)).toBe(true)
   }
   expect(runsDatabricksCompute('nice -n 10 echo databricks bundle deploy')).toBe(false)
+  expect(runsDatabricksCompute("bash -c 'echo databricks bundle deploy'")).toBe(false)
+})
+
+test('a job figure the answer leaves blank reads ?, not "under 0.1"', () => {
+  const [line] = evidenceLines({ ...JOB.evidence, task_hours: ' ', estimated_dbus: [] as any })
+  expect(line).toContain('? hours on all-purpose compute, ? DBUs')
 })
