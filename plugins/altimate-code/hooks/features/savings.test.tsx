@@ -756,7 +756,7 @@ test('/savings that finds a check running, with a /clear while its pane opens, s
     options.onOpen = undefined
     await $.session.end({ reason: 'clear' } as any)
   }
-  expect((await savings($)).text).toBe('The conversation was cleared before the Databricks savings check started. Run /savings again.')
+  expect((await savings($)).text).toBe('The conversation was cleared while the Databricks savings check ran. Run /savings again.')
   finish()
   await clock.settle()
 })
