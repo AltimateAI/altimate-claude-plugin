@@ -12,7 +12,8 @@ export const OBSERVED_NOTE = 'Billed in different weeks, so a change in workload
 const roundMoney = (value: number, cents: boolean) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
 
 /** A figure the answer gave: not missing, empty or something that reads as NaN. */
-export const known = (value: unknown) => value !== null && value !== undefined && value !== '' && Number.isFinite(Number(value))
+export const known = (value: unknown) =>
+  typeof value === 'number' ? Number.isFinite(value) : typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))
 
 function money(value: number, cents: boolean): string {
   if (!known(value)) return '?'
@@ -75,8 +76,7 @@ export const amount = (min: number, max: number) => (max > 0 ? `${range(min, max
 export const size = (value: unknown) => String(value ?? '?').replace(/_/g, '-')
 
 /** A whole count; one the answer lacks (missing, empty, not a number) reads "?", not 0. */
-export const count = (value: unknown) =>
-  value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? '?' : Math.round(Number(value)).toLocaleString('en-US')
+export const count = (value: unknown) => (known(value) ? Math.round(Number(value)).toLocaleString('en-US') : '?')
 
 /** Days a window covers, from its YYYY-MM-DD ends; 7 when they cannot be read. */
 export function windowDays(window: { start: string; end: string }): number {

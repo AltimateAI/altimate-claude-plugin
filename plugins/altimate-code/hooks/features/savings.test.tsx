@@ -2976,8 +2976,7 @@ test('a total missing its amounts or count is the findings\' own, and still draw
 
 test('an amount sent as a numeric string is shown like a number, and one that is no number as ?', () => {
   expect(dollars('27.5' as any)).toBe('$27.50')
-  expect(dollars(undefined as any)).toBe('?')
-  expect(dollars('n/a' as any)).toBe('?')
+  for (const missing of [undefined, null, '', ' ', 'n/a', [], true, {}]) expect(dollars(missing as any)).toBe('?')
 })
 
 test('a name the answer lacks is never matched', () => {
@@ -3232,4 +3231,28 @@ test('what-if figures sent as numeric strings are drawn as numbers when a size i
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /^At X-SMALL: \$59\.02 a month instead of \$118\.05, \$59\.03 less\. Its 16 cores cover the 7 its queries need/ })).toBeDefined()
   await ui.unmount()
+})
+
+test('the program is found past every leader the push check knows, and past xargs', () => {
+  for (const line of [
+    'nice -n 10 databricks bundle deploy',
+    'doas databricks jobs list',
+    'sudo -u admin databricks warehouses list',
+    '2>/dev/null databricks clusters list',
+    'xargs -0 sudo databricks clusters get',
+  ]) {
+    expect(runsDatabricksCompute(line)).toBe(true)
+  }
+  expect(runsDatabricksCompute('nice -n 10 echo databricks bundle deploy')).toBe(false)
+})
+
+test('a finding missing either end of its range is one with no dollar estimate, never "$0–$X"', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.findings[0].monthly_min
+  const finding = toView(answer.metadata)?.findings[0]
+  expect(finding?.monthlyMin).toBe(0)
+  expect(finding?.monthlyMax).toBe(0)
+  const blank = JSON.parse(JSON.stringify(ANSWER))
+  blank.metadata.report.findings[0].monthly_min = ' '
+  expect(toView(blank.metadata)?.findings[0]?.monthlyMax).toBe(0)
 })
