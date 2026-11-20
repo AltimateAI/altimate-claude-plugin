@@ -847,12 +847,17 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   const text = sqlCode(sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, ' __jinja__ '))
   const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s*(?:\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
-  const known = new Map<string, { relation: string; use: string }>()
+  // A spelling two relations share (a bare name in two schemas) is ambiguous: null, never flagged.
+  const known = new Map<string, { relation: string; use: string } | null>()
   const add = (id: string, node: any, use: string) => {
     if (id === selfId) return
     const parts = typeof node?.relation_name === 'string' ? node.relation_name.split('.').map(unquote) : [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(Boolean).map((one: string) => String(one).toLowerCase())
     if (!parts.length) return
-    for (let i = 0; i < parts.length; i++) known.set(parts.slice(i).join('.'), { relation: parts.slice(i).join('.'), use })
+    for (let i = 0; i < parts.length; i++) {
+      const key = parts.slice(i).join('.')
+      const had = known.get(key)
+      known.set(key, had === undefined || had?.use === use ? { relation: key, use } : null)
+    }
   }
   // A manifest too big to read here comes as a slice of the model's graph, with every relation listed apart.
   const nodes: [string, any][] = Array.isArray(manifest?.relations) ? manifest.relations.map((one: any) => [String(one?.id), one]) : Object.entries<any>(manifest?.nodes ?? {})
@@ -957,7 +962,8 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
   let star = false
   for (const item of topItems(list)) {
     const bare = item.replace(/\s+/g, ' ').trim()
-    if (/^(?:[\w"`]+\.)?\*$/.test(bare)) {
+    // `*`, `t.*`, and `* exclude (…)` / `* replace (…)`: columns the SQL does not name.
+    if (/^(?:[\w"`]+\.)?\*(?:$|\s)/.test(bare)) {
       star = true
       continue
     }
@@ -975,9 +981,9 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
   }
   // What the `*` reads, as written, with every CTE it names: an edit that leaves all of it alone brings no column.
   const cut = Math.min(...['where', 'group', 'order', 'limit', 'qualify', 'having', 'window', 'union'].map(word => topLevel(tail, word)).filter(at => at >= 0), tail.length)
-  const reads = sql.slice(from + 4, from + 4 + cut)
-  const named = [...ctes].filter(([name]) => new RegExp(`(?:^|[^\\w])["\`]?${name.replace(/[^\w]/g, '')}["\`]?(?:[^\\w]|$)`, 'i').test(code.slice(from + 4, from + 4 + cut)))
-  const source = [reads, ...named.map(([name, one]) => `${name}:${one.raw}`)].map(one => one.replace(/\s+/g, ' ').trim()).join(' | ')
+  // Its own list and what it reads, as written, with every CTE of the model (one it names may read another).
+  const reads = sql.slice(select, from + 4 + cut)
+  const source = [reads, ...[...ctes].map(([name, one]) => `${name}:${one.raw}`)].map(one => one.replace(/\s+/g, ' ').trim()).join(' | ')
   return { names, star, source }
 }
 
@@ -995,6 +1001,9 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   if (earlier === null && before !== null && after !== null && before === after) return { fresh: undocumented, old: [] }
   const was = before === null ? null : outputColumns(before)
   const now = after === null ? null : outputColumns(after)
+  // Column lists kept in `{% set %}` blocks (the select reads them through `{{ name }}`) name outputs too.
+  const wasSet = before === null ? new Set<string>() : setBlockNames(before)
+  const nowSet = after === null ? new Set<string>() : setBlockNames(after)
   const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
   const mine = new Set(ours.map(one => one.toLowerCase()))
   const old = (name: string) => {
@@ -1002,15 +1011,32 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
     if (mine.has(key)) return false
     if (returned.has(key)) return true
     if (!was || !now) return false
-    // Named in the model's own list after the edit: there before only when that list named it before too.
-    if (now.names.has(key)) return was.names.has(key)
-    // Not named, and the list is all the SQL says (a macro or a package's passthrough fills it): not the edit's.
-    if (!now.star && !was.star) return true
-    // Through a `*` the SQL does not resolve (a ref()), the edit brought nothing when it left what the `*` reads alone.
-    return now.star && was.star && now.source !== undefined && now.source === was.source
+    // Named after the edit: there before only when it was named before too.
+    if (now.names.has(key) || nowSet.has(key)) return was.names.has(key) || wasSet.has(key)
+    // Through a `*` the SQL does not resolve: there before only when the edit left the list, what it reads and every
+    // CTE alone.
+    if (now.star || was.star) return now.star && was.star && now.source !== undefined && now.source === was.source
+    // Named nowhere (a macro fills the list): there before only when no Jinja expression or tag changed.
+    return jinjaOf(before!) === jinjaOf(after!)
   }
   return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
 }
+
+/** The names in the comma lists of a model's `{% set name %}…{% endset %}` blocks. */
+function setBlockNames(sql: string): Set<string> {
+  const out = new Set<string>()
+  for (const block of sql.matchAll(/\{%-?\s*set\s+\w+\s*-?%\}([\s\S]*?)\{%-?\s*endset\s*-?%\}/gi)) {
+    for (const item of topItems(masked(block[1]!))) {
+      const bare = item.replace(/\s+/g, ' ').trim()
+      const name = /\bas\s+["`]?([A-Za-z_]\w*)["`]?$/i.exec(bare)?.[1] ?? /^(?:["`]?[A-Za-z_]\w*["`]?\.)*["`]?([A-Za-z_]\w*)["`]?$/.exec(bare)?.[1]
+      if (name) out.add(name.toLowerCase())
+    }
+  }
+  return out
+}
+
+/** Every Jinja expression and tag of a model, in order, spaces collapsed. */
+const jinjaOf = (sql: string) => [...sql.matchAll(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}/g)].map(one => one[0].replace(/\s+/g, ' ')).join('\u0000')
 
 // What the history may keep: the plugin store takes 4 MiB of JSON in all, the history and bookmarks among
 // other keys, so a cell, a query and the whole history are bounded, in UTF-8 bytes as the store counts them.

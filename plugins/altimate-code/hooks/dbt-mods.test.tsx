@@ -730,6 +730,18 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // A `*` over a join of CTEs: a column added to one of them is the edit's.
   const joined = 'with a as (select * from {{ ref("x") }}), b as (select id from raw) select * from a join b using (id)'
   expect(undocumentedByEdit(['amount'], joined, joined.replace('select id from raw', 'select id, amount from raw'), null)).toEqual({ fresh: ['amount'], old: [] })
+  // A column added to a CTE behind a joined `select *` CTE is the edit's: every CTE is part of what a `*` reads.
+  const deep = 'with src as (select id from raw),\n a as (select * from src),\n b as (select id from other)\nselect * from a join b using (id)'
+  expect(undocumentedByEdit(['amount'], deep, deep.replace('select id from raw', 'select id, amount from raw'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A macro list whose arguments changed, or a `* exclude (…)` dropped: the column is the edit's.
+  const macro = "select {{ dbt_utils.star(from=ref('raw_orders'), except=['amount']) }}\nfrom {{ ref('raw_orders') }}"
+  expect(undocumentedByEdit(['amount'], macro, macro.replace("except=['amount']", 'except=[]'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  expect(undocumentedByEdit(['amount'], 'select * exclude (amount) from raw', 'select * from raw', ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // Columns a macro fills, with no Jinja changed (Tuva's passthrough columns), are not the edit's; one added to a
+  // `{% set %}` column list is.
+  const tuva = "{%- set core -%}\n      med.claim_id\n    , med.paid_amount\n{%- endset -%}\nselect {{ core }} {{ extension_columns(ref('x')) }} from {{ ref('x') }} as med"
+  expect(undocumentedByEdit(['x_temp_payer'], tuva, tuva.replace('    , med.paid_amount', '    , greatest(med.paid_amount, 0) as paid_amount'), null)).toEqual({ fresh: [], old: ['x_temp_payer'] })
+  expect(undocumentedByEdit(['paid_cents'], tuva, tuva.replace('    , med.paid_amount', '    , med.paid_amount\n    , med.paid_amount * 100 as paid_cents'), null)).toEqual({ fresh: ['paid_cents'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -953,6 +965,10 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
     { relation: 'main.stg_orders', use: "{{ ref('stg_orders') }}" },
     { relation: 'shop.customers', use: "{{ source('shop', 'customers') }}" },
   ])
+  // A bare name two relations share (two schemas) is ambiguous: not flagged.
+  const twice = { nodes: { 'model.s.current_orders': { resource_type: 'model', name: 'current_orders', relation_name: '"d"."main"."orders"' }, 'model.s.archived_orders': { resource_type: 'model', name: 'archived_orders', relation_name: '"d"."archive"."orders"' } } }
+  expect(hardcodedRelations('select * from orders', twice, self)).toEqual([])
+  expect(hardcodedRelations('select * from archive.orders', twice, self)).toEqual([{ relation: 'archive.orders', use: "{{ ref('archived_orders') }}" }])
   // Another package's model of the same name is named with its package.
   const packages = { nodes: { 'model.jaffle_shop.orders2': { resource_type: 'model', name: 'orders2', package_name: 'jaffle_shop', relation_name: '"d"."main"."orders2"' }, 'model.pkg.orders2': { resource_type: 'model', name: 'orders2', package_name: 'pkg', relation_name: '"d"."pkg"."orders2"' } } }
   expect(hardcodedRelations('select * from pkg.orders2', packages, self)).toEqual([{ relation: 'pkg.orders2', use: "{{ ref('pkg', 'orders2') }}" }])
