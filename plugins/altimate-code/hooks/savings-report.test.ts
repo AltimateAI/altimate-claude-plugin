@@ -34,7 +34,7 @@ const view = (over: Partial<SavingsView> = {}): SavingsView => ({
       evidence: ['used at most 10% of its cores'],
       fact: 'used at most 10% of its cores',
       dailyCost: 1,
-      config: 'SMALL CLASSIC',
+      config: { size: 'SMALL', type: 'CLASSIC' },
       fixRequest: '',
     },
   ],

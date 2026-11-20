@@ -632,6 +632,9 @@ export interface CteProfileState {
   message?: string
 }
 
+/** A warehouse's settings as the CLI listed them: each its value, or null where the CLI did not read it. */
+export type WarehouseConfig = { size: string | null; type: string | null }
+
 /** The warehouse platforms /savings can check. */
 export type SavingsPlatform = 'databricks' | 'snowflake'
 
@@ -678,8 +681,8 @@ export type SavingsFinding = {
   fact: string
   /** What the resource cost a day over the window, from billing; null when the answer does not say. */
   dailyCost: number | null
-  /** A warehouse's size and type when it was measured; null for anything else. */
-  config: string | null
+  /** A warehouse's settings when it was measured, each as read or null; null for anything else. */
+  config: WarehouseConfig | null
   /** The request "Draft the fix" puts in the prompt box: the change, for Claude to draft and the person to review. */
   fixRequest: string
 }

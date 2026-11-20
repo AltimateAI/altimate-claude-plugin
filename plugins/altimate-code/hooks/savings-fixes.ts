@@ -5,8 +5,9 @@
 // billed in different weeks, so a change in workload moves them too: the line shows them as observed spend
 // and never calls the difference saved. A fix that changes neither leaves nothing to see but its finding
 // clearing, which usage falling can do too.
-import type { SavingsFinding, SavingsFixLine, SavingsPlatform, SavingsView } from '../types'
-import { cents, DAY_MS, OBSERVED_NOTE, oneLine, PLATFORM_NAME, size, windowDays } from './savings-format'
+import type { SavingsFinding, SavingsFixLine, SavingsPlatform, SavingsView, WarehouseConfig } from '../types'
+import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig, SETTINGS, settingsNoun } from './savings-config'
+import { cents, DAY_MS, OBSERVED_NOTE, oneLine, PLATFORM_NAME, windowDays } from './savings-format'
 
 /** What is kept when a fix is drafted. */
 export type FixRecord = {
@@ -20,8 +21,11 @@ export type FixRecord = {
   workspaceId: string | null
   resourceName: string
   title: string
-  /** The warehouse's size and type then, when the fix is a change of them; null for any other fix. */
-  config: string | null
+  /**
+   * The warehouse's settings when the fix was drafted, each as read or null, when the fix is a change of them; null
+   * for any other fix. One kept by an older version as a string loads with every setting unknown.
+   */
+  config: WarehouseConfig | null
   /** What it cost a day then, from billing; null when that was not known. */
   dailyCost: number | null
   /** How that cost was priced: a later run priced differently cannot be compared with it. */
@@ -36,8 +40,12 @@ export const FIX_PREFIX = 'savings-fix:'
 // cluster maximum) changes a setting the answers do not carry.
 const SIZING_CHECKS = new Set(['wh_classic_pro_to_serverless', 'wh_oversized', 'downsize_warehouse'])
 
-/** The configuration to compare later runs against: a warehouse's size and type, for a fix that changes them. */
-export const fixConfig = (one: Pick<SavingsFinding, 'checkId' | 'config'>) => (SIZING_CHECKS.has(one.checkId) ? one.config : null)
+/** The settings to compare later runs against, for a fix that changes them; null for any other fix. */
+export const fixConfig = (one: Pick<SavingsFinding, 'checkId' | 'config'>): WarehouseConfig | null =>
+  SIZING_CHECKS.has(one.checkId) && one.config != null ? loadConfig(one.config) : null
+
+/** A kept fix's settings as this version reads them. */
+const keptConfig = (fix: FixRecord): WarehouseConfig | null => (fix.config === null || fix.config === undefined ? null : loadConfig(fix.config))
 
 export const fixKey = (connection: string, one: Pick<SavingsFinding, 'resourceType' | 'resourceId'> & { workspaceId?: string | null }) =>
   `${FIX_PREFIX}${connection}:${one.workspaceId ?? ''}:${one.resourceType}:${one.resourceId}`
@@ -71,27 +79,6 @@ const rowOf = (fix: FixRecord, view: SavingsView) =>
       (one.id === fix.resourceId || (fix.platform === 'snowflake' && one.name === fix.resourceName)) &&
       sameWorkspace(one.workspaceId, fix.workspaceId, severalWorkspaces(view)),
   )
-/** A warehouse's size and type as a fix keeps them: two words, `SMALL PRO`, with "?" for one the CLI did not read. */
-export const configKey = (warehouseSize: unknown, type: unknown) => `${oneLine(warehouseSize) ? size(warehouseSize) : '?'} ${oneLine(type) || '?'}`
-/** The same as a line shows it: what the CLI did not read is left out (`PRO`), never drawn as "?". */
-export const configText = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSize) ? size(warehouseSize) : '', oneLine(type)].filter(Boolean).join(' ')
-/** A kept config's size and type, null where it was not read; a config kept as one word is a type. */
-const partsOf = (config: string) => {
-  const words = config.trim().split(/\s+/)
-  const [first, ...rest] = words.length > 1 ? words : ['?', ...words]
-  const read = (word: string | undefined) => (word && word !== '?' ? word : null)
-  return { size: read(first), type: read(rest.join(' ')) }
-}
-/** Whether two configs differ, by size or by type, counting only what both runs read: a value read on one side only is no change. */
-export const configDiffers = (a: string, b: string) => {
-  const was = partsOf(a)
-  const now = partsOf(b)
-  return (was.type !== null && now.type !== null && was.type !== now.type) || (was.size !== null && now.size !== null && was.size !== now.size)
-}
-/** Whether `now` reads a size or type `was` did not, with nothing changed: a kept record can take it, so a later change shows. */
-export const configLearns = (was: string, now: string) =>
-  !configDiffers(was, now) && ((partsOf(was).size === null && partsOf(now).size !== null) || (partsOf(was).type === null && partsOf(now).type !== null))
-const configOf = (row: SavingsView['inventory'][number]) => configKey(row.size, row.type)
 const isFlagged = (fix: FixRecord, view: SavingsView, sameCheck: boolean) =>
   view.findings.some(
     one =>
@@ -111,14 +98,25 @@ const checkPartial = (fix: FixRecord, view: SavingsView) => view.limited.length 
 export function fixChanged(fix: FixRecord, view: SavingsView): boolean | null {
   const row = rowOf(fix, view)
   if (!row) return null
-  if (fix.config !== null) return configDiffers(fix.config, configOf(row))
+  const was = keptConfig(fix)
+  if (was !== null) {
+    const now = configOf(row)
+    // Only a setting known both when it was drafted and now can show a change; with none, this run cannot tell.
+    return comparable(was, now).length === 0 ? null : changedSettings(was, now).length > 0
+  }
   return checkPartial(fix, view) ? null : !isFlagged(fix, view, true)
 }
 
-/** The config a kept fix takes from this run: what it now reads that the draft did not, or null to keep the record as it is. */
-export function learnedConfig(fix: FixRecord, view: SavingsView): string | null {
-  const row = fix.config === null ? undefined : rowOf(fix, view)
-  return row && fix.config !== null && configLearns(fix.config, configOf(row)) ? configOf(row) : null
+/**
+ * The settings a kept fix holds after this run: each one it did not know is filled from what this run read, and
+ * none it knew is overwritten. Null when the run teaches it nothing.
+ */
+export function mergedConfig(fix: FixRecord, view: SavingsView): WarehouseConfig | null {
+  const was = keptConfig(fix)
+  const row = was === null ? undefined : rowOf(fix, view)
+  if (!was || !row) return null
+  const now = configOf(row)
+  return learns(was, now) ? mergeConfig(was, now) : null
 }
 
 /** What a run says became of a drafted fix. */
@@ -132,7 +130,8 @@ export function fixProgress(fix: FixRecord, view: SavingsView): SavingsFixLine {
     // Names repeat across workspaces, so with several read the line names its own.
     text: `${fix.resourceName}${severalWorkspaces(view) && fix.workspaceId ? ` (workspace ${oneLine(fix.workspaceId)})` : ''}: ${text}`,
   })
-  const flagged = isFlagged(fix, view, fix.config === null)
+  const was = keptConfig(fix)
+  const flagged = isFlagged(fix, view, was === null)
   const drafted = `fix drafted ${fix.date}`
   const days = windowDays(view.window)
   const billing = `measured from ${PLATFORM_NAME[fix.platform]} billing`
@@ -144,32 +143,37 @@ export function fixProgress(fix: FixRecord, view: SavingsView): SavingsFixLine {
 
   // A cluster or job is in a run's answer only while it is flagged, so its cost afterwards is not known.
   if (!row) {
-    if (fix.config !== null) return line('unmeasured', `${drafted}, and this run did not list it, so no amount is claimed.`)
+    if (was !== null) return line('unmeasured', `${drafted}, and this run did not list it, so no amount is claimed.`)
     if (flagged) return sinceDraft < days ? waiting('still flagged') : line('unchanged', `${drafted}, and it is still flagged, so no saving is claimed.`)
     if (checkPartial(fix, view)) return notRun
     return line('unmeasured', `${drafted}, and it is no longer flagged. This check does not read its cost afterwards, so no amount is claimed.`)
   }
-  const config = configText(row.size, row.type)
+  // A line names only the settings known both when the fix was drafted and now: the only ones it compared.
+  const named = was === null ? [] : comparable(was, configOf(row))
+  if (was !== null && named.length === 0) {
+    return line('unmeasured', `${drafted}, but its ${settingsNoun(SETTINGS)} were not read both then and now, so nothing is claimed yet.`)
+  }
+  const config = configLabel(configOf(row), named)
   const changed = fixChanged(fix, view)
   if (changed === null) return notRun
   if (!changed) {
-    if (sinceDraft < days && (flagged || fix.config === null)) return waiting(fix.config === null ? 'still flagged' : `still ${config}`)
-    if (fix.config === null) return line('unchanged', `${drafted}, and it is still flagged, so no saving is claimed.`)
+    if (sinceDraft < days && (flagged || was === null)) return waiting(was === null ? 'still flagged' : `still ${config}`)
+    if (was === null) return line('unchanged', `${drafted}, and it is still flagged, so no saving is claimed.`)
     return flagged
       ? line('unchanged', `${drafted}, but it is still ${config} and still flagged, so no saving is claimed.`)
-      : line('unchanged', `${drafted}, but it is still ${config}: it is no longer flagged, and its size did not change, so no saving is claimed.`)
+      : line('unchanged', `${drafted}, but it is still ${config}: it is no longer flagged, and its ${settingsNoun(named)} did not change, so no saving is claimed.`)
   }
   // Counted from the first run that saw the change: the change itself may have landed any time before it.
   const since = fix.changedSeen ?? view.window.end
   const after = daysAfter(since, view.window)
   if (after < days) return line('measuring', `${drafted} · measuring (${after} of ${days} days)`)
-  const what = fix.config !== null ? `changed to ${config}` : 'no longer flagged'
+  const what = was !== null ? `changed to ${config}` : 'no longer flagged'
   if (fix.dailyCost === null || row.windowCost === null) return line('unmeasured', `${what} since ${since}, but its cost was not known on both sides, so no amount is claimed.`)
   if (fix.pricing && fix.pricing !== view.pricing) return line('unmeasured', `${what} since ${since}, but its cost was priced differently then, so no amount is claimed.`)
   const dailyNow = row.windowCost / days
   const costs = `${cents(fix.dailyCost)} a day before, ${cents(dailyNow)} a day now (${billing})`
   // Usage falling clears a finding too, and this fix leaves no setting in the answer to tell the two apart.
-  if (fix.config === null) return line('no_saving', `${what} since ${since}: ${costs}. The answer does not show whether your change did that, so no saving is claimed.`)
+  if (was === null) return line('no_saving', `${what} since ${since}: ${costs}. The answer does not show whether your change did that, so no saving is claimed.`)
   const gap = fix.dailyCost - dailyNow
   if (gap <= 0) return line('no_saving', `${what} since ${since}, but its cost did not fall: ${costs}.`)
   return line('lower', `${what} since ${since}: observed spend ${costs}. ${OBSERVED_NOTE}`)

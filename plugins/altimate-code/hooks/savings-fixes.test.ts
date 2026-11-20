@@ -1,7 +1,9 @@
 import { expect, test } from 'claude-code/testing'
 
 import type { SavingsFinding, SavingsView } from '../types'
-import { configDiffers, configKey, configText, daysAfter, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, learnedConfig, type FixRecord } from './savings-fixes'
+import type { WarehouseConfig } from '../types'
+import { OBSERVED_NOTE } from './savings-format'
+import { daysAfter, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, mergedConfig, type FixRecord } from './savings-fixes'
 
 const WINDOW = { start: '2026-11-11', end: '2026-11-18' }
 
@@ -14,7 +16,7 @@ const fix = (over: Partial<FixRecord> = {}): FixRecord => ({
   workspaceId: null,
   resourceName: 'Classic',
   title: 'Over-Sized Warehouse',
-  config: 'SMALL CLASSIC',
+  config: { size: 'SMALL', type: 'CLASSIC' },
   dailyCost: 4,
   ...over,
 })
@@ -32,38 +34,69 @@ const view = (size: string | null, windowCost: number | null, findings: Partial<
 
 const flagged = [{ checkId: 'wh_oversized', resourceId: 'w1', resourceType: 'sql_warehouse', workspaceId: null }]
 
-test('a size read on one side only is no resize, and an unread size is left out of a fix line, never "?"', () => {
-  expect(configText(null, 'PRO')).toBe('PRO')
-  expect(configText('2X_SMALL', 'PRO')).toBe('2X-SMALL PRO')
-  expect(configDiffers('SMALL PRO', 'PRO')).toBe(false)
-  expect(configDiffers('PRO', 'SMALL PRO')).toBe(false)
-  // A record kept before unread sizes were left out.
-  expect(configDiffers('? PRO', 'SMALL PRO')).toBe(false)
-  expect(configDiffers('SMALL PRO', 'X-SMALL PRO')).toBe(true)
-  expect(configDiffers('SMALL CLASSIC', 'SMALL PRO')).toBe(true)
-  // Drafted with a size, then a run that did not read one: no change, and the line names no "?".
-  expect(fixChanged(fix(), view(null, 7))).toBe(false)
-  const later = fixProgress(fix(), view(null, 7, flagged))
-  expect(later.text).not.toMatch(/\?|changed to/)
-  expect(later.text).toBe('Classic: fix drafted 2026-11-01, but it is still CLASSIC and still flagged, so no saving is claimed.')
-  // Drafted without a size, then a run that read one.
-  expect(fixChanged(fix({ config: 'CLASSIC' }), view('SMALL', 7))).toBe(false)
+// Each setting × known or unknown when drafted × known or unknown now × the same or a different value: the settings
+// the record keeps after the run, whether the run counts a change, and the line. The other setting is known and the
+// same on both sides, so every line has something it compared.
+const SETTING_CASES = [
+  { setting: 'size', a: 'SMALL', b: 'X_SMALL', other: 'type', otherValue: 'CLASSIC' },
+  { setting: 'type', a: 'CLASSIC', b: 'PRO', other: 'size', otherValue: 'SMALL' },
+] as const
+const rowView = (config: WarehouseConfig) =>
+  ({
+    platform: 'databricks',
+    window: WINDOW,
+    findings: [],
+    skipped: [],
+    limited: [],
+    pricing: 'list price',
+    inventory: [{ id: 'w1', name: 'Classic', type: config.type, size: config.size, windowCost: 7 }],
+  }) as unknown as SavingsView
+for (const { setting, a, b, other, otherValue } of SETTING_CASES) {
+  for (const before of ['known', 'unknown'] as const) {
+    for (const after of ['known', 'unknown'] as const) {
+      for (const same of [true, false]) {
+        test(`fix ${setting}: ${before} when drafted, ${after} now, ${same ? 'same' : 'different'} value`, () => {
+          const was = { [other]: otherValue, [setting]: before === 'known' ? a : null } as WarehouseConfig
+          const now = { [other]: otherValue, [setting]: after === 'known' ? (same ? a : b) : null } as WarehouseConfig
+          const drafted = fix({ config: was, changedSeen: '2026-11-10' })
+          const view = rowView(now)
+          // Merge: a known setting is never overwritten; an unknown one takes what this run read.
+          const kept = mergedConfig(drafted, view) ?? was
+          expect(kept[setting]).toBe(before === 'known' ? a : after === 'known' ? (same ? a : b) : null)
+          expect(kept[other]).toBe(otherValue)
+          // Changed: only a setting known on both sides, with different values.
+          const changed = before === 'known' && after === 'known' && !same
+          expect(fixChanged(drafted, view)).toBe(changed)
+          // The line names only the settings known both then and now.
+          const named = before === 'known' && after === 'known' ? (['size', 'type'] as const) : ([other] as const)
+          const label = named.map(one => (one === 'size' ? now.size!.replace(/_/g, '-') : now.type!)).join(' ')
+          expect(fixProgress(drafted, view).text).toBe(
+            changed
+              ? `Classic: changed to ${label} since 2026-11-10: observed spend $4.00 a day before, $1.00 a day now (measured from Databricks billing). ${OBSERVED_NOTE}`
+              : `Classic: fix drafted 2026-11-01, but it is still ${label}: it is no longer flagged, and its ${named.join(' and ')} did not change, so no saving is claimed.`,
+          )
+        })
+      }
+    }
+  }
+}
+
+test('a fix whose settings were not read both then and now claims nothing yet, and keeps what this run read', () => {
+  for (const config of [{ size: null, type: null }, 'SMALL CLASSIC', '? PRO']) {
+    // The strings an older version kept load with every setting unknown.
+    const drafted = fix({ config: config as WarehouseConfig, changedSeen: '2026-11-10' })
+    const view = rowView({ size: 'X_SMALL', type: 'PRO' })
+    expect(fixChanged(drafted, view)).toBeNull()
+    expect(fixProgress(drafted, view).text).toBe('Classic: fix drafted 2026-11-01, but its size and type were not read both then and now, so nothing is claimed yet.')
+    expect(mergedConfig(drafted, view)).toEqual({ size: 'X_SMALL', type: 'PRO' })
+  }
 })
 
-test('a kept config names what was not read, so a size is never parsed as a type, and a draft learns what a later run reads', () => {
-  expect(configKey(null, 'PRO')).toBe('? PRO')
-  expect(configKey('SMALL', '')).toBe('SMALL ?')
-  expect(configText('SMALL', '')).toBe('SMALL')
-  // A type read on one side only is no change; a size read on both that differs is.
-  expect(configDiffers('SMALL ?', 'SMALL PRO')).toBe(false)
-  expect(configDiffers('SMALL ?', 'X-SMALL PRO')).toBe(true)
-  // Drafted before the size was read: the first run that reads it gives the record its size, so a later resize shows.
-  const drafted = fix({ config: configKey(null, 'CLASSIC') })
-  expect(fixChanged(drafted, view('SMALL', 7))).toBe(false)
-  expect(learnedConfig(drafted, view('SMALL', 7))).toBe('SMALL CLASSIC')
-  expect(learnedConfig(drafted, view(null, 7))).toBeNull()
-  expect(learnedConfig(fix(), view('SMALL', 7))).toBeNull()
-  expect(fixChanged({ ...drafted, config: 'SMALL CLASSIC' }, view('X_SMALL', 7))).toBe(true)
+test('a run that reads one setting but not another keeps what the record knew, so a later resize still shows', () => {
+  const drafted = fix({ config: { size: 'SMALL', type: null } })
+  const merged = mergedConfig(drafted, rowView({ size: null, type: 'PRO' }))
+  expect(merged).toEqual({ size: 'SMALL', type: 'PRO' })
+  expect(fixChanged({ ...drafted, config: merged }, rowView({ size: 'X_SMALL', type: 'PRO' }))).toBe(true)
 })
 
 test('only whole days after the date count, and never more than the window', () => {
@@ -78,9 +111,9 @@ test('only whole days after the date count, and never more than the window', () 
 })
 
 test('a size fix is compared by size; any other fix by its finding clearing', () => {
-  expect(fixConfig({ checkId: 'wh_oversized', config: 'SMALL CLASSIC' })).toBe('SMALL CLASSIC')
-  expect(fixConfig({ checkId: 'downsize_warehouse', config: 'Large STANDARD' })).toBe('Large STANDARD')
-  expect(fixConfig({ checkId: 'high_idle_time', config: 'Large STANDARD' })).toBeNull()
+  expect(fixConfig({ checkId: 'wh_oversized', config: { size: 'SMALL', type: 'CLASSIC' } })).toEqual({ size: 'SMALL', type: 'CLASSIC' })
+  expect(fixConfig({ checkId: 'downsize_warehouse', config: { size: 'Large', type: 'STANDARD' } })).toEqual({ size: 'Large', type: 'STANDARD' })
+  expect(fixConfig({ checkId: 'high_idle_time', config: { size: 'Large', type: 'STANDARD' } })).toBeNull()
   expect(fixChanged(fix(), view('X_SMALL', 7))).toBe(true)
   expect(fixChanged(fix(), view('SMALL', 7))).toBe(false)
   const idle = fix({ checkId: 'high_idle_time', config: null })
@@ -143,7 +176,7 @@ test('an unchanged warehouse claims nothing, flagged or not, however long ago th
   expect(still.text).toBe('Classic: fix drafted 2026-11-01, but it is still SMALL CLASSIC and still flagged, so no saving is claimed.')
   const quiet = fixProgress(fix(), view('SMALL', 1))
   expect(quiet.state).toBe('unchanged')
-  expect(quiet.text).toContain('no longer flagged, and its size did not change')
+  expect(quiet.text).toContain('no longer flagged, and its size and type did not change')
   expect(quiet.text).not.toContain('saved')
 })
 
@@ -195,7 +228,7 @@ test('the same id in another workspace is another resource', () => {
 })
 
 test('a Snowflake warehouse with no usage, listed under its name, is still found', () => {
-  const idle = fix({ platform: 'snowflake', checkId: 'downsize_warehouse', resourceId: '7', resourceName: 'BI_WH', config: 'Large STANDARD', changedSeen: '2026-11-10' })
+  const idle = fix({ platform: 'snowflake', checkId: 'downsize_warehouse', resourceId: '7', resourceName: 'BI_WH', config: { size: 'Large', type: 'STANDARD' }, changedSeen: '2026-11-10' })
   const listed = { platform: 'snowflake', window: WINDOW, findings: [], skipped: [], limited: [], pricing: 'list price', inventory: [{ id: 'BI_WH', name: 'BI_WH', type: 'STANDARD', size: 'Medium', windowCost: 0 }] } as unknown as SavingsView
   expect(fixProgress(idle, listed).state).toBe('lower')
 })

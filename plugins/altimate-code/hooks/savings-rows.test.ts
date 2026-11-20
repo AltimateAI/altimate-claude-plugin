@@ -34,7 +34,7 @@ const finding = (over: Partial<SavingsFinding>): SavingsFinding => ({
   evidence: [],
   fact: '95% idle',
   dailyCost: 1,
-  config: 'SMALL CLASSIC',
+  config: { size: 'SMALL', type: 'CLASSIC' },
   fixRequest: '',
   ...over,
 })

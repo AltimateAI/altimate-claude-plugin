@@ -12,12 +12,13 @@
 import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
-import type { SavingsConnection, SavingsFinding, SavingsFixLine, SavingsKept, SavingsPlatform, SavingsView, SavingsWarehouseRef } from '../../types'
+import type { SavingsConnection, SavingsFinding, SavingsFixLine, SavingsKept, SavingsPlatform, SavingsView, SavingsWarehouseRef, WarehouseConfig } from '../../types'
 import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
 import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
+import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig } from '../savings-config'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
-import { configDiffers, configKey, FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, learnedConfig, sameWorkspace, type FixRecord } from '../savings-fixes'
+import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, mergedConfig, sameWorkspace, type FixRecord } from '../savings-fixes'
 import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, dollars, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
 import { savingsReportHtml } from '../savings-report'
 import {
@@ -327,9 +328,6 @@ function factOf(evidence: Record<string, unknown>, title: string): string {
 const sameResource = (finding: Pick<SavingsFinding, 'resourceType' | 'resourceId' | 'workspaceId'>, line: Pick<SavingsFixLine, 'resourceType' | 'resourceId' | 'workspaceId'>) =>
   finding.resourceType === line.resourceType && finding.resourceId === line.resourceId && (finding.workspaceId ?? null) === (line.workspaceId ?? null)
 
-/** A warehouse's size and type as the change line shows them; a size the CLI did not read is left out, not drawn as "?". */
-const configOf = (warehouseSize: unknown, type: unknown) => [oneLine(warehouseSize) ? size(warehouseSize) : '', oneLine(type)].filter(Boolean).join(' ')
-
 /** A size as the Databricks API spells it: `2X_SMALL` is `2X-Small`. */
 export function apiSize(value: unknown): string {
   return oneLine(value)
@@ -557,7 +555,7 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
         evidence: evidenceLines(one.evidence, days),
         fact: factOf(one.evidence ?? {}, titleOf(one)),
         dailyCost: dailyCostOf(one, warehouse?.windowCost, days),
-        config: warehouse ? configKey(warehouse.size, warehouse.type) : null,
+        config: warehouse ? configOf(warehouse) : null,
         fixRequest: fixRequest(one, days, platform, pricing),
       }
     }),
@@ -606,13 +604,21 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
  * What a warehouse was when a run first flagged it, kept across sessions to show its spend before and after a
  * change. `windowCost` is null when the answer gave the warehouse no cost: no amount is claimed from it. `days`
  * is the length of the window it covers; a baseline kept before `days` was stored is read as this run's.
+ * `config` holds each setting as read; one kept by an older version, without it, is fully unknown.
  */
-type Baseline = { date: string; type: string; size: string | null; windowCost: number | null; days?: number }
+type Baseline = { date: string; config: WarehouseConfig; windowCost: number | null; days?: number }
+
+/** A kept baseline back from the store, or undefined when there is none it can read. */
+function loadBaseline(value: unknown): Baseline | undefined {
+  const one = value as Partial<Baseline> | null | undefined
+  if (!one || typeof one !== 'object' || typeof one.date !== 'string') return undefined
+  const windowCost = typeof one.windowCost === 'number' ? one.windowCost : null
+  return { date: one.date, config: loadConfig(one.config), windowCost, ...(typeof one.days === 'number' ? { days: one.days } : {}) }
+}
 
 // One connection can read several workspaces, where warehouse ids can repeat: the workspace is part of the key.
 const baselineKey = (scope: string, warehouse: Pick<ToolWarehouse, 'id' | 'workspace_id'>) =>
   `savings-baseline:${scope}:${warehouse.workspace_id ? `${warehouse.workspace_id}:` : ''}${warehouse.id}`
-const sizeOrNull = (value: string | null | undefined) => value ?? null
 
 /**
  * Each flagged warehouse's state is kept the first time a run flags it. A later run that finds its
@@ -643,30 +649,30 @@ export async function trackChanges(
     // A warehouse listed twice is compared once, not with the baseline its first listing just wrote.
     if (seen.has(key)) continue
     seen.add(key)
-    const stored = (await $.store.get(key).catch(() => undefined)) as Baseline | undefined
+    const stored = loadBaseline(await $.store.get(key).catch(() => undefined))
     // A /clear while the baselines were read: this run keeps nothing.
     if (!live()) return []
     const windowCost = typeof warehouse.window_cost === 'number' ? warehouse.window_cost : null
-    // A size read on one side only is no resize: the other run did not read it. The type still tells a change.
-    const resized = stored?.size != null && warehouse.size != null && stored.size !== warehouse.size
-    const changed = stored && (resized || stored.type !== warehouse.type)
-    // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
-    // A baseline kept without a cost or a size takes the first one a later run gives, while the warehouse is still
-    // unchanged, so a later change shows.
-    const fillCost = stored && !changed && stored.windowCost === null && windowCost !== null
-    const fillSize = stored && !changed && stored.size == null && warehouse.size != null
-    if (stored && (fillCost || fillSize)) {
-      const filled: Baseline = { ...stored, ...(fillCost ? { windowCost, days: windowDays(view.window) } : {}), ...(fillSize ? { size: sizeOrNull(warehouse.size) } : {}) }
+    const now = configOf(warehouse)
+    // Only a setting both runs read can have changed, and the line names only those.
+    const changed = stored ? changedSettings(stored.config, now) : []
+    // Per setting, a later read fills what the baseline did not know and never overwrites what it did, and a cost
+    // kept unknown takes the first one a later run gives, while nothing changed: a later change then shows.
+    const fillCost = stored && changed.length === 0 && stored.windowCost === null && windowCost !== null
+    if (stored && changed.length === 0 && (fillCost || learns(stored.config, now))) {
+      const filled: Baseline = { ...stored, config: mergeConfig(stored.config, now), ...(fillCost ? { windowCost, days: windowDays(view.window) } : {}) }
       await $.store.set(key, filled).catch(() => undefined)
     }
-    if (stored && changed && typeof stored.windowCost === 'number' && windowCost !== null) {
+    // A cost the answer did not give, then or now, is not shown as $0: the change goes unremarked.
+    if (stored && changed.length > 0 && stored.windowCost !== null && windowCost !== null) {
+      const named = comparable(stored.config, now)
       changes.push({
         resourceId: warehouse.id,
         workspaceId: warehouse.workspace_id ?? null,
         // Names repeat across workspaces, so with several read the line names its own.
         name: `${shownName(warehouse.name, warehouse.id)}${several ? ` (workspace ${oneLine(warehouse.workspace_id)})` : ''}`,
-        from: configOf(stored.size, stored.type),
-        to: configOf(warehouse.size, warehouse.type),
+        from: configLabel(stored.config, named),
+        to: configLabel(now, named),
         since: stored.date,
         monthlyBefore: (stored.windowCost * 30) / (stored.days ?? windowDays(view.window)),
         monthlyNow: (windowCost * 30) / windowDays(view.window),
@@ -675,9 +681,7 @@ export async function trackChanges(
     // In one workspace an id is unambiguous, so it is matched alone: the finding or the warehouse may lack the workspace id.
     const isFlagged = flagged.has(`${warehouse.workspace_id ?? ''}/${warehouse.id}`) || (!several && flaggedIds.has(warehouse.id))
     if (!stored && isFlagged) {
-      await $.store
-        .set(key, { date: today, type: warehouse.type, size: sizeOrNull(warehouse.size), windowCost, days: windowDays(view.window) } satisfies Baseline)
-        .catch(() => undefined)
+      await $.store.set(key, { date: today, config: now, windowCost, days: windowDays(view.window) } satisfies Baseline).catch(() => undefined)
     }
   }
   return changes
@@ -1025,18 +1029,20 @@ async function fixesFor($: EngineInterface, view: SavingsView, today: string, li
     const changed = fixChanged(held, view)
     let fix = held
     if (changed === true && !held.changedSeen) fix = { ...held, changedSeen: today }
-    // A size or type the draft could not read is taken from the first run that reads it, so a later resize shows.
-    const learned = changed === false ? learnedConfig(held, view) : null
-    if (learned) fix = { ...fix, config: learned }
     // A run that cannot tell leaves the day as it was.
     if (changed === false && held.changedSeen) {
       const { changedSeen: _gone, ...rest } = held
       fix = rest
     }
+    // The line compares this run with what the draft knew. The record then takes each setting it did not know from
+    // this run, keeping every one it did, so a later change of it shows.
+    const line = fixProgress(fix, view)
+    const merged = mergedConfig(fix, view)
+    const kept = merged ? { ...fix, config: merged } : fix
     // A /clear while the fixes were read: this run writes nothing back.
     if (!live()) return []
-    if (fix !== held) await $.store.set(key, fix).catch(() => undefined)
-    lines.push(fixProgress(fix, view))
+    if (kept !== held) await $.store.set(key, kept).catch(() => undefined)
+    lines.push(line)
   }
   return lines
 }
@@ -1223,7 +1229,8 @@ async function rememberFix($: EngineInterface, view: SavingsView, finding: Savin
   const held = await $.store.get(key).catch(() => undefined)
   const config = fixConfig(finding)
   // Asked again before anything changed: the first draft's date and cost still stand.
-  const sameConfig = held && isFixRecord(held) && (held.config === null ? config === null : config !== null && !configDiffers(held.config, config))
+  const heldConfig = isFixRecord(held) && held.config != null ? loadConfig(held.config) : null
+  const sameConfig = isFixRecord(held) && (heldConfig === null ? config === null : config !== null && changedSettings(heldConfig, config).length === 0)
   if (isFixRecord(held) && sameConfig && (config !== null || held.checkId === finding.checkId)) return true
   // A fix that can be measured is not given up for one on the same warehouse that cannot.
   if (isFixRecord(held) && held.config !== null && config === null) return true
