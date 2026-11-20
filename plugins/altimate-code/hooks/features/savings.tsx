@@ -652,14 +652,16 @@ export async function trackChanges(
     const stored = loadBaseline(await $.store.get(key).catch(() => undefined))
     // A /clear while the baselines were read: this run keeps nothing.
     if (!live()) return []
-    const windowCost = typeof warehouse.window_cost === 'number' ? warehouse.window_cost : null
     const now = configOf(warehouse)
+    // A cost the answer did not give is no amount: no line is drawn from it, and a baseline keeps it unknown.
+    const windowCost = typeof warehouse.window_cost === 'number' && Number.isFinite(warehouse.window_cost) ? warehouse.window_cost : null
     // Only a setting both runs read can have changed, and the line names only those.
     const changed = stored ? changedSettings(stored.config, now) : []
-    // Per setting, a later read fills what the baseline did not know and never overwrites what it did, and a cost
-    // kept unknown takes the first one a later run gives, while nothing changed: a later change then shows.
+    // Per setting, a later read fills what the baseline did not know, whatever else changed, and never overwrites
+    // what it knew. A cost kept unknown takes the first one a later run gives while nothing changed. A later change
+    // then shows.
     const fillCost = stored && changed.length === 0 && stored.windowCost === null && windowCost !== null
-    if (stored && changed.length === 0 && (fillCost || learns(stored.config, now))) {
+    if (stored && (fillCost || learns(stored.config, now))) {
       const filled: Baseline = { ...stored, config: mergeConfig(stored.config, now), ...(fillCost ? { windowCost, days: windowDays(view.window) } : {}) }
       await $.store.set(key, filled).catch(() => undefined)
     }

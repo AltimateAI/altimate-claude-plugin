@@ -1,5 +1,9 @@
 // How /savings writes money, days and platforms, shared by the pane, the tool-row note and the report.
 import type { SavingsFinding, SavingsPlatform, SavingsView } from '../types'
+import { oneLine } from './savings-text'
+
+// Free text on one line; the settings a baseline and a fix keep share it.
+export { oneLine }
 
 export const PLATFORM_NAME: Record<SavingsPlatform, string> = { databricks: 'Databricks', snowflake: 'Snowflake' }
 export const PLATFORMS: readonly SavingsPlatform[] = ['databricks', 'snowflake']
@@ -44,12 +48,6 @@ export function range(min: number, max: number): string {
   return dollars(min) === dollars(max) ? dollars(max) : `${dollars(min)}–${dollars(max)}`
 }
 
-/** Free text from the workspace on one line, with control and invisible characters gone: one of them can blank the pane. */
-export const oneLine = (value: unknown) =>
-  String(value ?? '')
-    .replace(/\p{Cf}/gu, '')
-    .replace(/[\s\p{Cc}]+/gu, ' ')
-    .trim()
 
 /**
  * Text as it may be drawn: control and invisible characters gone, spacing otherwise left alone. Names,

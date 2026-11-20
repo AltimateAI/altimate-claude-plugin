@@ -6,7 +6,7 @@
 // and never calls the difference saved. A fix that changes neither leaves nothing to see but its finding
 // clearing, which usage falling can do too.
 import type { SavingsFinding, SavingsFixLine, SavingsPlatform, SavingsView, WarehouseConfig } from '../types'
-import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig, SETTINGS, settingsNoun } from './savings-config'
+import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig, SETTINGS, type Setting } from './savings-config'
 import { cents, DAY_MS, OBSERVED_NOTE, oneLine, PLATFORM_NAME, windowDays } from './savings-format'
 
 /** What is kept when a fix is drafted. */
@@ -43,6 +43,9 @@ const SIZING_CHECKS = new Set(['wh_classic_pro_to_serverless', 'wh_oversized', '
 /** The settings to compare later runs against, for a fix that changes them; null for any other fix. */
 export const fixConfig = (one: Pick<SavingsFinding, 'checkId' | 'config'>): WarehouseConfig | null =>
   SIZING_CHECKS.has(one.checkId) && one.config != null ? loadConfig(one.config) : null
+
+/** The settings a line names, as words: `size and type`, `size`. */
+const settingsNoun = (settings: readonly Setting[]) => settings.join(' and ')
 
 /** A kept fix's settings as this version reads them. */
 const keptConfig = (fix: FixRecord): WarehouseConfig | null => (fix.config === null || fix.config === undefined ? null : loadConfig(fix.config))

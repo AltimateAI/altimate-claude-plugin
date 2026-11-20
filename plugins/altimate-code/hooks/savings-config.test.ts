@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig, settingsNoun } from './savings-config'
+import { changedSettings, comparable, configLabel, configOf, learns, loadConfig, mergeConfig } from './savings-config'
 
 test('a kept config loads only as the object this version keeps; anything else is fully unknown', () => {
   const unknown = { size: null, type: null }
@@ -21,5 +21,4 @@ test('each setting merges, compares and is named on its own', () => {
   expect(configLabel(now, comparable(was, now))).toBe('X-SMALL')
   expect(configLabel(now)).toBe('X-SMALL PRO')
   expect(configLabel({ size: null, type: null })).toBe('')
-  expect(settingsNoun(['size', 'type'])).toBe('size and type')
 })
