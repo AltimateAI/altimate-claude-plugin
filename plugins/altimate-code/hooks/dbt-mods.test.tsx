@@ -968,6 +968,17 @@ test('a table read through ref() (a dependency), the model itself, or an unclear
   expect(result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).not.toContain('hardcoded')
 })
 
+test('with an altimate-code that has no dbt_map_relations, nothing is flagged and the check goes on', async ($, on) => {
+  const compiled = { ...MANIFEST, parent_map: { ...(MANIFEST as any).parent_map, 'model.shop.orders': [] }, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], depends_on: { nodes: [] } } } }
+  const { clock, mapAsked } = await start($, on, { manifestAfterShow: compiled, files: { 'target/manifest.json': JSON.stringify(MANIFEST), 'target/.altimate-plugin/compiled/shop/models/orders.sql': 'select * from main.stg_orders' } })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  expect(mapAsked).toEqual([])
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).toContain('compiled and ran')
+  expect(note).not.toContain('hardcoded')
+})
+
 test('a dbt command that only rewrites the manifest starts no check; a change to the model\'s schema.yml checks it again', async ($, on) => {
   const { clock, runs, mtimes, setBash } = await start($, on, { show: { rows: [{ order_id: 1, order_total: 10 }] } })
   await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'as amount', new_string: 'as order_total' })

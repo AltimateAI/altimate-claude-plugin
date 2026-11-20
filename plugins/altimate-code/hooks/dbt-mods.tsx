@@ -530,13 +530,12 @@ function addContext<T extends { context?: string[] }>(result: T, note: string | 
 /** The project-relative schema file a manifest node's columns come from (`patch_path`), when it names one. */
 const schemaOf = (node: any): string | null => (typeof node?.patch_path === 'string' ? node.patch_path.replace(/^[^:]*:\/\//, '') : null)
 
-/** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
 /**
  * The columns of a model's relation as it is built in the warehouse (`dbt show --inline "select * from {{ ref() }}"`,
  * one row): what the model returned before an edit that has not been built yet. Null when dbt could not show it (never
  * built, no row).
  */
-async function builtColumns($: EngineInterface, place: string, run: (args: string[]) => Promise<ProcessDone>, pkg: string | null, name: string, version: unknown, viaRunner: boolean, targetPath: string): Promise<string[] | null> {
+async function builtColumns(run: (args: string[]) => Promise<ProcessDone>, pkg: string | null, name: string, version: unknown, viaRunner: boolean, targetPath: string): Promise<string[] | null> {
   const args = [...(viaRunner && pkg ? [`'${pkg}'`] : []), `'${name}'`, ...(version !== undefined && version !== null && version !== '' ? [`v=${JSON.stringify(version)}`] : [])].join(', ')
   // Its artifacts go to a folder of their own: the manifest the check's show wrote stays the one it reports.
   const done = await run(['show', '--inline', `select * from {{ ref(${args}) }}`, '--limit', '1', '--output', 'json', '--log-format', 'json', '--target-path', targetPath]).catch(() => null)
@@ -549,7 +548,7 @@ async function builtColumns($: EngineInterface, place: string, run: (args: strin
  * The nodes a model reads through its own refs and sources: its direct parents, and through an ephemeral parent (which
  * dbt inlines into the compiled SQL) that parent's parents, and so on. A table read past a materialized parent is not.
  */
-function readThroughRefs(manifest: any, id: string): string[] {
+function readThroughRefs(manifest: any, id: string): Set<string> {
   const parents = (one: string): string[] => manifest?.parent_map?.[one] ?? manifest?.nodes?.[one]?.depends_on?.nodes ?? []
   const ephemeral = (one: string) => manifest?.nodes?.[one]?.config?.materialized === 'ephemeral'
   const seen = new Set<string>()
@@ -560,7 +559,7 @@ function readThroughRefs(manifest: any, id: string): string[] {
     seen.add(one)
     if (ephemeral(one)) todo.push(...parents(one))
   }
-  return [...seen]
+  return seen
 }
 
 /**
@@ -568,10 +567,9 @@ function readThroughRefs(manifest: any, id: string): string[] {
  * dependencies: altimate-code's dbt_map_relations reads the tables of the SQL and matches each to the manifest; only
  * one matched to a single node, other than the model and not read through its refs, counts. None when the tool is missing or fails.
  */
-async function hardcodedReads($: EngineInterface, manifest: string, sql: string, self: string, upstream: string[]): Promise<{ relation: string; use: string }[]> {
+async function hardcodedReads($: EngineInterface, manifest: string, sql: string, self: string, known: Set<string>): Promise<{ relation: string; use: string }[]> {
   const result = await within($, 15_000, runTool($, 'dbt_map_relations', { sql, manifest_path: manifest }, { cliOnly: true }).catch(() => null))
   const mappings: any[] = result?.ok && Array.isArray((result.metadata as any)?.mappings) ? (result.metadata as any).mappings : []
-  const known = new Set(upstream)
   const out: { relation: string; use: string }[] = []
   for (const one of mappings) {
     const candidates = Array.isArray(one?.candidates) ? one.candidates : []
@@ -583,6 +581,7 @@ async function hardcodedReads($: EngineInterface, manifest: string, sql: string,
   return out
 }
 
+/** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
 async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
   const rel = relative(root, file)
   // A check from a conversation that has ended takes no place in the order: it can neither land nor push a
@@ -740,7 +739,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // (An ephemeral model has no relation of its own: dbt would inline its edited SQL, so there is nothing from before.)
   const ephemeral = (node?.node?.config?.materialized ?? known?.node?.config?.materialized) === 'ephemeral'
   // Of those, only the ones undocumented then count as older gaps: a column whose documentation the edit removed is new.
-  const builtBefore = lastReturned.has(fileKey) || !(drift.undocumented.length && returned && named && !errors.length && !ephemeral) ? null : await builtColumns($, place, run1, pkg, named, node?.node?.version ?? known?.node?.version, viaRunner, `${scratch}/baseline`)
+  const builtBefore = lastReturned.has(fileKey) || !(drift.undocumented.length && returned && named && !errors.length && !ephemeral) ? null : await builtColumns(run1, pkg, named, node?.node?.version ?? known?.node?.version, viaRunner, `${scratch}/baseline`)
   const documentedBefore = known ? Object.values<any>(known.node.columns ?? {}) : null
   const earlier =
     lastReturned.get(fileKey) ??

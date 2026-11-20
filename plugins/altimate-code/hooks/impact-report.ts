@@ -115,8 +115,8 @@ export function valueCandidates(original: string, current: string, max = MAX_TAS
       left.set(line, n - 1)
       continue
     }
-    // A line that filters or joins (by its first word) names no value.
-    if (/^(?:where|and|or|on|join|left|right|inner|full|cross|group|order|having|qualify|limit|from)\b/i.test(line)) continue
+    // A line that filters or joins (by its first word, not a function such as `left(…)`) names no value.
+    if (/^(?:where|and|or|on|join|left|right|inner|full|cross|group|order|having|qualify|limit|from)\b(?!\s*\()/i.test(line)) continue
     for (const match of line.matchAll(/(?<![\w.])(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\b(?!\s*\()/g)) {
       const name = match[1]!.toLowerCase()
       if (!NOT_COLUMNS.has(name) && name.length > 1) counts.set(name, (counts.get(name) ?? 0) + 1)

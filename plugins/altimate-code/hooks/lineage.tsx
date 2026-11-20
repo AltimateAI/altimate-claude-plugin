@@ -1382,11 +1382,16 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
         }
       }
     }
-    if (result.isError) {
+    // The notes for the models the shell command changed, each once a turn: with its result, failed or not.
+    const withBashNotes = (out: typeof result) => {
       const fresh = bashNotes.filter(one => !contextGiven.has(one.key))
-      for (const one of fresh) contextGiven.add(one.key)
-      return fresh.length ? ({ ...result, context: [...(result.context ?? []), ...fresh.map(one => one.context)] } as typeof result) : result
+      for (const one of fresh) {
+        contextGiven.add(one.key)
+        $.ui.log(`impact-first · added to Claude's context: lineage for ${one.view.column ? `${one.view.model}.${one.view.column}` : one.view.model} (changed by a shell command)`, { to: 'debug' })
+      }
+      return fresh.length ? ({ ...out, context: [...(out.context ?? []), ...fresh.map(one => one.context)] } as typeof result) : null
     }
+    if (result.isError) return withBashNotes(result) ?? result
     // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
     if (file && EDIT_TOOLS.has(e.tool) && /(\.sql|\.py|dbt_project\.yml)$/i.test(file)) clearSqlGraphs()
     // Projects are found by their dbt_project.yml alone.
@@ -1441,14 +1446,8 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
         return { ...result, context: [...(result.context ?? []), note.context] } as typeof result
       }
     }
-    const fresh = bashNotes.filter(one => !contextGiven.has(one.key))
-    if (fresh.length) {
-      for (const one of fresh) {
-        contextGiven.add(one.key)
-        $.ui.log(`impact-first · added to Claude's context: lineage for ${one.view.column ? `${one.view.model}.${one.view.column}` : one.view.model} (changed by a shell command)`, { to: 'debug' })
-      }
-      return { ...result, context: [...(result.context ?? []), ...fresh.map(one => one.context)] } as typeof result
-    }
+    const noted = withBashNotes(result)
+    if (noted) return noted
     if (lookupFailed) {
       const name = (file!.split(/[\\/]/).pop() ?? file!).replace(/\.sql$/i, '')
       $.ui.log(`impact-first · added to Claude's context: the lineage lookup failed for ${name}`)
