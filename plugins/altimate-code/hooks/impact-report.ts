@@ -93,6 +93,9 @@ const NOT_COLUMNS = new Set(
     'set endset if endif for endfor macro endmacro ref source config var this dbt type_string type_numeric ' +
     'type_int type_float type_timestamp type_boolean quote_column int integer numeric decimal varchar text float double boolean').split(' '),
 )
+// A line that starts a clause, and the clauses that filter or join rather than compute a value.
+const CLAUSE = /^\s*(select|from|where|join|left|right|inner|full|cross|on|group|having|qualify|order|limit|union|with)\b/i
+const FILTERS = new Set(['where', 'join', 'left', 'right', 'inner', 'full', 'cross', 'on', 'having', 'qualify', 'group', 'order'])
 // A changed line that filters or joins rather than computes a value.
 const NOT_A_VALUE = /^\s*(?:where|and|or|on|from|join|left|right|inner|full|cross|group|order|having|limit|qualify|union|\)|\{%-?\s*(?:if|endif|for|endfor|else))\b/i
 
@@ -101,15 +104,25 @@ const NOT_A_VALUE = /^\s*(?:where|and|or|on|from|join|left|right|inner|full|cros
  * be the model's columns, the ones named most often first. Whether each is a column is the manifest's to say.
  */
 export function valueCandidates(original: string, current: string, max = MAX_TASK_COLUMNS * 2): string[] {
-  const lines = (text: string) => text.split('\n').map(line => line.trim()).filter(Boolean)
+  // Comments are not code: a reworded comment changes no value.
+  const lines = (text: string) =>
+    text
+      .replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}/g, ' ')
+      .split('\n')
+      .map(line => line.replace(/--.*$/, '').trim())
+      .filter(Boolean)
   const was = lines(original)
   const now = lines(current)
   const left = new Map<string, number>()
   for (const line of was) left.set(line, (left.get(line) ?? 0) + 1)
-  const added = now.filter(line => {
+  // Each line of the text after, with whether it sits in a filter or join clause (a predicate split over lines).
+  let filtering = false
+  const added = now.flatMap(line => {
+    const clause = CLAUSE.exec(line)?.[1]?.toLowerCase()
+    if (clause) filtering = FILTERS.has(clause)
     const n = left.get(line) ?? 0
     if (n > 0) left.set(line, n - 1)
-    return n === 0
+    return n === 0 && !filtering ? [line] : []
   })
   const counts = new Map<string, number>()
   for (const line of added) {

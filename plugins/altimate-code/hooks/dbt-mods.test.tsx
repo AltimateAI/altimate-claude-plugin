@@ -695,6 +695,11 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   expect(undocumentedByEdit(['amount_cents'], null, null, ['id'])).toEqual({ fresh: ['amount_cents'], old: [] })
   // Nothing to compare with: every column is the edit's, as before.
   expect(undocumentedByEdit(['amount'], null, null, null)).toEqual({ fresh: ['amount'], old: [] })
+  // A column a CTE already had, newly in the model's own select list: the edit's.
+  const cte = 'with src as (select id, amount from raw) select id from src'
+  expect(undocumentedByEdit(['amount'], cte, cte.replace('select id from src', 'select id, amount from src'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A gap an earlier edit made stays the edit's when a later edit rewrites its expression.
+  expect(undocumentedByEdit(['amount_cents'], 'select id, amount as amount_cents from x', 'select id, amount * 100 as amount_cents from x', ['id'], ['amount_cents'])).toEqual({ fresh: ['amount_cents'], old: [] })
 })
 
 test('only the columns an edit left undocumented are its gaps; ones undocumented before it are said once, quietly', async ($, on) => {
@@ -717,6 +722,12 @@ test('only the columns an edit left undocumented are its gaps; ones undocumented
   const pane = await $.ui.mount({ ...CHECK, surface: 'terminal' })
   expect(await pane.find({ type: 'Text', text: '  not documented, from before this edit' })).toBeDefined()
   await pane.unmount()
+
+  // A later edit that rewrites the new column, still undocumented, still warns about it.
+  files['models/orders.sql'] = 'select order_id, amount, status, amount * 101 as amount_cents from {{ ref("stg_orders") }}'
+  const rewritten: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'status, amount', new_string: 'status,  amount' })
+  await clock.settle()
+  expect(rewritten.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))).toContain('- returned but not documented in schema.yml: amount_cents\n')
 
   // The next edit adds no column: nothing is the edit's gap, and the older ones are not said again.
   show.rows = [{ order_id: 1, amount: 10, status: 'placed' }]
@@ -759,6 +770,26 @@ test('a package tested from integration_tests is compiled and validated from the
   await band.unmount()
 })
 
+test('from integration_tests the package repo\'s own dbt is used, and a versioned model is selected by its version', async ($, on) => {
+  const versioned = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop.orders': { ...(MANIFEST.nodes as any)['model.shop.orders'], version: 2 } } }
+  const { clock, runs, cwds } = await start($, on, {
+    show: { rows: [{ order_id: 1, amount: 10 }], node: 'orders.v2' },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+      'integration_tests/target/manifest.json': JSON.stringify(versioned),
+    },
+  })
+  await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  const at = runs.findIndex(argv => argv[1] === 'show')
+  // The repo's .venv dbt (integration_tests has none), run in integration_tests, for version 2 only.
+  expect(runs[at]!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
+  expect(cwds[at]).toBe(`${ROOT}/integration_tests`)
+})
+
 test('a project whose packages are not installed gets a one-line note, not a failure, when nothing installs it elsewhere', async ($, on) => {
   const { clock, toasts } = await start($, on, {
     show: { error: 'dbt expects 1 package(s) based on packages specified in packages.yml, but found only 0 package(s) installed in dbt_packages. Run "dbt deps"' },
@@ -795,6 +826,16 @@ kitTest('a model, seed or source named by its table instead of ref() or source()
   // Not code: a comment, a string; and the model itself.
   expect(hardcodedRelations("-- from main.stg_orders\nselect 'from main.stg_orders' as note from {{ ref('stg_orders') }} /* join raw_payments */", manifest, self)).toEqual([])
   expect(hardcodedRelations('select * from main.orders', manifest, self)).toEqual([])
+  // A CTE named like a model, quoted or not, is the CTE.
+  expect(hardcodedRelations('with "stg_orders" as (select 1 as id) select * from "stg_orders"', manifest, self)).toEqual([])
+  // A manifest too big to read here comes as a slice of the model's graph: the relations it lists apart still count,
+  // though the table, no longer a ref(), is out of the graph.
+  const sliced = { nodes: {}, relations: [{ id: 'model.jaffle_shop.stg_orders', resource_type: 'model', name: 'stg_orders', relation_name: '"jaffle_shop"."main"."stg_orders"' }, { id: 'source.jaffle_shop.shop.customers', resource_type: 'source', name: 'customers', source_name: 'shop', relation_name: '"raw"."shop"."customers"' }] }
+  expect(hardcodedRelations('select * from main.stg_orders join shop.customers using (id)', sliced, self)).toEqual([
+    { relation: 'main.stg_orders', use: "{{ ref('stg_orders') }}" },
+    { relation: 'shop.customers', use: "{{ source('shop', 'customers') }}" },
+  ])
+  expect(MANIFEST_SLICE).toContain("out['relations'] = ")
 })
 
 test('an edit that swaps a ref() for the table it builds is flagged: lineage cannot follow it', async ($, on) => {

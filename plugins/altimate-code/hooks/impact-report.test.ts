@@ -623,6 +623,11 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   expect(valueCandidates(before, after)).toEqual(['paid_amount'])
   // A filter names no column whose value changes.
   expect(valueCandidates(before, before.replace('is not null', 'is not null and med.paid_amount > 0'))).toEqual([])
+  // Nor does a predicate on the line below its WHERE, or a reworded comment.
+  const filtered = `${before}\n  and med.paid_amount > 0`
+  expect(valueCandidates(filtered, filtered.replace('> 0', '> 100'))).toEqual([])
+  const commented = before.replace('    , med.paid_amount', '    , med.paid_amount /* in cents */')
+  expect(valueCandidates(commented, commented.replace('in cents', 'in dollars'))).toEqual([])
   const answer = {
     version: 1, focus: { model: 'model.t.core__medical_claim', column: 'paid_amount' }, direction: 'downstream',
     nodes: [{ id: 'model.t.core__medical_claim', name: 'core__medical_claim' }, { id: 'model.t.fact_claims', name: 'fact_claims' }],

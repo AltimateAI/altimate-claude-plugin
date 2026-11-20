@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void> }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void> }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -233,8 +233,9 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '' } }
   })
   // The tool itself, beneath the plugin.
-  on('tool.call', (_: unknown, e: { tool: string }) => {
+  on('tool.call', async (_: unknown, e: { tool: string }) => {
     calls.push(`tool:${e.tool}`)
+    await options.duringTool?.()
     const result = options.toolResult?.(e)
     // A denial is the hook's own answer, not a result.
     if (result && typeof result === 'object' && 'deny' in result) return result
@@ -2005,4 +2006,21 @@ test('a graph wider than the pane opens as its ends, which fit, with its dashboa
   // Whatever the window shows, the dashboards stay named.
   expect((await ui.find({ type: 'Button', text: /Exec Revenue/ })) ?? (await ui.find({ type: 'Text', text: /Exec Revenue/ }))).toBeDefined()
   await ui.unmount()
+})
+
+test('a shell command that runs past a minute still has the model it changed found: the search covers its whole run', async ($, on) => {
+  const finds: string[][] = []
+  let clockRef: any
+  const { clock } = await start($, on, {
+    shell: argv => {
+      if (argv[0] === 'find') finds.push([...argv])
+      return argv[0] === 'find' ? { exitCode: 0, stdout: '' } : undefined
+    },
+    duringTool: async () => void (await clockRef.advance(70_000)),
+  })
+  clockRef = clock
+  await $.tool.call({ tool: 'Bash', command: "sed -i 's/a/b/' models/fct_orders.sql && sleep 70" })
+  await clock.settle()
+  expect(finds.at(-1)).toContain('-mmin')
+  expect(finds.at(-1)![finds.at(-1)!.indexOf('-mmin') + 1]).toBe('-2')
 })

@@ -1173,8 +1173,9 @@ async function bashChanged($: EngineInterface, start: BashStart): Promise<{ root
   const models = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')).models.map(one => one.replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean)
   const dirs = models.map(one => (one === '.' ? root : `${root}/${one}`))
   if (!dirs.length) return null
-  // Files touched in the last minute, then each one's own time against the command's start.
-  const listed = await $.process.run(['find', ...dirs, '-name', '*.sql', '-type', 'f', '-mmin', '-1'], { timeoutMs: 10_000 }).catch(() => null)
+  // Files touched since the command started, in whole minutes rounded up, then each one's own time against its start.
+  const minutes = Math.max(1, Math.ceil(((await $.clock.now()) - start.startedAt) / 60_000))
+  const listed = await $.process.run(['find', ...dirs, '-name', '*.sql', '-type', 'f', '-mmin', `-${minutes}`], { timeoutMs: 10_000 }).catch(() => null)
   const top = (await $.process.run(['git', '-C', root, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 }).catch(() => null))?.stdout.trim() ?? ''
   const files: { file: string; before: string }[] = []
   for (const file of (listed?.stdout ?? '').split('\n').map(one => one.trim()).filter(Boolean)) {

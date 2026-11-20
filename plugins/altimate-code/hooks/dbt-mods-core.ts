@@ -831,7 +831,7 @@ const unquote = (part: string) => part.trim().replace(/^["`\[]|["`\]]$/g, '').to
  */
 export function hardcodedRelations(sql: string, manifest: any, selfId?: string | null): { relation: string; use: string }[] {
   const text = sqlCode(sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}/g, ' __jinja__ '))
-  const ctes = new Set([...text.matchAll(/\b([A-Za-z_]\w*)\s+as\s*(?:not\s+)?(?:materialized\s+)?\(/gi)].map(one => one[1]!.toLowerCase()))
+  const ctes = new Set([...text.matchAll(new RegExp(String.raw`(${PART})\s+as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))].map(one => unquote(one[1]!)))
   // Every relation the manifest knows, by its full, schema-qualified and bare spellings.
   const known = new Map<string, { relation: string; use: string }>()
   const add = (id: string, node: any, use: string) => {
@@ -840,10 +840,12 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
     if (!parts.length) return
     for (let i = 0; i < parts.length; i++) known.set(parts.slice(i).join('.'), { relation: parts.slice(i).join('.'), use })
   }
-  for (const [id, node] of Object.entries<any>(manifest?.nodes ?? {})) {
+  // A manifest too big to read here comes as a slice of the model's graph, with every relation listed apart.
+  const nodes: [string, any][] = Array.isArray(manifest?.relations) ? manifest.relations.map((one: any) => [String(one?.id), one]) : Object.entries<any>(manifest?.nodes ?? {})
+  for (const [id, node] of nodes) {
     if (['model', 'seed', 'snapshot'].includes(node?.resource_type) && typeof node?.name === 'string') add(id, node, `{{ ref('${node.name}') }}`)
   }
-  for (const [id, node] of Object.entries<any>(manifest?.sources ?? {})) {
+  for (const [id, node] of Array.isArray(manifest?.relations) ? manifest.relations.filter((one: any) => one?.resource_type === 'source').map((one: any) => [String(one.id), one]) : Object.entries<any>(manifest?.sources ?? {})) {
     if (typeof node?.source_name === 'string' && typeof node?.name === 'string') add(id, node, `{{ source('${node.source_name}', '${node.name}') }}`)
   }
   const found = new Map<string, { relation: string; use: string }>()
@@ -857,22 +859,68 @@ export function hardcodedRelations(sql: string, manifest: any, selfId?: string |
   return [...found.values()]
 }
 
+/** The text with Jinja, comments and string literals blanked out, the same length, so positions still line up. */
+function masked(sql: string): string {
+  return sql.replace(/\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|\{#[\s\S]*?#\}|'(?:[^']|'')*'|--[^\n]*|\/\*[\s\S]*?\*\//g, one => one.replace(/[^\n]/g, ' '))
+}
+
 /**
- * Which undocumented columns this edit made, and which were undocumented already. A column is the edit's when the SQL
- * after the edit names it in a select list and the SQL before did not (a new or renamed column), and the last check
- * of the model did not return it. Any other (named before, or not named by the edit at all: a `select *`, a macro, a
- * package's passthrough columns) was there before. With neither the SQL from before nor an earlier check, or no
- * change seen between the two texts, every column counts as the edit's.
+ * The model's own output columns: the names in its last top-level SELECT (after its CTEs), not those of a CTE or
+ * subquery. `star` when that list has a `*`, whose columns the SQL does not name. Null when there is no such SELECT.
  */
-export function undocumentedByEdit(undocumented: string[], before: string | null, after: string | null, earlier: string[] | null): { fresh: string[]; old: string[] } {
+export function outputColumns(sql: string): { names: Set<string>; star: boolean } | null {
+  const code = masked(sql)
+  let depth = 0
+  let last = -1
+  for (let i = 0; i < code.length; i++) {
+    const ch = code[i]!
+    if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    else if (depth === 0 && /[Ss]/.test(ch) && /^select\b/i.test(code.slice(i, i + 7)) && !/\w/.test(code[i - 1] ?? '')) last = i
+  }
+  if (last < 0) return null
+  // The list runs to the FROM at the same depth.
+  let end = code.length
+  depth = 0
+  for (let i = last + 6; i < code.length; i++) {
+    const ch = code[i]!
+    if (ch === '(') depth++
+    else if (ch === ')') depth = Math.max(0, depth - 1)
+    else if (depth === 0 && /^from\b/i.test(code.slice(i, i + 5)) && !/\w/.test(code[i - 1] ?? '')) {
+      end = i
+      break
+    }
+  }
+  const list = code.slice(last, end)
+  const star = /(?:^select\s+(?:distinct\s+)?|,\s*)(?:[\w"`]+\.)?\*/i.test(list.replace(/\s+/g, ' ').trim())
+  return { names: new Set(selectItems(sql.slice(last, end)).keys()), star }
+}
+
+/**
+ * Which undocumented columns this edit made, and which were undocumented already. A column is the edit's when the
+ * model's own select list (its last SELECT, not a CTE's) names it after the edit and did not before (a new, renamed
+ * or newly exposed column), and the last check of the model did not return it; or when an earlier edit in this
+ * conversation made it and it is still undocumented (`ours`). Any other (named before, or not named by the model's
+ * list at all: a `select *`, a macro, a package's passthrough columns) was there before. With neither the SQL from
+ * before nor an earlier check, or no change seen between the two texts, every column counts as the edit's.
+ */
+export function undocumentedByEdit(undocumented: string[], before: string | null, after: string | null, earlier: string[] | null, ours: string[] = []): { fresh: string[]; old: string[] } {
   if (before === null && earlier === null) return { fresh: undocumented, old: [] }
   // The file reads the same as before the edit: what the edit changed is not seen, so nothing is set aside.
   if (earlier === null && before !== null && after !== null && before === after) return { fresh: undocumented, old: [] }
-  const was = before === null ? null : selectItems(sqlCode(before))
-  const now = after === null ? null : selectItems(sqlCode(after))
+  const outputs = (sql: string | null) => {
+    if (sql === null) return null
+    const own = outputColumns(sql)
+    // A model whose own list is `*` takes its names from wherever the SQL names them (its CTEs).
+    return own && !own.star ? own.names : new Set(selectItems(sql).keys())
+  }
+  const was = outputs(before)
+  const now = outputs(after)
   const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
+  const mine = new Set(ours.map(one => one.toLowerCase()))
   const old = (name: string) => {
     const key = name.toLowerCase()
+    if (mine.has(key)) return false
     if (returned.has(key)) return true
     if (!was || !now) return false
     return was.has(key) || !now.has(key)

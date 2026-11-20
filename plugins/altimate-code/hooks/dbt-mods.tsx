@@ -108,6 +108,8 @@ const checkSeq = new Map<string, number>()
 const lastReturned = new Map<string, string[]>()
 // Models whose columns undocumented from before an edit were said once in this conversation: not said again.
 const oldGapsSaid = new Set<string>()
+// The undocumented columns an edit in this conversation made, by project and file: still the edit's on later edits until documented.
+const editGaps = new Map<string, string[]>()
 let seq = 0
 // Bumped when a conversation ends (/clear): work started in the last one lands nowhere in this one.
 let generation = 0
@@ -186,12 +188,18 @@ async function sessionProject($: EngineInterface): Promise<string | null> {
 
 /** The project's dbt: its virtual environment's when it has one, else the one on PATH. */
 async function dbtBinary($: EngineInterface, root: string): Promise<string> {
-  // Only the project's own folders: never a dbt found above the folder the person opened.
-  for (const candidate of [`${root}/.venv/bin/dbt`, `${root}/venv/bin/dbt`, `${root}/.venv/Scripts/dbt.exe`, `${root}/venv/Scripts/dbt.exe`]) {
-    if (await $.fs.exists(candidate).catch(() => false)) return candidate
+  // Only the project's own folders: never a dbt found above the folder the person opened. A project dbt runs from
+  // for a package (integration_tests) also takes the package repo's own environment.
+  for (const dir of [root, ...(runFor.has(root) ? [runFor.get(root)!] : [])]) {
+    for (const candidate of [`${dir}/.venv/bin/dbt`, `${dir}/venv/bin/dbt`, `${dir}/.venv/Scripts/dbt.exe`, `${dir}/venv/Scripts/dbt.exe`]) {
+      if (await $.fs.exists(candidate).catch(() => false)) return candidate
+    }
   }
   return 'dbt'
 }
+
+// The package repo each project dbt runs from for a package belongs to (integration_tests → the repo).
+const runFor = new Map<string, string>()
 
 // A run's process result, with what `read` gave of its artifacts while the queue was held (null when that failed).
 type Artifact = { manifest: any; mtimeMs: number } | null
@@ -321,8 +329,12 @@ for graph in (pm, cm):
                 keep.add(x)
                 todo.append(x)
 full = set(hit) | (set(tests) & keep)
-fields = ('name', 'package_name', 'resource_type', 'original_file_path', 'relation_name', 'description', 'config', 'tags', 'columns', 'column_name', 'test_metadata', 'depends_on', 'patch_path')
+fields = ('name', 'package_name', 'resource_type', 'original_file_path', 'relation_name', 'description', 'config', 'tags', 'columns', 'column_name', 'test_metadata', 'depends_on', 'patch_path', 'version')
 out = {'nodes': {}, 'parent_map': {}, 'child_map': {}, 'metadata': {'project_name': project or (m.get('metadata') or {}).get('project_name')}}
+# Every model, seed, snapshot and source by its relation, whatever the graph reaches: a table a model names
+# instead of ref() or source() is no longer in its graph.
+rk = ('name', 'resource_type', 'relation_name', 'source_name')
+out['relations'] = [dict({'id': k}, **{f: n.get(f) for f in rk if n.get(f) is not None}) for group in ((m.get('nodes') or {}), (m.get('sources') or {})) for k, n in group.items() if n.get('resource_type') in ('model', 'seed', 'snapshot', 'source') and n.get('relation_name')]
 for k in keep:
     n = nodes.get(k)
     if n is not None:
@@ -427,6 +439,7 @@ function runnerOf($: EngineInterface, root: string): Promise<string | null> {
 async function runPlaceOf($: EngineInterface, root: string): Promise<string> {
   const runner = await runnerOf($, root)
   if (!runner) return root
+  runFor.set(runner, root)
   const theirs = await packagesOf($, runner)
   if (!theirs || theirs.installed) return runner
   const own = await packagesOf($, root)
@@ -563,8 +576,14 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // name (`defined_in`) is still previewed, and the path keeps it to that one version.
   // From the project that installs the package, `path:` reads from that project's folder: the package and the model's
   // name select it instead (the file's name when the manifest does not know it).
-  const selectorFor = (name: string | null) =>
-    viaRunner ? [...(pkg ? [`package:${pkg}`] : []), name ?? basename(file).replace(/\.sql$/i, '')].join(',') : [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(name ? [name] : [])].join(',')
+  // A versioned model goes by `name.vN` there, so only the edited version runs.
+  let versionOf: () => unknown = () => known?.node?.version
+  const selectorFor = (name: string | null) => {
+    if (!viaRunner) return [`path:${rel}`, ...(pkg ? [`package:${pkg}`] : []), ...(name ? [name] : [])].join(',')
+    const version = versionOf()
+    const named = name ?? basename(file).replace(/\.sql$/i, '')
+    return [...(pkg ? [`package:${pkg}`] : []), version !== undefined && version !== null && version !== '' ? `${named}.v${version}` : named].join(',')
+  }
   const scratch = await scratchOf($, place)
   const run1 = (args: string[], read?: () => Promise<Artifact>): Promise<ProcessDone> => runDbt($, place, args, DBT_TIMEOUT_MS, current, true, read).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   // The manifest the show wrote is read while the plugin's dbt queue is still held, so no other run of it replaces it first.
@@ -594,7 +613,8 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   // No preview, and the fresh manifest names the model with a name the selector did not carry (an old name that
   // selected nothing, or none when dbt ls could not give one): ask once more, with the name replaced, not added: a
   // comma intersects, and the old name and the new one select nothing together. The only case of a second show.
-  if (run.exitCode === 0 && !preview && named && !selector.split(',').includes(named)) {
+  versionOf = () => node?.node?.version ?? known?.node?.version
+  if (run.exitCode === 0 && !preview && named && selectorFor(named) !== selector && !selector.split(',').includes(named)) {
     const again = await show(selectorFor(named))
     if (again === SKIPPED) return replaced()
     run = again
@@ -642,7 +662,8 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
               : null
   // Only the columns this edit left undocumented are its gaps; ones undocumented before it are said once, quietly.
   const sqlNow = await $.fs.read(file).catch(() => null)
-  const gaps = undocumentedByEdit(drift.undocumented, sqlBefore, sqlBefore === null ? null : sqlNow, lastReturned.get(fileKey) ?? null)
+  const gaps = undocumentedByEdit(drift.undocumented, sqlBefore, sqlBefore === null ? null : sqlNow, lastReturned.get(fileKey) ?? null, editGaps.get(fileKey) ?? [])
+  if (returned && !stale) editGaps.set(fileKey, gaps.fresh)
   // A model, seed, snapshot or source named by its table instead of ref() or source(): dbt and lineage cannot follow it.
   const hardcoded = sqlNow !== null && !errors.length ? hardcodedRelations(sqlNow, after?.manifest ?? before?.manifest, node?.id ?? known?.id ?? null) : []
   // A gap this session's edit made stays the edit's on the next check, until schema.yml or the model closes it.
@@ -1530,6 +1551,7 @@ export async function startDbtMods($: EngineInterface, isInteractive: boolean) {
   contextGiven.clear()
   oldGapsSaid.clear()
   lastReturned.clear()
+  editGaps.clear()
   pendingNotes.splice(0)
   doctorNoteDue = null
   unrunnable.clear()
