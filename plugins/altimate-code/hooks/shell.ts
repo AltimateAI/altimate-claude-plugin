@@ -12,20 +12,22 @@ const LEADER_VALUE_OPTIONS: Record<string, readonly string[]> = {
   nice: ['-n'],
 }
 export const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh'])
-/** A shell's options that take their value as the next word (`-o pipefail`, `--rcfile x`). */
-const SHELL_VALUE_OPTIONS = new Set(['-o', '+o', '-O', '+O', '--rcfile', '--init-file'])
+/** A shell's long options that take their value as the next word (`--rcfile x`). */
+const SHELL_VALUE_OPTIONS = new Set(['--rcfile', '--init-file'])
 
 /**
  * The script a shell runs from its `-c` option (alone or in a cluster: `-lc`, `-cx`, `-Ec`): the first word
- * after the shell's options. Null when none of its options is `-c`, so `bash deploy.sh -c x` runs no script
+ * after the shell's options, where a cluster ending in `o` or `O` (`-o pipefail`, `-euo pipefail`) takes the
+ * next word as its value. Null when none of its options is `-c`, so `bash deploy.sh -c x` runs no script
  * here. `at` is where the shell's own name is.
  */
 export function shellScript(words: readonly string[], at: number): string | null {
   let script = false
   let i = at + 1
   for (; i < words.length && /^[-+]./.test(words[i]!) && words[i] !== '--'; i++) {
-    if (SHELL_VALUE_OPTIONS.has(words[i]!)) i++
-    else if (/^-[A-Za-z]*c[A-Za-z]*$/.test(words[i]!)) script = true
+    const word = words[i]!
+    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(word)) script = true
+    if (SHELL_VALUE_OPTIONS.has(word) || /^[-+][A-Za-z]*[oO]$/.test(word)) i++
   }
   if (words[i] === '--') i++
   return script ? (words[i] ?? null) : null

@@ -918,6 +918,10 @@ test('with ALTIMATE_TELEMETRY_DISABLED the push gate holds as before and sends n
 test('a shell runs its -c script only when -c is among its own options, in any cluster', () => {
   expect(isGitPush("bash -cx 'git push'")).toBe(true)
   expect(isGitPush("bash -o pipefail -c 'git push'")).toBe(true)
+  expect(isGitPush("bash -eo pipefail -c 'git push'")).toBe(true)
+  expect(isGitPush("bash -euo pipefail -c 'git push'")).toBe(true)
+  expect(isGitPush("bash +o history -c 'git push'")).toBe(true)
   expect(isGitPush("bash deploy.sh -c 'git push'")).toBe(false)
   expect(filesWrittenBy("bash -ec 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
+  expect(filesWrittenBy("bash -euo pipefail -c 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
 })
