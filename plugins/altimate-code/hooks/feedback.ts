@@ -74,6 +74,9 @@ function homeForms(homes: readonly string[]): string[] {
     forms.add(trimmed)
     forms.add(trimmed.replace(/\\/g, '/'))
     forms.add(trimmed.replace(/\//g, '\\'))
+    // As JSON or a Python repr writes a path: backslashes doubled, or slashes escaped.
+    forms.add(trimmed.replace(/\\/g, '\\\\'))
+    forms.add(trimmed.replace(/\//g, '\\/'))
   }
   return [...forms].sort((a, b) => b.length - a.length)
 }
@@ -96,15 +99,15 @@ export function withoutHome(text: string, homes: readonly string[]): string {
 const CONTROL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g
 const plain = (text: string) => text.replace(/\r\n?/g, '\n').replace(CONTROL, '').replace(LONE_SURROGATE, '')
-/** The most of a description that is read: the rest is cut before anything is matched against it. */
-const MAX_READ = 100_000
+/** The longest text read at all: a longer one is refused, not cut, so no secret is ever split before it is redacted. */
+export const MAX_INPUT = 100_000
 
 /**
  * What the person typed, as it will be filed: secrets and home-folder paths out of the whole text first, then cut to length,
  * so a secret that straddles the cut is gone whole. The person's other words are kept.
  */
 export function cleanDescription(text: string, homes: readonly string[]): string {
-  const clean = withoutHome(redactSecrets(plain(text).trim().slice(0, MAX_READ)), homes)
+  const clean = withoutHome(redactSecrets(plain(text).trim()), homes)
   return Array.from(clean.trim()).slice(0, MAX_DESCRIPTION).join('')
 }
 
@@ -350,6 +353,9 @@ export async function answer($: EngineInterface, args: string): Promise<string> 
   const withProblem = new RegExp(`(?:^|\\s)${WITH_ERROR}(?=\\s|$)`).test(text)
   const description = text.replace(new RegExp(`(?:^|\\s)${WITH_ERROR}(?=\\s|$)`, 'g'), ' ').trim()
   if (!description) return usage
+  if (description.length > MAX_INPUT) return `That is too long (over ${MAX_INPUT} characters). Say it shorter; nothing was drafted or sent.`
+  // The draft shown before is gone from this moment: a confirmation while this one is being built sends nothing.
+  pending = null
   const mine = ++epoch
   const homes = await homesOf($)
   const facts = await collectFacts($, { withProblem }, { doctor: await dbtModsDoctorFacts($).catch(() => null), settings })
