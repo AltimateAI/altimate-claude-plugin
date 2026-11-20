@@ -1251,7 +1251,7 @@ async function shareReport($: EngineInterface) {
     await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5_000 }).catch(() => null)
     await $.fs.write(path, savingsReportHtml(kept, builtAt, SIGNUP_URL, await read($, messagesAtom)))
   } catch (error) {
-    return void (await update($, sharedAtom, () => ({ text: `The report could not be written: ${String(error).slice(0, 200)}` })))
+    return void (await update($, sharedAtom, () => ({ text: `The report could not be written: ${oneLine(error).slice(0, 200)}` })))
   }
   const opened = await openReport($, path).catch(() => false)
   await update($, sharedAtom, () => ({ text: `${opened ? 'Report opened' : 'No browser could be opened. Report'}: ${path}. It stays on this machine until you send it.` }))

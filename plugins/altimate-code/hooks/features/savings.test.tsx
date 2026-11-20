@@ -254,6 +254,8 @@ type Options = {
   env?: Record<string, string>
   /** How the OS opener exits; 0 unless a test says otherwise. */
   openExit?: number
+  /** `$.fs.write` refuses with this. */
+  writeRejects?: string
   /** The session has nobody at a terminal. */
   headless?: boolean
   /** `warehouse_list` answers with this failure in its metadata. */
@@ -309,6 +311,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('env.get', (_: unknown, e: { name: string }) => ({ value: options.env?.[e.name] }))
   on('fs.write', (_: unknown, e: { path: string; text: string }) => {
+    if (options.writeRejects) return { deny: options.writeRejects }
     written.set(e.path, e.text)
     return { value: undefined }
   })
@@ -1696,6 +1699,21 @@ test('Share report writes one local page beside the plugin\'s other reports and 
   expect(written.get(path)).toContain('Migrate Classic/Pro to Serverless')
   expect(await ui.find({ type: 'Text', text: new RegExp(`^Report opened: ${path}\\. It stays on this machine until you send it\\.$`) })).toBeDefined()
   expect(runs.length).toBe(1)
+  await ui.unmount()
+})
+
+test('a report that cannot be written says why on one line, without the error\'s control characters', async ($, on) => {
+  const { clock, written } = await start($, on, { files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' }, writeRejects: 'EACCES\u001b[2J: permission\u0007 denied\nat write' })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  expect(written.size).toBe(0)
+  const said = ((await ui.findAll({ type: 'Text', text: /^The report could not be written: / })) as any[]).map(one => String(one.text))
+  expect(said.length).toBe(1)
+  expect(said[0]).toContain('permission denied at write')
+  expect(said[0]).not.toMatch(/[\u0000-\u001f\u007f]/)
   await ui.unmount()
 })
 
