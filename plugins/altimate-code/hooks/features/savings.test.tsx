@@ -1564,3 +1564,16 @@ test('editing a Terraform file that is not Databricks config names no finding, e
   expect(await band.find({ type: 'Text', text: /^Classic: / })).toBeUndefined()
   await band.unmount()
 })
+
+test('a finding without a title is drawn with a plain one, not "undefined"', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.findings[0].title
+  expect(toViewOf(answer.metadata)?.findings[0]?.title).toBe('Savings finding')
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Classic · Savings finding · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /undefined/ })).toBeUndefined()
+  await ui.unmount()
+})
