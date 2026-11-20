@@ -99,16 +99,24 @@ const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
 const BUNDLE_COMPUTE = new Set(['jobs', 'pipelines', 'clusters', 'sql_warehouses'])
 
 /**
- * Whether a file is Databricks config at all: a Terraform `databricks_` resource, a bundle's top-level `bundle:`, or a
- * top-level `resources:` whose own block holds one of a bundle's compute kinds. The block is read line by line, its
- * comments dropped, and ends at the next top-level key, so a container's `resources:` limits in a Kubernetes or Helm
- * file, or a `clusters:` under another top-level key, is not one. Anything else is not Databricks config.
+ * Whether an edited file is Databricks config, decided by its kind first:
+ * - a bundle's `databricks.yml` always is;
+ * - a Terraform file is when it declares a `databricks_` resource or data source;
+ * - a YAML file under `resources/` is when its top-level `resources:` block, in the block style bundles are written
+ *   in, lists jobs, pipelines, clusters or SQL warehouses. The block is read line by line, comments dropped, and
+ *   ends at the next top-level key, so a container's `resources:` limits in a Kubernetes or Helm file, or a
+ *   `clusters:` under another key, is not one.
+ * Anything else, flow-style YAML and anchors included, is not: the band stays quiet rather than guess.
  */
-export function isDatabricksConfig(text: string): boolean {
-  if (/databricks_/i.test(text) || /^bundle:/m.test(text)) return true
+export function isDatabricksConfig(path: string, text: string): boolean {
+  const file = path.replace(/\\/g, '/')
+  if (/(^|\/)databricks\.ya?ml$/i.test(file)) return true
+  if (/\.tf$/i.test(file)) return /^[ \t]*(?:resource|data)[ \t]+"databricks_/m.test(text)
+  if (!/(^|\/)resources\/(?:[^/]+\/)*[^/]+\.ya?ml$/i.test(file)) return false
   let inResources = false
   let childIndent: number | null = null
-  for (const line of text.split(/\r?\n/)) {
+  // Some editors start a file with a byte-order mark, which is not indentation.
+  for (const line of text.replace(/^\uFEFF/, '').split(/\r?\n/)) {
     const bare = line.replace(/(^|\s)#.*$/, '').trimEnd()
     if (!bare.trim()) continue
     const indent = bare.length - bare.trimStart().length
@@ -385,7 +393,9 @@ type ToolMetadata = {
 export function toView(metadata: ToolMetadata | null): SavingsView | null {
   const report = metadata?.report
   if (!metadata?.success || !report || !Array.isArray(report.findings) || !report.total || !metadata.window) return null
-  const days = report.lookback_days || windowDays(metadata.window)
+  // A count sent as a string is still a count; anything else falls back to the window's ends.
+  const lookback = Number(report.lookback_days)
+  const days = known(report.lookback_days) && lookback > 0 ? lookback : windowDays(metadata.window)
   // The CLI counts every workspace it read facts from; one without that count lists only the warehouses'
   // and the findings' workspaces, which misses one with only clusters or jobs and nothing found.
   const listed = new Set([...(metadata.warehouses ?? []), ...report.findings].map(one => one.workspace_id).filter(Boolean)).size
@@ -733,7 +743,7 @@ export function mentions(text: string, name: string | null | undefined): boolean
 }
 
 /** The band's line for a Databricks config file or command: a finding it names, else the once-a-session offer. */
-async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_WORDS.test(text) && isDatabricksConfig(text)): Promise<{ text: string; offer: boolean } | null> {
+async function bandFor($: EngineInterface, text: string, aboutCompute: boolean): Promise<{ text: string; offer: boolean } | null> {
   // After a run that failed, the pane shows only why: the band does not quote the answer the pane hides.
   const report = (await read($, messageAtom)) ? null : await read($, reportAtom)
   const matches = (report?.findings ?? []).filter(one => mentions(text, one.matchName) || (one.resourceType !== 'job' && mentions(text, one.resourceId)))
@@ -1020,8 +1030,8 @@ export async function editAfter($: EngineInterface, e: FileCall, result: ToolCal
   // The conversation the edit was made in: a /clear from here on keeps its line out of the new one.
   const at = conversation
   const text = String((await $.fs.read(file.path).catch(() => '')) ?? '').slice(0, BAND_READ_LIMIT)
-  if (!isDatabricksConfig(text)) return
-  await showBand($, await bandFor($, text), at)
+  if (!isDatabricksConfig(file.path, text)) return
+  await showBand($, await bandFor($, text, COMPUTE_WORDS.test(text)), at)
 }
 
 export async function readOrEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: { path: string }): Promise<ContextLines> {}
