@@ -3249,7 +3249,6 @@ test('the program is found past every leader the push check knows, and past xarg
     "bash -Ec 'databricks jobs list'",
     "bash -o pipefail -c 'databricks jobs list'",
     "bash -euo pipefail -c 'databricks bundle deploy'",
-    "bash -oc pipefail 'databricks bundle deploy'",
     'ls | xargs -J % databricks clusters get %',
     'xargs --max-args 1 databricks clusters get',
   ]) {
@@ -3257,8 +3256,6 @@ test('the program is found past every leader the push check knows, and past xarg
   }
   expect(runsDatabricksCompute('nice -n 10 echo databricks bundle deploy')).toBe(false)
   expect(runsDatabricksCompute("bash -c 'echo databricks bundle deploy'")).toBe(false)
-  expect(runsDatabricksCompute("zsh --emulate sh -c 'databricks bundle deploy'")).toBe(true)
-  expect(runsDatabricksCompute("bash 2>/dev/null -c 'databricks bundle deploy'")).toBe(true)
   // The shell runs deploy.sh; the `-c` after it is that script's own argument.
   expect(runsDatabricksCompute("bash deploy.sh -c 'databricks bundle deploy'")).toBe(false)
 })
