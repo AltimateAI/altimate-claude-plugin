@@ -733,7 +733,6 @@ const busyFor = (targets: readonly Target[]) => ({ label: targets.map(one => BUS
 /** The check's name for the platforms a run covers. */
 const checkName = (targets: readonly Target[]) => (targets.length === 1 ? `${PLATFORM_NAME[targets[0]!.platform]} savings check` : 'savings check')
 
-/** The pane's title: the one platform this session can check, else both. */
 /** The slim view's lines stay within this many columns, so none wraps at the pane's usual width. */
 export const SLIM_WIDTH = 84
 /** How many findings the slim view shows, largest first; the rest are behind Show all. */
@@ -790,6 +789,7 @@ export function checksNotRunCount(views: readonly SavingsView[]): number {
   }, 0)
 }
 
+/** The pane's title: the one platform this session can check, else both. */
 function paneTitle(connections: readonly SavingsConnection[] | null): string {
   const found = PLATFORMS.filter(platform => connections?.some(one => one.platform === platform))
   return found.length === 1 ? `${PLATFORM_NAME[found[0]!]} savings` : found.length > 1 || !connections ? 'Warehouse savings' : 'Databricks savings'
@@ -865,6 +865,8 @@ async function runCheck($: EngineInterface, asked: string | null) {
   const live = () => mine === generation
   lastAsked = asked
   offered = true
+  // Every run opens slim again, whether it answers or is refused.
+  await update($, expandedAtom, () => false)
   const refuse = async (platform: SavingsPlatform, name: string, why: { text: string; recovery: string }) => {
     await update($, messagesAtom, () => [{ platform, ...why }])
     notify($, `${name.charAt(0).toUpperCase()}${name.slice(1)}: ${why.text} ${why.recovery}`)
@@ -915,7 +917,6 @@ async function runCheck($: EngineInterface, asked: string | null) {
       }
     }
     await update($, whatIfAtom, () => null)
-    await update($, expandedAtom, () => false)
     await update($, messagesAtom, () => refusals)
     await update($, reportsAtom, kept => ({ ...kept, ...fresh }))
     if (unsaved) await update($, sharedAtom, () => ({ text: 'This answer could not be kept on this machine (the plugin store is full): the next session shows the last one that was, if any.' }))
@@ -1206,6 +1207,16 @@ export function register(on: On, _context: FeatureContext) {
       const names = views.map(view => view.connection ?? PLATFORM_NAME[view.platform])
       const oldest = dayOf(Math.min(...kept.map(one => one.savedAt)))
       const platforms = new Set(views.map(view => view.platform)).size
+      // A drafted fix's line goes under the first of the top findings on its resource; one whose resource
+      // has no finding now (the fix may have cleared it) is shown on its own, after the top findings.
+      const topFirst = new Set<string>()
+      const firstOnResource = top.map(({ view, finding }) => {
+        const key = `${view.platform}/${finding.resourceId}`
+        const first = !topFirst.has(key)
+        topFirst.add(key)
+        return first
+      })
+      const unflagged = views.flatMap(view => view.fixes.filter(line => !view.findings.some(one => one.resourceId === line.resourceId)))
       return cleanTree(
         <Box flexDirection="column" gap={1}>
           {refusals}
@@ -1228,13 +1239,13 @@ export function register(on: On, _context: FeatureContext) {
               })}
             </Box>
           )}
-          {top.map(({ view, finding, at }) => (
+          {top.map(({ view, finding, at }, rank) => (
             <Box key={`finding-${at}`} flexDirection="column">
               <Text bold>{slimTitle(view, finding)}</Text>
               <Box flexDirection="column" paddingLeft={2}>
                 {finding.evidence[0] ? <Text dimColor>{fitLine(finding.evidence[0], SLIM_WIDTH - 2)}</Text> : null}
                 {view.fixes
-                  .filter(line => line.resourceId === finding.resourceId)
+                  .filter(line => firstOnResource[rank] && line.resourceId === finding.resourceId)
                   .map((line, row) => (
                     <Text key={`fix-line-${at}-${row}`} color={line.state === 'measuring' || line.state === 'lower' ? undefined : 'warning'} dimColor={line.state === 'measuring'}>
                       {line.text}
@@ -1245,6 +1256,11 @@ export function register(on: On, _context: FeatureContext) {
                 </Box>
               </Box>
             </Box>
+          ))}
+          {unflagged.map((line, at) => (
+            <Text key={`fix-line-unflagged-${at}`} color={line.state === 'measuring' || line.state === 'lower' ? undefined : 'warning'} dimColor={line.state === 'measuring'}>
+              {line.text}
+            </Text>
           ))}
           {views.flatMap((view, at) => {
             const limited = limitedText(view)

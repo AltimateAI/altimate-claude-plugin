@@ -2357,3 +2357,49 @@ test('fitLine keeps a line that fits, cuts at the last clause that fits, else at
   expect(fitLine('averyveryverylongword and more words here', 20)).toBe('averyveryverylongwo…')
   expect(fitLine('a b c d e f g h i j k l m n o', 10)).toBe('a b c d…')
 })
+
+test('in the slim view a drafted fix\'s line shows once, under the first top finding on its warehouse', async ($, on) => {
+  // Classic is still SMALL and has two findings, both in the top three.
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  const line = 'Classic: fix drafted 2026-11-01, but it is still SMALL CLASSIC and still flagged, so no saving is claimed.'
+  expect(texts.filter(text => text === line)).toHaveLength(1)
+  expect(texts.indexOf(line)).toBe(texts.indexOf('CLASSIC SMALL warehouse, 95% idle over 11.0 running hours (3,107 queries)') + 1)
+  await ui.unmount()
+})
+
+test('in the slim view a drafted fix whose finding has cleared still shows its line', async ($, on) => {
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer: resizedAnswer('2026-11-18', 14), store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'more' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^No savings found by these 4 checks\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Classic: changed to X-SMALL CLASSIC since 2026-11-10: observed spend / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a session end, and a run that is refused, open the pane slim again', async ($, on) => {
+  const options: any = {}
+  const { clock } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeDefined()
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeUndefined()
+  expect(await ui.find({ key: 'more' })).toBeDefined()
+  // Open the detail again, then a run the tool refuses.
+  await showAll(ui)
+  expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeDefined()
+  options.answer = failure('[INSUFFICIENT_PERMISSIONS] User does not have USE SCHEMA on Schema system.billing')
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^A query was refused/ })).toBeDefined()
+  await ui.unmount()
+})
