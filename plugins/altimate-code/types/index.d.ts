@@ -830,6 +830,8 @@ declare module 'claude-code' {
       savingsRows: Record<string, SavingsWarehouseRef>
       /** What the pane's last Share report or Altimate press did. */
       savingsShared: { text: string } | null
+      /** Whether the pane shows every finding and its detail (Show all) or only the largest few; each run starts slim. */
+      savingsExpanded: boolean
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */

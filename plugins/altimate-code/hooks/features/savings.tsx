@@ -114,6 +114,7 @@ const whatIfAtom = atom({ plugin: 'altimate-code', key: 'savingsWhatIf' } as con
 const connectionsAtom = atom({ plugin: 'altimate-code', key: 'savingsConnections' } as const, null as SavingsConnection[] | null)
 const rowsAtom = atom({ plugin: 'altimate-code', key: 'savingsRows' } as const, {} as Record<string, SavingsWarehouseRef>)
 const sharedAtom = atom({ plugin: 'altimate-code', key: 'savingsShared' } as const, null as { text: string } | null)
+const expandedAtom = atom({ plugin: 'altimate-code', key: 'savingsExpanded' } as const, false as boolean)
 
 // Each run takes a number; /clear, a resume or a reload moves it on, so a run still waiting on
 // its warehouse when the conversation changed never writes its report into the new one.
@@ -733,6 +734,62 @@ const busyFor = (targets: readonly Target[]) => ({ label: targets.map(one => BUS
 const checkName = (targets: readonly Target[]) => (targets.length === 1 ? `${PLATFORM_NAME[targets[0]!.platform]} savings check` : 'savings check')
 
 /** The pane's title: the one platform this session can check, else both. */
+/** The slim view's lines stay within this many columns, so none wraps at the pane's usual width. */
+export const SLIM_WIDTH = 84
+/** How many findings the slim view shows, largest first; the rest are behind Show all. */
+export const TOP_FINDINGS = 3
+
+/** A finding with its answer, and its place in the full view, which keys its Draft the fix button in both views. */
+export type RankedFinding = { view: SavingsView; finding: SavingsFinding; at: number }
+
+/** Every finding across the answers, largest first: by the high end of its monthly saving, then the low end, then its name. */
+export function rankFindings(views: readonly SavingsView[]): RankedFinding[] {
+  let at = 0
+  const all = views.flatMap(view => view.findings.map(finding => ({ view, finding, at: at++ })))
+  return all.sort(
+    (a, b) =>
+      b.finding.monthlyMax - a.finding.monthlyMax ||
+      b.finding.monthlyMin - a.finding.monthlyMin ||
+      a.finding.resourceName.localeCompare(b.finding.resourceName) ||
+      a.at - b.at,
+  )
+}
+
+/** The line for the findings behind Show all: how many, and the sum of their monthly ranges. Null when there are none. */
+export function smallerLine(hidden: readonly RankedFinding[]): string | null {
+  if (hidden.length === 0) return null
+  const min = hidden.reduce((sum, one) => sum + one.finding.monthlyMin, 0)
+  const max = hidden.reduce((sum, one) => sum + one.finding.monthlyMax, 0)
+  const plural = hidden.length === 1 ? '' : 's'
+  return max > 0 ? `+ ${hidden.length} smaller finding${plural}, ${range(min, max)} a month` : `+ ${hidden.length} more finding${plural}, no dollar estimate`
+}
+
+/** `text` within `width` columns: cut at the last clause (", " or "; ") that fits, else at a word, with "…". */
+export function fitLine(text: string, width: number): string {
+  if (text.length <= width) return text
+  const clause = Math.max(text.lastIndexOf(', ', width), text.lastIndexOf('; ', width))
+  if (clause >= width / 3) return text.slice(0, clause)
+  const head = text.slice(0, width - 1)
+  const word = head.lastIndexOf(' ')
+  return `${head.slice(0, word > 0 ? word : width - 1)}…`
+}
+
+/** A finding's one-line title in the slim view: resource · platform · check · range, the name shortened to fit. */
+export function slimTitle(view: SavingsView, one: SavingsFinding, width = SLIM_WIDTH): string {
+  const rest = ` · ${PLATFORM_NAME[view.platform]} · ${one.title} · ${amount(one.monthlyMin, one.monthlyMax)}`
+  const room = width - rest.length
+  const name = one.resourceName.length <= room ? one.resourceName : `${one.resourceName.slice(0, Math.max(room - 1, 8))}…`
+  return `${name}${rest}`
+}
+
+/** How many of Altimate's checks did not run here, across the platforms that did. */
+export function checksNotRunCount(views: readonly SavingsView[]): number {
+  return PLATFORMS.reduce((sum, platform) => {
+    const view = views.find(one => one.platform === platform)
+    return view ? sum + checksNotRun(view).length : sum
+  }, 0)
+}
+
 function paneTitle(connections: readonly SavingsConnection[] | null): string {
   const found = PLATFORMS.filter(platform => connections?.some(one => one.platform === platform))
   return found.length === 1 ? `${PLATFORM_NAME[found[0]!]} savings` : found.length > 1 || !connections ? 'Warehouse savings' : 'Databricks savings'
@@ -858,6 +915,7 @@ async function runCheck($: EngineInterface, asked: string | null) {
       }
     }
     await update($, whatIfAtom, () => null)
+    await update($, expandedAtom, () => false)
     await update($, messagesAtom, () => refusals)
     await update($, reportsAtom, kept => ({ ...kept, ...fresh }))
     if (unsaved) await update($, sharedAtom, () => ({ text: 'This answer could not be kept on this machine (the plugin store is full): the next session shows the last one that was, if any.' }))
@@ -1094,14 +1152,18 @@ export function register(on: On, _context: FeatureContext) {
     const picked = await read($, whatIfAtom)
     const shared = await read($, sharedAtom)
     const connections = await read($, connectionsAtom)
+    const expanded = await read($, expandedAtom)
     const today = dayOf(now)
     const again = () => later($, () => startPressedRun($, lastAsked))
     const close = () => later($, () => $.ui.close({ id: PANE }))
+    const share = () => later($, () => shareReport($))
+    const altimate = () => later($, () => openAltimate($))
     const buttons = (
       <Box gap={1} key="buttons" flexWrap="wrap">
+        {kept.length > 0 ? <Button key="fewer" label="Show fewer" onPress={() => later($, () => update($, expandedAtom, () => false))} /> : null}
         <Button key="again" label="Run again" onPress={again} />
-        {kept.length > 0 ? <Button key="share" label="Share report" onPress={() => later($, () => shareReport($))} /> : null}
-        {kept.length > 0 ? <Button key="altimate" label="See every check in Altimate" onPress={() => later($, () => openAltimate($))} /> : null}
+        {kept.length > 0 ? <Button key="share" label="Share report" onPress={share} /> : null}
+        {kept.length > 0 ? <Button key="altimate" label="See every check in Altimate" onPress={altimate} /> : null}
         <Button key="close" label="Close" onPress={close} />
       </Box>
     )
@@ -1129,6 +1191,81 @@ export function register(on: On, _context: FeatureContext) {
           <Text bold>{paneTitle(connections)} check</Text>
           {refusals.length > 0 ? refusals : <Text dimColor>{`Run /savings, or /savings <connection>, to check ${names.length > 0 ? names.join(' and ') : 'a Databricks workspace'}.`}</Text>}
           {buttons}
+        </Box>,
+      )
+    }
+
+    if (!expanded) {
+      // The slim view: the largest few findings, each with one fact to check, and the rest behind Show all.
+      const views = kept.map(one => one.view)
+      const ranked = rankFindings(views)
+      const top = ranked.slice(0, TOP_FINDINGS)
+      const smaller = smallerLine(ranked.slice(TOP_FINDINGS))
+      const total = combinedTotal(views)
+      const days = [...new Set(views.map(view => windowDays(view.window)))].sort((a, b) => a - b)
+      const names = views.map(view => view.connection ?? PLATFORM_NAME[view.platform])
+      const oldest = dayOf(Math.min(...kept.map(one => one.savedAt)))
+      const platforms = new Set(views.map(view => view.platform)).size
+      return cleanTree(
+        <Box flexDirection="column" gap={1}>
+          {refusals}
+          <Box flexDirection="column">
+            <Text bold>{fitLine(`Savings check · last ${days.join(' and ')} days · ${names.join(', ')}`, SLIM_WIDTH)}</Text>
+            <Text dimColor>{`Read-only, on your own connection${views.length === 1 ? '' : 's'}. Nothing was sent to Altimate.`}</Text>
+            {oldest !== today ? <Text dimColor>{`Kept from ${oldest}: nothing is checked again until you run /savings.`}</Text> : null}
+          </Box>
+          {total.resources > 0 ? (
+            <Text bold color="success">
+              {range(total.min, total.max)} a month
+            </Text>
+          ) : ranked.length > 0 ? (
+            <Text bold>{findingCount(ranked.length)}</Text>
+          ) : (
+            <Box flexDirection="column">
+              {views.map((view, at) => {
+                const said = limitedText(view) && view.skipped.length === 0 ? 'No savings found by the checks that ran, in what they read.' : nothingFound(view)
+                return <Text key={`nothing-${at}`}>{views.length > 1 ? `${PLATFORM_NAME[view.platform]}: ${said}` : said}</Text>
+              })}
+            </Box>
+          )}
+          {top.map(({ view, finding, at }) => (
+            <Box key={`finding-${at}`} flexDirection="column">
+              <Text bold>{slimTitle(view, finding)}</Text>
+              <Box flexDirection="column" paddingLeft={2}>
+                {finding.evidence[0] ? <Text dimColor>{fitLine(finding.evidence[0], SLIM_WIDTH - 2)}</Text> : null}
+                {view.fixes
+                  .filter(line => line.resourceId === finding.resourceId)
+                  .map((line, row) => (
+                    <Text key={`fix-line-${at}-${row}`} color={line.state === 'measuring' || line.state === 'lower' ? undefined : 'warning'} dimColor={line.state === 'measuring'}>
+                      {line.text}
+                    </Text>
+                  ))}
+                <Box>
+                  <Button key={`fix-${at}`} label="Draft the fix" onPress={() => later($, () => draftFix($, view, finding))} />
+                </Box>
+              </Box>
+            </Box>
+          ))}
+          {views.flatMap((view, at) => {
+            const limited = limitedText(view)
+            return [
+              view.skipped.length > 0 ? <Text key={`skipped-${at}`} dimColor>{`Not checked: ${view.skipped.join('; ')}.`}</Text> : null,
+              limited ? <Text key={`limited-${at}`} dimColor>{limited}</Text> : null,
+            ]
+          })}
+          <Box gap={2} key="more">
+            {smaller ? <Text>{smaller}</Text> : null}
+            <Button key="more" label="Show all" onPress={() => later($, () => update($, expandedAtom, () => true))} />
+          </Box>
+          <Box gap={2} key="pitch">
+            <Text dimColor>{`Altimate runs ${checksNotRunCount(views)} more checks on ${platforms === 1 ? 'this platform' : 'these platforms'}.`}</Text>
+            <Button key="altimate" label="See every check in Altimate" onPress={altimate} />
+          </Box>
+          {shared ? <Text dimColor>{shared.text}</Text> : null}
+          <Box gap={1} key="buttons">
+            <Button key="share" label="Share report" onPress={share} />
+            <Button key="close" label="Close" onPress={close} />
+          </Box>
         </Box>,
       )
     }
@@ -1302,6 +1439,7 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   await update($, messagesAtom, () => [])
   await update($, sharedAtom, () => null)
   await update($, rowsAtom, () => ({}))
+  await update($, expandedAtom, () => false)
   // The kept answers outlive the conversation. Reading them back waits on the session's root and the
   // store, so it runs after the end hook returns: a /clear never waits on it.
   later($, async () => {

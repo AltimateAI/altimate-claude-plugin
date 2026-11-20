@@ -449,7 +449,7 @@ const SAVINGS_ANSWER = {
   },
 }
 
-test('/savings sends no usage event: not for the command, its pane, its buttons or a second run', async ($, on) => {
+test('/savings sends no usage event: not for the command, its pane, Show all, its buttons or a second run', async ($, on) => {
   const { clock, events, usage, savingsRuns } = await start($, on, { savings: SAVINGS_ANSWER })
   // Usage is on and this fake CLI records it: the session start's event arrived.
   expect(usage().map(argv => argv[3])).toEqual(['plugin_session_start'])
@@ -469,10 +469,14 @@ test('/savings sends no usage event: not for the command, its pane, its buttons 
   expect(await pane.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
   await pane.press({ key: 'fix-0' })
   await clock.settle()
+  await pane.press({ key: 'more' })
+  await clock.settle()
   await pane.press({ key: 'whatif-0-0' })
   await clock.settle()
   expect(await pane.find({ type: 'Text', text: /^As serverless: / })).toBeDefined()
   await pane.press({ key: 'again' })
+  await clock.settle()
+  await pane.press({ key: 'share' })
   await clock.settle()
   await pane.unmount()
   // Two runs of the check (the command and Run again), and not one usage event among them.
