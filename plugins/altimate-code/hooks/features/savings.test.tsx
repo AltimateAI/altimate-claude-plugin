@@ -3389,9 +3389,11 @@ for (const step of ['pane open', 'version probe', 'tool run', 'baseline read', '
       cleared = true
       await $.session.end({ reason: 'clear' } as any)
     }
-    await savings($)
+    const first = await savings($)
     await clock.settle()
     expect(cleared).toBe(true)
+    // A /clear while the pane opens: the command says so rather than that a check is running.
+    if (step === 'pane open') expect(String((first as any)?.text)).toContain('was cleared before')
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: /a month/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /Checking the workspace/ })).toBeUndefined()
