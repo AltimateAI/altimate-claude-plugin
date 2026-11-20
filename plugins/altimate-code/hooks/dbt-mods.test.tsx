@@ -4512,3 +4512,37 @@ test('a change whose read of the doctor finds it busy, then finds it idle only a
   expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
   await ui.unmount()
 })
+
+test('a manifest write that loses to dbt deps starting is read again once deps fails', async ($, on) => {
+  let holdWrite = false
+  let releaseWrite!: () => void
+  const writeGate = new Promise<void>(resolve => (releaseWrite = resolve))
+  on('state.set', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    if (holdWrite && e.key === 'dbtDoctor') {
+      holdWrite = false
+      await writeGate
+    }
+    return next(e)
+  })
+  let releaseDeps!: () => void
+  const holdDeps = new Promise<void>(resolve => (releaseDeps = resolve))
+  const { clock, mtimes } = await start($, on, { interactive: true, now: 200_000, files: { 'packages.yml': 'packages: []' }, depsFails: 'could not reach the hub', holdDeps })
+  await clock.settle()
+  // A change: its manifest read is written, but the write waits.
+  mtimes['models/orders.sql'] = 150_000
+  holdWrite = true
+  void $.tool.call({ tool: 'Bash', command: 'touch models/orders.sql' } as any)
+  await clock.settle()
+  // dbt deps starts meanwhile and marks the doctor busy; then the held write is let go and loses.
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  await band.unmount()
+  releaseWrite()
+  await clock.settle()
+  releaseDeps()
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await ui.unmount()
+})

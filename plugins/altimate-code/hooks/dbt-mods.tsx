@@ -1538,6 +1538,8 @@ async function recheckDoctorManifest($: EngineInterface) {
   if (check.fix) check.fix = redactValues(check.fix)
   let landed = false
   await update($, doctorAtom, prev => {
+    // Run again when a write loses to another: only the attempt that is written counts.
+    landed = false
     // Checked again here: a newer read may have landed while this update waited its turn.
     if (!prev || prev.root !== view.root || prev.busy || seq !== manifestSeq) return prev
     landed = true
