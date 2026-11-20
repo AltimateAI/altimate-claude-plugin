@@ -1000,7 +1000,7 @@ export async function bandLine($: EngineInterface, ui: BandUi): Promise<RenderEl
         label="Run /savings"
         onPress={() =>
           pressRun($, async live => {
-            await update($, bandAtom, () => null)
+            await update($, bandAtom, now => (live() ? null : now))
             if (live()) await openPane($)
           })
         }
