@@ -969,8 +969,8 @@ function depthAt(code: string, at: number): number {
 }
 
 /** The CTEs of a model's SQL, by name: each body as written, and the column names it declares (`name(a, b) as`). */
-function ctesOf(sql: string, code: string): Map<string, { raw: string; declared: string[] | null }> {
-  const out = new Map<string, { raw: string; declared: string[] | null }>()
+function ctesOf(sql: string, code: string, base = 0): Map<string, { raw: string; at: number; declared: string[] | null }> {
+  const out = new Map<string, { raw: string; at: number; declared: string[] | null }>()
   for (const match of code.matchAll(new RegExp(String.raw`(${PART})\s*(\([^()]*\)\s*)?as\s*(?:not\s+)?(?:materialized\s+)?\(`, 'gi'))) {
     // Only this query's own CTEs, at its top level: one declared inside a subquery is that subquery's.
     if (depthAt(code, match.index!) > 0) continue
@@ -984,7 +984,7 @@ function ctesOf(sql: string, code: string): Map<string, { raw: string; declared:
     const listAt = match[2] ? match.index! + match[0].indexOf(match[2]) : -1
     const declared = match[2] ? sql.slice(listAt + 1, listAt + match[2].trimEnd().length - 1).split(',').map(one => unquote(one)).filter(Boolean) : null
     // The name as written: masking hides a quoted name's letters.
-    out.set(unquote(sql.slice(match.index!, match.index! + match[1]!.length)), { raw: sql.slice(open, i - 1), declared })
+    out.set(unquote(sql.slice(match.index!, match.index! + match[1]!.length)), { raw: sql.slice(open, i - 1), at: base + open, declared })
   }
   return out
 }
@@ -997,27 +997,28 @@ function ctesOf(sql: string, code: string): Map<string, { raw: string; declared:
  * name. `vars` are the Jinja
  * variables the lists render (`{{ cols }}`). Null when there is no such SELECT.
  */
-export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw: string; declared: string[] | null }>): { names: Set<string>; star: boolean; vars: Set<string> } | null {
+export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw: string; at: number; declared: string[] | null }>, base = 0): Outputs | null {
   const code = masked(sql)
-  const ctes = new Map([...(outer ?? []), ...ctesOf(sql, code)])
+  const ctes = new Map([...(outer ?? []), ...ctesOf(sql, code, base)])
   const selects: number[] = []
   for (let at = topLevel(code, 'select'); at >= 0; at = topLevel(code, 'select', at + 6)) selects.push(at)
   if (!selects.length) return null
   // The first SELECT of each top-level query: one a set operation joins to the one before it is not.
   const heads = selects.filter((at, n) => n === 0 || topLevel(code.slice(selects[n - 1]!, at), '(?:union|intersect|except|minus)') < 0)
+  // Where Jinja decides whether text runs (`{% if %}…{% endif %}`, `{% for %}…{% endfor %}`): a name there may not be an output.
+  const conditional = jinjaControlled(sql)
   // CTE bodies are parenthesised: the top-level heads are the final query's, its Jinja alternatives each one.
-  const names = new Set<string>()
-  const vars = new Set<string>()
-  let star = false
+  const out: Outputs = { names: new Set(), maybe: new Set(), star: false, vars: new Set(), spans: [] }
   let modified = false
-  let resolved: { names: Set<string>; star: boolean; vars: Set<string> } | null = null
+  let resolved: Outputs | null = null
   for (const select of heads) {
     const next = selects.find(at => at > select) ?? code.length
     const from = topLevel(code, 'from', select + 6)
     const listEnd = from < 0 || from > next ? next : from
+    out.spans.push([base + select, base + listEnd])
     const list = code.slice(select + 6, listEnd)
     const lead = /^\s*(?:distinct|all)\b/i.exec(list)?.[0].length ?? 0
-    for (const one of sql.slice(select + 6, listEnd).matchAll(/\{\{-?\s*([A-Za-z_]\w*)\s*-?\}\}/g)) vars.add(one[1]!)
+    for (const one of sql.slice(select + 6, listEnd).matchAll(/\{\{-?\s*([A-Za-z_]\w*)\s*-?\}\}/g)) out.vars.add(one[1]!)
     let here = false
     for (const [a, b] of topItems(list.slice(lead))) {
       const bare = list.slice(lead + a, lead + b).replace(/\s+/g, ' ').trim()
@@ -1027,20 +1028,46 @@ export function outputColumns(sql: string, depth = 0, outer?: Map<string, { raw:
         if (/^(?:[\w"`]+\.)?\*\s+\S/.test(bare)) modified = true
         continue
       }
-      const name = itemName(sql.slice(select + 6 + lead + a, select + 6 + lead + b))
-      if (name) names.add(name)
+      // Where the item's own text starts (past whitespace and masked Jinja tags before it).
+      const start = select + 6 + lead + a + (/^\s*/.exec(list.slice(lead + a, lead + b))?.[0].length ?? 0)
+      const name = itemName(sql.slice(start, select + 6 + lead + b))
+      if (name) (conditional.some(([x, y]) => start >= x && start < y) ? out.maybe : out.names).add(name)
     }
     if (!here || from < 0 || from > next) continue
-    star = true
-    const tail = code.slice(from + 4, next)
+    out.star = true
     // `select * from <cte>`: that CTE's declared names, else its own list, once it is the only relation read.
-    const read = /^\s*((?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*))(?:\s+(?:as\s+)?(?!where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b|union\b)[A-Za-z_]\w*)?\s*(?:;\s*)?(?:$|where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b|union\b)/i.exec(tail)
-    const body = read && heads.length === 1 && !modified && depth < 8 ? ctes.get(unquote(read[1]!)) : undefined
-    if (body?.declared) resolved = { names: new Set(body.declared.map(one => one.toLowerCase())), star: false, vars: new Set() }
-    else if (body) resolved = outputColumns(body.raw, depth + 1, ctes)
+    const read = /^\s*((?:"[^"]+"|`[^`]+`|[A-Za-z_]\w*))(?:\s+(?:as\s+)?(?!where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b|union\b)[A-Za-z_]\w*)?\s*(?:;\s*)?(?:$|where\b|group\b|order\b|limit\b|qualify\b|having\b|window\b|union\b)/i.exec(code.slice(from + 4, next))
+    // The name as written (masking hides a quoted name's letters).
+    const written = read ? sql.slice(from + 4 + read.index + read[0].indexOf(read[1]!), from + 4 + read.index + read[0].indexOf(read[1]!) + read[1]!.length) : null
+    const body = written && heads.length === 1 && !modified && depth < 8 ? ctes.get(unquote(written)) : undefined
+    if (body?.declared) resolved = { names: new Set(body.declared.map(one => one.toLowerCase())), maybe: new Set(), star: false, vars: new Set(), spans: [] }
+    else if (body) resolved = outputColumns(body.raw, depth + 1, ctes, body.at)
   }
-  if (resolved) return { names: new Set([...names, ...resolved.names]), star: resolved.star, vars: new Set([...vars, ...resolved.vars]) }
-  return { names, star, vars }
+  if (!resolved) return out
+  return {
+    names: new Set([...out.names, ...resolved.names]),
+    maybe: new Set([...out.maybe, ...resolved.maybe]),
+    star: resolved.star,
+    vars: new Set([...out.vars, ...resolved.vars]),
+    spans: [...out.spans, ...resolved.spans],
+  }
+}
+
+/** A model's output lists: the names they give (`maybe`: inside Jinja that may not run), whether a `*` is left, the
+ * Jinja variables they render, and where they are in the SQL (offsets). */
+type Outputs = { names: Set<string>; maybe: Set<string>; star: boolean; vars: Set<string>; spans: [number, number][] }
+
+/** Where Jinja control blocks (`{% if %}…{% endif %}`, `{% for %}…{% endfor %}`) are in a model's SQL, as offsets. */
+function jinjaControlled(sql: string): [number, number][] {
+  const out: [number, number][] = []
+  const open: number[] = []
+  for (const tag of sql.matchAll(/\{%-?\s*(if|for|endif|endfor)\b[\s\S]*?%\}/g)) {
+    if (tag[1] === 'if' || tag[1] === 'for') open.push(tag.index!)
+    else if (open.length) out.push([open.pop()!, tag.index! + tag[0].length])
+  }
+  // An unclosed block runs to the end.
+  for (const at of open) out.push([at, sql.length])
+  return out
 }
 
 /**
@@ -1058,64 +1085,94 @@ export function undocumentedByEdit(undocumented: string[], before: string | null
   const was = before === null ? null : outputColumns(before)
   const now = after === null ? null : outputColumns(after)
   // Column lists kept in `{% set %}` blocks that the model's own list renders (`{{ name }}`) name outputs too.
-  const wasSet = before === null || !was ? new Set<string>() : setBlockNames(before, was.vars)
-  const nowSet = after === null || !now ? new Set<string>() : setBlockNames(after, now.vars)
+  const wasSet = before === null || !was ? null : setBlocks(before, was.vars)
+  const nowSet = after === null || !now ? null : setBlocks(after, now.vars)
   const returned = new Set((earlier ?? []).map(one => one.toLowerCase()))
   const mine = new Set(ours.map(one => one.toLowerCase()))
   const old = (name: string) => {
     const key = name.toLowerCase()
     if (mine.has(key)) return false
     if (returned.has(key)) return true
-    if (!was || !now) return false
+    if (!was || !now || !wasSet || !nowSet) return false
     // A Jinja expression or tag changed (a flag that turns on a column, a macro's arguments): what the SQL names before
     // may not have run, so nothing but the last check's columns counts as there before.
     if (jinjaOf(before!) !== jinjaOf(after!)) return false
-    // Named after the edit: there before only when it was named before too.
-    if (now.names.has(key) || nowSet.has(key)) return was.names.has(key) || wasSet.has(key)
-    // Named nowhere (through a `*` the SQL does not resolve, or a macro): there before only when no Jinja expression or
-    // tag changed and every line the edit changed either rewrote a named output's select item or sits in a clause that
-    // adds no column (WHERE, GROUP BY, HAVING, QUALIFY, ORDER BY, LIMIT).
-    return onlyNamedItems(before!, after!, new Set([...was.names, ...wasSet]), new Set([...now.names, ...nowSet]))
+    const sides = (o: Outputs, set: { names: Set<string>; spans: [number, number][] }) => ({ names: new Set([...o.names, ...set.names]), spans: [...o.spans, ...set.spans] })
+    const beforeSide = sides(was, wasSet)
+    const afterSide = sides(now, nowSet)
+    // Named in the model's own list after the edit: there before only when that list named it before too (outside
+    // Jinja that may not run).
+    if (afterSide.names.has(key) || now.maybe.has(key) || nowSet.maybe.has(key)) return beforeSide.names.has(key)
+    // Named on neither side (a macro or a `*` fills it): there before only when every line the edit changed is a named
+    // output's item or a clause that adds no column.
+    return !was.maybe.has(key) && !wasSet.maybe.has(key) && !beforeSide.names.has(key) && onlyNamedItems(before!, after!, beforeSide, afterSide)
   }
   return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
 }
 
-/** The names in the comma lists of a model's `{% set name %}…{% endset %}` blocks, for the variables in `only`. */
-function setBlockNames(sql: string, only: Set<string>): Set<string> {
-  const out = new Set<string>()
-  for (const block of sql.matchAll(/\{%-?\s*set\s+(\w+)\s*-?%\}([\s\S]*?)\{%-?\s*endset\s*-?%\}/gi)) {
-    if (!only.has(block[1]!)) continue
-    const body = block[2]!
-    for (const [a, b] of topItems(masked(body))) {
-      const name = itemName(body.slice(a, b))
-      if (name) out.add(name)
+/** The names in the comma lists of a model's `{% set name %}…{% endset %}` blocks for the variables in `only`, and where those lists are (offsets). */
+function setBlocks(sql: string, only: Set<string>): { names: Set<string>; maybe: Set<string>; spans: [number, number][] } {
+  const out = { names: new Set<string>(), maybe: new Set<string>(), spans: [] as [number, number][] }
+  const conditional = jinjaControlled(sql)
+  for (const block of sql.matchAll(/(\{%-?\s*set\s+(\w+)\s*-?%\})([\s\S]*?)\{%-?\s*endset\s*-?%\}/gi)) {
+    if (!only.has(block[2]!)) continue
+    const body = block[3]!
+    const at = block.index! + block[1]!.length
+    out.spans.push([at, at + body.length])
+    const hidden = masked(body)
+    for (const [a, b] of topItems(hidden)) {
+      const lead = /^\s*/.exec(hidden.slice(a, b))?.[0].length ?? 0
+      const name = itemName(body.slice(a + lead, b))
+      if (name) (conditional.some(([x, y]) => at + a + lead >= x && at + a + lead < y) ? out.maybe : out.names).add(name)
     }
   }
   return out
 }
 
-/** Whether every line an edit removed or added is one select item whose output name is known on its side. */
-function onlyNamedItems(before: string, after: string, was: Set<string>, now: Set<string>): boolean {
-  const lines = (text: string) => text.split('\n').map(line => line.trim()).filter(Boolean)
-  const left = new Map<string, number>()
-  for (const line of lines(before)) left.set(line, (left.get(line) ?? 0) + 1)
-  const added: string[] = []
-  for (const line of lines(after)) {
-    const n = left.get(line) ?? 0
-    if (n > 0) left.set(line, n - 1)
-    else added.push(line)
+/**
+ * Whether the edit only rewrote named outputs' select items and clauses that add no column: every line it removed or
+ * added (an ordered line diff) either sits in a WHERE/GROUP BY/HAVING/QUALIFY/ORDER BY/LIMIT clause, or is exactly one
+ * select item, inside the model's own output list on its side, whose name is one of that side's outputs.
+ */
+function onlyNamedItems(before: string, after: string, was: { names: Set<string>; spans: [number, number][] }, now: { names: Set<string>; spans: [number, number][] }): boolean {
+  const lines = (text: string) => {
+    const out: { text: string; at: number }[] = []
+    let at = 0
+    for (const line of text.split('\n')) {
+      if (line.trim()) out.push({ text: line.trim(), at: at + line.indexOf(line.trim()) })
+      at += line.length + 1
+    }
+    return out
   }
-  const removed = [...left].flatMap(([line, n]) => Array.from({ length: n }, () => line))
+  const a = lines(before)
+  const b = lines(after)
+  // Too long to diff here: nothing is taken as unchanged.
+  if (a.length * b.length > 4_000_000) return false
+  // The longest common subsequence, by line text: what is left on either side is what the edit removed or added.
+  const dp = Array.from({ length: a.length + 1 }, () => new Uint32Array(b.length + 1))
+  for (let x = a.length - 1; x >= 0; x--) for (let y = b.length - 1; y >= 0; y--) dp[x]![y] = a[x]!.text === b[y]!.text ? dp[x + 1]![y + 1]! + 1 : Math.max(dp[x + 1]![y]!, dp[x]![y + 1]!)
+  const removed: { text: string; at: number }[] = []
+  const added: { text: string; at: number }[] = []
+  let x = 0
+  let y = 0
+  while (x < a.length || y < b.length) {
+    if (x < a.length && y < b.length && a[x]!.text === b[y]!.text) {
+      x++
+      y++
+    } else if (y >= b.length || (x < a.length && dp[x + 1]![y]! >= dp[x]![y + 1]!)) removed.push(a[x++]!)
+    else added.push(b[y++]!)
+  }
   const quietBefore = columnlessLines(before)
   const quietAfter = columnlessLines(after)
-  const item = (line: string, names: Set<string>, quiet: Set<string>) => {
-    if (quiet.has(line)) return true
+  const item = (line: { text: string; at: number }, side: { names: Set<string>; spans: [number, number][] }, quiet: Set<string>) => {
+    if (quiet.has(line.text)) return true
+    if (!side.spans.some(([from, to]) => line.at >= from && line.at < to)) return false
     // One select item and nothing else: no second item (a comma inside it), and no clause keyword on the line.
-    const one = line.replace(/^,\s*/, '').replace(/,\s*$/, '')
+    const one = line.text.replace(/^,\s*/, '').replace(/,\s*$/, '')
     const code = masked(one)
     if (topItems(code).length !== 1 || /\b(?:select|from|join|where|with|union|group|order|having|qualify|limit)\b/i.test(code)) return false
     const name = itemName(one)
-    return !!name && names.has(name)
+    return !!name && side.names.has(name)
   }
   return added.every(line => item(line, now, quietAfter)) && removed.every(line => item(line, was, quietBefore))
 }

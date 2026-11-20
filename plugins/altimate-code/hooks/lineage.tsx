@@ -1171,8 +1171,11 @@ async function bashChanged($: EngineInterface, start: BashStart): Promise<{ file
   // holds the command's result. With no project there, the projects below it (a monorepo, a shell in a subfolder).
   const base = await $.session.root().catch(() => '.')
   const own = await projectRoot($, commandDir(start.command, base), false).catch(() => null)
-  // The walk below it is bounded (2000 folders) and kept for the session.
-  const roots = own ? [own] : (await projectsBelow($, base).catch(() => [] as string[])).slice(0, MAX_BASH_PROJECTS)
+  // And the projects below it (a project inside another, a monorepo): the walk is bounded (2000 folders) and kept for the session.
+  // projectsBelow stops at a project: below one, its sub-folders are walked (a few levels) for the projects inside it.
+  const children = own ? (await $.fs.list(own).catch(() => [])).filter(entry => entry.kind === 'dir' && !entry.name.startsWith('.') && !SKIP_DIRS.has(entry.name)).map(entry => `${own}/${entry.name}`) : [base]
+  const below = (await Promise.all(children.slice(0, 50).map(dir => projectsBelow($, dir, own ? 2 : 4).catch(() => [] as string[])))).flat().filter(one => one !== own)
+  const roots = [...(own ? [own] : []), ...below].slice(0, MAX_BASH_PROJECTS)
   // Files touched since the command started, in whole minutes rounded up, then each one's own time against its start.
   const minutes = Math.max(1, Math.ceil(((await $.clock.now()) - start.startedAt) / 60_000))
   const files: { file: string; before: string }[] = []

@@ -609,10 +609,20 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
     const listing = await run1(['ls', '--select', pkg ? `package:${pkg}` : 'fqn:*', '--resource-type', 'model', '--output', 'json', '--output-keys', 'name version original_file_path', '--log-format', 'text'])
     if (listing === SKIPPED) return replaced()
     if (cannotRun(listing)) return notChecked(NO_DBT)
-    const mine = listing.exitCode === 0 ? listedFiles(listing.stdout).filter(one => one.file === rel) : []
-    if (mine.length !== 1) return notChecked('dbt has no model for this file in the project that installs this package (disabled, or not a model), so nothing was compiled or run')
-    name = mine[0]!.name
-    const version = mine[0]!.version
+    // dbt could not list the models (a compilation error, missing packages): its own error, not "no model".
+    if (listing.exitCode !== 0) {
+      const errors = logErrors(listing.stdout)
+      if (!errors.length) errors.push(dbtTail(listing, 6) || `dbt exited ${listing.exitCode}`)
+      if (errors.some(one => DEPS_MISSING.test(one))) return notChecked(`dbt's packages are not installed in ${relative(root, place)}, so dbt could not compile it (run \`dbt deps\` there, or run dbt from the project that installs this package)`)
+      const view: CheckView = { ...blank, status: 'error', errors: errors.map(one => one.slice(0, 1500)), ms: (await $.clock.now()) - started, at: started }
+      await setCheck($, view, newest)
+      if (current()) checkEnded(`${root}/${rel}`, mine, null)
+      return { view, note: checkNote(view), current, newest }
+    }
+    const matched = listedFiles(listing.stdout).filter(one => one.file === rel)
+    if (matched.length !== 1) return notChecked('dbt has no model for this file in the project that installs this package (disabled, or not a model), so nothing was compiled or run')
+    name = matched[0]!.name
+    const version = matched[0]!.version
     versionOf = () => version
   }
   const selector = selectorFor(name)

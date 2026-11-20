@@ -2039,3 +2039,17 @@ test('a shell command in a session opened above its dbt project looks for change
   await clock.settle()
   expect(finds.at(-1)?.[1]).toBe(`${ROOT}/analytics/models`)
 })
+
+test('a shell command in a dbt project also looks in the projects below it', async ($, on) => {
+  const finds: string[][] = []
+  const { clock } = await start($, on, {
+    sqlFiles: { 'models/orders.sql': 'select 1', 'analytics/dbt_project.yml': "name: 'inner'\n", 'analytics/models/x.sql': 'select 1' },
+    shell: argv => {
+      if (argv[0] === 'find') finds.push([...argv])
+      return argv[0] === 'find' ? { exitCode: 0, stdout: '' } : undefined
+    },
+  })
+  await $.tool.call({ tool: 'Bash', command: "python3 -c \"print('rewrite')\"" })
+  await clock.settle()
+  expect(finds.map(one => one[1])).toEqual([`${ROOT}/models`, `${ROOT}/analytics/models`])
+})

@@ -761,9 +761,9 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // A keyword inside a quoted alias does not end the list.
   const quoted = 'select id as "from", amount from raw'
   expect(undocumentedByEdit(['tax'], quoted, quoted.replace('amount from', 'amount, tax from'), ['from', 'amount'])).toEqual({ fresh: ['tax'], old: [] })
-  // Jinja alternatives each name outputs.
-  const branches = '{% if is_incremental() %}\nselect id, amount from new_rows\n{% else %}\nselect id from all_rows\n{% endif %}'
-  expect(undocumentedByEdit(['amount'], branches, branches.replace('select id, amount from new_rows', 'select id, amount  from new_rows'), null)).toEqual({ fresh: [], old: ['amount'] })
+  // Jinja alternatives each name outputs, but a name only in a branch that may not run is no evidence it was there.
+  const branches = '{% if is_incremental() %}\nselect id, amount from new_rows\n{% else %}\nselect id, amount from all_rows\n{% endif %}'
+  expect(undocumentedByEdit(['id'], branches, branches.replace('select id, amount from new_rows', 'select id, amount  from new_rows'), null)).toEqual({ fresh: ['id'], old: [] })
   // A `*` whose source Jinja picks: a changed Jinja expression or tag keeps the column the edit's.
   const picked = "{% set src = 'a' %}\nselect * from {{ ref(src) }}"
   expect(undocumentedByEdit(['x'], picked, picked.replace("'a'", "'b'"), null)).toEqual({ fresh: ['x'], old: [] })
@@ -782,6 +782,13 @@ kitTest('an undocumented column is the edit\'s only when the edit names it and t
   // A CTE declared inside a subquery does not shadow the query's own.
   const shadow = 'with raw as (select 1 as id, 10 as amount),\nsrc as (select id from raw)\nselect * from src\nwhere exists (\n  with src as (select id, amount from raw)\n  select 1 from src\n)'
   expect(undocumentedByEdit(['amount'], shadow, shadow.replace('src as (select id from raw)', 'src as (select id, amount from raw)'), ['id'])).toEqual({ fresh: ['amount'], old: [] })
+  // A name in a Jinja branch that does not run is no evidence the column was there.
+  const inactive = 'select id,\n{% if false %}\n  amount,\n{% endif %}\n  status\nfrom raw'
+  expect(undocumentedByEdit(['amount'], inactive, inactive.replace('  status\n', '  status,\n  amount\n'), ['id', 'status'])).toEqual({ fresh: ['amount'], old: [] })
+  // Lines moved from one CTE to another behind an unresolved `*`: the column is the edit's.
+  const moved = 'with a as (\n  select id,\n  amount\n  from raw\n), b as (\n  select id\n  from raw\n)\nselect a.* exclude (amount), b.*\nfrom a join b using (id)'
+  const movedAfter = moved.replace('  select id,\n  amount\n', '  select id\n').replace('  select id\n  from raw\n)\nselect', '  select id,\n  amount\n  from raw\n)\nselect')
+  expect(undocumentedByEdit(['amount'], moved, movedAfter, ['id'])).toEqual({ fresh: ['amount'], old: [] })
   // A UNION takes its names from its first branch.
   const union = 'select id, amount as old_name from raw\nunion all\nselect id, amount from raw'
   expect(undocumentedByEdit(['new_name'], union, union.replace('old_name', 'new_name'), null)).toEqual({ fresh: ['new_name'], old: [] })
@@ -982,6 +989,23 @@ test('from integration_tests, a saved manifest that maps the file to an older ve
   await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
   await clock.settle()
   expect(runs.find(argv => argv[1] === 'show')!.slice(0, 4)).toEqual([DBT, 'show', '--select', 'package:shop,orders.v2'])
+})
+
+test('from integration_tests, dbt ls failing on a compilation error shows that error, not "no model"', async ($, on) => {
+  const { clock } = await start($, on, {
+    listFails: true,
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+    },
+  })
+  const result: any = await $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  const note = result.context?.find((one: string) => one.startsWith('Altimate compile-and-validate'))
+  expect(note).toContain('- FAILED. dbt reported:')
+  expect(note).not.toContain('no model for this file')
 })
 
 test('a project whose packages are not installed gets a one-line note, not a failure, when nothing installs it elsewhere', async ($, on) => {
