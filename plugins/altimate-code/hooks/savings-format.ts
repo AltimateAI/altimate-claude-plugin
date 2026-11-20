@@ -76,8 +76,9 @@ export const size = (value: unknown) => (oneLine(value) || '?').replace(/_/g, '-
 /** A whole count; one the answer lacks (missing, empty, not a number) reads "?", not 0. */
 export const count = (value: unknown) => (known(value) ? Math.round(Number(value)).toLocaleString('en-US') : '?')
 
-/** Days a window covers, from its YYYY-MM-DD ends; 7 when they cannot be read. */
-export function windowDays(window: { start: string; end: string }): number {
+/** Days a window covers: the CLI's own count when it gave one, else from its YYYY-MM-DD ends; 7 when neither can be read. */
+export function windowDays(window: { start: string; end: string; days?: number }): number {
+  if (typeof window.days === 'number' && Number.isFinite(window.days) && window.days > 0) return window.days
   const days = Math.round((Date.parse(window.end) - Date.parse(window.start)) / DAY_MS)
   return Number.isFinite(days) && days > 0 ? days : 7
 }

@@ -141,8 +141,10 @@ let pressStarting = false
 const DATABRICKS_CONFIG = /(^|\/)(databricks\.ya?ml|resources\/(?:[^/]+\/)*[^/]+\.ya?ml|[^/]+\.tf)$/i
 // What marks such a file, or a command, as about warehouses or clusters.
 const COMPUTE_WORDS = /sql_endpoint|sql_warehouse|warehouse|cluster/i
-// What marks a file as Databricks config at all: a Terraform `databricks_` resource, or a bundle.
-const DATABRICKS_TEXT = /databricks_|\bbundle:|\bresources:/i
+// What marks a file as Databricks config at all: a Terraform `databricks_` resource, a bundle's top-level `bundle:`,
+// or a top-level `resources:` holding a bundle's compute (jobs, pipelines, clusters, SQL warehouses). A container's
+// `resources:` limits, as in a Kubernetes or Helm file, sit under it with `limits:` and `requests:`, not those.
+const DATABRICKS_TEXT = /databricks_|^bundle:|^resources:[ \t]*$[\s\S]*?^[ \t]+(?:jobs|pipelines|clusters|sql_warehouses):[ \t]*$/im
 const DATABRICKS_SUBCOMMANDS = new Set(['warehouses', 'clusters', 'bundle', 'jobs'])
 const isDatabricks = (word: string) => /(^|\/)databricks$/.test(word)
 // xargs options that take their value as the next word (`-n 1`, `-I {}`, `-P 4`; BSD's `-J %`, `-R`, `-S`).
@@ -536,8 +538,9 @@ export function toView(metadata: ToolMetadata | null, platform: SavingsPlatform 
     scope: platform === 'snowflake' ? (metadata.warehouse ?? null) : null,
     pricing,
     ranOn: metadata.ran_on ?? null,
-    // Core always sends both ends; a missing one reads as unknown, never "undefined".
-    window: { start: oneLine(metadata.window.start), end: oneLine(metadata.window.end) },
+    // Core always sends both ends; a missing one reads as unknown, never "undefined". The length is the one the
+    // evidence is measured over, so the header, the rate and the monthly figures say the same.
+    window: { start: oneLine(metadata.window.start), end: oneLine(metadata.window.end), days },
     checked: { warehouses: metadata.warehouses_checked ?? 0, clusters: metadata.clusters_checked ?? 0, jobs: metadata.jobs_checked ?? 0, workspaces: Math.max(1, workspaces) },
     // Each with the CLI's reason: a check can be skipped for a refused read, for the run's time limit
     // (its query may still be running), or because core refused its facts.
@@ -1346,8 +1349,9 @@ async function bandFor($: EngineInterface, text: string, aboutCompute = COMPUTE_
   const named = matches[0]?.one
   // A file does not say which workspace or account it deploys to: a name flagged in several is not pinned on one of them.
   // Two connections that read the same workspace list its findings twice; they count once.
-  // The same warehouse by name, or by id where an id means something (a Databricks warehouse or cluster).
-  const same = matches.filter(({ one, byId }) => one.resourceType === named?.resourceType && (one.matchName === named.matchName || (byId && one.resourceId === named.resourceId)))
+  // The same warehouse by name where it has one (two unnamed ones are not the same), or by id where an id means
+  // something (a Databricks warehouse or cluster).
+  const same = matches.filter(({ one, byId }) => one.resourceType === named?.resourceType && ((named.matchName !== '' && one.matchName === named.matchName) || (byId && one.resourceId === named.resourceId)))
   const places = new Set(same.map(({ one, view }) => `${view.platform}:${view.scope ?? ''}:${one.workspaceId ?? ''}`))
   if (named && places.size > 1) {
     const platforms = new Set(same.map(({ view }) => view.platform))

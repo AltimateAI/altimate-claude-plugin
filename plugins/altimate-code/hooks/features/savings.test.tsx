@@ -4196,6 +4196,54 @@ test('two workspaces sharing a warehouse id: a drafted fix, a what-if press and 
   await ui.unmount()
 })
 
+test('two unnamed warehouses a file names by id, in two workspaces, are not one resource to the band', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings = [
+    { ...classic, resource_id: 'wh-aaaa', resource_name: null, workspace_id: '1001' },
+    { ...classic, resource_id: 'wh-bbbb', resource_name: null, workspace_id: '1002' },
+  ]
+  answer.metadata.workspaces_checked = 2
+  const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "a" {\n  id = "wh-aaaa"\n}\n# and wh-bbbb\n' }
+  const { clock } = await start($, on, { answer, files })
+  await savings($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'and', new_string: 'also' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  const texts = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => /has findings in/.test(text))).toEqual([])
+  expect(texts.filter(text => /^wh-aaaa \(workspace 1001\): /.test(text))).toHaveLength(1)
+  await band.unmount()
+})
+
+test('a Helm or Kubernetes file under a resources/ folder is not Databricks config, whatever its words', async ($, on) => {
+  const files = {
+    [`${ROOT}/deploy/resources/values.yaml`]: 'resources:\n  limits:\n    cpu: 1\n  requests:\n    memory: 1Gi\n# runs on the shared cluster\n',
+    [`${ROOT}/k8s/resources/app.yml`]: 'spec:\n  containers:\n    - name: app\n      resources:\n        limits:\n          cpu: 1\n# cluster: prod\n',
+  }
+  const { clock } = await start($, on, { files })
+  for (const path of Object.keys(files)) await $.tool.call({ tool: 'Edit', file_path: path, old_string: 'cpu: 1', new_string: 'cpu: 2' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /Databricks compute in play/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('an answer whose window cannot be read gives the length its evidence is measured over everywhere', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.window = { start: answer.metadata.window.start }
+  answer.metadata.report.lookback_days = 30
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => / · the \d+ days/.test(text)).map(text => /the (\d+) days/.exec(text)![1])).toEqual(['30'])
+  expect(texts.filter(text => /the last \d+ days' rate/.test(text)).map(text => /the last (\d+) days/.exec(text)![1])).toEqual(['30'])
+  await ui.unmount()
+})
+
 test('a what-if choice opens only its own warehouse when two workspaces share the warehouse id and the choice', async ($, on) => {
   const [first, second] = DATABRICKS_REPORT.what_if
   // Core's own answer: one id, the same choices, two workspaces.
