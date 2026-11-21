@@ -1247,12 +1247,13 @@ async function runCheck($: EngineInterface, mine: { asked: string | null; name?:
     const version = releaseOf(printed)
     if (source || !version || !supportsSavings(version)) {
       const targets = targetsFor(asked, known)
-      // Until the connection list is read no platform is named: it could be the wrong one.
-      const name = known ? checkName(targets) : 'savings check'
+      // A platform is named, and the refusal filed under it, only when the list was read, the run covered that one
+      // alone and the connection asked for is in the list: otherwise it is a guess and could be the wrong one.
+      const one = !!known && targets.length === 1 && kindOf(asked, known)
+      const name = one ? checkName(targets) : 'savings check'
       const noCheck = `This altimate-code has no ${name}.`
       await refuse(
-        // Filed under a platform only when the list was read and the run covered that one alone.
-        known && targets.length === 1 ? targets[0]!.platform : null,
+        one ? targets[0]!.platform : null,
         name,
         source
           ? {
@@ -1325,8 +1326,9 @@ async function runCheck($: EngineInterface, mine: { asked: string | null; name?:
     const targets = targetsFor(asked, known)
     const platform = targets[0]!.platform
     if (!live()) return
-    // A platform is named only when the list was read and the run covered that one alone: it could be the wrong one.
-    const one = known && targets.length === 1
+    // A platform is named only when the list was read, the run covered that one alone and the connection asked for
+    // is in the list: otherwise it is a guess and could be the wrong one.
+    const one = !!known && targets.length === 1 && kindOf(asked, known)
     const why = MISSING_BINARY.test(String(error))
       ? { text: 'altimate-code is not installed.', recovery: `Install it (\`${INSTALL}\`), add a ${one ? PLATFORM_NAME[platform] : 'Databricks or Snowflake'} connection, then run /savings again.` }
       : explain(String(error), asked, platform, kindOf(asked, known))

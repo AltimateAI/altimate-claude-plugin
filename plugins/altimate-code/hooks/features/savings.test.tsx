@@ -2503,6 +2503,32 @@ test('a warehouse name that is no plain identifier is quoted in the drafted stat
   await ui.unmount()
 })
 
+test('a version-gate refusal before the connection list is read is filed under no platform in the report', async ($, on) => {
+  const options: any = { files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' } }
+  const { clock, written } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  options.version = '0.12.11'
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  const page = [...written.values()].at(-1)!
+  expect(page).toContain('The last check did not finish: This altimate-code has no savings check.')
+  expect(page).not.toContain('The last Databricks check did not finish')
+  await ui.unmount()
+})
+
+test('a version-gate refusal for a name the list read at session start lacks names no platform', async ($, on) => {
+  const options: any = { list: BOTH }
+  const { clock, toasts } = await start($, on, options)
+  options.version = '0.12.11'
+  await savings($, 'newsf')
+  await clock.settle()
+  expect(toasts.at(-1)).toMatch(/^Savings check: This altimate-code has no savings check\. /)
+})
+
 test('the shared report names a platform that could not be checked', async ($, on) => {
   const missing = { status: 'error', title: 'Unknown tool', output: 'Unknown tool: finops_snowflake_savings. Run it', metadata: {} }
   const { clock, written } = await start($, on, { list: BOTH, snowflake: missing, files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' } })
