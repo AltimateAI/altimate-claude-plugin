@@ -1251,7 +1251,8 @@ async function runCheck($: EngineInterface, mine: { asked: string | null; name?:
       const name = known ? checkName(targets) : 'savings check'
       const noCheck = `This altimate-code has no ${name}.`
       await refuse(
-        targets[0]!.platform,
+        // Filed under a platform only when the list was read and the run covered that one alone.
+        known && targets.length === 1 ? targets[0]!.platform : null,
         name,
         source
           ? {
@@ -1329,7 +1330,7 @@ async function runCheck($: EngineInterface, mine: { asked: string | null; name?:
     const why = MISSING_BINARY.test(String(error))
       ? { text: 'altimate-code is not installed.', recovery: `Install it (\`${INSTALL}\`), add a ${one ? PLATFORM_NAME[platform] : 'Databricks or Snowflake'} connection, then run /savings again.` }
       : explain(String(error), asked, platform, kindOf(asked, known))
-    await refuse(platform, one ? checkName(targets) : 'savings check', why)
+    await refuse(one ? platform : null, one ? checkName(targets) : 'savings check', why)
   } finally {
     // A dropped run leaves the running flag as the /clear left it. The claim is let go only once the flag is
     // cleared, so a run claimed next never has its flag cleared by this one, and is let go even when that write
@@ -1589,11 +1590,12 @@ export function register(on: On, _context: FeatureContext) {
       // started).
       // The running check is named as it was asked for, not as this request would be: the one holding the claim
       // now, which may have started while the pane opened.
-      const running = (claim ?? going).name ?? 'savings check'
+      const current = claim ?? going
+      const running = current.name ?? 'savings check'
       if (conversation !== inConversation) return { text: `The conversation was cleared while the ${running} ran. Run /savings again.` }
       if (claim === null) return { text: `The ${running} just finished: its result is in the side pane.` }
       // One asked for a connection the running check is not reading, typed or not, is to be asked again.
-      const other = (asked || null) !== going.asked ? ` Run /savings${asked ? ` ${asked}` : ''} again when it finishes.` : ''
+      const other = (asked || null) !== current.asked ? ` Run /savings${asked ? ` ${asked}` : ''} again when it finishes.` : ''
       return { text: `The ${running} is already running in the side pane.${other}` }
     }
     if (claim !== mine) return cleared
