@@ -632,6 +632,60 @@ export interface CteProfileState {
   message?: string
 }
 
+/** A warehouse's settings as the CLI listed them: each its value, or null where the CLI did not read it. */
+export type WarehouseConfig = { size: string | null; type: string | null }
+
+/** One /savings run's answer, as the pane draws it. */
+export type SavingsView = {
+  /** The altimate-code connection that ran the check. */
+  connection: string | null
+  /** The window the check read (YYYY-MM-DD, UTC) and its length in days; `days` is derived from the ends when the CLI did not send `lookback_days`, and is absent only on reports saved before it was kept. */
+  window: { start: string; end: string; days?: number }
+  /** What was read; `workspaces` counts the Databricks workspaces the run read warehouses, clusters or jobs from. */
+  checked: { warehouses: number; clusters: number; jobs: number; workspaces: number }
+  /**
+   * Checks that did not run in full, each as "Check name (the CLI's reason)": the connection could not read
+   * its system tables, the run hit its time limit (its query may still be running), or core refused its facts.
+   */
+  skipped: string[]
+  /** What a query read only the first 10,000 of, e.g. `jobs`. */
+  limited: string[]
+  /** Dollars a month at list price, each resource counted once at its largest saving. */
+  total: { min: number; max: number; resources: number }
+  findings: {
+    title: string
+    /** `sql_warehouse`, `cluster` or `job`. */
+    resourceType: string
+    resourceId: string
+    resourceName: string
+    /** As the workspace spells it, to recognise it in files and commands. */
+    matchName: string
+    /** The workspace it is in; null when the check read only one. */
+    workspace: string | null
+    /** The workspace it is in, whether or not the check read several; null when the answer does not say. */
+    workspaceId: string | null
+    monthlyMin: number
+    monthlyMax: number
+    evidence: string[]
+    /** The request "Draft the fix" puts in the prompt box: the change, for Claude to draft and the person to review. */
+    fixRequest: string
+  }[]
+  /** What each flagged warehouse would cost at other sizes or as serverless. */
+  whatIf: {
+    resourceId: string
+    resourceName: string
+    /** The workspace it is in; null when the check read only one. */
+    workspace: string | null
+    /** The workspace it is in, whether or not the check read several; null when the answer does not say. */
+    workspaceId: string | null
+    currentMonthly: number
+    choices: { label: string; monthlyCost: number; monthlySaving: number; fits: boolean; cores: number; coresNeeded: number }[]
+  }[]
+  /** Warehouses whose size or type changed since a run first flagged them, with their observed spend a month before and
+   * after: billed in different weeks, so not a saving measured with the workload held constant. */
+  changes: { name: string; from: string; to: string; since: string; monthlyBefore: number; monthlyNow: number }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'altimate-code': {
@@ -709,6 +763,16 @@ declare module 'claude-code' {
       health: HealthState | null
       /** hooks/features/: SqlGraphState. */
       sqlGraph: Shaped<SqlGraphState | null>
+      /** The last /savings answer; null before one, or after /clear. */
+      savingsReport: Shaped<SavingsView | null>
+      /** What /savings is doing now; null when it is idle. */
+      savingsBusy: { label: string } | null
+      /** Why there is no answer to show: the check's refusal and the step that fixes it. */
+      savingsMessage: { text: string; recovery: string } | null
+      /** The line above the prompt when the session touches Databricks config; null when there is none. */
+      savingsBand: { text: string } | null
+      /** The alternative pressed in the pane's what-if row; null when none is. */
+      savingsWhatIf: { workspaceId: string | null; resourceId: string; label: string } | null
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */

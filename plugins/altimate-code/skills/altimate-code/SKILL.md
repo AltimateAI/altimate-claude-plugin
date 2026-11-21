@@ -104,6 +104,7 @@ Arguments for the most used tools (`?` marks optional):
 | `altimate_core_equivalence` | `{"sql1", "sql2"}` |
 | `sql_translate` | `{"sql", "source_dialect", "target_dialect"}` |
 | `finops_analyze_credits` | `{"warehouse"?, "days"?}` |
+| `finops_databricks_savings` | Do not call it yourself: ask the user to type `/savings [connection]`. That runs it read-only with telemetry and the tool daemon off, keeps the findings in the side pane, and only the user can start it (it may start their SQL warehouse, which bills) |
 | `workspace_context` | `{"include_tools"?, "refresh"?}` |
 | `workspace_skill` | `{"workspace_token", "name"}` |
 | `workspace_execute` | `{"workspace_token", "operation", "arguments"}` |

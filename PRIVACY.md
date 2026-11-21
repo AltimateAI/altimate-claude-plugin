@@ -16,7 +16,7 @@ This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai
 - When a task **is** delegated, your task text is passed to the altimate-code CLI, which sends it to an LLM provider to plan and execute the work — the Altimate LLM Gateway by default, or a provider you configure (BYOK).
 - Warehouse queries, dbt commands, and file edits run **locally on your machine, under your credentials**. Your warehouse credentials are never sent to Altimate.
 - In a project linked to an Altimate workspace, the plugin copies the workspace's team skills into the project's `.claude/skills/` and refreshes them from Altimate in the background at session start and at most hourly. Their text loads into the Claude Code conversation like any project skill. `ALTIMATE_CLAUDE_SKILL_SYNC=0` turns this off and removes the copies at the next session start.
-- The plugin counts its own use anonymously, through the altimate-code CLI's usage telemetry: one event at each session start (plugin and altimate-code versions, OS, a random install id) and one each time a panel or command opens or a gate holds or allows a command (its name and outcome). No session id, project, model, column or file names, SQL or session text, and nothing that links them to your account or to the CLI's other telemetry. `ALTIMATE_TELEMETRY_DISABLED=true` turns it off. See [Plugin usage events](#plugin-usage-events).
+- The plugin counts its own use anonymously, through the altimate-code CLI's usage telemetry: one event at each session start (plugin and altimate-code versions, OS, a random install id) and one each time a panel or command opens or a gate holds or allows a command (its name and outcome); `/savings` sends none. No session id, project, model, column or file names, SQL or session text, and nothing that links them to your account or to the CLI's other telemetry. `ALTIMATE_TELEMETRY_DISABLED=true` turns it off. See [Plugin usage events](#plugin-usage-events).
 - Installing the plugin is an explicit act — `/plugin marketplace add` does not install it, and `/plugin install` never auto-runs. Nothing is delegated until the plugin is installed and you send a task that matches the skill.
 
 ## What the plugin does and does not do
@@ -122,6 +122,7 @@ To count installs, active use and which features are used, the plugin asks the l
 - No event contains project, model, column or file names, SQL, query results or session text. The CLI accepts each field only from a fixed list or pattern (a version, a UUID, one of the names above) and refuses anything else.
 - **Turning it off:** `ALTIMATE_TELEMETRY_DISABLED=true` (or `1`) in the environment Claude Code starts in: the plugin then starts no CLI for these events, or for the lineage report's, and makes no install id. The CLI also drops them under its own opt-out (`ALTIMATE_TELEMETRY_DISABLED`, or `telemetry.disabled` in its config), as for every other event.
 - The events are sent in the background and never delay a hook. An altimate-code that predates them refuses them, and nothing is sent or shown.
+- **`/savings` sends no usage event.** Typing it, pressing its buttons and opening its pane are not counted, and nothing about the check (its queries, findings or amounts) goes to Altimate. See [The Databricks savings check](#the-databricks-savings-check).
 
 ## Data flows when a task is delegated
 
@@ -133,6 +134,10 @@ To count installs, active use and which features are used, the plugin asks the l
 | Schema metadata indexed by the CLI | Local index on your machine | Local only |
 
 **Bring Your Own Key (BYOK):** if you configure your own provider (Anthropic, OpenAI, Bedrock, Azure OpenAI, Ollama, and others), your prompts go directly from your machine to that provider. Altimate is not in that delegation path; workspace service requests still go to Altimate.
+
+## The Databricks savings check
+
+`/savings` runs altimate-code's `finops_databricks_savings` tool on your machine, with your own Databricks connection. It reads usage from your workspace's system tables and decides the savings locally. The plugin runs it with telemetry turned off, in altimate-code's assessment mode (`ALTIMATE_ASSESSMENT_MODE=true`) and outside its tool daemon. In assessment mode the CLI sends no usage event, not even the one-time telemetry opt-out event, and does not fetch the model catalog or download ripgrep, so your warehouse is the only host the run contacts; an altimate-code release without assessment mode ignores the setting and would still send that opt-out event and make those fetches, so the plugin first asks `altimate --version` (which sends nothing) and does not start a release older than 0.12.12, or a source build (which prints `local` whatever its age), for the check. The plugin sends no usage event of its own for `/savings` either (see [Plugin usage events](#plugin-usage-events)), so nothing about the check, its queries or its results goes to Altimate. The findings are shown in a pane, not added to the conversation. Not assessed: Databricks Apps spend; a serverless SQL warehouse gets only the over-sized check. The run starts the connection's SQL warehouse if it is stopped, and needs the `@databricks/sql` driver installed. Costs cover the six full billed days before the window's last day, scaled to seven, which read about 7% below the seven billed days on one measured workspace. To show a flagged warehouse's observed spend before and after a later change, the plugin keeps its size, type and weekly cost in Claude Code's local plugin store on your machine. **Draft the fix** puts one finding's details in your prompt box; they reach your model provider only if you send that prompt. When Claude runs the same tool itself, its answer is a tool result like any other and reaches your model provider.
 
 ## Usage telemetry
 
@@ -172,6 +177,8 @@ The plugin and the altimate-code CLI are professional developer tools, not direc
 ## Changes to this policy
 
 We will update this document in this repository and revise the effective date when our practices change. Material changes to Altimate-wide practices are governed by the master [Privacy Policy](https://www.altimate.ai/privacy).
+
+**November 19, 2026:** added [The Databricks savings check](#the-databricks-savings-check) (plugin 1.9.0): `/savings` runs altimate-code's savings tool with telemetry off, sends no plugin usage event, and keeps the findings out of the conversation.
 
 **November 19, 2026:** added [Plugin usage events](#plugin-usage-events) (plugin 1.8.2): the anonymous session start and feature-used events, and the plugin's own check of the telemetry opt-out.
 

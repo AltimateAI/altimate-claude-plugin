@@ -17,7 +17,10 @@ export const NOT_FOUND = /ENOENT|not found|no such file/i
 // timeout never reruns a command that may have taken effect.
 export const MISSING_BINARY = new RegExp(`${NOT_FOUND.source}|(cannot|could not|failed to) (start|spawn|run)`, 'i')
 
-/** Runs the altimate CLI under the first name that is installed; 90 s unless the caller says otherwise. */
+/**
+ * Runs the altimate CLI under the first name that is installed; 90 s unless the caller says otherwise.
+ * `env` is set over the session's environment for this run only.
+ */
 export async function runAltimate($: EngineInterface, args: string[], timeoutMs = 90_000, env?: Record<string, string>) {
   let lastError: unknown = null
   for (const bin of CLI_NAMES) {
@@ -67,7 +70,7 @@ export function compareVersions(a: string, b: string): number {
   return 0
 }
 
-const INSTALL = 'npm i -g @altimateai/altimate-code'
+export const INSTALL = 'npm i -g @altimateai/altimate-code'
 
 /**
  * What to tell the person about the altimate-code on PATH, or null when it is current, a preview build, or
@@ -191,8 +194,13 @@ export type RunToolOptions = {
    * item 4), as the skill does before it adds `--allow-write`.
    */
   write?: boolean
-  /** Variables set for the CLI process (CLI route only, so a call that sets them never goes over MCP). */
+  /** Variables set for a CLI run (`cliOnly`), over the session's environment. */
   env?: Record<string, string>
+  /**
+   * Run the tool in the CLI's own process (`--no-daemon`). A reused tool daemon keeps the environment
+   * it started with, so a run that sets `env` for itself must not be served by one.
+   */
+  noDaemon?: boolean
 }
 
 /**
@@ -203,7 +211,8 @@ export type RunToolOptions = {
  */
 export async function runTool($: EngineInterface, name: string, args: Record<string, unknown>, options: RunToolOptions = {}) {
   const { until, write = false } = options
-  const cliOnly = options.cliOnly === true || write || options.env !== undefined
+  // An environment or a daemon bypass is only honoured by the CLI: the MCP server would drop both silently.
+  const cliOnly = options.cliOnly === true || write || options.noDaemon === true || options.env !== undefined
   // With a deadline, nothing starts once it has passed, and the CLI is stopped at it.
   const left = async () => {
     const ms = until === undefined ? TOOL_TIMEOUT_MS : until - (await $.clock.now())
@@ -242,7 +251,7 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
       serverName = null
     }
   }
-  const argv = ['tool', 'run', name, '--args', JSON.stringify(args), '--json', ...(write ? ['--allow-write'] : [])]
+  const argv = ['tool', 'run', name, '--args', JSON.stringify(args), '--json', ...(write ? ['--allow-write'] : []), ...(options.noDaemon ? ['--no-daemon'] : [])]
   const result = await runAltimate($, argv, await left(), options.env)
   if ((result as { isStdoutTruncated?: boolean }).isStdoutTruncated) {
     return { metadata: null as any, text: `${name}'s answer was larger than the 4 MiB a plugin can read`, ok: false }
@@ -255,7 +264,11 @@ export async function runTool($: EngineInterface, name: string, args: Record<str
   }
   // A crash, or a failure the CLI prints as plain text, has no answer object: its first line is what to show.
   // An answer cut off mid-JSON is no message, so only what the CLI printed to stderr is shown for it.
+  // The whole output also comes back as `raw` (an altimate-code too old to have the command prints its
+  // usage instead of an answer), so the caller can say what went wrong.
   const out = result.stdout.trim()
-  const said = data && typeof data === 'object' ? '' : ((out.startsWith('{') ? '' : out) || String(result.stderr ?? '').trim()).split('\n')[0]!.slice(0, 500)
-  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? said, ok: result.exitCode === 0 && data?.status !== 'error' }
+  const answered = data && typeof data === 'object'
+  const said = answered ? '' : ((out.startsWith('{') ? '' : out) || String(result.stderr ?? '').trim()).split('\n')[0]!.slice(0, 500)
+  const raw = answered ? undefined : `${result.stdout ?? ''}\n${result.stderr ?? ''}`.trim().slice(0, 4000)
+  return { metadata: (data?.metadata ?? null) as any, text: data?.output ?? said, ok: result.exitCode === 0 && data?.status !== 'error', raw }
 }

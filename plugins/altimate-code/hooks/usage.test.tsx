@@ -1,5 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
+import { SAVINGS_MIN_ALTIMATE_CODE } from './features/savings'
 import { nothingToReport } from './inert-features'
 
 const ROOT = '/work/acme_secret_project'
@@ -36,6 +37,8 @@ type Options = {
   holdStore?: Promise<void>
   /** The team comments the CLI lists. */
   comments?: unknown[]
+  /** What the Databricks savings tool answers; the CLI is then a release that has it. */
+  savings?: unknown
 }
 
 /** A dbt project, the CLI answering every other feature with nothing to report, and each usage event recorded. */
@@ -44,6 +47,7 @@ async function start($: any, on: any, options: Options = {}) {
   mock.env(on, options.env ?? {})
   const store = options.store ?? new Map<string, unknown>()
   let idWrites = 0
+  let savingsRuns = 0
   const events: string[][] = []
   const toasts: string[] = []
   const logs: { text: string; to?: string }[] = []
@@ -104,6 +108,11 @@ async function start($: any, on: any, options: Options = {}) {
       events.push(argv)
       return { value: options.event ? await options.event(argv) : { exitCode: 0, stdout: '', stderr: '' } }
     }
+    if (options.savings && argv[1] === '--version') return { value: { exitCode: 0, stdout: `${SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: '' } }
+    if (options.savings && argv[3] === 'finops_databricks_savings') {
+      savingsRuns++
+      return { value: { exitCode: 0, stdout: JSON.stringify(options.savings), stderr: '' } }
+    }
     if (argv[3] === 'dbt_map_relations')
       return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { mappings: [{ raw: 'raw.orders', replaceWith: "{{ source('raw', 'orders') }}", match: 'exact' }] } }), stderr: '' } }
     if (argv[3] === 'docs_share_comments' && options.comments)
@@ -116,7 +125,7 @@ async function start($: any, on: any, options: Options = {}) {
   await clock.settle()
   const usage = () => events.filter(argv => argv[3]?.startsWith('plugin_'))
   const flag = (argv: string[], name: string) => argv[argv.indexOf(name) + 1]
-  return { clock, store, events, usage, flag, toasts, logs, idWrites: () => idWrites }
+  return { clock, store, events, usage, flag, toasts, logs, idWrites: () => idWrites, savingsRuns: () => savingsRuns }
 }
 
 /** Every panel: its command, arguments that open it, and its feature name. Both outcome tests walk this one list. */
@@ -399,4 +408,77 @@ test('/runs whose list cannot be read answers that it could not open, and sends 
   const answer: any = await run($, clock, 'runs')
   expect(answer.text).toStartWith('Could not open the dbt runs')
   expect(usage().slice(before).map(argv => [flag(argv, '--feature'), flag(argv, '--outcome')])).toEqual([['runs', 'failed']])
+})
+
+/** A savings answer with one finding and its what-if, as `tool run finops_databricks_savings --json` prints it. */
+const SAVINGS_ANSWER = {
+  status: 'ok',
+  output: '',
+  metadata: {
+    success: true,
+    window: { start: '2026-11-11', end: '2026-11-18' },
+    warehouse: 'dbx',
+    warehouses_checked: 1,
+    clusters_checked: 0,
+    jobs_checked: 0,
+    warehouses: [{ id: 'wh-1', name: 'Classic', type: 'CLASSIC', size: 'SMALL', window_cost: 27.54 }],
+    report: {
+      lookback_days: 7,
+      findings: [
+        {
+          title: 'Migrate Classic/Pro to Serverless',
+          resource_type: 'sql_warehouse',
+          resource_id: 'wh-1',
+          resource_name: 'Classic',
+          monthly_min: 80.64,
+          monthly_max: 100.8,
+          evidence: { kind: 'serverless', warehouse_type: 'CLASSIC', warehouse_size: 'SMALL', idle_ratio: 0.95, wall_clock_uptime_hours: 11, total_query_count: 3107, current_dbu_cost: 27.54, projected_serverless_dbu_cost: 4.02 },
+        },
+      ],
+      total: { monthly_min: 80.64, monthly_max: 100.8, resources: 1 },
+      what_if: [
+        {
+          resource_id: 'wh-1',
+          resource_name: 'Classic',
+          current_label: 'SMALL',
+          current_monthly_cost: 118.03,
+          choices: [{ label: 'SERVERLESS', monthly_cost: 17.24, monthly_saving: 100.8, fits: true, cores: 0, cores_needed: 6.9 }],
+        },
+      ],
+    },
+  },
+}
+
+test('/savings sends no usage event: not for the command, its pane, its buttons or a second run', async ($, on) => {
+  const { clock, events, usage, savingsRuns } = await start($, on, { savings: SAVINGS_ANSWER })
+  // Usage is on and this fake CLI records it: the session start's event arrived.
+  expect(usage().map(argv => argv[3])).toEqual(['plugin_session_start'])
+  const before = events.length
+  const composer = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 200 } }
+  const said: any = await $.command.run({ command: 'savings', args: '', ...composer } as any)
+  await clock.settle()
+  expect(said.text).toContain('Nothing is sent to Altimate')
+  const pane = await $.ui.mount({
+    plugin: 'altimate-code',
+    component: 'Pane',
+    requestId: 'altimate-savings',
+    surface: 'terminal',
+    props: { title: 'Databricks savings', isFocused: true, bodyColumns: 96, placement: 'dock', scroll: { offset: 0, bodyRows: 60 }, view: {} },
+  } as any)
+  // The check ran and drew its finding, so every button below is live.
+  expect(await pane.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
+  await pane.press({ key: 'fix-0' })
+  await clock.settle()
+  await pane.press({ key: 'whatif-0-0' })
+  await clock.settle()
+  expect(await pane.find({ type: 'Text', text: /^As serverless: / })).toBeDefined()
+  await pane.press({ key: 'again' })
+  await clock.settle()
+  await pane.unmount()
+  // Two runs of the check (the command and Run again), and not one usage event among them.
+  expect(savingsRuns()).toBe(2)
+  expect(events.slice(before)).toEqual([])
+  // The same fake CLI still records a counted panel opened right after, so the silence above is /savings' own.
+  await run($, clock, 'runs')
+  expect(usage().slice(-1).map(argv => argv[3])).toEqual(['plugin_feature_used'])
 })
