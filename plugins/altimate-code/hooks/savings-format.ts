@@ -1,0 +1,135 @@
+// How /savings writes money, days and platforms, shared by the pane, the tool-row note and the report.
+import type { SavingsFinding, SavingsPlatform, SavingsView } from '../types'
+import { oneLine } from './savings-text'
+
+// Free text on one line; the settings a baseline and a fix keep share it.
+export { oneLine }
+
+export const PLATFORM_NAME: Record<SavingsPlatform, string> = { databricks: 'Databricks', snowflake: 'Snowflake' }
+export const PLATFORMS: readonly SavingsPlatform[] = ['databricks', 'snowflake']
+export const DAY_MS = 86_400_000
+
+/** Said beside any before-and-after amounts: the two come from different billing weeks, so they are observed spend, not a saving. */
+export const OBSERVED_NOTE = 'Billed in different weeks, so a change in workload moves these too: not a measured saving.'
+
+/** An amount rounded as it is shown: to the cent, or to the dollar. */
+const roundMoney = (value: number, cents: boolean) => (cents ? Math.round(value * 100) / 100 : Math.round(value))
+
+/** A figure the answer gave: not missing, empty or something that reads as NaN. */
+export const known = (value: unknown) =>
+  typeof value === 'number' ? Number.isFinite(value) : typeof value === 'string' && value.trim() !== '' && Number.isFinite(Number(value))
+
+function money(value: number, cents: boolean): string {
+  if (!known(value)) return '?'
+  const rounded = roundMoney(Number(value), cents)
+  const [whole, fraction] = rounded.toFixed(cents ? 2 : 0).split('.')
+  return `$${whole!.replace(/\B(?=(\d{3})+(?!\d))/g, ',')}${fraction ? `.${fraction}` : ''}`
+}
+
+export function dollars(value: number): string {
+  return money(value, value < 100)
+}
+
+/** To the cent, whatever the amount: for a figure small amounts are compared by. */
+export function cents(value: number): string {
+  return money(value, true)
+}
+
+/** Two monthly amounts and the gap between them, as a sentence that compares them shows them: all
+ * three to the cent when any of them is under $100, so the gap it states is the gap between the
+ * amounts it shows ("$19.05 instead of $125.50, $106.45 less", not "$19.05 instead of $126, $106
+ * less"), and a small gap between large amounts is not shown as $0. */
+export function compared(was: number, now: number): { was: string; now: string; gap: string } {
+  const inCents = Math.abs(was) < 100 || Math.abs(now) < 100 || Math.abs(was - now) < 100
+  return { was: money(was, inCents), now: money(now, inCents), gap: money(Math.abs(roundMoney(was, inCents) - roundMoney(now, inCents)), inCents) }
+}
+
+export function range(min: number, max: number): string {
+  return dollars(min) === dollars(max) ? dollars(max) : `${dollars(min)}–${dollars(max)}`
+}
+
+
+/**
+ * Text as it may be drawn: control and invisible characters gone, spacing otherwise left alone. Names,
+ * skip reasons and driver errors all reach the screen, and one escape character can blank a whole pane.
+ */
+export const cleanText = (text: string) => text.replace(/\p{Cf}/gu, '').replace(/[\p{Cc}\u2028\u2029]+/gu, ' ')
+
+/** A drawing with every text and button label in it cleaned: the one place the pane and the band pass through. */
+export function cleanTree<T>(node: T): T {
+  if (typeof node === 'string') return cleanText(node) as T
+  if (Array.isArray(node)) return node.map(cleanTree) as T
+  const element = node as { type?: unknown; props?: Record<string, unknown>; children?: unknown } | null
+  if (!element || typeof element !== 'object' || !['Box', 'Text', 'Button'].includes(String(element.type))) return node
+  const clean: typeof element = { ...element }
+  if ('children' in element) clean.children = cleanTree(element.children)
+  if (typeof element.props?.label === 'string') clean.props = { ...element.props, label: cleanText(element.props.label) }
+  return clean as T
+}
+
+/** A finding's monthly figure: its range, or that it has none. */
+export const amount = (min: number, max: number) => (max > 0 ? `${range(min, max)} a month` : 'no dollar estimate')
+
+/** A size as the pane writes it: `2X_SMALL` is `2X-SMALL`. */
+export const size = (value: unknown) => (oneLine(value) || '?').replace(/_/g, '-')
+
+/** A whole count; one the answer lacks (missing, empty, not a number) reads "?", not 0. */
+export const count = (value: unknown) => (known(value) ? Math.round(Number(value)).toLocaleString('en-US') : '?')
+
+/** Days a window covers: the CLI's own count when it gave one, else from its YYYY-MM-DD ends; 7 when neither can be read. */
+export function windowDays(window: { start: string; end: string; days?: number }): number {
+  if (typeof window.days === 'number' && Number.isFinite(window.days) && window.days > 0) return window.days
+  const days = Math.round((Date.parse(window.end) - Date.parse(window.start)) / DAY_MS)
+  return Number.isFinite(days) && days > 0 ? days : 7
+}
+
+const ROW_LIMIT: Record<SavingsPlatform, string> = { databricks: '10,000', snowflake: '100,000' }
+
+/** What a run read only part of, as a sentence; null when it read everything. */
+export function limitedText(view: Pick<SavingsView, 'platform' | 'limited'>): string | null {
+  if (view.limited.length === 0) return null
+  if (view.platform !== 'snowflake') return `Only the first ${ROW_LIMIT[view.platform]} ${view.limited.join(' and ')} were read; any beyond them were not checked.`
+  // SHOW WAREHOUSES stops at its own limit; every other Snowflake read is by rows.
+  const parts = view.limited.map(what => (what === 'warehouses' ? 'the first 9,999 warehouses' : `the first ${ROW_LIMIT.snowflake} rows of ${what}`))
+  return `Only ${parts.join(' and ')} were read; any beyond them were not checked.`
+}
+
+/** The key a resource is counted once under across the kept answers: two connections that read the same account share it. */
+export const resourceKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: Pick<SavingsFinding, 'workspaceId' | 'resourceType' | 'resourceId'>) =>
+  `${view.platform}:${view.scope ?? ''}:${one.workspaceId ?? ''}:${one.resourceType}:${one.resourceId}`
+
+/** The key a finding is counted once under: its resource's and its check's. Two connections that read one workspace list it twice. */
+export const findingKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: Pick<SavingsFinding, 'workspaceId' | 'resourceType' | 'resourceId' | 'checkId'>) =>
+  `${resourceKey(view, one)}:${one.checkId}`
+
+/** How many findings the answers hold, each counted once (`findingKey`). */
+export const distinctFindingCount = (views: readonly SavingsView[]) => new Set(views.flatMap(view => view.findings.map(one => findingKey(view, one)))).size
+
+/** Whether a finding's range is larger than another's: by its high end, then its low end. */
+export const largerSaving = (a: { min: number; max: number }, b: { min: number; max: number }) => a.max > b.max || (a.max === b.max && a.min > b.min)
+
+/** What several kept answers add up to a month: one answer's own total, or their findings' added up. */
+export function combinedTotal(views: readonly SavingsView[]): { min: number; max: number; resources: number } {
+  return views.length === 1 ? views[0]!.total : findingsTotal(views)
+}
+
+/** What the answers' priced findings add up to a month: each resource once, at its largest saving, even when two connections read the same account. */
+export function findingsTotal(views: readonly SavingsView[]): { min: number; max: number; resources: number } {
+  const best = new Map<string, { min: number; max: number }>()
+  for (const view of views) {
+    for (const one of view.findings) {
+      if (one.monthlyMax <= 0) continue
+      const key = resourceKey(view, one)
+      const held = best.get(key)
+      const saving = { min: one.monthlyMin, max: one.monthlyMax }
+      if (!held || largerSaving(saving, held)) best.set(key, saving)
+    }
+  }
+  let min = 0
+  let max = 0
+  for (const one of best.values()) {
+    min += one.min
+    max += one.max
+  }
+  return { min, max, resources: best.size }
+}

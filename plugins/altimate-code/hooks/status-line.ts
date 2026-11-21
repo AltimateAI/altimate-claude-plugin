@@ -5,7 +5,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
 /** The features, in the order the plugin calls them (features/index.ts calls each by name in this order). */
-export const FEATURE_IDS = ['runs', 'defer', 'toModel', 'comments', 'cost', 'health', 'sqlGraph', 'docs', 'cteProfile'] as const
+export const FEATURE_IDS = ['runs', 'defer', 'toModel', 'comments', 'cost', 'health', 'sqlGraph', 'docs', 'cteProfile', 'savings'] as const
 export type FeatureId = (typeof FEATURE_IDS)[number]
 export type StatusPartId = 'integrations' | 'altimateCode' | FeatureId
 

@@ -635,41 +635,99 @@ export interface CteProfileState {
 /** A warehouse's settings as the CLI listed them: each its value, or null where the CLI did not read it. */
 export type WarehouseConfig = { size: string | null; type: string | null }
 
+/** The warehouse platforms /savings can check. */
+export type SavingsPlatform = 'databricks' | 'snowflake'
+
+/** An altimate-code connection as /savings knows it: never its credentials. */
+export type SavingsConnection = {
+  name: string
+  /** Null for a connection of any other type. */
+  platform: SavingsPlatform | null
+  /** The compute it runs on: a Databricks SQL warehouse id, or a Snowflake warehouse name; null when its config does not say. */
+  warehouse: string | null
+  /** The Snowflake account it reaches; null when its config does not say, and for anything else. */
+  account: string | null
+}
+
+/** The compute a tool call runs on. */
+export type SavingsWarehouseRef = {
+  platform: SavingsPlatform
+  warehouse: string
+  /** Which Snowflake account that name is in: a name means nothing across accounts. Null on Databricks, whose ids are unique. */
+  scope: string | null
+}
+
+/** One finding of a /savings run, as the pane draws it. */
+export type SavingsFinding = {
+  /** The check that raised it, by its id in Altimate's catalog. */
+  checkId: string
+  title: string
+  /** `sql_warehouse`, `warehouse`, `cluster` or `job`. */
+  resourceType: string
+  resourceId: string
+  /** Cleaned for showing. */
+  resourceName: string
+  /** As the workspace spells it, to recognise it in files, commands and connections. */
+  matchName: string
+  /** The workspace it is in; null when the check read only one. */
+  workspace: string | null
+  /** The workspace it is in, whether or not the check read several. */
+  workspaceId: string | null
+  /** Both 0 when the finding has no dollar estimate. */
+  monthlyMin: number
+  monthlyMax: number
+  evidence: string[]
+  /** The one fact a line under a tool call quotes. */
+  fact: string
+  /** What the resource cost a day over the window, from billing; null when the answer does not say. */
+  dailyCost: number | null
+  /** A warehouse's settings when it was measured, each as read or null; null for anything else. */
+  config: WarehouseConfig | null
+  /** The request "Draft the fix" puts in the prompt box: the change, for Claude to draft and the person to review. */
+  fixRequest: string
+}
+
+/** What became of a drafted fix, as of one run. */
+export type SavingsFixLine = {
+  /** The fixed resource's type, as its finding gave it (`sql_warehouse`, `warehouse`, `cluster`, `job`). */
+  resourceType: string
+  resourceId: string
+  /** The workspace the fixed resource is in; null when the answer does not say. */
+  workspaceId: string | null
+  resourceName: string
+  /** `lower`: the change was seen and billed spend fell; amounts from different weeks, so not a measured saving. */
+  state: 'measuring' | 'lower' | 'no_saving' | 'unchanged' | 'unmeasured'
+  text: string
+}
+
 /** One /savings run's answer, as the pane draws it. */
 export type SavingsView = {
+  platform: SavingsPlatform
   /** The altimate-code connection that ran the check. */
   connection: string | null
+  /** What the answer is about: the workspace host or Snowflake account, else the project it ran in. It is shown only there. */
+  identity: string
+  /** The Snowflake account the answer is about (its connection's name when the account is not known); null on Databricks. */
+  scope: string | null
+  /** How its dollars are priced: `list price`, or the account's own credit price. */
+  pricing: string
+  /** The SQL warehouse its queries ran on. */
+  ranOn: string | null
   /** The window the check read (YYYY-MM-DD, UTC) and its length in days; `days` is derived from the ends when the CLI did not send `lookback_days`, and is absent only on reports saved before it was kept. */
   window: { start: string; end: string; days?: number }
   /** What was read; `workspaces` counts the Databricks workspaces the run read warehouses, clusters or jobs from. */
   checked: { warehouses: number; clusters: number; jobs: number; workspaces: number }
   /**
-   * Checks that did not run in full, each as "Check name (the CLI's reason)": the connection could not read
-   * its system tables, the run hit its time limit (its query may still be running), or core refused its facts.
+   * What did not run in full, each with the CLI's reason in brackets: a check whose system tables the connection
+   * could not read, that hit the run's time limit (its query may still be running) or whose facts core refused;
+   * on Snowflake also warehouses the role cannot list.
    */
   skipped: string[]
   /** What a query read only the first 10,000 of, e.g. `jobs`. */
   limited: string[]
-  /** Dollars a month at list price, each resource counted once at its largest saving. */
+  /** Dollars a month, each resource with a dollar estimate counted once at its largest saving. */
   total: { min: number; max: number; resources: number }
-  findings: {
-    title: string
-    /** `sql_warehouse`, `cluster` or `job`. */
-    resourceType: string
-    resourceId: string
-    resourceName: string
-    /** As the workspace spells it, to recognise it in files and commands. */
-    matchName: string
-    /** The workspace it is in; null when the check read only one. */
-    workspace: string | null
-    /** The workspace it is in, whether or not the check read several; null when the answer does not say. */
-    workspaceId: string | null
-    monthlyMin: number
-    monthlyMax: number
-    evidence: string[]
-    /** The request "Draft the fix" puts in the prompt box: the change, for Claude to draft and the person to review. */
-    fixRequest: string
-  }[]
+  findings: SavingsFinding[]
   /** What each flagged warehouse would cost at other sizes or as serverless. */
   whatIf: {
     resourceId: string
@@ -683,8 +741,20 @@ export type SavingsView = {
   }[]
   /** Warehouses whose size or type changed since a run first flagged them, with their observed spend a month before and
    * after: billed in different weeks, so not a saving measured with the workload held constant. */
-  changes: { name: string; from: string; to: string; since: string; monthlyBefore: number; monthlyNow: number }[]
+  changes: { resourceId: string; workspaceId: string | null; name: string; from: string; to: string; since: string; monthlyBefore: number; monthlyNow: number }[]
+  /** Every warehouse the run read, with what it cost over the window. */
+  /** `workspaceId` is null when the answer did not say; an answer kept before it was stored has none. */
+  inventory: { id: string; workspaceId?: string | null; name: string; type: string; size: string | null; windowCost: number | null }[]
+  /** Queries the findings' evidence counted; null when none did. */
+  queryCount: number | null
+  /** The warehouse type those queries ran on (`CLASSIC`), when they all ran on one. */
+  queriesOn: string | null
+  /** The fixes drafted from earlier results, and what this run says became of them. */
+  fixes: SavingsFixLine[]
 }
+
+/** A run's answer as it is kept between sessions, for seven days. */
+export type SavingsKept = { savedAt: number; view: SavingsView }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -763,16 +833,25 @@ declare module 'claude-code' {
       health: HealthState | null
       /** hooks/features/: SqlGraphState. */
       sqlGraph: Shaped<SqlGraphState | null>
-      /** The last /savings answer; null before one, or after /clear. */
-      savingsReport: Shaped<SavingsView | null>
+      /** The kept /savings answers, by connection; each lasts seven days or until that connection is checked again. */
+      savingsReports: Shaped<Record<string, SavingsKept>>
       /** What /savings is doing now; null when it is idle. */
-      savingsBusy: { label: string } | null
-      /** Why there is no answer to show: the check's refusal and the step that fixes it. */
-      savingsMessage: { text: string; recovery: string } | null
+      savingsBusy: { label: string; detail: string } | null
+      /** Why a platform has no answer to show: the check's refusal and the step that fixes it. */
+      // A refusal about no one platform (a connection name that is neither) carries none.
+      savingsMessages: { platform: SavingsPlatform | null; text: string; recovery: string }[]
       /** The line above the prompt when the session touches Databricks config; null when there is none. */
       savingsBand: { text: string } | null
       /** The alternative pressed in the pane's what-if row; null when none is. */
-      savingsWhatIf: { workspaceId: string | null; resourceId: string; label: string } | null
+      savingsWhatIf: { connection: string | null; workspaceId: string | null; resourceId: string; label: string } | null
+      /** altimate-code's connections, in its order; null until they are read. */
+      savingsConnections: SavingsConnection[] | null
+      /** The compute each dbt run or build in the transcript runs on, by tool call. */
+      savingsRows: Record<string, SavingsWarehouseRef>
+      /** What the pane's last Share report or Altimate press did. */
+      savingsShared: { text: string } | null
+      /** Whether the pane shows every finding and its detail (Show all) or only the largest few; each run starts slim. */
+      savingsExpanded: boolean
       /** hooks/features/: DocsState. */
       docs: DocsState | null
       /** hooks/features/: CteProfileState. */

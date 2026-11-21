@@ -1,7 +1,9 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, apiSize, checksNotRun, compared, dollars, errorText, evidenceLines, explain, fixRequest, isDatabricksConfig, mentions, runsDatabricksCompute, supportsSavings, toView as toViewOf } from './savings'
-import { DATABRICKS_FACTS, DATABRICKS_REPORT } from './savings-core.testkit'
+import { SNOWFLAKE_CAPTURE } from './savings-snowflake-capture.test-data'
+import { skippedChecks } from '../savings-checks'
+import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, errorText, evidenceLines, explain, fitLine, fixRequest, isDatabricksConfig, mentions, runsDatabricksCompute, slimTitle, statusText, supportsSavings, toView } from './savings'
+import { DATABRICKS_FACTS, DATABRICKS_REPORT, SNOWFLAKE_FACTS, SNOWFLAKE_REPORT } from './savings-core.testkit'
 
 const ROOT = '/repo'
 
@@ -166,6 +168,55 @@ const ANSWER = {
   },
 }
 
+// `finops_snowflake_savings`'s answer, in the shape of that tool's own test report: a warehouse id that is
+// a number, evidence of its four kinds, a rate-sheet price, and a finding with no dollar estimate.
+const snowflakeFinding = (check_id: string, title: string, evidence: Record<string, unknown>, monthly_min: number, monthly_max: number) => ({
+  check_id,
+  title,
+  resource_type: 'sql_warehouse',
+  resource_id: '7',
+  resource_name: 'BI_WH',
+  workspace_id: null,
+  severity: 'medium',
+  daily_min: monthly_min / 30,
+  daily_max: monthly_max / 30,
+  monthly_min,
+  monthly_max,
+  evidence,
+})
+const SNOWFLAKE_ANSWER = {
+  status: 'ok',
+  title: 'Snowflake Savings: $54.00–$90.00 a month on 1 warehouse',
+  output: 'Snowflake savings: 3 warehouses checked',
+  metadata: {
+    success: true,
+    window: { start: '2026-11-11', end: '2026-11-18' },
+    warehouse: 'sfmega',
+    ran_on: 'BI_WH',
+    warehouses_checked: 3,
+    price: { per_credit: 3, source: 'rate_sheet', as_of: '2026-11-17' },
+    skipped: [],
+    limited: [],
+    warehouses: [
+      { id: '7', name: 'BI_WH', type: 'STANDARD', size: 'Large', window_cost: 42 },
+      { id: '8', name: 'ETL_WH', type: 'STANDARD', size: 'Small', window_cost: 12 },
+      { id: '9', name: 'OLD_WH', type: 'STANDARD', size: 'Small', window_cost: 0 },
+    ],
+    report: {
+      lookback_days: 7,
+      price_per_credit: 3,
+      findings: [
+        snowflakeFinding('downsize_warehouse', 'Downsize Warehouse', { kind: 'downsize_warehouse', current_size: 'Large', recommended_size: 'Medium', short_period_percent: 95, sub_five_second_percent: 91.5, query_count: 1200, cost_basis: 42, price_per_credit: 3 }, 54, 90),
+        snowflakeFinding('high_idle_time', 'High Idle Time', { kind: 'high_idle_time', idle_ratio: 0.6, idle_seconds: 7200, active_seconds: 12000, flagged_days: ['2026-11-11', '2026-11-12'], credits_used: 10, price_per_credit: 3, wasted_cost: 18 }, 54, 77.14),
+        snowflakeFinding('frequent_restart_overcharge', 'Frequent Restart Overcharge', { kind: 'frequent_restart', bounces: 12, double_billed_seconds: 300, credits_per_hour: 4, flagged_days: ['2026-11-11'], price_per_credit: 3 }, 4.29, 6.43),
+        snowflakeFinding('underutilized_cluster', 'Underutilized Cluster', { kind: 'underutilized_cluster', max_cluster_count: 2, recommended_max_cluster_count: 1, highest_idle_percent: 70, flagged_days: ['2026-11-13'] }, 0, 0),
+      ],
+      total: { monthly_min: 54, monthly_max: 90, resources: 1 },
+      what_if: [],
+    },
+  },
+}
+
 /** The tool's failure as `tool run --json` prints it: `status: ok`, the reason in the metadata. */
 function failure(error: string) {
   return { status: 'ok', title: 'Databricks Savings: FAILED', output: `The Databricks savings check failed: ${error}`, metadata: { success: false, error } }
@@ -199,6 +250,30 @@ type Options = {
   store?: Record<string, unknown>
   /** The tool run rejects with this, as `$.process.run` does on its timeout. */
   runRejects?: string
+  /** What `warehouse_list` prints; without it the list cannot be read. */
+  list?: string
+  /** What `finops_snowflake_savings` answers. */
+  snowflake?: unknown
+  /** Environment variables `$.env` answers. */
+  env?: Record<string, string>
+  /** How the OS opener exits; 0 unless a test says otherwise. */
+  openExit?: number
+  /** Opening a page in the browser waits for this. */
+  openHold?: Promise<void>
+  /** `$.fs.write` refuses with this. */
+  writeRejects?: string
+  /** The session has nobody at a terminal. */
+  headless?: boolean
+  /** `warehouse_list` answers with this failure in its metadata. */
+  listError?: string
+  /** `$.store` refuses every write, as it does past its size limit. */
+  storeFull?: boolean
+  /** `$.store` refuses the writes to these keys. */
+  storeRefuses?: (key: string) => boolean
+  /** What `uname -sr` prints. */
+  uname?: string
+  /** WSL without wslview installed. */
+  noWslview?: boolean
   /** `altimate --version` rejects with this, as `$.process.run` does on its timeout. */
   versionRejects?: string
   /** What `altimate --version` prints on stderr. */
@@ -207,19 +282,59 @@ type Options = {
   versionExit?: number
 }
 
+// The clock of the test that is running: tests in a file run one at a time.
+let testClock: { settle: () => Promise<unknown> } | null = null
+
+/** Presses Show all when the pane offers it, so the full detail (every finding, what-ifs, checks not run, Run again) is drawn. */
+async function showAll(ui: any) {
+  if (!(await ui.find({ type: 'Button', key: 'more' }))) return
+  await ui.press({ key: 'more' })
+  await testClock?.settle()
+}
+
+/** The pane as Show all draws it: today's full detail. */
+async function mountFull($: any, surface: 'terminal' | 'desktop' = 'terminal') {
+  const ui = await $.ui.mount({ ...PANE, surface })
+  await showAll(ui)
+  return ui
+}
+
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on, { now: options.now ?? Date.parse('2026-11-17T10:00:00Z') })
+  testClock = clock
   const runs: { argv: string[]; env: Record<string, string> | undefined }[] = []
   const versionRuns: { env: Record<string, string> | undefined }[] = []
   const toasts: string[] = []
   const fills: string[] = []
   const store = new Map<string, unknown>(Object.entries(options.store ?? {}))
+  const listRuns: { argv: string[]; env: Record<string, string> | undefined }[] = []
+  const snowflakeRuns: { argv: string[]; env: Record<string, string> | undefined }[] = []
+  const opened: string[] = []
+  const written = new Map<string, string>()
+  const statuses: (string | undefined)[] = []
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  on('store.delete', (_: unknown, e: { key: string }) => {
+    store.delete(e.key)
+    return { value: undefined }
+  })
+  on('env.get', (_: unknown, e: { name: string }) => ({ value: options.env?.[e.name] }))
+  on('fs.write', (_: unknown, e: { path: string; text: string }) => {
+    if (options.writeRejects) return { deny: options.writeRejects }
+    written.set(e.path, e.text)
+    return { value: undefined }
+  })
+  on('ui.status', (_: unknown, e: { text?: string }) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
   on('store.get', async (_: unknown, e: { key: string }) => {
     if (e.key.startsWith('savings-baseline:')) await options.onStep?.('baseline read')
     return { value: store.get(e.key) }
   })
   on('store.set', async (_: unknown, e: { key: string; value: unknown }) => {
     if (e.key.startsWith('savings-baseline:')) await options.onStep?.('baseline write')
+    if (e.key.startsWith('savings-fix:')) await options.onStep?.('fix write')
+    if (options.storeFull || options.storeRefuses?.(e.key)) return { deny: 'the store is over its limit' }
     store.set(e.key, e.value)
     return { value: undefined }
   })
@@ -250,7 +365,7 @@ async function start($: any, on: any, options: Options = {}) {
     const { Box } = $$.ui.resolve(e)
     return <Box key="engine" />
   })
-  on('fs.exists', () => ({ value: false }))
+  on('fs.exists', (_: unknown, e: { path: string }) => ({ value: options.files?.[e.path] !== undefined }))
   const reads = new Map<string, number>()
   on('fs.read', async (_: unknown, e: { path: string }) => {
     reads.set(e.path, (reads.get(e.path) ?? 0) + 1)
@@ -260,13 +375,36 @@ async function start($: any, on: any, options: Options = {}) {
   on('tool.list', () => ({ value: [] }))
   on('mcp.connect', () => ({ value: { isConnected: false, reason: 'not_connected', message: 'off' } }))
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { env?: Record<string, string> } }) => {
-    const [, command, , tool] = e.argv
+    const [bin, command, , tool] = e.argv
+    if (bin === 'uname') return { value: { exitCode: 0, stdout: `${options.uname ?? 'Darwin 24.6.0'}\n`, stderr: '' } }
+    if (bin === 'wslview' && options.noWslview) return { deny: 'spawn wslview ENOENT' }
+    if (bin === 'wslpath' || bin === 'wslview' || bin === 'xdg-open' || bin === 'explorer.exe') {
+      opened.push(`${bin} ${e.argv.slice(1).join(' ')}`)
+      return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    }
+    if (bin === 'mkdir') return { value: { exitCode: 0, stdout: '', stderr: '' } }
+    if (bin === 'open') {
+      if (options.openHold) await options.openHold
+      opened.push(command!)
+      return { value: { exitCode: options.openExit ?? 0, stdout: '', stderr: '' } }
+    }
     if (command === '--version') {
       await options.onStep?.('version probe')
       if (options.missingCli) return { deny: 'spawn altimate ENOENT' }
       if (options.versionRejects) return { deny: options.versionRejects }
-      versionRuns.push({ env: e.init?.env })
+      // The status line's own version check at session start runs without the switches: not the savings check's.
+      if (e.init?.env?.ALTIMATE_ASSESSMENT_MODE === 'true') versionRuns.push({ env: e.init?.env })
       return { value: { exitCode: options.versionExit ?? 0, stdout: options.version === null ? '' : `${options.version ?? SAVINGS_MIN_ALTIMATE_CODE}\n`, stderr: options.versionStderr ?? '' } }
+    }
+    if (command === 'tool' && tool === 'warehouse_list') {
+      listRuns.push({ argv: [...e.argv], env: e.init?.env })
+      if (options.list === undefined) return { value: { exitCode: 1, stdout: '', stderr: 'no list here' } }
+      if (options.listError) return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', title: 'Warehouses: ERROR', output: 'Failed to list warehouses', metadata: { count: 0, error: options.listError } }), stderr: '' } }
+      return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', title: 'Warehouses', output: options.list, metadata: {} }), stderr: '' } }
+    }
+    if (command === 'tool' && tool === 'finops_snowflake_savings') {
+      snowflakeRuns.push({ argv: [...e.argv], env: e.init?.env })
+      return { value: { exitCode: 0, stdout: JSON.stringify(options.snowflake ?? SNOWFLAKE_ANSWER), stderr: '' } }
     }
     // The other halves of the plugin ask the CLI for other things at session start.
     if (command !== 'tool' || tool !== 'finops_databricks_savings') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
@@ -280,11 +418,13 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: { exitCode: 0, stdout: JSON.stringify(options.answer ?? ANSWER), stderr: '' } }
   })
   on('tool.call', () => ({ result: { ok: true } }))
-  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: !options.headless })
   await clock.settle()
-  // The session start's own version check (for the status line) is not the savings check's.
+  const atStart = { versionRuns: versionRuns.length, listRuns: listRuns.length, runs: runs.length }
+  // From here on the lists hold what the test itself caused.
   versionRuns.length = 0
-  return { clock, runs, versionRuns, toasts, fills, store }
+  listRuns.length = 0
+  return { clock, runs, versionRuns, listRuns, snowflakeRuns, atStart, toasts, fills, store, opened, written, statuses }
 }
 
 const composer = { origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 200 } }
@@ -308,7 +448,17 @@ test('/savings runs the altimate-code tool once with telemetry off and draws its
   expect(toasts.at(-1)).toBe('Databricks savings check: $80.64–$101 a month on 1 resource.')
 
   for (const surface of ['terminal', 'desktop'] as const) {
-    const ui = await $.ui.mount({ ...PANE, surface })
+    // Slim first: the header, the total, each finding on one title line and one fact.
+    const slim = await $.ui.mount({ ...PANE, surface })
+    expect(await slim.find({ type: 'Text', text: /^Savings check · last 7 days · dbxmega$/ })).toBeDefined()
+    expect(await slim.find({ type: 'Text', text: /^Read-only, on your own connection\. Nothing was sent to Altimate\.$/ })).toBeDefined()
+    expect(await slim.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
+    expect(await slim.find({ type: 'Text', text: /^Classic · Databricks · Migrate Classic\/Pro to Serverless · \$80\.64–\$101 a month$/ })).toBeDefined()
+    expect(await slim.find({ type: 'Text', text: /^CLASSIC SMALL warehouse, 95% idle over 11\.0 running hours \(3,107 queries\)$/ })).toBeDefined()
+    expect(await slim.find({ type: 'Text', text: /^Altimate runs 9 more checks on this platform\.$/ })).toBeDefined()
+    expect(await slim.find({ type: 'Text', text: /2X-SMALL is enough|What if|Not run here/ })).toBeUndefined()
+    await slim.unmount()
+    const ui = await mountFull($, surface)
     expect(await ui.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^Classic · Migrate Classic\/Pro to Serverless · \$80\.64–\$101 a month$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^Classic · Over-Sized Warehouse · \$31\.48–\$55\.09 a month$/ })).toBeDefined()
@@ -316,7 +466,12 @@ test('/savings runs the altimate-code tool once with telemetry off and draws its
     expect(await ui.find({ type: 'Text', text: /^2X-SMALL is enough: 12 → 4 DBU an hour, on \$27\.54 spent over 7 days$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /^5 SQL warehouses, 0 all-purpose clusters and 0 jobs · the 7 days to 2026-11-18 · connection dbxmega$/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /These were 4 of Altimate's 13 Databricks checks/ })).toBeDefined()
-    expect((await ui.find({ type: 'Link' }))?.props.href).toBe(SIGNUP_URL)
+    expect(await ui.find({ key: 'altimate' })).toBeDefined()
+    // Show fewer goes back to the slim view.
+    await ui.press({ key: 'fewer' })
+    await clock.settle()
+    expect(await ui.find({ type: 'Text', text: /^Savings check · last 7 days · dbxmega$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /Not run here/ })).toBeUndefined()
     await ui.unmount()
   }
 })
@@ -343,7 +498,7 @@ test('an altimate-code without the tool says to update it', async ($, on) => {
   const { clock } = await start($, on, { error })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^This altimate-code has no Databricks savings check\.$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /altimate upgrade/ })).toBeDefined()
   await ui.unmount()
@@ -356,7 +511,7 @@ test('with no Databricks connection the pane says how to add one, and gives no v
   const { clock, toasts } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^altimate-code has no Databricks connection\.$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /connections\.json/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /No savings found|a month$/ })).toBeUndefined()
@@ -371,7 +526,7 @@ test('a refused query says what to ask an admin for, and is no verdict', async (
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^A query was refused: \[TABLE_OR_VIEW_NOT_FOUND\]/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /system\.query and system\.lakeflow: ask a workspace admin for SELECT/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /No savings found/ })).toBeUndefined()
@@ -382,10 +537,11 @@ test('without altimate-code the pane says how to install it', async ($, on) => {
   const { clock } = await start($, on, { missingCli: true })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^altimate-code is not installed\.$/ })).toBeDefined()
-  // The scoped package the CLI ships as, as the plugin's other install hints name it.
-  expect(await ui.find({ type: 'Text', text: /^Install it \(`npm i -g @altimateai\/altimate-code`\), add a Databricks connection/ })).toBeDefined()
+  // The scoped package the CLI ships as, as the plugin's other install hints name it. With no connection list read,
+  // no platform is named: it could be the wrong one.
+  expect(await ui.find({ type: 'Text', text: /^Install it \(`npm i -g @altimateai\/altimate-code`\), add a Databricks or Snowflake connection/ })).toBeDefined()
   await ui.unmount()
 })
 
@@ -395,9 +551,9 @@ test('checks that ran and found nothing say so, and still link to the rest', asy
   await savings($)
   await clock.settle()
   expect(toasts.at(-1)).toBe('Databricks savings check: no savings found on 5 SQL warehouses, 0 all-purpose clusters and 0 jobs.')
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^No savings found by these 4 checks\.$/ })).toBeDefined()
-  expect((await ui.find({ type: 'Link' }))?.props.href).toBe(SIGNUP_URL)
+  expect(await ui.find({ key: 'altimate' })).toBeDefined()
   await ui.unmount()
 })
 
@@ -409,7 +565,7 @@ test('a run still waiting when the session ends never writes its report', async 
   await $.session.end({ reason: 'clear' } as any)
   release()
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /a month/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /Run \/savings/ })).toBeDefined()
   expect(toasts.filter(text => text.startsWith('Databricks savings check'))).toEqual([])
@@ -438,7 +594,7 @@ test('Run again checks the same connection again', async ($, on) => {
   const { clock, runs } = await start($, on)
   await savings($, 'prod_dbx')
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'again' })
   await clock.settle()
   expect(runs.map(one => JSON.parse(one.argv[5]!))).toEqual([{ warehouse: 'prod_dbx', confirm: true }, { warehouse: 'prod_dbx', confirm: true }])
@@ -482,11 +638,29 @@ test('each refusal altimate-code gives is explained in the person\'s terms', () 
     `ALTIMATE_ASSESSMENT_MODE=true ALTIMATE_TELEMETRY_DISABLED=true altimate tool run finops_databricks_savings --args '{"warehouse":"prod_dbx","confirm":true}' --json --no-daemon`,
   )
   expect(explain('socket hang up').recovery).toContain(`--args '{"confirm":true}'`)
+  expect(explain('socket hang up', 'sf', 'snowflake').recovery).toContain(`altimate tool run finops_snowflake_savings --args '{"warehouse":"sf","confirm":true}'`)
   // The resolver's words for a connection of another type, as altimate-code writes them.
   const other = explain('The Databricks savings check is not available for snowflake warehouses. Try one of: dbx.')
   expect(other.text).toBe('That connection is not a Databricks one.')
   expect(other.recovery).toContain('/savings <connection>')
   expect(explain('No SQL warehouses were found for warehouse abc123 in system.compute.warehouses.').recovery).toContain('within a few hours')
+})
+
+test('Snowflake refusals name Snowflake and what to ask for', () => {
+  expect(explain('Unknown tool: finops_snowflake_savings. Run it', null, 'snowflake').text).toBe('This altimate-code has no Snowflake savings check.')
+  expect(explain('SQL access control error: Insufficient privileges to operate on schema ACCOUNT_USAGE', null, 'snowflake').recovery).toContain('IMPORTED PRIVILEGES')
+  expect(explain('The Snowflake savings check requires a configured warehouse', null, 'snowflake').recovery).toContain('type "snowflake"')
+  // The same words from Databricks are not read as Snowflake's permission error.
+  expect(explain('user is not authorized').text).toBe('The savings check failed: user is not authorized')
+})
+
+test('a run that answers nothing says so rather than failing silently', async ($, on) => {
+  const { clock } = await start($, on, { output: { exitCode: 1, stdout: '', stderr: '' } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^The savings check failed: no answer$/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('dollars are whole from $100 and to the cent below it', () => {
@@ -513,7 +687,7 @@ test('Draft the fix puts a request for the change in the prompt box, and sends n
   const { clock, runs, toasts, fills } = await start($, on)
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'fix-0' })
   await clock.settle()
   expect(fills.length).toBe(1)
@@ -536,7 +710,7 @@ test('Draft the fix with no prompt box says so instead of claiming it filled one
   const { clock, toasts, fills } = await start($, on, { canFill: false })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'fix-0' })
   await clock.settle()
   expect(fills).toEqual([])
@@ -671,7 +845,7 @@ test('/savings <connection> typed after a band press decided to run is told that
   const settling = clock.settle()
   await writing
   const said = await savings($, 'prod_dbx')
-  expect(said.text).toBe('The Databricks savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
+  expect(said.text).toBe('The savings check is already running in the side pane. Run /savings prod_dbx again when it finishes.')
   release()
   await settling
   await clock.settle()
@@ -776,6 +950,40 @@ test('/savings that finds a check running, which ends while its pane opens, says
   await clock.settle()
 })
 
+test('a band press while a typed /savings reads its connection list starts nothing: the typed connection is read', async ($, on) => {
+  // Holds the command's read of the connection list, which comes after its claim: the band's press runs meanwhile.
+  let armed = false
+  let reached = () => {}
+  const reading = new Promise<void>(resolve => (reached = resolve))
+  let release = () => {}
+  const released = new Promise<void>(resolve => (release = resolve))
+  const hook = on as any
+  hook('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<unknown>) => {
+    if (!armed || e.key !== 'savingsConnections') return next(e)
+    armed = false
+    const before = await next(e)
+    reached()
+    await released
+    return before
+  })
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  const { clock, runs } = await start($, on, { files })
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  await band.press({ key: 'savings-run' })
+  await band.unmount()
+  armed = true
+  const saying = savings($, 'prod_dbx')
+  await reading
+  await clock.settle()
+  release()
+  expect((await saying).text).toMatch(/^Running the /)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect(runs[0]!.argv.join(' ')).toContain('prod_dbx')
+})
+
 test('after a check, editing config that names a flagged warehouse puts its saving above the prompt', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const { clock } = await start($, on, { files })
@@ -816,7 +1024,7 @@ test('pressing a what-if size shows what the warehouse would cost there and whet
   const { clock } = await start($, on)
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^What if Classic \(\$118 a month now\) were…$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Press a size to see/ })).toBeDefined()
   // The choices, in core's order: serverless, then each smaller size.
@@ -837,7 +1045,7 @@ test('a size too small for the queries is marked, and pressing it says they woul
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(((await ui.find({ key: 'whatif-0-2' })) as any)?.props.label).toBe('2X-SMALL $39.35 ⚠')
   await ui.press({ key: 'whatif-0-2' })
   await clock.settle()
@@ -855,7 +1063,7 @@ test('a flagged warehouse is remembered, and a later run that finds it resized s
   const { clock } = await start($, on, { answer: resized, store })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const change = (await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\./ })) as any
   expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. Observed spend: \$118\.03 a month before, \$59\.01 after\.$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Billed in different weeks, so a change in workload moves these too: not a measured saving\.$/ })).toBeDefined()
@@ -874,9 +1082,9 @@ test('a resized warehouse that costs more in its later week shows both amounts t
   const { clock } = await start($, on, { answer: resized, store })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. Observed spend: \$118\.03 a month before, \$177\.04 after\.$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /saved|more/i })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /saved|a month more/i })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -886,7 +1094,7 @@ test('the first run that flags a warehouse keeps what it is, and an unflagged on
   await clock.settle()
   expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.544375, days: 7 })
   expect(store.has('savings-baseline:dbxmega:wh-xs')).toBe(false)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: / since / })).toBeUndefined()
   await ui.unmount()
 })
@@ -928,7 +1136,7 @@ test('idle clusters and jobs on all-purpose compute get their own evidence and f
   const { clock, fills } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^5 SQL warehouses, 3 all-purpose clusters and 12 jobs · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^nightly_orders · Job Running on All-Purpose Compute · \$1,870–\$2,805 a month$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^1,028 task runs \(periodic\), 181\.8 hours on all-purpose compute, about 1,818\.2 DBUs, most on cluster "shared analytics"$/ })).toBeDefined()
@@ -973,7 +1181,7 @@ test('a control character in a workspace name does not blank the pane', async ($
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^night \[2J ly FAKE · Job Running on All-Purpose Compute · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^0101-abc · Idle Cluster Detection · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^What if what if \(/ })).toBeDefined()
@@ -1007,7 +1215,7 @@ test('when checks were skipped and none found anything, the verdict is only for 
   await savings($)
   await clock.settle()
   expect(toasts.at(-1)).toBe('Databricks savings check: no savings found on 5 SQL warehouses, 0 all-purpose clusters and 0 jobs; 1 of the 4 checks could not run.')
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^No savings found by the 3 of 4 checks that ran\.$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^No savings found by these 4 checks/ })).toBeUndefined()
   await ui.unmount()
@@ -1019,7 +1227,7 @@ test('a query that read only its first 10,000 rows is named in the pane', async 
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^Only the first 10,000 job task rows were read; any beyond them were not checked\.$/ })).toBeDefined()
   await ui.unmount()
 })
@@ -1032,7 +1240,7 @@ test('the band never starts a second run while one is going', async ($, on) => {
   // A second run that does not finish yet.
   let release = () => {}
   options.hold = new Promise<void>(done => (release = done))
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'again' })
   await clock.settle()
   expect(runs.length).toBe(2)
@@ -1059,10 +1267,12 @@ test('the first baseline stays: a second run after a resize still says what chan
   const started = await start($, on, { answer: resized, store })
   await savings($)
   await started.clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'again' })
   await started.clock.settle()
   expect(started.runs.length).toBe(2)
+  // A new run starts slim again.
+  await showAll(ui)
   expect(started.store.get('savings-baseline:dbxmega:wh-classic')).toEqual(store['savings-baseline:dbxmega:wh-classic'])
   expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\./ })).toBeDefined()
   await ui.unmount()
@@ -1076,7 +1286,7 @@ test('a serverless choice that would cost more says so, in the warning colour', 
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'whatif-0-0' })
   await clock.settle()
   const line = (await ui.find({ type: 'Text', text: /^As serverless: \$300 a month instead of \$118, \$182 more: / })) as any
@@ -1110,7 +1320,7 @@ test('across several workspaces the pane counts them and names each finding\'s w
   const { clock, fills } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^5 SQL warehouses, 0 all-purpose clusters and 0 jobs in 2 workspaces · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Classic \(workspace 2056943136844690\) · Migrate Classic\/Pro to Serverless · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Databricks checks, on 2 workspaces\./ })).toBeDefined()
@@ -1135,8 +1345,9 @@ test('an altimate-code older than the check is never started for it: only `--ver
   await clock.settle()
   expect(versionRuns.length).toBe(1)
   expect(runs).toEqual([])
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^This altimate-code has no Databricks savings check\.$/ })).toBeDefined()
+  const ui = await mountFull($)
+  // No connection list was read, so no platform is named.
+  expect(await ui.find({ type: 'Text', text: /^This altimate-code has no savings check\.$/ })).toBeDefined()
   expect(toasts.at(-1)).toContain(`It is 0.12.11; update it to ${SAVINGS_MIN_ALTIMATE_CODE} or later`)
   await ui.unmount()
 })
@@ -1184,7 +1395,7 @@ test('an altimate-code too old to have `tool run` says to update, from what that
   const { clock, toasts } = await start($, on, { output: { exitCode: 1, stdout: '', stderr } })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^This altimate-code has no Databricks savings check\.$/ })).toBeDefined()
   expect(toasts.at(-1)).toContain('altimate upgrade')
   await ui.unmount()
@@ -1202,7 +1413,7 @@ test('a finding in a workspace with no SQL warehouse still counts that workspace
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: / in 2 workspaces · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Classic \(workspace 222\) · / })).toBeDefined()
   await ui.unmount()
@@ -1219,7 +1430,7 @@ test('a workspace the CLI read with no SQL warehouse and nothing found is still 
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^5 SQL warehouses, 2 all-purpose clusters and 4 jobs in 2 workspaces · / })).toBeDefined()
   // With two workspaces read, each finding says which one it is in.
   expect(await ui.find({ type: 'Text', text: /^Classic \(workspace 111\) · Migrate Classic\/Pro to Serverless · / })).toBeDefined()
@@ -1236,11 +1447,1511 @@ for (const counted of [undefined, 1, 0, -3, 1.5, 'two']) {
     const { clock } = await start($, on, { answer })
     await savings($)
     await clock.settle()
-    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    const ui = await mountFull($)
     expect(await ui.find({ type: 'Text', text: / in 2 workspaces · / })).toBeDefined()
     await ui.unmount()
   })
 }
+
+// --- The status line and the kept answer.
+
+const BOTH = 'Name | Type | Database\ndbxmega | databricks | -\nclassic | databricks | -\nsfmega | snowflake | ANALYTICS\nsfother | snowflake | ANALYTICS\nscratch | duckdb | scratch'
+const DATABRICKS_ONLY = 'Name | Type | Database\ndbxmega | databricks | -'
+const HOME = '/home/me'
+const CONNECTIONS = JSON.stringify({
+  dbxmega: { type: 'databricks', server_hostname: 'x', http_path: '/sql/1.0/warehouses/wh-xs', access_token: 'never-kept' },
+  classic: { type: 'databricks', server_hostname: 'x', http_path: '/sql/1.0/warehouses/wh-classic', access_token: 'never-kept' },
+  sfmega: { type: 'snowflake', account: 'ACME-SF', user: 'u', warehouse: 'BI_WH', private_key: 'never-kept' },
+  sfother: { type: 'snowflake', account: 'other-sf', user: 'u', warehouse: 'BI_WH', private_key: 'never-kept' },
+})
+const CONNECTION_FILES = { [`${HOME}/.altimate-code/connections.json`]: CONNECTIONS }
+const NOW = Date.parse('2026-11-17T10:00:00Z')
+const HERE = `project:${ROOT}`
+const KEPT_KEY = `savings-report:${HERE}/dbxmega`
+const lastStatus = (statuses: (string | undefined)[]) => statuses.at(-1)
+
+test('before any run the status line names the platforms and /savings, and the check does not run', async ($, on) => {
+  const { atStart, runs, snowflakeRuns, statuses } = await start($, on, { list: BOTH })
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · Databricks + Snowflake · /savings')
+  expect(atStart).toEqual({ versionRuns: 1, listRuns: 1, runs: 0 })
+  expect(runs).toEqual([])
+  expect(snowflakeRuns).toEqual([])
+})
+
+test('the connection list is read with telemetry off and outside the daemon', async ($, on) => {
+  const { clock, listRuns } = await start($, on, { list: BOTH })
+  await savings($)
+  await clock.settle()
+  expect(listRuns[0]!.argv.slice(1)).toEqual(['tool', 'run', 'warehouse_list', '--args', '{}', '--json', '--no-daemon'])
+  expect(listRuns[0]!.env).toEqual({ ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' })
+})
+
+test('an altimate-code too old for assessment mode is not started to list connections', async ($, on) => {
+  const { atStart, statuses } = await start($, on, { list: BOTH, version: '0.12.11' })
+  expect(atStart).toEqual({ versionRuns: 1, listRuns: 0, runs: 0 })
+  expect(statuses.filter(Boolean)).toEqual([])
+})
+
+test('a session nobody is at does not start the CLI to list connections', async ($, on) => {
+  const { atStart } = await start($, on, { list: BOTH, headless: true })
+  expect(atStart).toEqual({ versionRuns: 0, listRuns: 0, runs: 0 })
+})
+
+test('no warehouse connection, no status entry', async ($, on) => {
+  const { statuses } = await start($, on, { list: 'Name | Type | Database\nlocal | postgres | app' })
+  expect(statuses.filter(Boolean)).toEqual([])
+})
+
+test('after a run the status line shows the monthly range, and the answer is kept per connection', async ($, on) => {
+  const { clock, statuses, store } = await start($, on, { list: DATABRICKS_ONLY })
+  await savings($)
+  await clock.settle()
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · $80.64–$101/mo to save · /savings')
+  const kept = store.get(KEPT_KEY) as any
+  expect(kept.savedAt).toBe(NOW)
+  expect(kept.view.total.resources).toBe(1)
+})
+
+const keptAnswer = (identity = HERE) => ({ savedAt: NOW, view: { ...toView(ANSWER.metadata as any)!, identity } })
+
+test('a later session shows the kept answer without running anything, and says how old it is', async ($, on) => {
+  const { clock, runs, statuses } = await start($, on, { now: NOW + 3 * 86_400_000, store: { [KEPT_KEY]: keptAnswer() } })
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · $80.64–$101/mo to save (3d ago) · /savings')
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Kept from 2026-11-17: nothing is checked again until you run \/savings\.$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('after seven days the kept answer is gone and the status line offers /savings again', async ($, on) => {
+  const later = await start($, on, { now: NOW + 7 * 86_400_000, list: DATABRICKS_ONLY, store: { [KEPT_KEY]: keptAnswer() } })
+  expect(later.store.has(KEPT_KEY)).toBe(false)
+  expect(lastStatus(later.statuses)).toBe('⚡ Altimate · Databricks · /savings')
+  expect(later.runs).toEqual([])
+})
+
+test('another project\'s answer stays out of this one, though it stays in the store', async ($, on) => {
+  const elsewhere = `savings-report:project:/other/dbxmega`
+  const { statuses, store, clock } = await start($, on, { store: { [elsewhere]: keptAnswer('project:/other') } })
+  await clock.settle()
+  expect(store.has(elsewhere)).toBe(true)
+  expect(statuses.filter(Boolean)).toEqual([])
+  const note = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'dbxmega', query: 'select 1' })))
+  expect(await note.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await note.unmount()
+})
+
+test('a connection of the same name on another workspace does not pick up the answer', async ($, on) => {
+  const files = { [`${HOME}/.altimate-code/connections.json`]: JSON.stringify({ dbxmega: { type: 'databricks', server_hostname: 'https://b.example.com/', http_path: '/sql/1.0/warehouses/w' } }) }
+  const other = await start($, on, { env: { HOME }, files, store: { 'savings-report:databricks:a.example.com/dbxmega': keptAnswer('databricks:a.example.com') } })
+  expect(other.statuses.filter(Boolean)).toEqual([])
+})
+
+test('the same workspace reached from any project shows its answer', async ($, on) => {
+  const files = { [`${HOME}/.altimate-code/connections.json`]: JSON.stringify({ dbxmega: { type: 'databricks', server_hostname: 'A.example.com', http_path: '/sql/1.0/warehouses/w' } }) }
+  const here = await start($, on, { env: { HOME }, files, store: { 'savings-report:databricks:a.example.com/dbxmega': keptAnswer('databricks:a.example.com') } })
+  expect(lastStatus(here.statuses)).toContain('/mo to save')
+})
+
+test('a fix drafted under another project\'s connection of the same name is not read', async ($, on) => {
+  const { clock } = await start($, on, { store: { 'savings-fix:project:/other/dbxmega::sql_warehouse:wh-classic': FIX } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /fix drafted|saved since/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('/clear keeps the answer: it belongs to the warehouse, not the conversation', async ($, on) => {
+  const { clock, runs, statuses } = await start($, on)
+  await savings($)
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect(lastStatus(statuses)).toContain('$80.64–$101/mo to save')
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a run that fails keeps showing the last answer, with the reason above it', async ($, on) => {
+  const options: Options = {}
+  const { clock } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  options.answer = failure('[TABLE_OR_VIEW_NOT_FOUND] gone')
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^A query was refused: / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a stored answer of an older shape is dropped rather than drawn', async ($, on) => {
+  const { store } = await start($, on, { store: { 'savings-report:old': { savedAt: NOW, view: { findings: [] } } } })
+  expect(store.has('savings-report:old')).toBe(false)
+})
+
+test('statusText says nothing without a platform or an answer, and "checking" during a run', () => {
+  expect(statusText({}, null, false, NOW)).toBeNull()
+  expect(statusText({}, [{ name: 'p', platform: null, warehouse: null, account: null }], false, NOW)).toBeNull()
+  expect(statusText({}, [{ name: 'd', platform: 'databricks', warehouse: null, account: null }], true, NOW)).toBe('checking savings…')
+})
+
+test('a clean result on the status line says nothing was found', async ($, on) => {
+  const answer = { ...ANSWER, metadata: { ...ANSWER.metadata, report: { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] } } }
+  const { clock, statuses } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · no savings found · /savings')
+})
+
+// --- The line under a tool row.
+
+const SQL_TOOL = 'mcp__plugin_altimate-code_altimate-code__sql_execute'
+const rowProps = (tool: string, input: unknown, id = 'tu-1') => ({ tool_use_id: id, tool, input, isRunning: false, isErrored: false, isInterrupted: false })
+const row = (props: unknown) => ({ plugin: 'altimate-code', surface: 'terminal', component: 'ToolUse', props }) as any
+const NOTE = /^ {2}⎿ {2}Classic: 95% idle · \$80\.64–\$101 a month → \/savings$/
+
+const withFinding = async ($: any, on: any, extra: Options = {}) => {
+  const started = await start($, on, { list: BOTH, env: { HOME }, files: CONNECTION_FILES, ...extra })
+  await savings($)
+  await started.clock.settle()
+  return started
+}
+
+test('a SQL call on a connection whose warehouse has a finding gets one line, and queries nothing', async ($, on) => {
+  const { runs, listRuns, versionRuns } = await withFinding($, on)
+  const before = { runs: runs.length, lists: listRuns.length, versions: versionRuns.length }
+  const ui = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'classic', query: 'select 1' })))
+  expect(await ui.find({ type: 'Text', text: NOTE })).toBeDefined()
+  await ui.unmount()
+  expect({ runs: runs.length, lists: listRuns.length, versions: versionRuns.length }).toEqual(before)
+})
+
+test('no finding, no line: another warehouse, another tool, or no answer yet', async ($, on) => {
+  await withFinding($, on)
+  for (const props of [rowProps(SQL_TOOL, { warehouse: 'dbxmega', query: 'select 1' }), rowProps('Read', { file_path: '/x' }), rowProps('mcp__plugin_altimate-code_altimate-code__schema_inspect', { warehouse: 'classic' })]) {
+    const ui = await $.ui.mount(row(props))
+    expect(await ui.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('before any run a SQL call gets no line', async ($, on) => {
+  await start($, on, { list: BOTH, env: { HOME }, files: CONNECTION_FILES })
+  const ui = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'classic', query: 'select 1' })))
+  expect(await ui.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a SQL call that names no connection runs on the first one', async ($, on) => {
+  const list = 'Name | Type | Database\nclassic | databricks | -\ndbxmega | databricks | -'
+  await withFinding($, on, { list })
+  const ui = await $.ui.mount(row(rowProps(SQL_TOOL, { query: 'select 1' })))
+  expect(await ui.find({ type: 'Text', text: NOTE })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the same call through `altimate tool run` in a shell gets the line', async ($, on) => {
+  await withFinding($, on)
+  const command = `altimate tool run sql_execute --args '{"warehouse":"classic","query":"select 1"}' --json`
+  const ui = await $.ui.mount(row(rowProps('Bash', { command })))
+  expect(await ui.find({ type: 'Text', text: NOTE })).toBeDefined()
+  await ui.unmount()
+})
+
+const DBT_FILES = {
+  ...CONNECTION_FILES,
+  [`${ROOT}/dbt_project.yml`]: 'name: acme\nprofile: acme\n',
+  [`${ROOT}/profiles.yml`]:
+    'acme:\n  target: dev\n  outputs:\n    dev:\n      type: databricks\n      http_path: /sql/1.0/warehouses/wh-classic\n      token: "{{ env_var(\'T\') }}"\n    other:\n      type: databricks\n      http_path: /sql/1.0/warehouses/wh-xs\n    moved:\n      type: databricks\n      http_path: "{{ env_var(\'P\') }}"\n',
+}
+
+test('dbt run gets the line through its target\'s warehouse; another target or an unstated path does not', async ($, on) => {
+  const { clock } = await withFinding($, on, { files: DBT_FILES })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders', tool_use_id: 'dbt-1' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'dbt build --target other', tool_use_id: 'dbt-2' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -t moved', tool_use_id: 'dbt-3' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'dbt test', tool_use_id: 'dbt-4' } as any)
+  await clock.settle()
+  const lineFor = async (command: string, id: string) => {
+    const ui = await $.ui.mount(row(rowProps('Bash', { command }, id)))
+    const found = await ui.find({ type: 'Text', text: NOTE })
+    await ui.unmount()
+    return found
+  }
+  expect(await lineFor('dbt run -s orders', 'dbt-1')).toBeDefined()
+  expect(await lineFor('dbt build --target other', 'dbt-2')).toBeUndefined()
+  expect(await lineFor('dbt run -t moved', 'dbt-3')).toBeUndefined()
+  expect(await lineFor('dbt test', 'dbt-4')).toBeUndefined()
+})
+
+test('a dbt run whose profile is read across a /clear puts no line under its row in the new conversation', async ($, on) => {
+  let release = () => {}
+  let holding = false
+  const held = new Promise<void>(done => (release = done))
+  const { clock } = await withFinding($, on, { files: DBT_FILES, readHold: path => (holding && path.endsWith('/dbt_project.yml') ? held : undefined) })
+  holding = true
+  const call = $.tool.call({ tool: 'Bash', command: 'dbt run -s orders', tool_use_id: 'dbt-1' } as any)
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  await call
+  await clock.settle()
+  const ui = await $.ui.mount(row(rowProps('Bash', { command: 'dbt run -s orders' }, 'dbt-1')))
+  expect(await ui.find({ type: 'Text', text: NOTE })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('dbt finds its profile the way dbt does: the flag, the environment, and an exported target', async ($, on) => {
+  const files = {
+    ...CONNECTION_FILES,
+    [`${ROOT}/dbt_project.yml`]: 'name: acme\nprofile: acme\n',
+    '/conf/profiles.yml': DBT_FILES[`${ROOT}/profiles.yml`]!,
+    '/env/profiles.yml': DBT_FILES[`${ROOT}/profiles.yml`]!,
+  }
+  const { clock } = await withFinding($, on, { files, env: { HOME, DBT_PROFILES_DIR: '/env', DBT_TARGET: 'other' } })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run --profiles-dir /conf --target dev', tool_use_id: 'dbt-f' } as any)
+  // DBT_TARGET in the environment picks `other`, which runs on a warehouse with no finding.
+  await $.tool.call({ tool: 'Bash', command: 'dbt run', tool_use_id: 'dbt-e' } as any)
+  await clock.settle()
+  const flagged = await $.ui.mount(row(rowProps('Bash', { command: 'dbt run --profiles-dir /conf --target dev' }, 'dbt-f')))
+  expect(await flagged.find({ type: 'Text', text: NOTE })).toBeDefined()
+  await flagged.unmount()
+  const other = await $.ui.mount(row(rowProps('Bash', { command: 'dbt run' }, 'dbt-e')))
+  expect(await other.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await other.unmount()
+})
+
+test('a connection in the project\'s file replaces the global one of its name', async ($, on) => {
+  const files = { ...CONNECTION_FILES, [`${ROOT}/.altimate-code/connections.json`]: JSON.stringify({ classic: { type: 'databricks', server_hostname: 'x', http_path: '/sql/1.0/warehouses/wh-xs' } }) }
+  await withFinding($, on, { files })
+  const ui = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'classic', query: 'select 1' })))
+  expect(await ui.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('dbt with --project-dir still takes its default profile from the working folder', async ($, on) => {
+  const files = { ...DBT_FILES, '/repo/sub/dbt_project.yml': 'name: sub\nprofile: acme\n', '/repo/sub/profiles.yml': 'acme:\n  target: dev\n  outputs:\n    dev:\n      type: databricks\n      http_path: /sql/1.0/warehouses/wh-xs\n' }
+  const { clock } = await withFinding($, on, { files })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run --project-dir sub', tool_use_id: 'dbt-p' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount(row(rowProps('Bash', { command: 'dbt run --project-dir sub' }, 'dbt-p')))
+  expect(await ui.find({ type: 'Text', text: NOTE })).toBeDefined()
+  await ui.unmount()
+})
+
+test('only the latest dbt rows are remembered', async ($, on) => {
+  const { clock } = await withFinding($, on, { files: DBT_FILES })
+  for (let at = 0; at < 201; at++) await $.tool.call({ tool: 'Bash', command: 'dbt run', tool_use_id: `dbt-many-${at}` } as any)
+  await clock.settle()
+  const oldest = await $.ui.mount(row(rowProps('Bash', { command: 'dbt run' }, 'dbt-many-0')))
+  expect(await oldest.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await oldest.unmount()
+  const newest = await $.ui.mount(row(rowProps('Bash', { command: 'dbt run' }, 'dbt-many-200')))
+  expect(await newest.find({ type: 'Text', text: NOTE })).toBeDefined()
+  await newest.unmount()
+})
+
+test('dbt after a `cd` on its own line gets no line, though the session\'s project would give one', async ($, on) => {
+  const { clock } = await withFinding($, on, { files: DBT_FILES })
+  await $.tool.call({ tool: 'Bash', command: 'cd other && dbt run', tool_use_id: 'dbt-cd' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount(row(rowProps('Bash', { command: 'cd other && dbt run' }, 'dbt-cd')))
+  expect(await ui.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('dbt gives no line when the line moves first, or a named profiles folder cannot be read', async ($, on) => {
+  const { [`${ROOT}/profiles.yml`]: profiles, ...rest } = DBT_FILES
+  const { clock } = await withFinding($, on, { files: { ...rest, '/inline/profiles.yml': profiles! } })
+  await $.tool.call({ tool: 'Bash', command: 'cd other && dbt run', tool_use_id: 'dbt-c' } as any)
+  await $.tool.call({ tool: 'Bash', command: 'dbt run --profiles-dir /missing', tool_use_id: 'dbt-m' } as any)
+  await $.tool.call({ tool: 'Bash', command: `DBT_PROFILES_DIR=/inline dbt run`, tool_use_id: 'dbt-i' } as any)
+  await clock.settle()
+  for (const [command, id, shown] of [['cd other && dbt run', 'dbt-c', false], ['dbt run --profiles-dir /missing', 'dbt-m', false], [`DBT_PROFILES_DIR=/inline dbt run`, 'dbt-i', true]] as const) {
+    const ui = await $.ui.mount(row(rowProps('Bash', { command }, id)))
+    expect(!!(await ui.find({ type: 'Text', text: NOTE }))).toBe(shown)
+    await ui.unmount()
+  }
+})
+
+const groupCall = (tool: string, input: unknown, id: string) => ({ tool_use_id: id, tool, input, isRunning: false, isErrored: false, isInterrupted: false })
+const group = (calls: unknown[], isExpanded = false) => ({ plugin: 'altimate-code', surface: 'terminal', component: 'ToolGroup', props: { calls, isActive: false, isExpanded } }) as any
+
+test('a run of calls folded into one line gets one note, for the largest finding among them', async ($, on) => {
+  await withFinding($, on)
+  const calls = [
+    groupCall('Read', { file_path: '/x' }, 'g-1'),
+    groupCall(SQL_TOOL, { warehouse: 'sfmega', query: 'select 1' }, 'g-2'),
+    groupCall(SQL_TOOL, { warehouse: 'classic', query: 'select 1' }, 'g-3'),
+  ]
+  const ui = await $.ui.mount(group(calls))
+  expect(await ui.find({ type: 'Text', text: NOTE })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /COMPUTE_WH/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('an unfolded group leaves the note to its rows, and a group on no finding gets none', async ($, on) => {
+  await withFinding($, on)
+  const unfolded = await $.ui.mount(group([groupCall(SQL_TOOL, { warehouse: 'classic', query: 'select 1' }, 'g-1')], true))
+  expect(await unfolded.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await unfolded.unmount()
+  const clean = await $.ui.mount(group([groupCall(SQL_TOOL, { warehouse: 'dbxmega', query: 'select 1' }, 'g-1'), groupCall('Read', { file_path: '/x' }, 'g-2')]))
+  expect(await clean.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await clean.unmount()
+})
+
+test('a dbt run folded into a group gets the note through its target', async ($, on) => {
+  const { clock } = await withFinding($, on, { files: DBT_FILES })
+  await $.tool.call({ tool: 'Bash', command: 'dbt run -s orders', tool_use_id: 'dbt-9' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount(group([groupCall('Bash', { command: 'dbt run -s orders' }, 'dbt-9')]))
+  expect(await ui.find({ type: 'Text', text: NOTE })).toBeDefined()
+  await ui.unmount()
+})
+
+test('nothing the row hook needs is kept from the connection file but the warehouse', async ($, on) => {
+  const { store } = await withFinding($, on)
+  expect(JSON.stringify([...store.entries()])).not.toContain('never-kept')
+})
+
+// --- Saved since.
+
+const windowEnding = (end: string) => ({ start: new Date(Date.parse(end) - 7 * 86_400_000).toISOString().slice(0, 10), end })
+
+function resizedAnswer(end: string, windowCost: number) {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.window = windowEnding(end)
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  classic.size = 'X_SMALL'
+  classic.window_cost = windowCost
+  answer.metadata.report = { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
+  return answer
+}
+
+const FIX_KEY = `savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-classic`
+const FIX = { date: '2026-11-01', changedSeen: '2026-11-10', checkId: 'wh_oversized', platform: 'databricks', resourceType: 'sql_warehouse', resourceId: 'wh-classic', workspaceId: null, resourceName: 'Classic', title: 'Over-Sized Warehouse', config: { size: 'SMALL', type: 'CLASSIC' }, dailyCost: 3.94 }
+
+test('Draft the fix keeps the resource, its daily cost and the date; a second press keeps the first', async ($, on) => {
+  const { clock, store } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  const kept = store.get(FIX_KEY) as any
+  expect(kept).toMatchObject({ date: '2026-11-17', resourceName: 'Classic', config: { size: 'SMALL', type: 'CLASSIC' } })
+  expect(Math.abs(kept.dailyCost - 27.544375 / 7)).toBeLessThan(1e-9)
+  await clock.advance(86_400_000)
+  await ui.press({ key: 'fix-1' })
+  await clock.settle()
+  expect((store.get(FIX_KEY) as any).date).toBe('2026-11-17')
+  await ui.unmount()
+})
+
+test('with no prompt box nothing was drafted, so nothing is kept', async ($, on) => {
+  const { clock, store } = await start($, on, { canFill: false })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  expect(store.has(FIX_KEY)).toBe(false)
+  await ui.unmount()
+})
+
+/** An answer with a warehouse of one id in workspaces 111 and 222: 111's resized to X-SMALL at $2 a day, 222's still SMALL at $10 a day. */
+function sharedIdAnswer() {
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.workspaces_checked = 2
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  answer.metadata.warehouses.push({ ...classic, workspace_id: '222', size: 'SMALL', window_cost: 70 })
+  return answer
+}
+
+test('a drafted fix on a warehouse id two workspaces share is followed on its own workspace\'s warehouse', async ($, on) => {
+  const key = `savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`
+  const store = { [key]: { ...FIX, workspaceId: '222', dailyCost: 10 } }
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer: sharedIdAnswer(), store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  // Workspace 111's resize is not workspace 222's fix: 222's warehouse is still SMALL.
+  expect(texts.filter(text => /changed to X-SMALL/.test(text))).toEqual([])
+  expect(texts.filter(text => text.startsWith('Classic (workspace 222): fix drafted 2026-11-01'))).toEqual([
+    'Classic (workspace 222): fix drafted 2026-11-01, but it is still SMALL CLASSIC: it is no longer flagged, and its size and type did not change, so no saving is claimed.',
+  ])
+  await ui.unmount()
+})
+
+test('a fix drafted in one workspace is not followed on the other workspace\'s warehouse when a later run reads only that one', async ($, on) => {
+  const key = `savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`
+  // This run reads only workspace 111, whose warehouse of the same id was resized.
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.workspaces_checked = 1
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store: { [key]: { ...FIX, workspaceId: '222', dailyCost: 10 } } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => /changed to X-SMALL/.test(text))).toEqual([])
+  expect(texts).toContain('Classic: fix drafted 2026-11-01, and this run did not list it, so no amount is claimed.')
+  await ui.unmount()
+})
+
+test('Draft the fix on a warehouse id two workspaces share keeps its own workspace\'s cost and size', async ($, on) => {
+  const answer = sharedIdAnswer()
+  answer.metadata.report = JSON.parse(JSON.stringify(ANSWER.metadata.report))
+  answer.metadata.report.findings = answer.metadata.report.findings.slice(0, 1).map((one: any) => ({ ...one, workspace_id: '222' }))
+  answer.metadata.report.what_if = []
+  answer.metadata.report.total = { monthly_min: answer.metadata.report.findings[0].monthly_min, monthly_max: answer.metadata.report.findings[0].monthly_max, resources: 1 }
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  const kept = store.get(`savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`) as any
+  expect(kept).toMatchObject({ workspaceId: '222', config: { size: 'SMALL', type: 'CLASSIC' } })
+  expect(Math.abs(kept.dailyCost - 70 / 7)).toBeLessThan(1e-9)
+  await ui.unmount()
+})
+
+test('the run that first sees a change notes the day, and measuring counts from it', async ($, on) => {
+  const { date, changedSeen, ...drafted } = FIX
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-14T10:00:00Z'), answer: resizedAnswer('2026-11-14', 14), store: { [FIX_KEY]: { ...drafted, date: '2026-11-01' } } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(FIX_KEY) as any).changedSeen).toBe('2026-11-14')
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Classic: fix drafted 2026-11-01 · measuring \(0 of 7 days\)$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /saved since/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a changed warehouse is measured while the window still reaches back before the change was seen', async ($, on) => {
+  const { clock } = await start($, on, { now: Date.parse('2026-11-14T10:00:00Z'), answer: resizedAnswer('2026-11-14', 14), store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Classic: fix drafted 2026-11-01 · measuring \(3 of 7 days\)$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('once the whole window is after the change, its observed spend is stated from billing, never as saved, and replaces the older line', async ($, on) => {
+  const store = { [FIX_KEY]: FIX, 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } }
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer: resizedAnswer('2026-11-18', 14), store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(
+    await ui.find({
+      type: 'Text',
+      text: /^Classic: changed to X-SMALL CLASSIC since 2026-11-10: observed spend \$3\.94 a day before, \$2\.00 a day now \(measured from Databricks billing\)\. Billed in different weeks, so a change in workload moves these too: not a measured saving\.$/,
+    }),
+  ).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /saved/i })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /→ X-SMALL CLASSIC since/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a warehouse that did not change is said to be unchanged, and a change that was undone starts over', async ($, on) => {
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Classic: fix drafted 2026-11-01, but it is still SMALL CLASSIC and still flagged, so no saving is claimed\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /saved since/ })).toBeUndefined()
+  expect((store.get(FIX_KEY) as any).changedSeen).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a fix record under another connection, or of another platform, is not read', async ($, on) => {
+  const store = {
+    [`savings-fix:project:${ROOT}/dbxmega:extra::sql_warehouse:wh-classic`]: FIX,
+    [`savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-xs`]: { ...FIX, resourceId: 'wh-xs', platform: 'snowflake' },
+  }
+  const { clock } = await start($, on, { store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /fix drafted|saved since|did not fall/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('old fix records and broken ones are dropped at session start, recent ones kept', async ($, on) => {
+  const { store } = await start($, on, { store: { [FIX_KEY]: { ...FIX, date: '2026-07-01' }, 'savings-fix:x::sql_warehouse:y': 'broken', 'savings-fix:x::sql_warehouse:z': { ...FIX, resourceId: 'z' } } })
+  expect(store.has(FIX_KEY)).toBe(false)
+  expect(store.has('savings-fix:x::sql_warehouse:y')).toBe(false)
+  expect(store.has('savings-fix:x::sql_warehouse:z')).toBe(true)
+})
+
+// --- The checks that did not run, the report, and Altimate.
+
+test('the checks that did not run are named with counts from this run, and one button goes to Altimate', async ($, on) => {
+  const { clock, opened, runs } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Not run here: 9 more of Altimate's 13 Databricks checks$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Stale\/Orphaned Warehouse: 3 of 5 SQL warehouses billed nothing in these 7 days, not checked further$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Undersized Concurrency Capacity: 3,107 queries on CLASSIC not ranked for queueing$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Hung & Long-Cancelled Job Runs: not read: this run counts only jobs on all-purpose compute, and saw none$/ })).toBeDefined()
+  await ui.press({ key: 'altimate' })
+  await clock.settle()
+  expect(opened).toEqual([SIGNUP_URL])
+  expect(runs.length).toBe(1)
+  await ui.unmount()
+})
+
+test('with no browser the Altimate button says where to go', async ($, on) => {
+  const { clock } = await start($, on, { openExit: 1 })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'altimate' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: new RegExp(`Altimate is at ${SIGNUP_URL}`) })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Share report writes one local page beside the plugin\'s other reports and opens it', async ($, on) => {
+  const { clock, opened, written, runs } = await start($, on, { files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  const path = `${ROOT}/target/.altimate-lineage/savings-report.html`
+  expect([...written.keys()]).toEqual([path])
+  expect(opened).toEqual([path])
+  expect(written.get(path)).toContain('Migrate Classic/Pro to Serverless')
+  expect(await ui.find({ type: 'Text', text: new RegExp(`^Report opened: ${path}\\. It stays on this machine until you send it\\.$`) })).toBeDefined()
+  expect(runs.length).toBe(1)
+  await ui.unmount()
+})
+
+for (const button of ['share', 'altimate'] as const) {
+  test(`${button === 'share' ? 'Share report' : 'See every check in Altimate'} whose browser opens across a /clear says nothing in the new conversation`, async ($, on) => {
+    let release = () => {}
+    const openHold = new Promise<void>(done => (release = done))
+    // No browser: the sign-up button speaks only then.
+    const { clock, opened } = await start($, on, { files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' }, openHold, openExit: 1 })
+    await savings($)
+    await clock.settle()
+    let ui = await mountFull($)
+    await ui.press({ key: button })
+    await clock.settle()
+    await ui.unmount()
+    await $.session.end({ reason: 'clear' } as any)
+    release()
+    await clock.settle()
+    expect(opened).toHaveLength(1)
+    ui = await mountFull($)
+    expect(await ui.find({ type: 'Text', text: /^Report opened|^No browser could be opened|^The report could not be written/ })).toBeUndefined()
+    await ui.unmount()
+  })
+}
+
+test('a report that cannot be written says why on one line, without the error\'s control characters', async ($, on) => {
+  const { clock, written } = await start($, on, { files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' }, writeRejects: 'EACCES\u001b[2J: permission\u0007 denied\nat write' })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  expect(written.size).toBe(0)
+  const said = ((await ui.findAll({ type: 'Text', text: /^The report could not be written: / })) as any[]).map(one => String(one.text))
+  expect(said.length).toBe(1)
+  expect(said[0]).toContain('permission denied at write')
+  expect(said[0]).not.toMatch(/[\u0000-\u001f\u007f]/)
+  await ui.unmount()
+})
+
+test('outside a dbt project the report goes in altimate-code\'s folder, and no browser is not an error', async ($, on) => {
+  const { clock, written } = await start($, on, { env: { HOME }, openExit: 1 })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  expect([...written.keys()]).toEqual([`${HOME}/.altimate-code/savings-report.html`])
+  expect(await ui.find({ type: 'Text', text: /^No browser could be opened\. Report: / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('before any answer there is nothing to share', async ($, on) => {
+  await start($, on)
+  const ui = await mountFull($)
+  expect(await ui.find({ key: 'share' })).toBeUndefined()
+  expect(await ui.find({ key: 'altimate' })).toBeUndefined()
+  await ui.unmount()
+})
+
+// --- Both platforms.
+
+test('with both platforms /savings runs each tool once and draws a section for each', async ($, on) => {
+  const { clock, runs, snowflakeRuns, toasts, statuses, store } = await start($, on, { list: BOTH })
+  const said = await savings($)
+  expect(said.text).toContain('your own connections')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect(snowflakeRuns.length).toBe(1)
+  expect(JSON.parse(snowflakeRuns[0]!.argv[5]!)).toEqual({ confirm: true })
+  expect(snowflakeRuns[0]!.env).toEqual({ ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' })
+  expect(toasts.at(-1)).toBe('Databricks savings check: $80.64–$101 a month on 1 resource. Snowflake savings check: $54.00–$90.00 a month on 1 resource.')
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · $135–$191/mo to save · /savings')
+  expect([...store.keys()].filter(key => key.startsWith('savings-report:')).sort()).toEqual([KEPT_KEY, `savings-report:${HERE}/sfmega`])
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Databricks savings check$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Snowflake savings check$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^3 warehouses · the 7 days to 2026-11-18 · connection sfmega$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^BI_WH · Downsize Warehouse · \$54\.00–\$90\.00 a month$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^BI_WH · Underutilized Cluster · no dollar estimate$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /at your account's \$3\.00 a credit and the last 7 days' rate.*; 1 more with no dollar estimate$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Not run here: 7 more of Altimate's 11 Snowflake checks$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^High auto suspend: 3 warehouses: auto-suspend setting not read$/ })).toBeDefined()
+  // Each finding keeps its own button across the sections.
+  expect(await ui.find({ key: 'fix-5' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('each kind of Snowflake finding says what it rests on, and what to change', async ($, on) => {
+  const { clock, fills } = await start($, on, { list: BOTH })
+  await savings($, 'sfmega')
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Large could be Medium: 95\.0% of its active periods lasted 80 seconds or less; 91\.5% of 1,200 queries ran in 5 seconds or less$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^60% idle on 2 days above 40%: 2\.0 of 3\.3 active hours$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^12 suspend-and-resume bounces inside a billed minute on 1 day$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^The highest of its 2 clusters was barely needed on 1 day \(up to 70% idle\)$/ })).toBeDefined()
+  for (const key of ['fix-0', 'fix-1', 'fix-2', 'fix-3']) await ui.press({ key })
+  await clock.settle()
+  expect(fills[0]).toContain('Draft the change for this Snowflake savings finding')
+  expect(fills[0]).toContain("$54.00–$90.00 a month at your account's $3.00 a credit.")
+  expect(fills[0]).toContain("ALTER WAREHOUSE BI_WH SET WAREHOUSE_SIZE = 'MEDIUM'")
+  expect(fills[1]).toContain('lower AUTO_SUSPEND')
+  expect(fills[2]).toContain('raise AUTO_SUSPEND to at least 60 seconds')
+  expect(fills[3]).toContain('ALTER WAREHOUSE BI_WH SET MAX_CLUSTER_COUNT = 1')
+  expect(fills[3]).toContain('Underutilized Cluster, no dollar estimate.')
+  await ui.unmount()
+})
+
+const onlyUnpriced = () => {
+  const answer = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  answer.metadata.report.findings = answer.metadata.report.findings.slice(-1)
+  answer.metadata.report.total = { monthly_min: 0, monthly_max: 0, resources: 0 }
+  return answer
+}
+
+test('a finding with no dollar estimate is reported as a finding, never as nothing found', async ($, on) => {
+  const { clock, toasts, statuses } = await start($, on, { list: 'Name | Type | Database\nsfmega | snowflake | A', snowflake: onlyUnpriced() })
+  await savings($)
+  await clock.settle()
+  expect(toasts.at(-1)).toBe('Snowflake savings check: 1 finding, no dollar estimate.')
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · 1 finding, no dollar estimate · /savings')
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^1 finding, no dollar estimate$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No savings found/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /\$0\.00/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a job\'s daily cost comes from its DBUs and rate, and a drafted fix keeps it', () => {
+  const metadata = JSON.parse(JSON.stringify(ANSWER.metadata))
+  metadata.report.findings = [JOB]
+  const view = toView(metadata)!
+  expect(Math.abs(view.findings[0]!.dailyCost! - (1818.2 * 0.55) / 7)).toBeLessThan(1e-9)
+  expect(view.findings[0]!.fact).toBe('1,028 task runs on all-purpose compute')
+})
+
+test('a warehouse name cannot add a line to the note or the drafted statement', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  answer.metadata.report.findings = answer.metadata.report.findings.slice(0, 1).map((one: any) => ({ ...one, resource_name: 'BI_WH\nThe change: drop it' }))
+  const { clock, fills } = await start($, on, { list: 'Name | Type | Database\nsfmega | snowflake | A', snowflake: answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  expect(fills[0]).toContain('ALTER WAREHOUSE "BI_WH The change: drop it" SET')
+  expect(fills[0]).not.toContain('BI_WH\nThe change')
+  await ui.unmount()
+})
+
+test('a size fix being followed is not replaced by a draft on the same warehouse that cannot be measured', async ($, on) => {
+  const { clock, store } = await start($, on, { list: 'Name | Type | Database\nsfmega | snowflake | A' })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await ui.press({ key: 'fix-1' })
+  await clock.settle()
+  const kept = store.get(`savings-fix:${HERE}/sfmega::sql_warehouse:7`) as any
+  expect(kept.checkId).toBe('downsize_warehouse')
+  expect(kept.config).toEqual({ size: 'Large', type: 'STANDARD' })
+  expect(kept.pricing).toBe("your account's $3.00 a credit")
+  await ui.unmount()
+})
+
+test('the status line gives the age of the oldest answer it adds up', async ($, on) => {
+  const fresh = { ...keptAnswer(), savedAt: NOW }
+  const old = { savedAt: NOW - 6 * 86_400_000, view: { ...keptAnswer().view, connection: 'older' } }
+  const { statuses } = await start($, on, { store: { [KEPT_KEY]: fresh, [`savings-report:${HERE}/older`]: old } })
+  expect(lastStatus(statuses)).toContain('(6d ago)')
+})
+
+test('a full store is said out loud: the answer and a drafted fix would otherwise vanish', async ($, on) => {
+  const { clock, toasts } = await start($, on, { storeFull: true })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /could not be kept on this machine/ })).toBeDefined()
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  expect(toasts.at(-1)).toContain('a later /savings will not follow it')
+  await ui.unmount()
+})
+
+test('Share report pressed after the answer ran out writes nothing', async ($, on) => {
+  const { clock, written } = await start($, on, { files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await clock.advance(7 * 86_400_000)
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  await ui.unmount()
+  expect([...written.keys()]).toEqual([])
+})
+
+test('the band\'s Run button pressed twice starts one run', async ($, on) => {
+  const options: Options = { files: { [`${ROOT}/infra/w.tf`]: 'resource "databricks_sql_endpoint" "x" { name = "Classic" }' } }
+  const { clock, runs } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/w.tf`, old_string: 'x', new_string: 'x' })
+  await clock.settle()
+  let release = () => {}
+  options.hold = new Promise<void>(done => (release = done))
+  const band = await $.ui.mount(BAND)
+  await Promise.all([band.press({ key: 'savings-run' }), band.press({ key: 'savings-run' })])
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  release()
+  await clock.settle()
+  await band.unmount()
+})
+
+test('after /clear during a pressed run, Run again works at once', async ($, on) => {
+  const options: Options = {}
+  const { clock, runs } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  let release = () => {}
+  options.hold = new Promise<void>(done => (release = done))
+  const ui = await mountFull($)
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  options.hold = undefined
+  await showAll(ui)
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  expect(runs.length).toBe(3)
+  release()
+  await clock.settle()
+  await ui.unmount()
+})
+
+test('a finding past its seven days no longer reaches the band', async ($, on) => {
+  const { clock } = await start($, on, { files: { [`${ROOT}/infra/w.tf`]: 'resource "databricks_sql_endpoint" "x" { name = "Classic" }' } })
+  await savings($)
+  await clock.settle()
+  await clock.advance(7 * 86_400_000)
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/w.tf`, old_string: 'x', new_string: 'x' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^Classic: / })).toBeUndefined()
+  await band.unmount()
+})
+
+test('Run again pressed again while its run is going starts no second one', async ($, on) => {
+  const options: Options = {}
+  const { clock, runs } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  let release = () => {}
+  options.hold = new Promise<void>(done => (release = done))
+  const ui = await mountFull($)
+  // Both presses land before the pane redraws without its buttons.
+  await Promise.all([ui.press({ key: 'again' }), ui.press({ key: 'again' })])
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  release()
+  await clock.settle()
+  await ui.unmount()
+})
+
+test('before the connections are known, /savings names no platform', async ($, on) => {
+  const { clock } = await start($, on)
+  const said = await savings($)
+  expect(said.text).toBe('Running the savings check in the side pane: read-only queries on your own connection. Nothing is sent to Altimate.')
+  await clock.settle()
+})
+
+test('a connection list that failed is not read as having no connections', async ($, on) => {
+  const options: Options = { list: BOTH }
+  const { clock, snowflakeRuns } = await start($, on, options)
+  options.listError = 'config unreadable'
+  await savings($)
+  await clock.settle()
+  expect(snowflakeRuns.length).toBe(1)
+})
+
+test('a number in a config file is not taken for a Snowflake warehouse or a job', async ($, on) => {
+  const files = { [`${ROOT}/infra/w.tf`]: 'resource "databricks_sql_endpoint" "other" {\n  name = "other"\n  min_num_clusters = 7\n}\n' }
+  const { clock } = await start($, on, { list: 'Name | Type | Database\nsfmega | snowflake | A', files })
+  await savings($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/w.tf`, old_string: 'other', new_string: 'other' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /BI_WH/ })).toBeUndefined()
+  await band.unmount()
+})
+
+const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u200b]/
+
+/** Every text and button a mounted drawing shows. */
+async function drawnTexts(ui: any): Promise<string[]> {
+  const found = [...(await ui.findAll({ type: 'Text' })), ...(await ui.findAll({ type: 'Button' }))]
+  return found.map((one: any) => String(one.text ?? one.props?.label ?? ''))
+}
+
+test('a control character in a name, reason, failure or connection never reaches the pane', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  answer.metadata.warehouse = 'sf\u001b[2Jmega'
+  answer.metadata.report.findings[0].resource_name = 'BI\u001b[2J\u200b_WH'
+  answer.metadata.report.findings[0].title = 'Downsize\u0007 Warehouse'
+  answer.metadata.skipped = [{ check: 'Frequent Restart\u001b Overcharge', reason: 'driver\u001b[31m said no' }]
+  const failed = failure('connect\u001b[31m refused\u0007')
+  const { clock, toasts, statuses } = await start($, on, { list: BOTH, snowflake: answer, answer: failed })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = await drawnTexts(ui)
+  expect(texts.length).toBeGreaterThan(5)
+  expect(texts.filter(text => CONTROL.test(text))).toEqual([])
+  expect(texts.some(text => text.includes('connection sf [2Jmega'))).toBe(true)
+  expect(texts.some(text => text.includes('The savings check failed: connect [31m refused'))).toBe(true)
+  expect(texts.some(text => text.includes('driver [31m said no'))).toBe(true)
+  expect(toasts.filter(text => CONTROL.test(text))).toEqual([])
+  expect(statuses.filter(text => text && CONTROL.test(text))).toEqual([])
+  await ui.unmount()
+})
+
+test('a kept answer holding a control character is drawn clean in the pane and the note', async ($, on) => {
+  const dirty = keptAnswer()
+  dirty.view.findings = dirty.view.findings.map(one => ({ ...one, resourceName: 'Cla\u001b[2Jssic', evidence: ['a\u0007b'] }))
+  const files = { [`${HOME}/.altimate-code/connections.json`]: JSON.stringify({ dbxmega: { type: 'databricks', http_path: '/sql/1.0/warehouses/wh-classic' } }) }
+  await start($, on, { list: DATABRICKS_ONLY, env: { HOME }, files, store: { [KEPT_KEY]: dirty } })
+  const note = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'dbxmega', query: 'select 1' })))
+  expect(await note.find({ type: 'Text', text: /^ {2}⎿ {2}Cla \[2Jssic: 95% idle · / })).toBeDefined()
+  await note.unmount()
+  const ui = await mountFull($)
+  expect((await drawnTexts(ui)).filter(text => CONTROL.test(text))).toEqual([])
+  await ui.unmount()
+})
+
+test('matching keeps the name as the warehouse spells it, whatever is shown', async ($, on) => {
+  const raw = 'BI\u200b_WH'
+  const answer = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  answer.metadata.report.findings[0].resource_name = raw
+  const files = { [`${HOME}/.altimate-code/connections.json`]: JSON.stringify({ sfmega: { type: 'snowflake', account: 'a', warehouse: raw } }), [`${ROOT}/infra/w.tf`]: `resource "databricks_sql_endpoint" "x" {\n  name = "${raw}"\n}\n` }
+  const { clock } = await start($, on, { list: 'Name | Type | Database\nsfmega | snowflake | A', snowflake: answer, env: { HOME }, files })
+  await savings($)
+  await clock.settle()
+  const note = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'sfmega', query: 'select 1' })))
+  expect(await note.find({ type: 'Text', text: /^ {2}⎿ {2}BI_WH: Large could be Medium/ })).toBeDefined()
+  await note.unmount()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/w.tf`, old_string: 'x', new_string: 'x' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  expect(await band.find({ type: 'Text', text: /^BI_WH: Downsize Warehouse, / })).toBeDefined()
+  await band.unmount()
+})
+
+test('names and reasons from the answer cannot blank the pane or the note', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  answer.metadata.report.findings[0].resource_name = 'BI\u001b[2J_WH'
+  answer.metadata.warehouses[0].name = 'BI\u001b[2J_WH'
+  answer.metadata.skipped = [{ check: 'Frequent Restart Overcharge', reason: 'bad\u0007\nthing' }]
+  answer.metadata.limited = ['active\u001b periods']
+  const { clock } = await start($, on, { list: BOTH, env: { HOME }, files: CONNECTION_FILES, snowflake: answer })
+  await savings($, 'sfmega')
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^BI \[2J_WH · Downsize Warehouse · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Not checked: Frequent Restart Overcharge \(bad thing\)\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /rows of active periods were read/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('under WSL the Altimate address is opened as an address, not turned into a Windows path', async ($, on) => {
+  const { clock, opened } = await start($, on, { uname: 'Linux 5.15-microsoft-standard' })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'altimate' })
+  await clock.settle()
+  expect(opened).toEqual([`wslview ${SIGNUP_URL}`])
+  await ui.unmount()
+})
+
+test('under WSL without wslview the Altimate address goes to explorer.exe as it is', async ($, on) => {
+  const { clock, opened } = await start($, on, { uname: 'Linux 5.15-microsoft-standard', noWslview: true })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'altimate' })
+  await clock.settle()
+  expect(opened).toEqual([`explorer.exe ${SIGNUP_URL}`])
+  await ui.unmount()
+})
+
+test('/savings with a name the connection list does not hold runs no check, and names the ones it has', async ($, on) => {
+  const { clock, runs, snowflakeRuns, toasts } = await start($, on, { list: BOTH })
+  await savings($, 'sf_prod')
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(snowflakeRuns).toEqual([])
+  expect(toasts.at(-1)).toBe('Savings check: altimate-code has no connection named sf_prod. Run /savings for every connection, or /savings <connection> with one of: dbxmega, classic, sfmega, sfother.')
+})
+
+test('/savings with a listed connection of another kind runs no check and says what it is not', async ($, on) => {
+  const { clock, runs, snowflakeRuns, toasts } = await start($, on, { list: BOTH })
+  await savings($, 'scratch')
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(snowflakeRuns).toEqual([])
+  expect(toasts.at(-1)).toBe("Savings check: altimate-code's connection scratch is neither a Databricks nor a Snowflake one. Run /savings for every connection, or /savings <connection> with one of: dbxmega, classic, sfmega, sfother.")
+})
+
+test('a name missing from the list read at session start still runs when this run cannot read the list', async ($, on) => {
+  const options: any = { list: DATABRICKS_ONLY }
+  const { clock, runs } = await start($, on, options)
+  // The connection was added after the session started, and this run's list read fails.
+  options.listError = 'Failed to list warehouses'
+  await savings($, 'newdbx')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect(runs[0]!.argv.join(' ')).toContain('newdbx')
+})
+
+test('without altimate-code, with both kinds of connection, the install message names neither one', async ($, on) => {
+  const { clock, toasts } = await start($, on, { list: BOTH, missingCli: true })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /add a Databricks or Snowflake connection, then run \/savings again\.$/ })).toBeDefined()
+  await ui.unmount()
+  expect(toasts.at(-1)).toMatch(/^Savings check: altimate-code is not installed\./)
+})
+
+test('a connection the list could not tell the kind of, refused as not Databricks, is not sent to a Databricks one', async ($, on) => {
+  const { clock } = await start($, on, { answer: failure('The Databricks savings check is not available for snowflake warehouses. Try one of: dbx.') })
+  await savings($, 'sf_prod')
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^That connection is not a Databricks one, and altimate-code's connection list could not be read to tell its kind\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Run \/savings with no connection to check each of yours/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('"already running" names the check that is running, not the one just asked for', async ($, on) => {
+  let finish = () => {}
+  const { clock, runs } = await start($, on, { list: BOTH, hold: new Promise<void>(resolve => (finish = resolve)) })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect((await savings($, 'sfmega')).text).toBe('The Databricks savings check is already running in the side pane. Run /savings sfmega again when it finishes.')
+  finish()
+  await clock.settle()
+})
+
+test('a warehouse name that is no plain identifier is quoted in the drafted statement', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  answer.metadata.report.findings = answer.metadata.report.findings.slice(0, 1).map((one: any) => ({ ...one, resource_name: 'my "wh"' }))
+  const { clock, fills } = await start($, on, { list: 'Name | Type | Database\nsfmega | snowflake | A', snowflake: answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  expect(fills[0]).toContain(`ALTER WAREHOUSE "my ""wh""" SET WAREHOUSE_SIZE = 'MEDIUM'`)
+  await ui.unmount()
+})
+
+test('a version-gate refusal before the connection list is read is filed under no platform in the report', async ($, on) => {
+  const options: any = { files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' } }
+  const { clock, written } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  options.version = '0.12.11'
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  const page = [...written.values()].at(-1)!
+  expect(page).toContain('The last check did not finish: This altimate-code has no savings check.')
+  expect(page).not.toContain('The last Databricks check did not finish')
+  await ui.unmount()
+})
+
+test('a version-gate refusal for a name the list read at session start lacks names no platform', async ($, on) => {
+  const options: any = { list: BOTH }
+  const { clock, toasts } = await start($, on, options)
+  options.version = '0.12.11'
+  await savings($, 'newsf')
+  await clock.settle()
+  expect(toasts.at(-1)).toMatch(/^Savings check: This altimate-code has no savings check\. /)
+})
+
+test('a failure for a name the list read at session start lacks names no platform', async ($, on) => {
+  const options: any = { list: BOTH }
+  const { clock, toasts } = await start($, on, options)
+  options.missingCli = true
+  await savings($, 'newsf')
+  await clock.settle()
+  expect(toasts.at(-1)).toMatch(/^Savings check: altimate-code is not installed\. Install it .*, add a Databricks or Snowflake connection/)
+})
+
+test('the shared report names a platform that could not be checked', async ($, on) => {
+  const missing = { status: 'error', title: 'Unknown tool', output: 'Unknown tool: finops_snowflake_savings. Run it', metadata: {} }
+  const { clock, written } = await start($, on, { list: BOTH, snowflake: missing, files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' } })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  expect([...written.values()][0]).toContain('The last Snowflake check did not finish: This altimate-code has no Snowflake savings check.')
+  await ui.unmount()
+})
+
+test('a Snowflake answer with its checks skipped claims nothing wider than what ran', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  answer.metadata.report = { lookback_days: 7, price_per_credit: 3, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
+  answer.metadata.skipped = [{ check: 'High Idle Time, Underutilized Cluster and the short-period signal of Downsize Warehouse', reason: 'Insufficient privileges' }, { check: '3 warehouses that billed credits', reason: "the connection's role cannot list A" }]
+  answer.metadata.limited = ['active periods']
+  const { clock, statuses } = await start($, on, { list: 'Name | Type | Database\nsfmega | snowflake | A', snowflake: answer })
+  await savings($)
+  await clock.settle()
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · nothing found by the checks that ran · /savings')
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^No savings found by the checks that ran\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Not checked: High Idle Time, .*\(Insufficient privileges\); 3 warehouses that billed credits \(/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Only the first 100,000 rows of active periods were read; any beyond them were not checked\.$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a Snowflake finding gets the note under a tool row, in its own account only', async ($, on) => {
+  await withFinding($, on)
+  const ui = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'sfmega', query: 'select 1' })))
+  expect(await ui.find({ type: 'Text', text: /^ {2}⎿ {2}BI_WH: Large could be Medium · \$54\.00–\$90\.00 a month → \/savings$/ })).toBeDefined()
+  await ui.unmount()
+  // Another account's warehouse of the same name has no kept finding.
+  const other = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'sfother', query: 'select 1' })))
+  expect(await other.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await other.unmount()
+})
+
+test('the Snowflake tool\'s live answer is drawn as it is: its total, evidence, price and note', async ($, on) => {
+  const files = { [`${HOME}/.altimate-code/connections.json`]: JSON.stringify({ snowflake: { type: 'snowflake', account: 'acct', warehouse: 'COMPUTE_WH' } }) }
+  const { clock, toasts, statuses, fills } = await start($, on, { list: 'Name | Type | Database\nsnowflake | snowflake | A', snowflake: SNOWFLAKE_CAPTURE, env: { HOME }, files })
+  await savings($)
+  await clock.settle()
+  expect(toasts.at(-1)).toBe('Snowflake savings check: $342–$489 a month on 7 resources.')
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · $342–$489/mo to save · /savings')
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^69 warehouses · the 7 days to 2026-11-18 · connection snowflake$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^on 7 resources, at your account's \$3\.00 a credit and the last 7 days' rate/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^DBT_INTEGRATION_TEST_WH · High Idle Time · \$197–\$281 a month$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^90% idle on 5 days above 40%: 12\.2 of 13\.5 active hours$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^180 suspend-and-resume bounces inside a billed minute on 5 days$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^2,456 seconds billed twice at 1 credit an hour$/ })).toBeDefined()
+  // Short active times are in the unit they fill, not "0.3 of 0.3 active hours".
+  expect(await ui.find({ type: 'Text', text: /^94% idle on 5 days above 40%: 19 of 20 active minutes$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^High auto suspend: 69 warehouses: auto-suspend setting not read$/ })).toBeDefined()
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  expect(fills[0]).toContain('ALTER WAREHOUSE DBT_INTEGRATION_TEST_WH SET AUTO_SUSPEND = 60')
+  await ui.unmount()
+  const note = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'snowflake', query: 'select 1' })))
+  expect(await note.find({ type: 'Text', text: /^ {2}⎿ {2}COMPUTE_WH: 59% idle · \$21\.30–\$30\.43 a month → \/savings$/ })).toBeDefined()
+  await note.unmount()
+})
+
+test('one platform failing does not lose the other, and says why', async ($, on) => {
+  const missing = { status: 'error', title: 'Unknown tool', output: 'Unknown tool: finops_snowflake_savings. Run `altimate-code tool list` to see the available tools.', metadata: {} }
+  const { clock } = await start($, on, { list: BOTH, snowflake: missing })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^This altimate-code has no Snowflake savings check\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('/savings <connection> checks only that connection, on its own platform', async ($, on) => {
+  const { clock, runs, snowflakeRuns } = await start($, on, { list: BOTH })
+  await savings($, 'sfmega')
+  await clock.settle()
+  expect(runs).toEqual([])
+  expect(JSON.parse(snowflakeRuns[0]!.argv[5]!)).toEqual({ warehouse: 'sfmega', confirm: true })
+})
+
+test('a connection added since the session started is checked', async ($, on) => {
+  const options: Options = { list: DATABRICKS_ONLY }
+  const { clock, snowflakeRuns } = await start($, on, options)
+  options.list = BOTH
+  await savings($)
+  await clock.settle()
+  expect(snowflakeRuns.length).toBe(1)
+})
+
+test('a subagent working on its own does not hold a finished run\'s notice back', async ($, on) => {
+  const { clock, toasts } = await start($, on)
+  await $.turn.start({ text: 'sub', turnId: 's1', agentId: 'a1' } as any)
+  await savings($)
+  await clock.settle()
+  expect(toasts.at(-1)).toBe('Databricks savings check: $80.64–$101 a month on 1 resource.')
+})
+
+test('the next run after a draft says it is measuring, and that nothing has changed yet', async ($, on) => {
+  const { clock } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  await showAll(ui)
+  expect(await ui.find({ type: 'Text', text: /^Classic: fix drafted 2026-11-17 · measuring \(0 of 7 days\): still SMALL CLASSIC, no change seen yet$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a subagent finishing is not the turn ending, and notices held meanwhile all arrive', async ($, on) => {
+  const { clock, toasts } = await start($, on)
+  await $.turn.start({ text: 'go', turnId: 't1' } as any)
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  await ui.unmount()
+  await $.turn.start({ text: 'sub', turnId: 's1', agentId: 'a1' } as any)
+  await $.turn.complete({ answer: 'sub done', durationMs: 5, isAborted: false, reason: 'answer', turnId: 's1', agentId: 'a1' } as any)
+  expect(toasts).toEqual([])
+  await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  expect(toasts.length).toBe(1)
+  expect(toasts[0]).toContain('$80.64–$101 a month on 1 resource.')
+  expect(toasts[0]).toContain('in your prompt box')
+})
+
+test('an answer that passes seven days during a session stops being shown', async ($, on) => {
+  const { clock, statuses } = await start($, on, { list: BOTH, env: { HOME }, files: CONNECTION_FILES })
+  await savings($)
+  await clock.settle()
+  await clock.advance(7 * 86_400_000)
+  await $.turn.start({ text: 'later', turnId: 't9' } as any)
+  expect(lastStatus(statuses)).toBe('⚡ Altimate · Databricks + Snowflake · /savings')
+  const note = await $.ui.mount(row(rowProps(SQL_TOOL, { warehouse: 'classic', query: 'select 1' })))
+  expect(await note.find({ type: 'Text', text: /→ \/savings/ })).toBeUndefined()
+  await note.unmount()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /a month$/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('while Claude is working a finished run raises no notice; it comes when the turn ends', async ($, on) => {
+  const { clock, toasts, statuses } = await start($, on)
+  await $.turn.start({ text: 'go', turnId: 't1' } as any)
+  await savings($)
+  await clock.settle()
+  expect(toasts).toEqual([])
+  expect(lastStatus(statuses)).toContain('$80.64–$101/mo to save')
+  await $.turn.complete({ answer: 'done', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  expect(toasts).toEqual(['Databricks savings check: $80.64–$101 a month on 1 resource.'])
+})
+
+// --- The slim view: the largest findings first, the rest behind Show all.
+
+/** A Databricks answer whose findings are these, each its own warehouse. */
+const databricksWith = (findings: { name: string; min: number; max: number }[]) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const base = answer.metadata.report.findings[0]
+  answer.metadata.report.findings = findings.map((one, at) => ({ ...base, resource_id: `wh-d${at}`, resource_name: one.name, monthly_min: one.min, monthly_max: one.max }))
+  answer.metadata.report.what_if = []
+  answer.metadata.report.total = { monthly_min: 0, monthly_max: 0, resources: 0 }
+  return answer
+}
+
+/** A Snowflake answer whose findings are these, each its own warehouse. */
+const snowflakeWith = (findings: { name: string; min: number; max: number }[]) => {
+  const answer = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  const base = answer.metadata.report.findings[1]
+  answer.metadata.report.findings = findings.map((one, at) => ({ ...base, resource_id: `s${at}`, resource_name: one.name, monthly_min: one.min, monthly_max: one.max }))
+  answer.metadata.report.total = { monthly_min: 0, monthly_max: 0, resources: 0 }
+  return answer
+}
+
+// Ranked by the high end, then the low end, then the name: Zeta, Alpha, Beta, then Mid, Small and NoDollar.
+const SIX = {
+  answer: databricksWith([
+    { name: 'Mid', min: 10, max: 30 },
+    { name: 'Zeta', min: 100, max: 200 },
+    { name: 'Alpha', min: 50, max: 200 },
+  ]),
+  snowflake: snowflakeWith([
+    { name: 'Small', min: 1, max: 5 },
+    { name: 'Beta', min: 50, max: 200 },
+    { name: 'NoDollar', min: 0, max: 0 },
+  ]),
+}
+
+const titles = async (ui: any) => ((await ui.findAll({ type: 'Text', text: / · (Databricks|Snowflake) · / })) as any[]).map(one => one.text)
+
+test('the slim view shows the three largest findings across both platforms, largest first, ties by low end then name', async ($, on) => {
+  const { clock } = await start($, on, { list: BOTH, ...SIX })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^Savings check · last 7 days · dbxmega, sfmega$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Read-only, on your own connections\. Nothing was sent to Altimate\.$/ })).toBeDefined()
+  expect(await titles(ui)).toEqual([
+    'Zeta · Databricks · Migrate Classic/Pro to Serverless · $100–$200 a month',
+    'Alpha · Databricks · Migrate Classic/Pro to Serverless · $50.00–$200 a month',
+    'Beta · Snowflake · High Idle Time · $50.00–$200 a month',
+  ])
+  // One fact under each, and no platform section headers.
+  expect(await ui.findAll({ type: 'Text', text: /^CLASSIC SMALL warehouse, 95% idle/ })).toHaveLength(2)
+  expect(await ui.find({ type: 'Text', text: /^60% idle/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /savings check$/ })).toBeUndefined()
+  // Each keeps the Draft the fix key it has in the full view: Zeta and Alpha are the Databricks answer's 2nd and 3rd, Beta the Snowflake one's 2nd.
+  expect((await ui.findAll({ type: 'Button', text: 'Draft the fix' })).map((one: any) => one.key)).toEqual(['fix-1', 'fix-2', 'fix-4'])
+  await ui.unmount()
+})
+
+test('the +N line counts the findings behind Show all, and the total is the three shown plus what it adds', async ($, on) => {
+  const { clock } = await start($, on, { list: BOTH, ...SIX })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Mid $10–$30, Small $1–$5 and NoDollar with none: three findings, adding $11–$35.
+  expect(await ui.find({ type: 'Text', text: /^\+ 3 more findings, adding \$11\.00–\$35\.00 a month to the total$/ })).toBeDefined()
+  // Zeta $100–$200, Alpha $50–$200 and Beta $50–$200 shown, plus $11–$35: $211–$635, each resource once.
+  expect(await ui.find({ type: 'Text', text: /^\$211–\$635 a month$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^each resource counted once, at its largest saving$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^(Mid|Small|NoDollar) · / })).toBeUndefined()
+  // The checks not run, across both platforms: 9 Databricks and 7 Snowflake.
+  expect(await ui.find({ type: 'Text', text: /^Altimate runs 16 more checks on these platforms\.$/ })).toBeDefined()
+  expect(await ui.find({ key: 'altimate', type: 'Button' })).toBeDefined()
+  expect(await ui.find({ key: 'again' })).toBeUndefined()
+  // Show all draws all six, with each platform's section; Show fewer goes back.
+  await ui.press({ key: 'more' })
+  await clock.settle()
+  for (const name of ['Zeta', 'Alpha', 'Beta', 'Mid', 'Small', 'NoDollar']) expect(await ui.find({ type: 'Text', text: new RegExp(`^${name} · `) })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Databricks savings check$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Not run here: 7 more of Altimate's 11 Snowflake checks$/ })).toBeDefined()
+  expect(await ui.find({ key: 'again' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\+ 3 more/ })).toBeUndefined()
+  await ui.press({ key: 'fewer' })
+  await clock.settle()
+  expect(await titles(ui)).toHaveLength(3)
+  await ui.unmount()
+})
+
+test('a new run starts slim again, after Show all', async ($, on) => {
+  const { clock, runs } = await start($, on, { list: BOTH, ...SIX })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Mid · / })).toBeDefined()
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  expect(await ui.find({ type: 'Text', text: /^Mid · / })).toBeUndefined()
+  expect(await ui.find({ key: 'more' })).toBeDefined()
+  await ui.unmount()
+  // So does /savings typed again.
+  const full = await mountFull($)
+  await savings($)
+  await clock.settle()
+  expect(await full.find({ type: 'Text', text: /^Mid · / })).toBeUndefined()
+  await full.unmount()
+})
+
+test('when every finding is shown there is no +N line, and Show all still opens the detail', async ($, on) => {
+  const answer = databricksWith([
+    { name: 'Zeta', min: 100, max: 200 },
+    { name: 'Alpha', min: 50, max: 200 },
+    { name: 'Mid', min: 10, max: 30 },
+  ])
+  answer.metadata.report.total = { monthly_min: 160, monthly_max: 430, resources: 3 }
+  answer.metadata.report.what_if = JSON.parse(JSON.stringify(ANSWER)).metadata.report.what_if
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await titles(ui)).toHaveLength(3)
+  expect(await ui.find({ type: 'Text', text: /^\+ / })).toBeUndefined()
+  await ui.press({ key: 'more' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^What if Classic/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a shown resource\'s other findings are behind Show all, and already in the total', async ($, on) => {
+  // Classic has two findings; the total counts it once, at its larger one.
+  const { clock } = await start($, on)
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await titles(ui)).toEqual(['Classic · Databricks · Migrate Classic/Pro to Serverless · $80.64–$101 a month'])
+  expect(await ui.find({ type: 'Text', text: /^\$80\.64–\$101 a month$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^\+ 1 more finding, already in the total$/ })).toBeDefined()
+  await ui.press({ key: 'more' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Classic · Over-Sized Warehouse · / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('Share report from the slim view still lists every finding', async ($, on) => {
+  const { clock, written } = await start($, on, { list: BOTH, ...SIX, files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  const html = written.get(`${ROOT}/target/.altimate-lineage/savings-report.html`) ?? ''
+  for (const name of ['Zeta', 'Alpha', 'Beta', 'Mid', 'Small', 'NoDollar']) expect(html).toContain(`${name} · `)
+  expect(html).toContain('CLASSIC SMALL warehouse, 95% idle')
+  await ui.unmount()
+})
+
+test('on the live Snowflake answer the slim view shows its three largest, the rest summed, and no line wider than the pane', async ($, on) => {
+  const files = { [`${HOME}/.altimate-code/connections.json`]: JSON.stringify({ snowflake: { type: 'snowflake', account: 'acct', warehouse: 'COMPUTE_WH' } }) }
+  const { clock } = await start($, on, { list: 'Name | Type | Database\nsnowflake | snowflake | A', snowflake: SNOWFLAKE_CAPTURE, env: { HOME }, files })
+  await savings($)
+  await clock.settle()
+  // From the capture itself: each warehouse at its largest finding, largest first.
+  const raw = [...(SNOWFLAKE_CAPTURE.metadata.report.findings as any[])].sort(
+    (a, b) => b.monthly_max - a.monthly_max || b.monthly_min - a.monthly_min || String(a.resource_name).localeCompare(String(b.resource_name)),
+  )
+  const largest = raw.filter((one, at) => raw.findIndex(other => other.resource_id === one.resource_id) === at)
+  const rest = largest.slice(3)
+  const sum = (rows: any[], key: 'monthly_min' | 'monthly_max') => rows.reduce((total, one) => total + one[key], 0)
+  const total = SNOWFLAKE_CAPTURE.metadata.report.total
+  // The three shown and what the +N line adds are the whole total, to the cent.
+  expect(Math.abs(sum(largest.slice(0, 3), 'monthly_min') + sum(rest, 'monthly_min') - total.monthly_min)).toBeLessThan(0.005)
+  expect(Math.abs(sum(largest.slice(0, 3), 'monthly_max') + sum(rest, 'monthly_max') - total.monthly_max)).toBeLessThan(0.005)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await titles(ui)).map((one: string) => one.split(' · ')[0])).toEqual(largest.slice(0, 3).map(one => one.resource_name))
+  expect(await ui.find({ type: 'Text', text: /^\$342–\$489 a month$/ })).toBeDefined()
+  const smaller = (await ui.find({ type: 'Text', text: /^\+ 6 more findings, / })) as any
+  expect(smaller?.text).toBe(`+ 6 more findings, adding ${dollars(sum(rest, 'monthly_min'))}–${dollars(sum(rest, 'monthly_max'))} a month to the total`)
+  expect(await ui.find({ type: 'Text', text: /^Altimate runs 7 more checks on this platform\.$/ })).toBeDefined()
+  for (const line of (await ui.findAll({ type: 'Text' })) as any[]) expect({ line: line.text, fits: line.text.length <= SLIM_WIDTH }).toEqual({ line: line.text, fits: true })
+  await ui.unmount()
+})
+
+test('a long fact is cut at a clause, a long name is shortened, so the slim lines do not wrap', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.report = { lookback_days: 7, findings: [{ ...JOB, resource_name: 'nightly_orders_rollup_with_a_very_long_name_from_the_workspace_ui' }, IDLE_CLUSTER], total: { monthly_min: 1870.2, monthly_max: 2805.3, resources: 2 }, what_if: [] }
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^1,028 task runs \(periodic\), 181\.8 hours on all-purpose compute, about 1,818\.2 DBUs$/ })).toBeDefined()
+  const title = (await ui.find({ type: 'Text', text: /^nightly_o… · Databricks · Job Running on All-Purpose Compute · \$1,870–\$2,805 a month$/ })) as any
+  expect(title?.text.length).toBe(SLIM_WIDTH)
+  for (const line of (await ui.findAll({ type: 'Text' })) as any[]) expect({ line: line.text, fits: line.text.length <= SLIM_WIDTH }).toEqual({ line: line.text, fits: true })
+  // The full view keeps the whole fact.
+  await ui.press({ key: 'more' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /about 1,818\.2 DBUs, most on cluster "shared analytics"$/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('fitLine keeps a line that fits, cuts at the last clause that fits, else at a word with an ellipsis', () => {
+  expect(fitLine('short', 10)).toBe('short')
+  expect(fitLine('one thing, two things, three things', 25)).toBe('one thing, two things')
+  // A clause that ends exactly at the width is kept whole.
+  expect(fitLine('one thing, two things, three things', 21)).toBe('one thing, two things')
+  expect(fitLine('averyveryverylongword and more words here', 20)).toBe('averyveryverylongwo…')
+  expect(fitLine('a b c d e f g h i j k l m n o', 10)).toBe('a b c d…')
+})
+
+test('in the slim view a drafted fix\'s line shows once, under the first top finding on its warehouse', async ($, on) => {
+  // Classic is still SMALL and has two findings, both in the top three.
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  const line = 'Classic: fix drafted 2026-11-01, but it is still SMALL CLASSIC and still flagged, so no saving is claimed.'
+  expect(texts.filter(text => text === line)).toHaveLength(1)
+  expect(texts.indexOf(line)).toBe(texts.indexOf('CLASSIC SMALL warehouse, 95% idle over 11.0 running hours (3,107 queries)') + 1)
+  await ui.unmount()
+})
+
+test('in the slim view a drafted fix whose finding has cleared still shows its line', async ($, on) => {
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer: resizedAnswer('2026-11-18', 14), store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ key: 'more' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^No savings found by these 4 checks\.$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Classic: changed to X-SMALL CLASSIC since 2026-11-10: observed spend / })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a session end, and a run that is refused, open the pane slim again', async ($, on) => {
+  const options: any = {}
+  const { clock } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeDefined()
+  await $.session.end({ reason: 'clear' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeUndefined()
+  expect(await ui.find({ key: 'more' })).toBeDefined()
+  // Open the detail again, then a run the tool refuses.
+  await showAll(ui)
+  expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeDefined()
+  options.answer = failure('[INSUFFICIENT_PERMISSIONS] User does not have USE SCHEMA on Schema system.billing')
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^Not run here/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^A query was refused/ })).toBeDefined()
+  await ui.unmount()
+})
+
+// --- Missing values, checks that did not run, the version, the command match and per-workspace baselines.
 
 test('a job whose evidence lacks its trigger, host cluster, hours or DBUs reads without "NaN", "undefined", empty quotes or "(id )"', () => {
   const evidence = { kind: 'job_on_all_purpose', task_runs: 3, all_purpose_rate_per_dbu: 0.55, jobs_rate_per_dbu: 0.15 }
@@ -1254,24 +2965,27 @@ test('a job whose evidence lacks its trigger, host cluster, hours or DBUs reads 
   expect(evidenceLines(JOB.evidence)[0]).toContain('(periodic), 181.8 hours on all-purpose compute, about 1,818.2 DBUs')
 })
 
-test('when no check could run, the pane and the notice say nothing was checked, not that nothing was found', async ($, on) => {
+test('when no check could run, the pane, the notice and the status line say nothing was checked, not that nothing was found', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   const checks = ['Migrate Classic/Pro to Serverless', 'Over-Sized Warehouse', 'Idle Cluster Detection', 'Job Running on All-Purpose Compute']
   // A check listed twice is still one check.
   answer.metadata.skipped = [...checks, checks[3]].map(check => ({ check, reason: 'INSUFFICIENT_PERMISSIONS' }))
   answer.metadata.report = { lookback_days: 7, findings: [], total: { monthly_min: 0, monthly_max: 0, resources: 0 }, what_if: [] }
-  const { clock, toasts } = await start($, on, { answer })
+  const { clock, toasts, statuses } = await start($, on, { answer })
   await savings($)
   await clock.settle()
   expect(toasts.at(-1)).toBe('Databricks savings check: none of the 4 checks could run, so nothing was checked.')
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^None of the 4 checks could run, so nothing was checked\.$/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /No savings found|-?\d+ of 4 checks that ran/ })).toBeUndefined()
-  await ui.unmount()
+  expect(String(statuses.at(-1) ?? '')).toContain('nothing was checked')
+  for (const full of [false, true]) {
+    const ui = full ? await mountFull($) : await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /^None of the 4 checks could run, so nothing was checked\.$/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /No savings found|-?\d+ of 4 checks that ran/ })).toBeUndefined()
+    await ui.unmount()
+  }
 })
 
 test('a check listed for two reasons counts once in the verdict', () => {
-  expect(checksNotRun({ skipped: ['Idle Cluster Detection (refused)', 'Idle Cluster Detection (time limit)'] })).toBe(1)
+  expect(skippedChecks({ skipped: ['Idle Cluster Detection (refused)', 'Idle Cluster Detection (time limit)'] })).toBe(1)
 })
 
 for (const [name, options] of [
@@ -1341,7 +3055,7 @@ test('a baseline in one workspace is read for that workspace only, though anothe
   const { clock } = await start($, on, { answer, store })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
   expect(texts.filter(text => / → .* since 2026-11-10/.test(text))).toEqual([
     'Classic (workspace 111): SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.',
@@ -1383,7 +3097,7 @@ for (const { setting, a, b, other, otherValue } of SETTING_CASES) {
             // The line names only the settings known on both sides.
             const named = (['size', 'type'] as const).filter(one => was[one] !== null && now[one] !== null)
             const label = (config: Record<string, string | null>) => named.map(one => (one === 'size' ? config.size!.replace(/_/g, '-') : config.type!)).join(' ')
-            const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+            const ui = await mountFull($)
             const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
             expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(
               changed ? [`Classic: ${label(was)} → ${label(now)} since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.`] : [],
@@ -1397,6 +3111,37 @@ for (const { setting, a, b, other, otherValue } of SETTING_CASES) {
   }
 }
 
+test('a change a fix saw is kept when a later run does not read the setting that changed', async ($, on) => {
+  // Seen resized on 2026-11-10; this run reads no size, so it cannot say the resize was undone.
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = null
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(FIX_KEY) as any).changedSeen).toBe('2026-11-10')
+})
+
+test('a change a fix saw is cleared when a later run reads every setting and finds it undone', async ($, on) => {
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').size = 'SMALL'
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store: { [FIX_KEY]: FIX } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(FIX_KEY) as any).changedSeen).toBeUndefined()
+})
+
+test('a fix drafted before the size was read never takes a later run\'s size, and its line compares only the type', async ($, on) => {
+  // The size this run reads may be the fix itself, applied since: it is not what the fix was drafted against.
+  const { clock, store } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), store: { [FIX_KEY]: { ...FIX, changedSeen: undefined, config: { size: null, type: 'CLASSIC' } } } })
+  await savings($)
+  await clock.settle()
+  expect((store.get(FIX_KEY) as any).config).toEqual({ size: null, type: 'CLASSIC' })
+  const ui = await mountFull($)
+  const lines = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)).filter(text => text.startsWith('Classic: fix drafted'))
+  expect(lines).toEqual(['Classic: fix drafted 2026-11-01, but it is still CLASSIC and still flagged, so no saving is claimed.'])
+  await ui.unmount()
+})
+
 test('a setting the baseline did not know is not filled from a read in which another setting changed', async ($, on) => {
   // The baseline knew only the type. This run reads SMALL PRO: the type changed, so SMALL is the size after the
   // change, not the size the baseline had.
@@ -1407,7 +3152,7 @@ test('a setting the baseline did not know is not filled from a read in which ano
   await savings($)
   await clock.settle()
   expect((store.get(key) as any).config).toEqual({ size: null, type: 'CLASSIC' })
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(['Classic: CLASSIC → PRO since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'])
   await ui.unmount()
@@ -1456,7 +3201,7 @@ test('Draft the fix pressed just before a run starts still fills the prompt box 
 test('Draft the fix whose prompt box is filled across a /clear says nothing in the new conversation', async ($, on) => {
   let release = () => {}
   const fillHold = new Promise<void>(done => (release = done))
-  const { clock, fills, toasts } = await start($, on, { fillHold })
+  const { clock, fills, toasts, store } = await start($, on, { fillHold })
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
@@ -1467,6 +3212,94 @@ test('Draft the fix whose prompt box is filled across a /clear says nothing in t
   await clock.settle()
   expect(fills).toHaveLength(1)
   expect(toasts.filter(text => /prompt box/.test(text))).toEqual([])
+  // The /clear replaced the box's text: the request is not followed by a later run.
+  expect([...store.keys()].filter(key => key.startsWith('savings-fix:'))).toEqual([])
+  await ui.unmount()
+})
+
+test('Draft the fix whose record is written across a /clear says nothing in the new conversation', async ($, on) => {
+  let release = () => {}
+  const held = new Promise<void>(done => (release = done))
+  const { clock, toasts } = await start($, on, { onStep: async step => (step === 'fix write' ? held : undefined) })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  await clock.settle()
+  expect(toasts.filter(text => /prompt box/.test(text))).toEqual([])
+  await ui.unmount()
+})
+
+test('with two connections on one workspace, a fix drafted from the one listed second stays under the finding the slim view shows', async ($, on) => {
+  // A second, smaller finding on another warehouse puts a line listed on its own after both titles.
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  // The answers are listed by connection name, so `dbxmega` comes after `classic`: its copy is the one to prefer.
+  const store = { [`savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-classic`]: FIX }
+  const { clock } = await start($, on, { list: BOTH, answer, now: Date.parse('2026-11-18T10:00:00Z'), store })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(titles).toHaveLength(2)
+  expect(texts[titles[0]!]).toContain('Classic')
+  expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
+  await ui.unmount()
+})
+
+test('with two connections on one workspace, a fix drafted from one stays under the finding when the other connection\'s copy ranks higher', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  const store = { [`savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-classic`]: FIX }
+  const { clock } = await start($, on, { list: BOTH, answer, now: Date.parse('2026-11-18T10:00:00Z'), store })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  // The other connection ran on another day and reads a larger saving for the same finding.
+  classic.monthly_max += 50
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(texts[titles[0]!]).toContain('Classic')
+  expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
+  await ui.unmount()
+})
+
+test('with two connections on one workspace that both drafted the fix, its line shows once, under the finding', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  const store = {
+    [`savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-classic`]: FIX,
+    [`savings-fix:project:${ROOT}/classic::sql_warehouse:wh-classic`]: { ...FIX, date: '2026-11-02' },
+  }
+  const { clock } = await start($, on, { list: BOTH, answer, now: Date.parse('2026-11-18T10:00:00Z'), store })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
   await ui.unmount()
 })
 
@@ -1487,12 +3320,14 @@ test('an answer whose window has no end, or whose connection name carries a line
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const slim = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await slim.find({ type: 'Text', text: /^Savings check · last 7 days · dbx mega$/ })).toBeDefined()
+  await slim.unmount()
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
-  const line = texts.find(text => / days/.test(text) && /connection/.test(text))
+  const line = texts.find(text => / · the 7 days/.test(text))
   expect(line).toBeDefined()
-  expect(line).not.toMatch(/undefined|\n/)
-  expect(line).toContain('connection dbx mega')
+  expect(texts.filter(text => /undefined|\n/.test(text))).toEqual([])
   await ui.unmount()
 })
 
@@ -1533,7 +3368,7 @@ test('a config edit whose file is read across a /clear puts no line above the ne
   await band.unmount()
 })
 
-test('a warehouse the answer gives no cost for draws no change line and keeps no baseline from it', async ($, on) => {
+test('a warehouse the answer gives no cost for draws no change line', async ($, on) => {
   const key = 'savings-baseline:dbxmega:wh-classic'
   const answer = JSON.parse(JSON.stringify(ANSWER))
   const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
@@ -1542,7 +3377,7 @@ test('a warehouse the answer gives no cost for draws no change line and keeps no
   const resized = await start($, on, { answer, store: { [key]: { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } } })
   await savings($)
   await resized.clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => / since 2026-11-10/.test(text))).toEqual([])
   expect(texts.filter(text => /NaN|\?/.test(text))).toEqual([])
@@ -1556,10 +3391,18 @@ test('a cost sent as a numeric string is a cost: the change line is drawn', asyn
   const { clock } = await start($, on, { answer, store: { [key]: { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } } })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => / since 2026-11-10\./.test(text))).toEqual(['Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10. Observed spend: $118.03 a month before, $118.05 after.'])
   await ui.unmount()
+})
+
+test('a warehouse cost sent as a numeric string is the cost a draft keeps', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost = '27.544375'
+  const view = toView(answer.metadata)!
+  expect(view.inventory.find(one => one.id === 'wh-classic')?.windowCost).toBe(27.544375)
+  expect(Math.abs(view.findings.find(one => one.resourceId === 'wh-classic')!.dailyCost! - 27.544375 / 7)).toBeLessThan(1e-9)
 })
 
 test('a flagged warehouse whose cost is a numeric string keeps a baseline with that cost', async ($, on) => {
@@ -1571,13 +3414,34 @@ test('a flagged warehouse whose cost is a numeric string keeps a baseline with t
   expect((store.get('savings-baseline:dbxmega:wh-classic') as any)?.windowCost).toBe(27.544375)
 })
 
-test('a flagged warehouse the answer gives no cost for keeps no baseline', async ($, on) => {
+test('a cost kept unknown is not filled from a run after a change: the line stays unremarked and the baseline keeps no cost', async ($, on) => {
+  const key = 'savings-baseline:dbxmega:wh-classic'
   const answer = JSON.parse(JSON.stringify(ANSWER))
-  delete answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost
-  const { clock, store } = await start($, on, { answer })
+  Object.assign(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic'), { size: 'X_SMALL', window_cost: 100 })
+  const { clock, store } = await start($, on, { answer, store: { [key]: { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: null } } })
   await savings($)
   await clock.settle()
-  expect(store.has('savings-baseline:dbxmega:wh-classic')).toBe(false)
+  expect((store.get(key) as any).windowCost).toBeNull()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: / since 2026-11-10\./ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('in one workspace, a fix that names another workspace does not hide this workspace\'s change line', async ($, on) => {
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.workspaces_checked = 1
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const store = {
+    [`savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`]: { ...FIX, workspaceId: '222' },
+    'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 },
+  }
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
+  await ui.unmount()
 })
 
 test('a baseline an older version kept as strings loads as fully unknown: no line, and this run replaces it', async ($, on) => {
@@ -1588,7 +3452,7 @@ test('a baseline an older version kept as strings loads as fully unknown: no lin
   const { clock, store: kept } = await start($, on, { answer, store })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: / since 2026-11-10\./ })).toBeUndefined()
   await ui.unmount()
   // This run's read, with its own date and spend: nothing of the string baseline is kept.
@@ -1598,7 +3462,7 @@ test('a baseline an older version kept as strings loads as fully unknown: no lin
   expect(now.windowCost).toBe(Number(answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost))
 })
 
-test('after a run that failed, the band does not quote the answer the pane no longer shows', async ($, on) => {
+test('after a run that failed, the pane keeps the earlier answer beside why, and the band quotes that answer', async ($, on) => {
   const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "classic" {\n  name = "Classic"\n  cluster_size = "Small"\n}\n' }
   const answer: { value: unknown } = { value: ANSWER }
   const started = await start($, on, { files, get answer() { return answer.value } } as any)
@@ -1607,10 +3471,14 @@ test('after a run that failed, the band does not quote the answer the pane no lo
   answer.value = failure('[INSUFFICIENT_PERMISSIONS] no access to system.billing')
   await savings($)
   await started.clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^A query was refused: \[INSUFFICIENT_PERMISSIONS\]/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^Classic · Migrate Classic\/Pro to Serverless · / })).toBeDefined()
+  await ui.unmount()
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'Small', new_string: 'Medium' })
   await started.clock.settle()
   const band = await $.ui.mount(BAND)
-  expect(await band.find({ type: 'Text', text: /^Classic: .*a month to save/ })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /^Classic: Migrate Classic\/Pro to Serverless, .*a month to save/ })).toBeDefined()
   await band.unmount()
 })
 
@@ -1624,7 +3492,7 @@ test('two resized warehouses draw the observed-spend note once, after both lines
   const { clock } = await start($, on, { answer: resized, store })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
   const changes = texts.filter(text => / since 2026-11-10\. Observed spend: /.test(text))
   expect(changes).toHaveLength(2)
@@ -1634,8 +3502,74 @@ test('two resized warehouses draw the observed-spend note once, after both lines
   await ui.unmount()
 })
 
+// --- What a resize line claims, how wide a slim title is, and which change line a drafted fix replaces.
+
+for (const [when, costNow, costThen] of [
+  ['now', null, 27.54],
+  ['when it was flagged', 13.77, null],
+] as const) {
+  test(`a resized warehouse whose cost the answer did not give ${when} gets no "$0" spend line`, async ($, on) => {
+    const answer = JSON.parse(JSON.stringify(ANSWER))
+    const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+    classic.size = 'X_SMALL'
+    if (costNow === null) delete classic.window_cost
+    else classic.window_cost = costNow
+    const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: costThen } }
+    const { clock } = await start($, on, { answer, store })
+    await savings($)
+    await clock.settle()
+    const ui = await mountFull($)
+    expect(await ui.find({ type: 'Text', text: /→ X-SMALL CLASSIC since 2026-11-10/ })).toBeUndefined()
+    expect(await ui.find({ type: 'Text', text: /\$0(\.00)? (a month )?(before|after)/ })).toBeUndefined()
+    await ui.unmount()
+  })
+}
+
+test('a flagged warehouse the answer gives no cost for is remembered without one', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic').window_cost
+  const { clock, store } = await start($, on, { answer, now: Date.parse('2026-11-18T10:00:00Z') })
+  await savings($)
+  await clock.settle()
+  expect(store.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-18', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: null, days: 7 })
+})
+
+test('a slim title with a long check name stays within the slim width, keeping the platform and the amount', () => {
+  const view = { platform: 'databricks' } as any
+  const finding = { resourceName: 'analytics-shared-warehouse-for-the-finance-team', title: 'Migrate Classic/Pro to Serverless, with a much longer check title than any today', monthlyMin: 1200, monthlyMax: 3400 } as any
+  for (const width of [SLIM_WIDTH, 60]) {
+    const line = slimTitle(view, finding, width)
+    expect(line.length).toBeLessThanOrEqual(width)
+    expect(line).toContain(' · Databricks · ')
+    expect(line).toMatch(/\$1,200–\$3,400/)
+    expect(line.startsWith('analytic')).toBe(true)
+  }
+  // A short title and name read whole, as before.
+  expect(slimTitle(view, { ...finding, resourceName: 'Classic', title: 'Over-Sized Warehouse' })).toMatch(/^Classic · Databricks · Over-Sized Warehouse · /)
+})
+
+test('a drafted fix replaces the change line of its own warehouse only, not of another with the same name', async ($, on) => {
+  const store = {
+    [FIX_KEY]: FIX,
+    'savings-baseline:dbxmega:wh-classic': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 },
+    'savings-baseline:dbxmega:wh-classic-2': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 },
+  }
+  const answer = resizedAnswer('2026-11-18', 14)
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  answer.metadata.warehouses.push({ ...classic, id: 'wh-classic-2' })
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  // The fixed one has its fix line instead; the other, also called Classic, keeps its change line.
+  expect(texts.filter(text => /^Classic: changed to X-SMALL CLASSIC since /.test(text))).toHaveLength(1)
+  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
+  await ui.unmount()
+})
+
 test('evidence with none of its figures reads "?" where a figure goes, never NaN or "undefined"', () => {
-  for (const kind of ['serverless', 'over_sized', 'idle_cluster', 'job_on_all_purpose']) {
+  for (const kind of ['serverless', 'over_sized', 'idle_cluster', 'job_on_all_purpose', 'high_idle_time', 'downsize_warehouse']) {
     const lines = evidenceLines({ kind })
     expect(lines.length).toBeGreaterThan(0)
     for (const line of lines) expect(line).not.toMatch(/NaN|undefined|null|\b0 (queries|task runs|active days)/)
@@ -1671,18 +3605,6 @@ for (const command of ['echo databricks -p prod clusters list', 'grep -r databri
   })
 }
 
-test('Run again pressed twice starts one run', async ($, on) => {
-  const { clock, runs } = await start($, on)
-  await savings($)
-  await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'again' })
-  await ui.press({ key: 'again' })
-  await clock.settle()
-  expect(runs.length).toBe(2)
-  await ui.unmount()
-})
-
 test('a baseline read over a longer window is scaled by its own length, not this run\'s', async ($, on) => {
   // Two weeks at $55.08 is the same $118.03 a month as one week at $27.54.
   const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 55.08, days: 14 } }
@@ -1691,7 +3613,7 @@ test('a baseline read over a longer window is scaled by its own length, not this
   const { clock } = await start($, on, { answer: resized, store })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-10\. Observed spend: \$118\.03 a month before, / })).toBeDefined()
   await ui.unmount()
 })
@@ -1703,19 +3625,6 @@ test('a preview build is named as one, not told to update', async ($, on) => {
   expect(runs).toEqual([])
   expect(toasts.at(-1)).toContain('It is a preview build (0.0.0-main-202611191200)')
   expect(toasts.at(-1)).not.toContain('update it to')
-})
-
-test('the band\'s Run /savings pressed twice starts one run', async ($, on) => {
-  const { clock, runs } = await start($, on)
-  await $.tool.call({ tool: 'Bash', command: 'databricks warehouses list' })
-  await clock.settle()
-  const band = await $.ui.mount(BAND)
-  expect(await band.find({ key: 'savings-run' })).toBeDefined()
-  await band.press({ key: 'savings-run' })
-  await band.press({ key: 'savings-run' })
-  await clock.settle()
-  expect(runs.length).toBe(1)
-  await band.unmount()
 })
 
 test('an over-sized finding with no target size asks for a smaller size, with no empty quotes', () => {
@@ -1751,7 +3660,7 @@ test('a size that fits but costs more says how much more', async ($, on) => {
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'whatif-0-1' })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /^At X-SMALL: \$150\.00 a month instead of \$118\.05, \$31\.95 more\. / })).toBeDefined()
@@ -1815,7 +3724,7 @@ test('a press queued when the session ends does not hold the next session\'s Run
   await clock.settle()
   // A run that does not finish before the session ends.
   options.hold = new Promise<void>(() => {})
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'again' })
   await clock.settle()
   await ui.unmount()
@@ -1824,7 +3733,7 @@ test('a press queued when the session ends does not hold the next session\'s Run
   options.hold = undefined
   await savings($)
   await clock.settle()
-  const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const again = await mountFull($)
   await again.press({ key: 'again' })
   await clock.settle()
   expect(runs.length).toBe(4)
@@ -1844,7 +3753,7 @@ test('across several workspaces a warehouse with no workspace id is not compared
   await clock.settle()
   // Classic has no workspace id in a two-workspace answer: no baseline is kept for it under any key.
   expect([...kept.keys()].filter(key => key.includes('wh-classic'))).toEqual([])
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
   expect(texts.filter(text => / since 2026-11-10\. Observed spend: /.test(text))).toHaveLength(1)
   await ui.unmount()
@@ -1858,7 +3767,7 @@ test('a what-if row without its choices, or a choice without its figures, is lef
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^What if Classic / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^What if Other / })).toBeUndefined()
   expect(await ui.find({ key: 'whatif-0-2' })).toBeUndefined()
@@ -1872,6 +3781,148 @@ test('auto-termination core sends as null reads "off", as core and the CLI count
   expect(evidenceLines({ ...evidence, auto_termination_minutes: null })[1]).toMatch(/^Auto-termination off; /)
   expect(evidenceLines({ ...evidence, auto_termination_minutes: 0 })[1]).toMatch(/^Auto-termination off; /)
   expect(evidenceLines({ ...evidence, auto_termination_minutes: 120 })[1]).toMatch(/^Auto-termination 120 minutes; /)
+})
+
+// --- The merged head's review: the startup probe, saving every answer, slim fix lines, Snowflake gaps, baseline costs.
+
+test('at session start a source build is not listed from, whatever its stderr names', async ($, on) => {
+  // A version before `local` on stdout too: only the source-build check keeps this one out.
+  const { atStart } = await start($, on, { list: BOTH, version: `${SAVINGS_MIN_ALTIMATE_CODE}\nlocal`, versionStderr: 'warning: node v22.1.0 is deprecated\n' })
+  expect(atStart.listRuns).toBe(0)
+})
+
+test('an answer the store refuses does not keep the next one from being saved', async ($, on) => {
+  const { clock, store } = await start($, on, { list: BOTH, storeRefuses: key => key.startsWith('savings-report:') && /dbxmega|classic/.test(key) })
+  await savings($)
+  await clock.settle()
+  expect([...store.keys()].filter(key => key.startsWith('savings-report:'))).toHaveLength(1)
+})
+
+test('in the slim view a drafted fix in another workspace is not drawn under a finding with the same id', async ($, on) => {
+  const key = `savings-fix:project:${ROOT}/dbxmega:222:sql_warehouse:wh-classic`
+  // A second, smaller finding on another warehouse, so the slim view shows two titles: Classic's first.
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const classic = answer.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  answer.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  // This run read workspace 111 alone, and says so; the fix was drafted in 222.
+  answer.metadata.warehouses.forEach((one: any) => (one.workspace_id = '111'))
+  answer.metadata.report.findings.forEach((one: any) => (one.workspace_id = '111'))
+  const { clock } = await start($, on, { answer, now: Date.parse('2026-11-18T10:00:00Z'), store: { [key]: { ...FIX, workspaceId: '222' } } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  // Listed on its own, after every finding shown, not under the first Classic one.
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(titles.length).toBeGreaterThan(1)
+  expect(texts.indexOf(lines[0])).toBeGreaterThan(titles.at(-1)!)
+  await ui.unmount()
+})
+
+test('in the slim view a drafted fix stays under its finding when a later single-workspace answer omits the workspace id', async ($, on) => {
+  // Drafted while the finding said workspace 1001; this run reads one workspace and names none. A second, smaller
+  // finding on another warehouse puts a line listed on its own after both titles.
+  const later = JSON.parse(JSON.stringify(ANSWER))
+  const classic = later.metadata.report.findings.find((one: any) => one.resource_id === 'wh-classic')
+  later.metadata.report.findings.push({ ...classic, resource_id: 'wh-xs', resource_name: 'ALTIMATE_WH', monthly_min: 5, monthly_max: 10 })
+  const drafted = JSON.parse(JSON.stringify(later))
+  drafted.metadata.warehouses.forEach((one: any) => (one.workspace_id = '1001'))
+  drafted.metadata.report.findings.forEach((one: any) => (one.workspace_id = '1001'))
+  const options: any = { answer: drafted }
+  const { clock, store } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  await ui.unmount()
+  expect([...store.keys()].filter(key => key.startsWith('savings-fix:') && key.includes(':1001:'))).toHaveLength(1)
+  options.answer = later
+  await savings($)
+  await clock.settle()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const lines = texts.filter(text => /^Classic: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
+  expect(titles).toHaveLength(2)
+  // Under the first finding: its title, its one fact, then the fix's line, before the next title.
+  expect(texts[titles[0]!]).toContain('Classic')
+  expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
+  await ui.unmount()
+})
+
+test('in the slim view a drafted Snowflake fix stays under its finding when the warehouse id changes from its name to a number', async ($, on) => {
+  // A warehouse with no usage has its name for an id; once it has usage it has its number. A smaller finding on
+  // ETL_WH puts a line listed on its own after both titles.
+  const later = JSON.parse(JSON.stringify(SNOWFLAKE_ANSWER))
+  const bi = later.metadata.report.findings[0]
+  later.metadata.report.findings.push({ ...bi, resource_id: '8', resource_name: 'ETL_WH', monthly_min: 1, monthly_max: 2 })
+  const drafted = JSON.parse(JSON.stringify(later))
+  drafted.metadata.report.findings.filter((one: any) => one.resource_id === '7').forEach((one: any) => (one.resource_id = 'BI_WH'))
+  drafted.metadata.warehouses[0].id = 'BI_WH'
+  const options: any = { list: 'Name | Type | Database\nsfmega | snowflake | A', snowflake: drafted }
+  const { clock, store } = await start($, on, options)
+  await savings($)
+  await clock.settle()
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  await ui.unmount()
+  expect([...store.keys()].filter(key => key.startsWith('savings-fix:') && key.endsWith(':BI_WH'))).toHaveLength(1)
+  options.snowflake = later
+  await savings($)
+  await clock.settle()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  const lines = texts.filter(text => /^BI_WH: fix drafted /.test(text))
+  expect(lines).toHaveLength(1)
+  const titles = texts.map((text, at) => (text.includes(' · Snowflake · ') ? at : -1)).filter(at => at >= 0)
+  expect(titles).toHaveLength(2)
+  expect(texts[titles[0]!]).toContain('BI_WH')
+  expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
+  await ui.unmount()
+})
+
+test('Snowflake evidence and requests with a figure missing read "?" or ask for the value, never "undefined"', () => {
+  for (const kind of ['underutilized_cluster', 'frequent_restart', 'downsize_warehouse']) {
+    for (const line of evidenceLines({ kind })) expect(line).not.toMatch(/undefined|NaN/)
+    const request = fixRequest({ title: 'Check', resource_type: 'warehouse', resource_id: 'BI_WH', resource_name: 'BI_WH', monthly_min: 0, monthly_max: 0, evidence: { kind } } as any, 7, 'snowflake')
+    expect(request).not.toMatch(/undefined|UNDEFINED|NaN/)
+  }
+})
+
+test('a baseline kept without a cost is replaced by the first run that gives one, while the warehouse is unchanged', async ($, on) => {
+  // The cost and the date come from the same run: the spend is never paired with another week's date.
+  const store = { 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-10', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: null } }
+  const { clock, store: kept } = await start($, on, { store })
+  await savings($)
+  await clock.settle()
+  expect(kept.get('savings-baseline:dbxmega:wh-classic')).toEqual({ date: '2026-11-17', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.544375, days: 7 })
+})
+
+test('a drafted fix hides the change line of its own workspace\'s warehouse, not of the same id in another', async ($, on) => {
+  const key = `savings-fix:project:${ROOT}/dbxmega:111:sql_warehouse:wh-classic`
+  const store = {
+    [key]: { ...FIX, workspaceId: '111' },
+    'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 },
+    'savings-baseline:dbxmega:222:wh-classic': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 },
+  }
+  const answer = resizedAnswer('2026-11-18', 14)
+  answer.metadata.workspaces_checked = 2
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const classic = answer.metadata.warehouses.find((one: any) => one.id === 'wh-classic')
+  answer.metadata.warehouses.push({ ...classic, workspace_id: '222', name: 'Classic in 222' })
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  expect(texts.filter(text => /^Classic in 222 \(workspace 222\): SMALL CLASSIC → X-SMALL CLASSIC since 2026-11-01\./.test(text))).toHaveLength(1)
+  expect(texts.filter(text => /^Classic( \(workspace 111\))?: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(0)
+  await ui.unmount()
 })
 
 test('the command reader reads past every wrapper, its flags\' values and assignments, and the remaining keywords', () => {
@@ -1897,10 +3948,10 @@ test('the command reader reads past every wrapper, its flags\' values and assign
 test('an answer without a total is no report rather than a failed run', () => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   delete answer.metadata.report.total
-  expect(toViewOf(answer.metadata)).toBeNull()
+  expect(toView(answer.metadata)).toBeNull()
 })
 
-test('a total missing its amounts or count still draws its findings, with ? for the amounts', async ($, on) => {
+test('a total missing its amounts or count is the findings\' own, and still draws them', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   delete answer.metadata.report.total.monthly_min
   delete answer.metadata.report.total.monthly_max
@@ -1908,8 +3959,9 @@ test('a total missing its amounts or count still draws its findings, with ? for 
   const { clock, toasts } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  expect(toasts.at(-1)).toBe('Databricks savings check: ? a month on 1 resource.')
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The fixture's one priced finding, counted once at its largest saving.
+  expect(toasts.at(-1)).toMatch(/^Databricks savings check: \$80\.64–\$101 a month on 1 resource/)
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^Classic · Migrate Classic\/Pro to Serverless · / })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /failed/ })).toBeUndefined()
   await ui.unmount()
@@ -1932,15 +3984,16 @@ test('a finding without evidence, amounts or a name is still drawn, with ? for w
   delete finding.monthly_min
   delete finding.monthly_max
   expect(evidenceLines(undefined)).toEqual([])
-  const view = toViewOf(answer.metadata)
+  const view = toView(answer.metadata)
   expect(view?.findings[0]?.evidence).toEqual([])
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.some(text => text.includes('NaN'))).toBe(false)
-  expect(texts.some(text => /^Classic · .* · \? a month$/.test(text))).toBe(true)
+  // A finding the answer gives no amounts for is one with no dollar estimate.
+  expect(texts.some(text => /^Classic · .* · no dollar estimate$/.test(text))).toBe(true)
   await ui.unmount()
 })
 
@@ -1963,7 +4016,7 @@ test('a serverless choice the CLI says does not fit is still marked', async ($, 
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(((await ui.find({ key: 'whatif-0-0' })) as any)?.props.label).toBe('SERVERLESS $17.24 ⚠')
   await ui.press({ key: 'whatif-0-0' })
   await clock.settle()
@@ -1977,7 +4030,7 @@ test('a serverless choice without a fit is not marked as one that does not fit',
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(((await ui.find({ key: 'whatif-0-0' })) as any)?.props.label).toBe('SERVERLESS $17.24')
   await ui.press({ key: 'whatif-0-0' })
   await clock.settle()
@@ -2011,7 +4064,7 @@ test('a sized what-if choice without its cores or fit is left out', async ($, on
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(((await ui.find({ key: 'whatif-0-0' })) as any)?.props.label).toBe('SERVERLESS $17.24')
   expect(await ui.find({ key: 'whatif-0-1' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /undefined/ })).toBeUndefined()
@@ -2026,7 +4079,7 @@ test('the checked line says one warehouse, cluster or job in the singular', asyn
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^1 SQL warehouse, 0 all-purpose clusters and 1 job · / })).toBeDefined()
   await ui.unmount()
 })
@@ -2037,9 +4090,24 @@ test('a what-if row whose every choice lacks its figures is left out, not drawn 
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^What if Classic / })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^Press a size to see/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('in one workspace a drafted fix hides its warehouse\'s change line though only the warehouse names the workspace', async ($, on) => {
+  const store = { [FIX_KEY]: FIX, 'savings-baseline:dbxmega:111:wh-classic': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } }
+  const answer = resizedAnswer('2026-11-18', 14)
+  // The warehouses carry the workspace id; the fix (from a finding) does not.
+  answer.metadata.warehouses = answer.metadata.warehouses.map((one: any) => ({ ...one, workspace_id: '111' }))
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer, store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  expect(texts.filter(text => /^Classic: changed to X-SMALL CLASSIC since /.test(text))).toHaveLength(1)
+  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(0)
   await ui.unmount()
 })
 
@@ -2079,17 +4147,69 @@ test('editing a Terraform file that is not Databricks config names no finding, e
   await band.unmount()
 })
 
+test('a drafted job fix that shares a resized warehouse\'s id does not hide that warehouse\'s change line', async ($, on) => {
+  const jobFix = { ...FIX, resourceType: 'job', checkId: 'job_on_all_purpose', title: 'Job on all-purpose compute', config: null }
+  const store = { [FIX_KEY.replace(':sql_warehouse:', ':job:')]: jobFix, 'savings-baseline:dbxmega:wh-classic': { date: '2026-11-01', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 27.54 } }
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), answer: resizedAnswer('2026-11-18', 14), store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => one.text)
+  expect(texts.filter(text => /^Classic: SMALL CLASSIC → X-SMALL CLASSIC since /.test(text))).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a finding the answer gives no amounts for is one with no dollar estimate, never a missing figure', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.findings[0].monthly_min
+  answer.metadata.report.findings[0].monthly_max = 'n/a'
+  const finding = toView(answer.metadata)?.findings[0]
+  expect(finding?.monthlyMin).toBe(0)
+  expect(finding?.monthlyMax).toBe(0)
+})
+
+test('a drafted job fix that shares a warehouse finding\'s id is not drawn under that finding', async ($, on) => {
+  const jobFix = { ...FIX, resourceType: 'job', checkId: 'job_on_all_purpose', title: 'Job on all-purpose compute', config: null }
+  const { clock } = await start($, on, { now: Date.parse('2026-11-18T10:00:00Z'), store: { [FIX_KEY.replace(':sql_warehouse:', ':job:')]: jobFix } })
+  await savings($)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The job's line is listed on its own, after the findings, not inside the warehouse finding's box.
+  expect(String(((await ui.find({ key: 'finding-0' })) as any)?.text)).not.toContain('no longer flagged')
+  expect(((await ui.findAll({ type: 'Text' })) as any[]).filter(one => /^Classic: no longer flagged since /.test(one.text))).toHaveLength(1)
+  await ui.unmount()
+})
+
 test('a finding without a title is drawn with a plain one, not "undefined"', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   delete answer.metadata.report.findings[0].title
-  expect(toViewOf(answer.metadata)?.findings[0]?.title).toBe('Savings opportunity')
+  expect(toView(answer.metadata)?.findings[0]?.title).toBe('Savings opportunity')
+  const { clock } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  expect(await ui.find({ type: 'Text', text: /^Classic · Savings opportunity · / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /undefined/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a finding without a title is drawn in the slim view too, with a plain one', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  for (const one of answer.metadata.report.findings) delete one.title
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /^Classic · Savings opportunity · / })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /undefined/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^Classic · Databricks · Savings opportunity · / })).toBeDefined()
   await ui.unmount()
+})
+
+test('a total without its count, over findings with no dollar estimate, is never "$0 a month"', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.report.total = { monthly_min: 0, monthly_max: 0 }
+  const second = { ...answer.metadata.report.findings[0], resource_id: 'wh-other', resource_name: 'Other' }
+  answer.metadata.report.findings = [answer.metadata.report.findings[0], second].map((one: any) => ({ ...one, monthly_min: 0, monthly_max: 0 }))
+  expect(toView(answer.metadata)?.total).toEqual({ min: 0, max: 0, resources: 0 })
 })
 
 test('what-if figures sent as numeric strings are drawn as numbers when a size is pressed', async ($, on) => {
@@ -2099,7 +4219,7 @@ test('what-if figures sent as numeric strings are drawn as numbers when a size i
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'whatif-0-1' })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /^At X-SMALL: \$59\.02 a month instead of \$118\.05, \$59\.03 less\. Its 16 cores cover the 7 its queries need/ })).toBeDefined()
@@ -2138,6 +4258,26 @@ test('a job figure the answer leaves blank reads ?, not "under 0.1"', () => {
   expect(line).toContain('? hours on all-purpose compute, ? DBUs')
 })
 
+test('a finding missing either end of its range is one with no dollar estimate, never "$0–$X"', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.findings[0].monthly_min
+  const finding = toView(answer.metadata)?.findings[0]
+  expect(finding?.monthlyMin).toBe(0)
+  expect(finding?.monthlyMax).toBe(0)
+  const blank = JSON.parse(JSON.stringify(ANSWER))
+  blank.metadata.report.findings[0].monthly_min = ' '
+  expect(toView(blank.metadata)?.findings[0]?.monthlyMax).toBe(0)
+})
+
+test('the fix request for a finding missing an end of its range asks with no dollar estimate, as the pane shows it', () => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  delete answer.metadata.report.findings[0].monthly_min
+  const request = toView(answer.metadata)?.findings[0]?.fixRequest ?? ''
+  expect(request).toContain('no dollar estimate')
+  expect(request).toContain('Migrate Classic/Pro to Serverless, no dollar estimate.')
+  expect(request).not.toContain('?–$')
+})
+
 test('/savings gives no note for a shell -c script behind a word its reader does not take for an option', async ($, on) => {
   for (const command of ["bash 2>/dev/null -c 'databricks bundle deploy'", "zsh --emulate sh -c 'databricks bundle deploy'", "bash -oc pipefail 'databricks bundle deploy'"]) {
     expect(runsDatabricksCompute(command)).toBe(false)
@@ -2170,7 +4310,7 @@ test('a /clear in the same tick as /savings drops that run: nothing lands in the
 test('a skipped check whose reason is not text, or carries control characters, is drawn on one line without failing the run', async ($, on) => {
   const answer = JSON.parse(JSON.stringify(ANSWER))
   answer.metadata.skipped = [{ check: 'Idle Cluster Detection', reason: 42 }, { check: 'Over-Sized Warehouse', reason: 'refused\n\u001b[2J by the warehouse.' }, { reason: 'no name' }]
-  const view = toViewOf(answer.metadata)
+  const view = toView(answer.metadata)
   expect(view?.skipped).toEqual(['Idle Cluster Detection (42)', 'Over-Sized Warehouse (refused [2J by the warehouse)', '? (no name)'])
   const { clock } = await start($, on, { answer })
   await savings($)
@@ -2186,7 +4326,7 @@ test('Run again pressed in the same tick as a /clear starts nothing, and /saving
   await savings($)
   await clock.settle()
   expect(runs.length).toBe(1)
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   await ui.press({ key: 'again' })
   // The press is scheduled but has not started when the session ends.
   await $.session.end({ reason: 'clear' } as any)
@@ -2250,7 +4390,7 @@ for (const step of ['pane open', 'version probe', 'tool run', 'baseline read', '
   })
 }
 
-/** What `tool run` prints around core's own report for the testkit's synthetic facts. */
+/** What `finops_databricks_savings` prints around core's own report for the testkit's synthetic facts. */
 function coreAnswer() {
   return {
     status: 'ok',
@@ -2259,7 +4399,7 @@ function coreAnswer() {
     metadata: {
       success: true,
       window: { start: '2026-11-10', end: '2026-11-17' },
-      warehouse: 'synth_conn',
+      warehouse: 'dbxmega',
       ran_on: 'wh-synth-pro',
       warehouses_checked: DATABRICKS_FACTS.warehouses.length,
       clusters_checked: DATABRICKS_FACTS.clusters.length,
@@ -2272,47 +4412,110 @@ function coreAnswer() {
   }
 }
 
+/** What `finops_snowflake_savings` prints around core's own report for the testkit's synthetic facts. */
+function coreSnowflakeAnswer() {
+  const price = SNOWFLAKE_FACTS.price_per_credit
+  return {
+    status: 'ok',
+    title: 'Snowflake Savings',
+    output: 'Snowflake savings',
+    metadata: {
+      success: true,
+      window: { start: '2026-11-10', end: '2026-11-17' },
+      warehouse: 'sfmega',
+      ran_on: 'SYNTH_MULTI',
+      warehouses_checked: SNOWFLAKE_FACTS.warehouses.length,
+      price: { per_credit: price, source: 'rate_sheet', as_of: '2026-11-16' },
+      skipped: [],
+      limited: [],
+      warehouses: SNOWFLAKE_FACTS.warehouses.map(one => ({
+        id: one.warehouse_id,
+        name: one.warehouse_name,
+        type: one.warehouse_type,
+        size: one.warehouse_size,
+        window_cost: one.usage_days.reduce((sum, day) => sum + day.credits_used, 0) * price,
+      })),
+      report: JSON.parse(JSON.stringify(SNOWFLAKE_REPORT)),
+    },
+  }
+}
+
 /** What the pane draws in place of a value it lacks, or a value read from a field core does not send. */
 const UNREAL = /\?|undefined|NaN/
+const kindsOf = (report: { findings: readonly { evidence: { kind: string } }[] }) => [...new Set(report.findings.map(one => one.evidence.kind))].sort()
+const drawnOf = async (ui: any) => [
+  ...((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)),
+  ...((await ui.findAll({ type: 'Button' })) as any[]).map(one => String(one.props.label)),
+]
 
-test('every finding kind core returns is drawn from its own fields: no "?", "undefined" or "NaN" in the pane, a fix draft, a what-if, the notice or the band', async ($, on) => {
-  const files = { [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "pro" {\n  name = "synth_pro"\n  cluster_size = "Large"\n}\n' }
-  const { clock, toasts, fills } = await start($, on, { answer: coreAnswer(), files })
+test('every finding kind core returns is drawn from its own fields: no "?", "undefined" or "NaN" on the slim pane, Show all, a fix draft, a what-if, the report page, the notice, the status line or the band', async ($, on) => {
+  // Core's answers hold every kind each platform has; Underutilized Cluster carries no dollar estimate.
+  expect(kindsOf(DATABRICKS_REPORT)).toEqual(['idle_cluster', 'job_on_all_purpose', 'over_sized', 'serverless'])
+  expect(kindsOf(SNOWFLAKE_REPORT)).toEqual(['downsize_warehouse', 'frequent_restart', 'high_idle_time', 'underutilized_cluster'])
+  expect(SNOWFLAKE_REPORT.findings.find(one => one.check_id === 'underutilized_cluster')).toMatchObject({ monthly_min: 0, monthly_max: 0 })
+
+  // Each finding's evidence, the one fact the slim pane and the tool-row note quote, and its fix request.
+  for (const [metadata, platform] of [
+    [coreAnswer().metadata, 'databricks'],
+    [coreSnowflakeAnswer().metadata, 'snowflake'],
+  ] as const) {
+    const view = toView(metadata as any, platform)!
+    expect(view.findings.length).toBe(metadata.report.findings.length)
+    expect(view.findings.flatMap(one => [one.title, one.fact, one.fixRequest, ...one.evidence]).filter(line => UNREAL.test(line))).toEqual([])
+  }
+
+  const files = {
+    [`${ROOT}/dbt_project.yml`]: 'name: acme\n',
+    [`${ROOT}/infra/warehouses.tf`]: 'resource "databricks_sql_endpoint" "pro" {\n  name = "synth_pro"\n  cluster_size = "Large"\n}\n',
+  }
+  const { clock, toasts, fills, written, statuses } = await start($, on, { list: BOTH, answer: coreAnswer(), snowflake: coreSnowflakeAnswer(), files })
   await savings($)
   await clock.settle()
-  expect([...new Set(DATABRICKS_REPORT.findings.map(one => one.evidence.kind))].sort()).toEqual(['idle_cluster', 'job_on_all_purpose', 'over_sized', 'serverless'])
+  const slim = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect((await drawnOf(slim)).filter(text => UNREAL.test(text))).toEqual([])
+  await slim.unmount()
 
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const drawn = async () => [
-    ...((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)),
-    ...((await ui.findAll({ type: 'Button' })) as any[]).map(one => String(one.props.label)),
-  ]
-  const pane = await drawn()
-  for (const one of DATABRICKS_REPORT.findings) {
-    expect(pane.some(text => text.startsWith(`${one.resource_name} (workspace ${one.workspace_id}) · ${one.title} · $`))).toBe(true)
-  }
-  expect(pane).toContain('All-purpose cluster 100% idle across 5 active days (zombie), average worker CPU 3%, peak 10%')
+  const ui = await mountFull($)
+  const full = await drawnOf(ui)
+  expect(full).toContain('SYNTH_MULTI · Underutilized Cluster · no dollar estimate')
+  expect(full).toContain('The highest of its 2 clusters was barely needed on 7 days (up to 80% idle)')
+  expect(full).toContain('All-purpose cluster 100% idle across 5 active days (zombie), average worker CPU 3%, peak 10%')
   // Core's nulls: no auto-termination setting is off, no size is left out, and a pattern core names `unknown` is not shown.
-  expect(pane).toContain('All-purpose cluster 50% idle across 4 active days, average worker CPU 20%, peak 70%')
-  expect(pane).toContain('Auto-termination off; $400.00 billed on all-purpose compute over 7 days')
-  expect(pane).toContain('PRO warehouse, 92% idle over 5.6 running hours (900 queries)')
-  expect(pane).toContain('$0.750 a DBU now; a job cluster would be about $0.450 (estimated: the workspace billed no jobs compute)')
-  expect(pane.filter(text => UNREAL.test(text))).toEqual([])
+  expect(full).toContain('All-purpose cluster 50% idle across 4 active days, average worker CPU 20%, peak 70%')
+  expect(full).toContain('Auto-termination off; $400.00 billed on all-purpose compute over 7 days')
+  expect(full).toContain('PRO warehouse, 92% idle over 5.6 running hours (900 queries)')
+  expect(full).toContain('$0.750 a DBU now; a job cluster would be about $0.450 (estimated: the workspace billed no jobs compute)')
+  expect(full.filter(text => UNREAL.test(text))).toEqual([])
 
-  for (let at = 0; at < DATABRICKS_REPORT.findings.length; at++) await ui.press({ key: `fix-${at}` })
+  const findings = DATABRICKS_REPORT.findings.length + SNOWFLAKE_REPORT.findings.length
+  for (let at = 0; at < findings; at++) await ui.press({ key: `fix-${at}` })
   await clock.settle()
-  expect(fills.length).toBe(DATABRICKS_REPORT.findings.length)
+  expect(fills.length).toBe(findings)
   expect(fills.filter(text => UNREAL.test(text))).toEqual([])
 
   for (const [row, one] of DATABRICKS_REPORT.what_if.entries()) {
     for (let k = 0; k < one.choices.length; k++) {
       await ui.press({ key: `whatif-${row}-${k}` })
       await clock.settle()
-      expect((await drawn()).filter(text => UNREAL.test(text))).toEqual([])
+      expect((await drawnOf(ui)).filter(text => UNREAL.test(text))).toEqual([])
     }
   }
+
+  await ui.press({ key: 'share' })
+  await clock.settle()
+  const page = written.get(`${ROOT}/target/.altimate-lineage/savings-report.html`)!
+  expect(page).toContain('The highest of its 2 clusters was barely needed')
+  expect(page).toContain('What if synth_classic in workspace 1002 (')
+  const shown = page
+    .replace(/<style>[\s\S]*?<\/style>/g, '')
+    .replace(/<[^>]*>/g, '\n')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+  expect(shown.filter(line => UNREAL.test(line))).toEqual([])
   await ui.unmount()
   expect(toasts.filter(text => UNREAL.test(text))).toEqual([])
+  expect(statuses.filter(text => text !== undefined && UNREAL.test(text))).toEqual([])
 
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/infra/warehouses.tf`, old_string: 'Large', new_string: 'Medium' })
   await clock.settle()
@@ -2336,6 +4539,103 @@ test('a name flagged in two workspaces is not pinned on one of them by the band'
   const texts = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => text.startsWith('synth_classic'))).toEqual(['synth_classic has findings in 2 workspaces. /savings shows each.'])
   await band.unmount()
+})
+
+test('a Snowflake warehouse name flagged in two accounts is not pinned on one of them by the band', async ($, on) => {
+  const answer = coreSnowflakeAnswer()
+  // A bundle's job config that names the Snowflake warehouse its tasks load into.
+  const files = { ...CONNECTION_FILES, [`${ROOT}/resources/load.yml`]: 'resources:\n  jobs:\n    load:\n      parameters:\n        - name: sf_warehouse\n          default: SYNTH_MULTI\n      timeout_seconds: 30\n' }
+  const { clock } = await start($, on, { list: BOTH, env: { HOME }, files, snowflake: answer })
+  await savings($, 'sfmega')
+  await clock.settle()
+  // The other connection is another account with a warehouse of the same name.
+  answer.metadata.warehouse = 'sfother'
+  await savings($, 'sfother')
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/load.yml`, old_string: '30', new_string: '60' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  const texts = ((await band.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => text.startsWith('SYNTH_MULTI'))).toEqual(['SYNTH_MULTI has findings in 2 Snowflake accounts. /savings shows each.'])
+  await band.unmount()
+})
+
+test('queries are counted once per warehouse in its own workspace, so one id in two workspaces is two warehouses', () => {
+  const view = toView(coreAnswer().metadata as any)!
+  const each = new Map<string, number>()
+  for (const one of DATABRICKS_REPORT.findings) {
+    const e = one.evidence as Record<string, unknown>
+    const queries = Number(e.total_query_count ?? e.parallelism_query_count ?? e.query_count)
+    if (queries > 0) each.set(`${one.workspace_id}/${one.resource_id}`, Math.max(each.get(`${one.workspace_id}/${one.resource_id}`) ?? 0, queries))
+  }
+  // wh-synth-classic's queries in 1001 and in 1002 both count.
+  expect([...each.keys()].filter(key => key.endsWith('/wh-synth-classic')).sort()).toEqual(['1001/wh-synth-classic', '1002/wh-synth-classic'])
+  expect(view.queryCount).toBe([...each.values()].reduce((sum, one) => sum + one, 0))
+})
+
+test('a fix drafted on a warehouse core sends with no size reads its type alone on a later run, never "?"', async ($, on) => {
+  const nosize = DATABRICKS_REPORT.findings.find(one => one.resource_id === 'wh-synth-nosize')!
+  expect(nosize.evidence).toMatchObject({ warehouse_size: null })
+  const answer = coreAnswer()
+  const { clock, fills } = await start($, on, { answer })
+  await savings($)
+  await clock.settle()
+  let ui = await mountFull($)
+  const at = DATABRICKS_REPORT.findings.indexOf(nosize)
+  await ui.press({ key: `fix-${at}` })
+  await clock.settle()
+  expect(fills.length).toBe(1)
+  await ui.unmount()
+  await savings($)
+  await clock.settle()
+  ui = await mountFull($)
+  const lines = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)).filter(text => text.startsWith('synth_nosize (workspace 1002): fix drafted'))
+  expect(lines.length).toBe(1)
+  expect(lines[0]).not.toMatch(/\?|changed to/)
+  expect(lines[0]).toContain('still PRO')
+  await ui.unmount()
+})
+
+test('two workspaces sharing a warehouse id: a drafted fix, a what-if press and a baseline each touch only their own workspace', async ($, on) => {
+  const ours = DATABRICKS_REPORT.findings.findIndex(one => one.resource_id === 'wh-synth-classic' && one.workspace_id === '1001' && one.check_id === 'wh_classic_pro_to_serverless')
+  expect(ours).not.toBe(-1)
+  expect(DATABRICKS_REPORT.findings.some(one => one.resource_id === 'wh-synth-classic' && one.workspace_id === '1002')).toBe(true)
+  const baseline = (workspace: string) => `savings-baseline:dbxmega:${workspace}:wh-synth-classic`
+  const fix = (workspace: string) => `savings-fix:project:${ROOT}/dbxmega:${workspace}:sql_warehouse:wh-synth-classic`
+  // 1001 is as its baseline says; 1002 was MEDIUM when first flagged and is SMALL now.
+  const store = {
+    [baseline('1001')]: { date: '2026-11-03', config: { size: 'SMALL', type: 'CLASSIC' }, windowCost: 66 },
+    [baseline('1002')]: { date: '2026-11-03', config: { size: 'MEDIUM', type: 'CLASSIC' }, windowCost: 99 },
+  }
+  const { clock, store: kept } = await start($, on, { answer: coreAnswer(), store })
+  await savings($)
+  await clock.settle()
+  const ui = await mountFull($)
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  // Baseline: only 1002's warehouse changed, and only its line is drawn.
+  expect(texts.filter(text => /^synth_classic .* since 2026-11-03\./.test(text))).toEqual([
+    'synth_classic (workspace 1002): MEDIUM CLASSIC → SMALL CLASSIC since 2026-11-03. Observed spend: $424 a month before, $212 after.',
+  ])
+  expect(kept.get(baseline('1001'))).toEqual(store[baseline('1001')])
+  // Drafted fix: kept under 1001 with 1001's cost and size; nothing kept for 1002.
+  await ui.press({ key: `fix-${ours}` })
+  await clock.settle()
+  expect(kept.get(fix('1001'))).toMatchObject({ workspaceId: '1001', config: { size: 'SMALL', type: 'CLASSIC' } })
+  expect(Math.abs((kept.get(fix('1001')) as any).dailyCost - 66 / 7)).toBeLessThan(1e-9)
+  expect(kept.has(fix('1002'))).toBe(false)
+  // What-if, with 1001's fix drafted: pressing 1002's choice opens 1002's comparison alone, and leaves 1001's
+  // record and 1002's (absent) record as they were.
+  const drafted = kept.get(fix('1001'))
+  await ui.press({ key: 'whatif-1-1' })
+  await clock.settle()
+  const opened = ((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).map(one => String(one.text))
+  const second = DATABRICKS_REPORT.what_if[1]!
+  expect(second.workspace_id).toBe('1002')
+  const costs = compared(second.current_monthly_cost, second.choices[1]!.monthly_cost)
+  expect(opened).toEqual([`At X-SMALL: ${costs.now} a month instead of ${costs.was}, ${costs.gap} less. Its 16 cores cover the 4 its queries need (twice what 99% of them use).`])
+  expect(kept.get(fix('1001'))).toEqual(drafted)
+  expect(kept.has(fix('1002'))).toBe(false)
+  await ui.unmount()
 })
 
 test('two unnamed warehouses a file names by id, in two workspaces, are not one resource to the band', async ($, on) => {
@@ -2432,7 +4732,7 @@ test('a lookback the answer sends as a string is still the window\'s length', as
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => /the last \d+ days' rate/.test(text)).map(text => /the last (\d+) days/.exec(text)![1])).toEqual(['30'])
   await ui.unmount()
@@ -2458,7 +4758,7 @@ test('an answer whose window cannot be read gives the length its evidence is mea
   const { clock } = await start($, on, { answer })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
   expect(texts.filter(text => / · the \d+ days/.test(text)).map(text => /the (\d+) days/.exec(text)![1])).toEqual(['30'])
   expect(texts.filter(text => /the last \d+ days' rate/.test(text)).map(text => /the last (\d+) days/.exec(text)![1])).toEqual(['30'])
@@ -2477,19 +4777,82 @@ test('a what-if choice opens only its own warehouse when two workspaces share th
   const { clock } = await start($, on, { answer: coreAnswer() })
   await savings($)
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^What if synth_classic in workspace 1001 \(\$283 a month now\) were…$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^What if synth_classic in workspace 1002 \(/ })).toBeDefined()
   const opened = async () => ((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).map(one => String(one.text))
+  const at = (one: (typeof DATABRICKS_REPORT.what_if)[number] | undefined) => compared(one!.current_monthly_cost, one!.choices[1]!.monthly_cost)
 
   await ui.press({ key: 'whatif-0-1' })
   await clock.settle()
-  expect(await opened()).toEqual([`At X-SMALL: ${compared(first!.current_monthly_cost, first!.choices[1]!.monthly_cost).now} a month instead of ${compared(first!.current_monthly_cost, first!.choices[1]!.monthly_cost).was}, ${compared(first!.current_monthly_cost, first!.choices[1]!.monthly_cost).gap} less. Its 16 cores cover the 4 its queries need (twice what 99% of them use).`])
+  expect(await opened()).toEqual([`At X-SMALL: ${at(first).now} a month instead of ${at(first).was}, ${at(first).gap} less. Its 16 cores cover the 4 its queries need (twice what 99% of them use).`])
 
   await ui.press({ key: 'whatif-1-1' })
   await clock.settle()
   const now = await opened()
   expect(now.length).toBe(1)
-  expect(now[0]).toContain(`instead of ${compared(second!.current_monthly_cost, second!.choices[1]!.monthly_cost).was},`)
+  expect(now[0]).toContain(`instead of ${at(second).was},`)
+  await ui.unmount()
+})
+
+/** The slim view's count lines: the hidden findings, and the headline when nothing has a dollar estimate. */
+async function slimCounts($: any) {
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text)).filter(text => /^\+ \d+ more finding|^\d+ findings?, no dollar estimate$/.test(text))
+  await ui.unmount()
+  return texts
+}
+
+test('two connections that read one workspace count its findings once behind Show all', async ($, on) => {
+  const answer = coreAnswer()
+  const { clock } = await start($, on, { list: BOTH, answer })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  const one = await slimCounts($)
+  expect(one).toHaveLength(1)
+  // The second connection reads the same workspaces, so its answer lists the same findings.
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  expect(await slimCounts($)).toEqual(one)
+})
+
+test('two connections that read one workspace count its findings once when none has a dollar estimate: headline and status line', async ($, on) => {
+  const answer = coreAnswer()
+  for (const one of answer.metadata.report.findings as any[]) Object.assign(one, { monthly_min: 0, monthly_max: 0 })
+  answer.metadata.report.total = { monthly_min: 0, monthly_max: 0, resources: 0 }
+  const { clock, statuses } = await start($, on, { list: BOTH, answer })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  const headline = `${(answer.metadata.report.findings as any[]).length} findings, no dollar estimate`
+  expect(await slimCounts($)).toContain(headline)
+  expect(lastStatus(statuses)).toContain(headline)
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  expect(await slimCounts($)).toContain(headline)
+  expect(lastStatus(statuses)).toContain(headline)
+})
+
+test('a what-if choice opens only the connection it was pressed in when two connections list the same warehouse', async ($, on) => {
+  const answer = coreAnswer()
+  const { clock } = await start($, on, { list: BOTH, answer })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  // The second connection reads the same workspaces, so its answer lists the same warehouses.
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await mountFull($)
+  const headings = ((await ui.findAll({ type: 'Text', text: /^What if synth_classic in workspace 1001 / })) as any[]).length
+  // Both connections' answers are drawn, each with its own what-if rows.
+  expect(headings).toBe(2)
+  const rows = DATABRICKS_REPORT.what_if.length
+  await ui.press({ key: 'whatif-0-1' })
+  await clock.settle()
+  expect(((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).length).toBe(1)
+  await ui.press({ key: `whatif-${rows}-1` })
+  await clock.settle()
+  expect(((await ui.findAll({ type: 'Text', text: /^At X-SMALL: / })) as any[]).length).toBe(1)
   await ui.unmount()
 })
