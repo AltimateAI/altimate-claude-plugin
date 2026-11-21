@@ -2529,6 +2529,15 @@ test('a version-gate refusal for a name the list read at session start lacks nam
   expect(toasts.at(-1)).toMatch(/^Savings check: This altimate-code has no savings check\. /)
 })
 
+test('a failure for a name the list read at session start lacks names no platform', async ($, on) => {
+  const options: any = { list: BOTH }
+  const { clock, toasts } = await start($, on, options)
+  options.missingCli = true
+  await savings($, 'newsf')
+  await clock.settle()
+  expect(toasts.at(-1)).toMatch(/^Savings check: altimate-code is not installed\. Install it .*, add a Databricks or Snowflake connection/)
+})
+
 test('the shared report names a platform that could not be checked', async ($, on) => {
   const missing = { status: 'error', title: 'Unknown tool', output: 'Unknown tool: finops_snowflake_savings. Run it', metadata: {} }
   const { clock, written } = await start($, on, { list: BOTH, snowflake: missing, files: { [`${ROOT}/dbt_project.yml`]: 'name: acme\n' } })
