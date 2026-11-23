@@ -569,11 +569,18 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // session's folder, or below it in a monorepo, the shown one first.
   const shown = !given && !input.file && !input.root && current && input.model ? await read($, graphAtom) : null
   const inShown = !!shown && !!input.model && !!findModelOrColumn(shown, input.model)
+  // A model asked for by its path (/lineage models/orders.sql[.column]): the session's path, in the project it lies in,
+  // whatever project the pane shows.
+  const pathArg = !input.file && !given && !input.root && input.model ? /^(.+?\.sql)(?:\.([A-Za-z_]\w*))?$/i.exec(input.model) : null
+  const argFile = pathArg ? normalize(pathArg[1]!.startsWith('/') ? pathArg[1]! : `${sessionRoot}/${pathArg[1]}`) : null
+  const argRoot = argFile ? await projectRoot($, argFile, true).catch(() => null) : null
   // A manifest a package repo borrows (integration_tests') names its own project, not the package: the root given stands.
   const root = given
     ? ((input.root ? await projectRoot($, input.root, false) : null) ?? (await ownerOf($, given, input.model, sessionRoot)))
     : input.file
       ? await projectRoot($, input.file, true)
+      : argRoot
+        ? argRoot
       : inShown
         ? current!.root
         : ((input.root ? await projectRoot($, input.root, false) : null) ??
@@ -607,7 +614,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     manifestCache = null
     for (const key of toolsCache.keys()) if (key.startsWith(`${manifest}\u0000`)) toolsCache.delete(key)
   }
-  let wanted = input.file ? relative(root, input.file) : input.model!
+  let wanted = input.file ? relative(root, input.file) : argFile && argRoot ? `${relative(root, argFile)}${pathArg![2] ? `.${pathArg![2]}` : ''}` : input.model!
   // /lineage <model> with no column clears the selected one.
   let column = input.column ?? (input.dottedColumn ? null : undefined)
   // The text before the last dot, when that is a model and the whole is not.

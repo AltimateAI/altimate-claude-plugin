@@ -523,6 +523,28 @@ test('a package repo with the pane on integration_tests: written-out paths are t
   await ui.unmount()
 })
 
+test('a package repo with the pane on integration_tests: /lineage <path> is the session\'s path, in the package', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    present: [`${ROOT}/integration_tests/models/fct_orders.sql`],
+    // The package's file is newer than the manifest: said only when the package's model is followed, in the package.
+    fileMtime: path => (path === FILE ? 5 : undefined),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/integration_tests/models/fct_orders.sql` })
+  await clock.settle()
+  for (const args of ['models/fct_orders.sql', 'models/fct_orders.sql.revenue']) {
+    await $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
