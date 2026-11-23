@@ -7,7 +7,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later, runTool } from './altimate-cli'
 import { openTracked } from './usage'
-import { runnerOf } from './package-runner'
+import { normalize, runnerOf } from './package-runner'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
   cellText,
@@ -143,16 +143,6 @@ function within<T>($: EngineInterface, ms: number, work: Promise<T>): Promise<T 
   })
 }
 
-/** `a/./b/../c` → `a/c`: two spellings of one folder are one project, one queue, one identity. */
-function normalize(path: string): string {
-  const out: string[] = []
-  for (const part of path.replace(/\\/g, '/').split('/')) {
-    if (part === '.' || (part === '' && out.length > 0)) continue
-    if (part === '..' && out.length > 1 && out[out.length - 1] !== '..') out.pop()
-    else out.push(part)
-  }
-  return out.join('/') || '/'
-}
 
 /** The closest folder above a file or folder that holds dbt_project.yml, spelled one way. */
 async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {
@@ -1637,7 +1627,9 @@ async function parseNow($: EngineInterface, root: string) {
   const asked = generation
   const current = await read($, doctorAtom)
   if (current) await update($, doctorAtom, () => ({ ...current, busy: 'Running dbt parse…' }))
-  const run = await runDbt($, root, ['parse', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  // Where compile and validate runs dbt: for a package repo, the project below that installs it, whose manifest is read.
+  const place = await runPlaceOf($, root)
+  const run = await runDbt($, place, ['parse', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   if (run.exitCode !== 0) {
     const reason = dbtTail({ stdout: run.stdout || run.stderr, stderr: '' }, 3, true, ' ').slice(0, 200)
     $.ui.toast(`✖ dbt parse failed · ${reason}`, { timeoutMs: 10000 })

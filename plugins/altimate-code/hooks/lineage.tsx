@@ -13,7 +13,7 @@ import type {
 } from '../types'
 import { later, parseJson, runTool, textOf, within } from './altimate-cli'
 import { openTracked } from './usage'
-import { manifestFile } from './package-runner'
+import { manifestFile, runnerManifest } from './package-runner'
 import { featuresSessionEnd, featuresTurnComplete, featuresTurnStart } from './features'
 import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
@@ -525,7 +525,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   const stat = await $.fs.stat(manifest).catch(() => null)
   // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
   // A default manifest that went away (dbt clean) also falls back to the SQL files.
-  const fromSql = !stat && (!named || named === fallback || named === `${root}/target/manifest.json`)
+  const fromSql = !stat && (!named || named === fallback || named === `${root}/target/manifest.json` || named === (await runnerManifest($, root)))
   if (!stat && !fromSql) {
     await say('No dbt manifest at that path: run `dbt parse` or `dbt compile` to see lineage.', true)
     return false

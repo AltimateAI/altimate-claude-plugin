@@ -487,6 +487,8 @@ kitTest('a text table is cut at the rule\'s pipes, so a value with a pipe stays 
     rows: [['1.10', 'a', 12345.5, 7], ['10.25', 'bbbbbb', 3.1, 1234567]],
   })
   expect(textTable(table('| ver  |', '| ---- |', '| 1.10 |', '| 1.20 |'))).toEqual({ columns: ['ver'], rows: [['1.10'], ['1.20']] })
+  // Cells as wide as the column show no alignment: text stays text (a number column then keeps its digits as text).
+  expect(textTable(table('| code |', '| ---- |', '| 1.10 |', '| 1.20 |'))).toEqual({ columns: ['code'], rows: [['1.10'], ['1.20']] })
   // A column of numbers comes back as numbers, the way dbt's JSON output gives them, so Re-run shows them the same.
   expect(textTable(table('| region  |   revenue |                  id |', '| ------- | --------- | ------------------- |', '| central | 21,109.09 | 1234567890123456789 |', '| east    | 20,476.10 |                   7 |'))).toEqual({
     columns: ['region', 'revenue', 'id'],
@@ -564,7 +566,7 @@ kitTest('dbt commands are found behind a cd, a venv path or uv run, with their s
   const shared = { metadata: { project_name: 'shop' }, nodes: { 'model.pkg.orders': { resource_type: 'model', package_name: 'pkg', original_file_path: 'models/orders.sql' }, 'model.shop.orders': { resource_type: 'model', package_name: 'shop', original_file_path: 'models/orders.sql' } } }
   expect(nodeForFile(shared, 'models/orders.sql')?.id).toBe('model.shop.orders')
   // dbt show's two other output forms: text preview in JSON logs, and a JSON block in text logs.
-  expect(showPreview(JSON.stringify({ data: { output_format: 'text', node_name: 'm', preview: '| a | b |\n| - | - |\n| 1 | 2 |' }, info: { code: 'Q041' } }))?.rows).toEqual([[1, 2]])
+  expect(showPreview(JSON.stringify({ data: { output_format: 'text', node_name: 'm', preview: '| a | b |\n| - | - |\n| 1 | 2 |' }, info: { code: 'Q041' } }))?.rows).toEqual([['1', '2']])
   expect(showPreview('06:00:00  Previewing node \'m\':\n{\n  "node": "m",\n  "show": [\n    {"a": 1}\n  ]\n}\n')?.columns).toEqual(['a'])
   // A prefix applies only to its own command.
   expect(dbtCommand('A=1 echo hi; dbt run -s o')?.env).toEqual([])
@@ -799,6 +801,30 @@ test('a package repo with no manifest of its own: the doctor and model context r
   const result: any = await $.tool.call({ tool: 'Read', file_path: ORDERS })
   await clock.settle()
   expect(result.context?.some((one: string) => one.startsWith('dbt model context for orders'))).toBe(true)
+})
+
+test('a package repo whose manifest comes from integration_tests: the doctor\'s Run dbt parse runs there', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    target: 'integration_tests/target',
+    mtimes: { 'models/orders.sql': 5_000 },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+    },
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /Manifest: stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  const at = runs.findIndex(argv => argv[1] === 'parse')
+  expect(at).toBeGreaterThan(-1)
+  expect(cwds[at]).toBe(`${ROOT}/integration_tests`)
+  await band.unmount()
 })
 
 test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {

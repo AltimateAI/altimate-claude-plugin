@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -119,12 +119,12 @@ async function start($: any, on: any, options: Options = {}) {
   const runnerFiles: Record<string, string> = options.packageRepo ? { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' } : {}
   const MANIFEST_AT = options.packageRepo ? `${RUNNER}/target/manifest.json` : MANIFEST_PATH
   on('fs.exists', (_: unknown, e: { path: string }) => ({
-    value: (e.path === `${ROOT}/dbt_project.yml` && !options.noRootProject) || (hasManifest && e.path === MANIFEST_AT) || e.path in runnerFiles || (!!sql && e.path.slice(ROOT.length + 1) in sql),
+    value: (e.path === `${ROOT}/dbt_project.yml` && !options.noRootProject) || (hasManifest && e.path === MANIFEST_AT && !options.runnerManifestGone?.()) || e.path in runnerFiles || (!!sql && e.path.slice(ROOT.length + 1) in sql),
   }))
   on('fs.stat', async (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
     if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
-    if (options.packageRepo && e.path === MANIFEST_PATH) throw new Error('ENOENT')
+    if (options.packageRepo && (e.path === MANIFEST_PATH || (e.path === MANIFEST_AT && options.runnerManifestGone?.()))) throw new Error('ENOENT')
     // A model's own file can be newer than the manifest (edited after the last compile).
     const fileMtime = e.path === MANIFEST_PATH ? undefined : options.fileMtime?.(e.path)
     return { value: { kind: 'file', size, mtimeMs: fileMtime ?? mtime(), isLink: false } }
@@ -294,6 +294,21 @@ test('a package repo with no target/ of its own: the pane and the per-edit note 
   await clock.settle()
   expect(calls).toContain('cli:impact_analysis:revenue')
   expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+})
+
+test('a package repo whose integration_tests manifest went away (dbt clean): r falls back to the SQL files, as a project of its own does', async ($, on) => {
+  let gone = false
+  const { clock, toasts, logs } = await start($, on, { packageRepo: true, runnerManifestGone: () => gone })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  gone = true
+  await ui.press({ key: 'lineage-refresh' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /No dbt manifest at that path/ })).toBeUndefined()
+  expect([...toasts, ...logs].some(one => one.includes('No dbt manifest at that path'))).toBe(false)
+  await ui.unmount()
 })
 
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {

@@ -239,9 +239,10 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
     const kept = rows.map(row => keep.map(i => row[i] ?? null))
     // A column of numbers is read as numbers, as dbt's JSON output gives them: the table's grouping commas and
     // padded decimals (21,109.09, 20,476.10) would show apart from the same query run again through JSON.
-    // A column dbt drew left-aligned (a cell padded on the right) is text, though its values look like numbers (versions
-    // such as 1.10); dbt draws numbers right-aligned. A column whose cells are all as wide as it shows neither.
-    const aligned = (i: number) => !alignments.some(one => one[i] === 'left')
+    // Only a column dbt drew right-aligned (a cell padded on the left, none on the right) is read as numbers: dbt draws
+    // text left-aligned, so a text column of versions (1.10) keeps its text, and one whose cells are all as wide as the
+    // column shows no alignment and stays text too.
+    const aligned = (i: number) => alignments.some(one => one[i] === 'right') && !alignments.some(one => one[i] === 'left')
     const numeric = keep.map((i, k) => kept.length > 0 && aligned(i) && kept.every(row => row[k] === null || row[k] === '' || TABLE_NUMBER.test(row[k]!)) && kept.some(row => !!row[k]))
     return { columns: keep.map(i => columns[i]!), rows: kept.map(row => row.map((cell, k) => (numeric[k] && cell ? tableNumber(cell) : cell))) }
   }

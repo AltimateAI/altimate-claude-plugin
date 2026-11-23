@@ -3,8 +3,8 @@
 // dbt in that project; the lineage half reads the manifest it writes when the package has none of its own.
 import type { EngineInterface } from 'claude-code'
 
-/** `a/./b/../c` → `a/c`, so two spellings of one folder are one project. */
-function normalize(path: string): string {
+/** `a/./b/../c` → `a/c`: two spellings of one folder are one project, one queue, one identity. */
+export function normalize(path: string): string {
   const out: string[] = []
   for (const part of path.replace(/\\/g, '/').split('/')) {
     if (part === '.' || (part === '' && out.length > 0)) continue
@@ -58,7 +58,12 @@ export function runnerOf($: EngineInterface, root: string): Promise<string | nul
 export async function manifestFile($: EngineInterface, root: string): Promise<string> {
   const own = `${root}/target/manifest.json`
   if (await $.fs.exists(own).catch(() => false)) return own
-  const runner = await runnerOf($, root).catch(() => null)
-  const theirs = runner ? `${runner}/target/manifest.json` : null
+  const theirs = await runnerManifest($, root)
   return theirs && (await $.fs.exists(theirs).catch(() => false)) ? theirs : own
+}
+
+/** Where the project below a package repo that installs it writes its manifest; null when there is no such project. */
+export async function runnerManifest($: EngineInterface, root: string): Promise<string | null> {
+  const runner = await runnerOf($, root).catch(() => null)
+  return runner ? `${runner}/target/manifest.json` : null
 }
