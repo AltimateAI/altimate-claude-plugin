@@ -410,11 +410,20 @@ test('gh missing: the link is given and opened, and no issue is created', async 
   expect(done).toContain('nothing is created until you press "Submit new issue"')
 })
 
-test('gh missing on Linux opens with xdg-open; on another platform the link is only given', async ($, on) => {
+test('gh missing on Linux opens with xdg-open', async ($, on) => {
   const linux = await start($, on, { gh: { missing: true }, platform: 'linux' })
   await linux.run('x')
   await linux.run('--confirm')
   expect(linux.opens().map(call => call.argv[0])).toEqual(['xdg-open'])
+})
+
+test('gh missing on another platform (Windows): the link is only given, nothing is opened', async ($, on) => {
+  const { run, opens, creates } = await start($, on, { gh: { missing: true }, platform: 'windows' })
+  await run('x')
+  const done = await run('--confirm')
+  expect(done).toContain('https://github.com/AltimateAI/altimate-claude-plugin/issues/new?title=')
+  expect(opens()).toEqual([])
+  expect(creates()).toEqual([])
 })
 
 test('gh not signed in: the link, no sign-in attempt, no create', async ($, on) => {
@@ -447,12 +456,16 @@ test('gh that times out is not retried and the link is not offered as if nothing
   expect(await run('--confirm')).toContain('no draft to send')
 })
 
-test('two confirmations create one issue', async ($, on) => {
+test('two confirmations create one issue, one after the other or at the same time', async ($, on) => {
   const { run, creates } = await start($, on)
   await run('x')
   await run('--confirm')
   expect(await run('--confirm')).toContain('no draft to send')
   expect(creates()).toHaveLength(1)
+  await run('y')
+  const answers = await Promise.all([run('--confirm'), run('--confirm')])
+  expect(answers.filter(one => one.startsWith('Created: '))).toHaveLength(1)
+  expect(creates()).toHaveLength(2)
 })
 
 test('ALTIMATE_FEEDBACK_DRY_RUN prints the gh command and creates nothing, opens nothing', async ($, on) => {
@@ -507,7 +520,19 @@ test('the last plugin error is attached only with --with-error, as its type and 
   for (const leaked of [HOME, 'manifest.json', 'ACME', 'ghp_abc', 'no such file']) expect(body).not.toContain(leaked)
 })
 
-test('a draft still being built when it is discarded, or when the session ends, is not kept and cannot be sent', async ($, on) => {
+test('a draft still being built when the session ends is not kept and cannot be sent', async ($, on) => {
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const { run, creates } = await start($, on, { holdVersion: () => held })
+  const building = run('slow draft')
+  await $.session.end({ reason: 'clear', sessionId: 'a1b2c3d4-0000-4000-8000-000000000001' } as any)
+  release()
+  expect(await building).toContain('replaced or discarded before it was ready')
+  expect(await run('--confirm')).toContain('no draft to send')
+  expect(creates()).toEqual([])
+})
+
+test('a draft still being built when it is discarded is not kept and cannot be sent', async ($, on) => {
   let release!: () => void
   const held = new Promise<void>(resolve => (release = resolve))
   const { run, creates } = await start($, on, { holdVersion: () => held })
@@ -556,7 +581,7 @@ test('a description at the read limit is redacted whole and quickly, whatever sh
 })
 
 test('a long run that no rule matches is read once, not once per position: each shape at the read limit is redacted quickly', () => {
-  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000)]) {
+  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000), 'eyJ-'.repeat(25_000), '-eyJ'.repeat(25_000), 'password:\n'.repeat(10_000)]) {
     const started = Date.now()
     cleanDescription(text.slice(0, 100_000), [HOME])
     expect(Date.now() - started).toBeLessThan(1500)
@@ -579,11 +604,14 @@ test('a home path whose names hold apostrophes, quotes of another kind, or many 
   expect(withoutHome(`a "${HOME}/x\\"y/z.sql" b`, [HOME])).toBe('a "<path under home>" b')
 })
 
-test('a description that is refused as too long, or empty after the flag, leaves no earlier draft to confirm, finished or still being built', async ($, on) => {
+test('a description that is refused as too long leaves no earlier draft to confirm, finished or still being built; the flag alone only asks for words', async ($, on) => {
   let hold = false
   let release!: () => void
   const held = new Promise<void>(resolve => (release = resolve))
   const { run, creates } = await start($, on, { holdVersion: () => (hold ? held : undefined) })
+  await run('kept draft')
+  expect(await run('--with-error')).toContain('Say what happened')
+  expect(await run('--confirm')).toMatch(/^Created: /)
   await run('obsolete draft')
   expect(await run('x'.repeat(100_001))).toContain('too long')
   expect(await run('--confirm')).toContain('no draft to send')
@@ -593,7 +621,7 @@ test('a description that is refused as too long, or empty after the flag, leaves
   release()
   expect(await building).toContain('replaced or discarded before it was ready')
   expect(await run('--confirm')).toContain('no draft to send')
-  expect(creates()).toEqual([])
+  expect(creates()).toHaveLength(1)
 })
 
 test('credential keys with a prefix or suffix (DBT_PASSWORD, access_token), YAML block scalars and doubled apostrophes are cut out whole, with no profile values loaded', () => {
@@ -647,6 +675,19 @@ test('a YAML quoted credential that goes on to the next lines is cut to its clos
   expect(out).toBe(['password: ‹redacted›', 'user: bob'].join('\n'))
   const single = redactSecrets(["  token: 'it''s first-private", "    it''s second-private'", '  user: bob'].join('\n'))
   expect(single).toBe(['  token: ‹redacted›', '  user: bob'].join('\n'))
+})
+
+test('a YAML plain credential that goes on over indented lines, or starts on the line after its key, is cut whole', () => {
+  expect(redactSecrets(['password: correct horse', '  battery staple', 'user: bob'].join('\n'))).toBe(['password: ‹redacted›', 'user: bob'].join('\n'))
+  expect(redactSecrets(['password:', '  correct horse battery staple', 'user: bob'].join('\n'))).toBe(['password:‹redacted›', 'user: bob'].join('\n'))
+  expect(redactSecrets(['  password:  # the warehouse one', '    firstprivatepiece', '    secondprivatepiece', '  user: bob'].join('\n'))).not.toMatch(/firstprivate|secondprivate/)
+  // An empty value with nothing indented after it does not take the next key's lines.
+  expect(redactSecrets(['password:', 'user: bob', 'threads: 4'].join('\n'))).toContain('threads: 4')
+})
+
+test('Databricks tokens and Google API keys are cut without a key name before them', () => {
+  const out = redactSecrets(`my token is dapi${'0123456789abcdef'.repeat(2)} and the key AIza${'Sy0123456789abcdefghijklmnopqrstuvw'.slice(0, 35)} broke`)
+  expect(out).toBe('my token is ‹redacted› and the key ‹redacted› broke')
 })
 
 test('a password in a URL is cut whatever comes before its scheme', () => {

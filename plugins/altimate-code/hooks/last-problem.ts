@@ -69,4 +69,3 @@ export function doctorFacts(checks: ReadonlyArray<{ id: string; status: string; 
   }
   return Object.keys(found).length ? found : null
 }
-

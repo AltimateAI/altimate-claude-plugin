@@ -10,7 +10,7 @@
 // project, model or column names are collected.
 import type { EngineInterface, On, PluginOptions } from 'claude-code'
 
-import { MISSING_BINARY, parseVersion } from './altimate-cli'
+import { CLI_NAMES, MISSING_BINARY, parseVersion } from './altimate-cli'
 import { redactionForms, redactionValues } from './dbt-mods-core'
 import { dbtModsDoctorFacts } from './dbt-mods'
 import { asVersion, forgetProblem, problemNoted, type DoctorFacts } from './last-problem'
@@ -26,7 +26,6 @@ export const MAX_URL = 7000
 export const MAX_DESCRIPTION = 4000
 export const MAX_TITLE = 80
 const DRY_RUN_ENV = 'ALTIMATE_FEEDBACK_DRY_RUN'
-const CLI_NAMES = ['altimate', 'altimate-code'] as const
 const CONFIRM = '--confirm'
 const CANCEL = '--cancel'
 const WITH_ERROR = '--with-error'
@@ -56,12 +55,13 @@ const HOME_MASK = '<path under home>'
 type Span = { start: number; end: number; home: boolean }
 
 const CREDENTIAL_KEY = String.raw`(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?`
-// A YAML line of a credential key: a block-scalar header (`password: |`, `secret: >- # note`) takes the indented lines after it, a quoted value
-// that does not close on its line takes the indented lines after it up to its closing quote, and a plain value
-// (`password: correct horse battery staple`) is the rest of its line.
+// A YAML line of a credential key: a block-scalar header (`password: |`, `secret: >- # note`) or an empty value takes the indented lines after it,
+// a quoted value that does not close on its line takes the indented lines after it up to its closing quote, and a plain value
+// (`password: correct horse battery staple`) is the rest of its line and its indented continuation lines.
 const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?[ \t]*:[ \t]*)`
 const BLOCK_HEADER = new RegExp(String.raw`${KEY_LINE}[|>](?:\d[+-]?|[+-]\d?)?[ \t]*(?:#.*)?$`, 'i')
 const PLAIN_VALUE = new RegExp(String.raw`${KEY_LINE}(?![|>"'])(\S.*)$`, 'i')
+const EMPTY_VALUE = new RegExp(String.raw`${KEY_LINE}(?:#.*)?$`, 'i')
 const QUOTED_VALUE = new RegExp(String.raw`${KEY_LINE}(["'])(.*)$`, 'i')
 /** A YAML quoted value that closes on its own line: `"…"` with backslash escapes, `'…'` with doubled apostrophes. */
 const closesOnLine = (quote: string, rest: string) => (quote === '"' ? /^(?:[^"\\]|\\.)*"/ : /^(?:[^']|'')*'(?!')/).test(rest)
@@ -80,7 +80,10 @@ const SECRET_PATTERNS: RegExp[] = [
   /\bsk-[A-Za-z0-9_-]{16,}/g,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
   /\bxox[abprs]-[A-Za-z0-9-]{10,}/g,
-  /\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{4,}/g,
+  /(?<![\w-])eyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{4,}/g,
+  // Databricks personal access tokens and Google API keys, which are shorter than a long run below.
+  /\bdapi[0-9a-f]{32}(?:-\d)?\b/g,
+  /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /\b((?:proxy-)?authorization["']?\s*[:=]\s*)[^\n]+/gi,
   /\b((?:Bearer|Basic|Digest|Token)\s+)[A-Za-z0-9._~+/=-]{8,}/g,
@@ -113,8 +116,9 @@ function patternSpans(text: string): Span[] {
 }
 
 /**
- * The YAML values under credential keys: the rest of a line; the indented lines (blank ones between them too) after a block-scalar header;
- * the indented lines after a quoted value left open on its line, up to the one that closes it.
+ * The YAML values under credential keys: the rest of a line and its indented continuation lines; the indented lines (blank ones between
+ * them too) after a block-scalar header or an empty value; the indented lines after a quoted value left open on its line, up to the one
+ * that closes it.
  */
 function yamlSpans(text: string): Span[] {
   const spans: Span[] = []
@@ -129,17 +133,15 @@ function yamlSpans(text: string): Span[] {
   for (let i = 0; i < lines.length; i++) {
     const line = bare(lines[i]!)
     const plainValue = PLAIN_VALUE.exec(line)
-    if (plainValue) {
-      spans.push({ start: starts[i]! + plainValue[1]!.length, end: starts[i]! + line.length, home: false })
-      continue
-    }
-    const header = BLOCK_HEADER.exec(line)
-    const quoted = header ? null : QUOTED_VALUE.exec(line)
-    if (!header && !(quoted && !closesOnLine(quoted[2]!, quoted[3]!))) continue
-    const keyLine = (header ?? quoted)!
-    // The value is the lines after it indented deeper than its key (a list item's `- ` counts as indentation), or as deep but not a key
-    // themselves (tab-indented text pasted under a key); a sibling key at the key's depth, or a shallower line, ends it. A quoted value
-    // ends at the line that closes its quote.
+    const header = plainValue ? null : (BLOCK_HEADER.exec(line) ?? EMPTY_VALUE.exec(line))
+    const quoted = plainValue || header ? null : QUOTED_VALUE.exec(line)
+    // A quoted value that closes on its own line is the credential-key pattern's to cut.
+    if (quoted && closesOnLine(quoted[2]!, quoted[3]!)) continue
+    const keyLine = plainValue ?? header ?? quoted
+    if (!keyLine) continue
+    // The value goes on over the lines after it indented deeper than its key (a list item's `- ` counts as indentation), or as deep but not
+    // a key themselves (tab-indented text pasted under a key): a plain value's continuation lines, a block's or an empty value's indented
+    // lines. A sibling key at the key's depth, or a shallower line, ends it. A quoted value ends at the line that closes its quote.
     const keyIndent = /^[ \t]*(?:-[ \t]+)?/.exec(line)![0]
     const closing = quoted ? new RegExp(quoted[2] === '"' ? '(?:^|[^\\\\])(?:\\\\\\\\)*"' : "(?:^|[^'])(?:'')*'(?!')") : null
     let last = i
@@ -153,7 +155,8 @@ function yamlSpans(text: string): Span[] {
       last = next
       if (closing?.test(candidate)) break
     }
-    spans.push({ start: starts[i]! + keyLine[1]!.length, end: starts[last]! + bare(lines[last]!).length, home: false })
+    const end = starts[last]! + bare(lines[last]!).length
+    if (end > starts[i]! + keyLine[1]!.length) spans.push({ start: starts[i]! + keyLine[1]!.length, end, home: false })
     i = last
   }
   return spans
