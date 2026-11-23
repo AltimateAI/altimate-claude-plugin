@@ -311,6 +311,19 @@ test('a package repo whose integration_tests manifest went away (dbt clean): r f
   await ui.unmount()
 })
 
+test('a package repo: a model the answer names is followed in the package, so its SQL newer than the borrowed manifest is said', async ($, on) => {
+  const { clock } = await start($, on, { packageRepo: true, fileMtime: path => (path === FILE ? 5 : undefined) })
+  await $.turn.start({ text: 'how is revenue built?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'Revenue is summed in `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.press({ key: 'answer-model.shop.fct_orders' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })

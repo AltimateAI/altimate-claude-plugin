@@ -1627,8 +1627,11 @@ async function parseNow($: EngineInterface, root: string) {
   const asked = generation
   const current = await read($, doctorAtom)
   if (current) await update($, doctorAtom, () => ({ ...current, busy: 'Running dbt parse…' }))
-  // Where compile and validate runs dbt: for a package repo, the project below that installs it, whose manifest is read.
-  const place = await runPlaceOf($, root)
+  // Where the manifest the doctor and lineage read is written: the project's own when it has one, integration_tests' when
+  // a package repo borrows that one, else where compile and validate runs dbt (which also notes the runner's package).
+  const runs = await runPlaceOf($, root)
+  const own = await targetOf($, root)
+  const place = (await $.fs.exists(`${own}/manifest.json`).catch(() => false)) ? root : (await manifestTarget($, root)) !== own ? ((await runnerOf($, root)) ?? runs) : runs
   const run = await runDbt($, place, ['parse', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   if (run.exitCode !== 0) {
     const reason = dbtTail({ stdout: run.stdout || run.stderr, stderr: '' }, 3, true, ' ').slice(0, 200)

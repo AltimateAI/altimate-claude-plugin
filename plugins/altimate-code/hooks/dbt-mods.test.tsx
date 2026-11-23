@@ -827,6 +827,27 @@ test('a package repo whose manifest comes from integration_tests: the doctor\'s 
   await band.unmount()
 })
 
+test('a package repo with a manifest of its own: the doctor\'s Run dbt parse refreshes that one, in the package, though integration_tests has its packages', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+    },
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  const at = runs.findIndex(argv => argv[1] === 'parse')
+  expect(cwds[at]).toBe(ROOT)
+  await band.unmount()
+})
+
 test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {
   const { clock, runs, cwds, toasts } = await start($, on, {
     pathDbtPython: '/usr/bin/python3',

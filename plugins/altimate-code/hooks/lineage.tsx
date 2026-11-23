@@ -500,8 +500,9 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // session's folder, or below it in a monorepo, the shown one first.
   const shown = !given && !input.file && !input.root && current && input.model ? await read($, graphAtom) : null
   const inShown = !!shown && !!input.model && !!findModelOrColumn(shown, input.model)
+  // A manifest a package repo borrows (integration_tests') names its own project, not the package: the root given stands.
   const root = given
-    ? dirname(dirname(given))
+    ? ((input.root ? await projectRoot($, input.root, false) : null) ?? dirname(dirname(given)))
     : input.file
       ? await projectRoot($, input.file, true)
       : inShown
