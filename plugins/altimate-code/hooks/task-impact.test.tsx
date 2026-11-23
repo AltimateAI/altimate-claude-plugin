@@ -820,9 +820,11 @@ test('a package repo with a manifest small enough to read: each project\'s chang
   await turn('t1', async () => {
     await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
     await $.tool.call({ tool: 'Edit', file_path: TEST_MODEL, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+    // A package model the manifest does not have yet: by the package's id, never the name integration_tests may answer to.
+    await $.tool.call({ tool: 'Write', file_path: `${ROOT}/models/fresh.sql`, content: 'select 1 as order_id\n' })
   })
   const models = new Set(tools.filter(one => one.direction === 'downstream' && one.column).map(one => `${one.model}:${one.column}`))
-  expect(models).toEqual(new Set(['model.shop.fct_orders.v1:revenue', 'model.shop_tests.fct_orders:checked']))
+  expect(models).toEqual(new Set(['model.shop.fct_orders.v1:revenue', 'model.shop_tests.fct_orders:checked', 'model.shop.fresh:order_id']))
   tools.length = 0
   await $.command.run({ command: 'lineage-report', args: 'fct_orders.revenue' } as any)
   expect(tools.filter(one => one.direction).map(one => one.model)).toEqual(['model.shop.fct_orders.v1', 'model.shop.fct_orders.v1'])
@@ -1170,6 +1172,8 @@ test('a task that changes a package model and an integration_tests model copies 
   expect(runs.filter(one => one[0] === 'cp').map(one => one[1])).toEqual([THEIRS])
   const asked = tools.filter(one => one.direction === 'downstream' && (one.column === 'revenue' || one.column === 'checked'))
   expect(new Set(asked.map(one => one.column))).toEqual(new Set(['revenue', 'checked']))
+  // The manifest is too large to read here: each project's model goes by its own package's unique_id.
+  expect(new Set(asked.map(one => `${one.model}:${one.column}`))).toEqual(new Set(['model.shop.fct_orders:revenue', 'model.shop_tests.orders_check:checked']))
   const paths = new Set(asked.map(one => String(one.manifest_path)))
   expect(paths.size).toBe(1)
   const [frozen] = [...paths]

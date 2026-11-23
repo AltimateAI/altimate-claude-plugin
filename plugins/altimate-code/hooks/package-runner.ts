@@ -67,6 +67,17 @@ export async function manifestFile($: EngineInterface, root: string): Promise<st
   return theirs && (await $.fs.exists(theirs).catch(() => false)) ? theirs : own
 }
 
+/**
+ * Whether the manifest the project at `root` reads holds another local project's models beside its own, so a bare
+ * model name may be either's: a package repo reading integration_tests' manifest, or a project that installs a package
+ * by a local path (integration_tests itself), whose manifest holds that package's models.
+ */
+export async function sharesManifest($: EngineInterface, root: string, manifest: string): Promise<boolean> {
+  if (!manifest.startsWith(`${root}/`) || manifest.slice(root.length + 1).split('/').length > 2) return true
+  const declared = `${await $.fs.read(`${root}/packages.yml`).catch(() => '')}\n${await $.fs.read(`${root}/dependencies.yml`).catch(() => '')}`
+  return /^\s*-?\s*local:\s*\S/m.test(declared)
+}
+
 /** Where the project below a package repo that installs it writes its manifest; null when there is no such project. */
 export async function runnerManifest($: EngineInterface, root: string): Promise<string | null> {
   const runner = await runnerOf($, root).catch(() => null)

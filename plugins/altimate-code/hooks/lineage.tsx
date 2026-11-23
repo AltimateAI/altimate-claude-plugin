@@ -271,22 +271,37 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
   const rootOf = (id: string) => (borrowedRoot && pkg && packageOf(id) !== pkg ? borrowedRoot : root)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
   const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
-  // A path written out names its project's model: under the borrowed manifest's project (integration_tests/…), that
-  // project's node at the rest of the path; else the project's own node at it.
-  const byPath = new Map<string, string>()
+  // A path written out names its project's model, and only that: under the borrowed manifest's project
+  // (integration_tests/…), that project's node at the rest of the path; else the project's own node at it. A path no node
+  // has names nothing (its file name is not looked up as a name, which another project's model may have).
   const below = borrowedRoot ? `${relative(root, borrowedRoot)}/` : null
+  const theirPkg = borrowedRoot ? await projectName($, borrowedRoot) : null
+  const mentions: { at: number; end: number; id: string | null; name: string }[] = []
   for (const match of text.matchAll(/[\w./-]+\.sql\b/g)) {
-    const rel = match[0].replace(/^\.\//, '')
+    const written = match[0].startsWith(`${root}/`) ? match[0].slice(root.length + 1) : match[0]
+    const rel = written.replace(/^(?:\.\/)+/, '')
     const theirs = !!below && rel.startsWith(below)
     const path = theirs ? rel.slice(below!.length) : rel
-    const node = Object.values(graph.nodes).find(one => FOLLOWABLE.has(one.type) && one.path === path && (!pkg || (packageOf(one.id) === pkg) !== theirs))
-    if (node) byPath.set(node.name.toLowerCase(), node.id)
+    const want = theirs ? theirPkg : pkg
+    const mine = (one: { id: string; type: string }) => FOLLOWABLE.has(one.type) && (!want || packageOf(one.id) === want)
+    // The node at that path, else (a path written from a subfolder) one whose path ends with it, else, for the project's
+    // own files, its model of that file name: all of that project's.
+    const node =
+      Object.values(graph.nodes).find(one => mine(one) && one.path === path) ??
+      Object.values(graph.nodes).find(one => mine(one) && !!one.path?.endsWith(`/${path}`))
+    const byFile = !node && !theirs ? byName.get(path.split('/').pop()!.replace(/\.sql$/i, '').toLowerCase()) : undefined
+    const id = node?.id ?? (byFile && (!pkg || packageOf(byFile) === pkg) ? byFile : null)
+    mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: node?.name ?? (id ? graph.nodes[id]?.name ?? '' : '') })
+  }
+  for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
+    if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue
+    const word = match[0].toLowerCase()
+    const id = byName.get(word)
+    if (id && (word.includes('_') || ticked.has(word))) mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: match[0] })
   }
   const found = new Map<string, AnswerModel>()
-  for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
-    const word = match[0].toLowerCase()
-    const id = byPath.get(word) ?? byName.get(word)
-    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root: rootOf(id), ...(kept && { manifest: kept }) })
+  for (const one of mentions.sort((x, y) => x.at - y.at)) {
+    if (one.id && !found.has(one.id)) found.set(one.id, { id: one.id, name: one.name, root: rootOf(one.id), ...(kept && { manifest: kept }) })
   }
   return [...found.values()].slice(0, 12)
 }

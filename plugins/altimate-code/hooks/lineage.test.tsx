@@ -384,24 +384,76 @@ test('a package repo over 4 MiB: /lineage <name> that the CLI answers with integ
     cliId: model => (model === 'model.shop.fct_orders' ? 'model.shop.fct_orders' : 'model.shop_tests.fct_orders'),
     fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined),
   })
-  // Asked for by its path: the path's other-package node is not the file's.
+  // By its name: the CLI's answer is integration_tests' model, so the package's own is asked for by its unique_id.
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(asked).toEqual(['fct_orders', 'model.shop.fct_orders'])
+})
+
+test('a package repo over 4 MiB: /lineage <path> that the CLI answers with integration_tests\' model looks the package\'s own up', async ($, on) => {
+  const asked: string[] = []
+  const cliGraph = (graph: any) => ({ ...graph, nodes: { ...graph.nodes, 'model.shop_tests.fct_orders': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop_tests.fct_orders' } } })
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    size: 6 * 1024 * 1024,
+    cliGraph,
+    cliModels: asked,
+    cliId: model => (model === 'model.shop.fct_orders' ? 'model.shop.fct_orders' : 'model.shop_tests.fct_orders'),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined),
+  })
   await $.command.run({ command: 'lineage', args: 'models/fct_orders.sql', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
   await clock.settle()
   expect(asked).toEqual(['models/fct_orders.sql', 'model.shop.fct_orders'])
-  // By its name, the same (the package's own answer is already at hand).
-  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+})
+
+test('a package repo: Read of a package file whose node the manifest lacks shows no model, not integration_tests\' at its path', async ($, on) => {
+  const manifest = JSON.parse(JSON.stringify(MANIFEST).replaceAll('model.shop.fct_orders', 'model.shop_tests.fct_orders'))
+  const { clock, calls } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
-  expect(asked).toEqual(['models/fct_orders.sql', 'model.shop.fct_orders', 'fct_orders'])
+  expect(calls.some(one => one.includes('dbt_lineage'))).toBe(false)
+})
+
+test('a package repo: written-out paths name their own project\'s model each; a path no node has names nothing', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs, 'model.shop_tests.only_tests': { ...theirs, name: 'only_tests', original_file_path: 'models/only_tests.sql' } } }
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.turn.start({ text: 'which files?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'See `models/fct_orders.sql`, `integration_tests/models/fct_orders.sql` and `models/only_tests.sql`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  // models/only_tests.sql is no file of the package: integration_tests' only_tests is not taken for it.
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.only_tests' })).toBeUndefined()
   await ui.unmount()
 })
 
-test('a package repo: a name the answer gives that integration_tests shares follows the package\'s own model', async ($, on) => {
+test('a package repo: a name the answer gives that integration_tests shares follows the package\'s own model (listed last)', async ($, on) => {
   const manifest = {
     ...MANIFEST,
     // integration_tests' own fct_orders listed last, so a name map that keeps the last would take it.
     nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} } },
+  }
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.turn.start({ text: 'how is revenue built?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'Revenue is summed in `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo: a name the answer gives that integration_tests shares follows the package\'s own model (listed first)', async ($, on) => {
+  const manifest = {
+    ...MANIFEST,
+    // integration_tests' own fct_orders listed first, so a name map that keeps the first would take it.
+    nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes },
   }
   const { clock } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
   await $.turn.start({ text: 'how is revenue built?', turnId: 't1' } as any)
