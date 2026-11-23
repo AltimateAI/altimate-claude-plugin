@@ -296,8 +296,10 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
   // A unique_id written out (model.shop_tests.orders) is that node.
   for (const match of text.matchAll(/\b(?:model|snapshot)\.[A-Za-z_][\w]*\.[A-Za-z_][\w]*(?:\.v\d+)?\b/g)) {
     if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue
+    // Kept as written when the graph read here lacks it (the SQL files' graph, for a manifest over 4 MiB): its name alone
+    // could be another project's model.
     const node = graph.nodes[match[0]]
-    if (node && FOLLOWABLE.has(node.type)) mentions.push({ at: match.index!, end: match.index! + match[0].length, id: node.id, name: node.name, root: await rootOf(node.id) })
+    if (!node || FOLLOWABLE.has(node.type)) mentions.push({ at: match.index!, end: match.index! + match[0].length, id: match[0], name: node?.name ?? match[0].split('.')[2]!, root: await rootOf(match[0]) })
   }
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
     if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue

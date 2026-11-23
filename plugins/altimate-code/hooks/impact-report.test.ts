@@ -672,5 +672,6 @@ test('two same-named models, the package\'s and integration_tests\', each get th
   const lines = summaryLines(summaryOf([ours, theirs], traces, null))
   expect(lines.filter(line => line.startsWith('fct_orders'))).toEqual(['fct_orders · 6 downstream models at model level', 'fct_orders · 1 downstream model at model level'])
   const data = reportData([ours, theirs], traces, TASK)
-  expect(data.focuses.map(one => one.modelLevel)).toEqual([6, 1])
+  expect(data.focuses.map(one => one.modelLevel)).toEqual([6, 1])  // Its untraced columns point at /lineage-report by its unique_id, which its name alone may not reach.
+  expect(summaryLines(summaryOf([{ ...theirs, more: 1 }], traces, null))).toContain('  + 1 more changed column, not traced here (/lineage-report model.shop_tests.fct_orders.<column> traces one)')
 })

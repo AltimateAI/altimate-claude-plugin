@@ -586,6 +586,17 @@ test('a package repo: an answer that writes a unique_id names that node, not the
   await ui.unmount()
 })
 
+test('a package repo over 4 MiB: a unique_id written in an answer is kept as written, not read as its name', async ($, on) => {
+  const { clock } = await start($, on, { packageRepo: true, size: 6 * 1024 * 1024, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined) })
+  await $.turn.start({ text: 'which model?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'It is model.shop_tests.fct_orders.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })

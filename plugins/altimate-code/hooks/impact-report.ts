@@ -341,7 +341,7 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
         const note = one.unknown ?? (one.unchecked ? ADDED_NOTE : undefined)
         return { name: one.column!, reach, failed: one.failed, ...(note && { note }), ...(one.value && { value: true }) }
       })
-    return { name: change.model, modelLevel, columns, ...(change.more ? { more: change.more } : {}) }
+    return { name: change.model, ...(change.id ? { id: change.id } : {}), modelLevel, columns, ...(change.more ? { more: change.more } : {}) }
   })
   for (const id of unresolved) unseen.delete(id)
   return { state: 'ready', models, unresolved: unresolved.size, ...(unseen.size ? { unseen: unseen.size } : {}), truncated, report, openFailed: false }
@@ -372,7 +372,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
       }
     }
     // Columns past the three traced: said, so the list never reads as every column the task changed.
-    if (model.more) lines.push(`  + ${plural(model.more, 'more changed column')}, not traced here (/lineage-report ${model.name}.<column> traces one)`)
+    if (model.more) lines.push(`  + ${plural(model.more, 'more changed column')}, not traced here (/lineage-report ${model.id ?? model.name}.<column> traces one)`)
   }
   // The tick only when nothing was left out: a changed column past the three traced may reach models the traced ones do not.
   if (view.unresolved > 0 || view.truncated || (view.unseen ?? 0) > 0) {
