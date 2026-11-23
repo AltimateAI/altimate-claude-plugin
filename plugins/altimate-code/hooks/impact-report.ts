@@ -260,6 +260,9 @@ export function mergeConsumers(traces: ColumnTrace[]): ReportConsumers {
 }
 
 /** The traced answers for one changed column: downstream and upstream, each null when not asked or failed. */
+/** A trace is a change's when its unique_id is the change's (two same-named models, the package's and integration_tests'), else by name. */
+export const sameModel = (trace: { model: string; id?: string }, change: { model: string; id?: string }) => (trace.id ?? trace.model) === (change.id ?? change.model)
+
 export type ColumnTrace = {
   model: string
   /** The change's unique_id when it has one (ModelChange.id): which of two same-named models the trace is of. */
@@ -323,7 +326,7 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
   const unseen = new Set<string>()
   let truncated = false
   const models = changes.map(change => {
-    const mine = traces.filter(one => one.model === change.model)
+    const mine = traces.filter(one => sameModel(one, change))
     const modelLevel = mine.map(one => one.modelLevel ?? (one.down ? reachOf(one.down).modelLevel : null)).find(one => one !== null) ?? null
     const columns = mine
       .filter(one => one.column !== null)
@@ -678,10 +681,10 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
 export function reportData(changes: ModelChange[], traces: ColumnTrace[], task: ReportTask): ReportData {
   const focuses: ReportFocus[] = []
   for (const change of changes) {
-    if (change.columns.length === 0) focuses.push(focusOf(change, null, traces.find(one => one.model === change.model && one.column === null)))
+    if (change.columns.length === 0) focuses.push(focusOf(change, null, traces.find(one => sameModel(one, change) && one.column === null)))
     // Columns whose values the change alters, found by name in the manifest: each its own section.
-    for (const trace of traces) if (trace.value && trace.model === change.model && trace.column) focuses.push(focusOf(change, { name: trace.column, before: null, after: null }, trace))
-    for (const col of change.columns) focuses.push(focusOf(change, col, traces.find(one => one.model === change.model && one.column === col.name)))
+    for (const trace of traces) if (trace.value && sameModel(trace, change) && trace.column) focuses.push(focusOf(change, { name: trace.column, before: null, after: null }, trace))
+    for (const col of change.columns) focuses.push(focusOf(change, col, traces.find(one => sameModel(one, change) && one.column === col.name)))
   }
   const names = changes.map(one => one.model)
   return {

@@ -489,6 +489,19 @@ async function graphFromToolsOnce($: EngineInterface, manifest: string, mtimeMs:
 }
 
 /**
+ * The project a model followed in a given manifest belongs to: the manifest's own project, unless the model is a unique_id
+ * of the session's project, whose package repo borrows that manifest (integration_tests'), when it is the session's.
+ */
+async function ownerOf($: EngineInterface, manifest: string, model: string | undefined, sessionRoot: string): Promise<string> {
+  const theirs = dirname(dirname(manifest))
+  if (!model || model.split('.').length < 3) return theirs
+  const pkg = packageOf(model)
+  if (pkg === (await projectName($, theirs))) return theirs
+  const session = await projectRoot($, sessionRoot, false).catch(() => null)
+  return session && (await projectName($, session)) === pkg ? session : theirs
+}
+
+/**
  * A file is that model only when its path is the model's (a macro or analysis of the same name is not) and, with `pkg`,
  * the model is the project's own: in a manifest holding another project's `models/orders.sql`, that one is not the file's.
  */
@@ -555,7 +568,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   const inShown = !!shown && !!input.model && !!findModelOrColumn(shown, input.model)
   // A manifest a package repo borrows (integration_tests') names its own project, not the package: the root given stands.
   const root = given
-    ? ((input.root ? await projectRoot($, input.root, false) : null) ?? dirname(dirname(given)))
+    ? ((input.root ? await projectRoot($, input.root, false) : null) ?? (await ownerOf($, given, input.model, sessionRoot)))
     : input.file
       ? await projectRoot($, input.file, true)
       : inShown
@@ -1470,7 +1483,9 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
       const trace = modelLineageOf(output) ?? modelLineageOf(parseJson(textOf(output)))
       const columns = (e as any).column || trace?.focus?.column ? null : lineageFromOutput(output)
       const manifest = typeof (e as any).manifest_path === 'string' ? String((e as any).manifest_path) : undefined
-      later($, async () => void (await follow($, { model: String((e as any).model), columns, auto: true, manifest })))
+      // The node the call answered for, by its unique_id: in a manifest two projects share, its bare name may be either's.
+      const answered = (output as any)?.model_unique_id ?? parseJson(textOf(output))?.model_unique_id
+      later($, async () => void (await follow($, { model: typeof answered === 'string' ? answered : String((e as any).model), columns, auto: true, manifest })))
     }
     if (isSql) later($, async () => void (await follow($, { file: file!, auto: true })))
     else if (e.tool === 'Bash' && 'command' in e) {

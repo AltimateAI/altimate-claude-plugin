@@ -295,7 +295,7 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
   }
   const traces = (await pool(jobs, PARALLEL)).filter((one): one is ColumnTrace => one !== null)
   // At most three columns whose values change per model, the most named first, as for changed select items.
-  return traces.filter(one => !one.value || traces.filter(other => other.value && other.model === one.model).indexOf(one) < MAX_TASK_COLUMNS)
+  return traces.filter(one => !one.value || traces.filter(other => other.value && (other.id ?? other.model) === (one.id ?? one.model)).indexOf(one) < MAX_TASK_COLUMNS)
 }
 
 /** What a report adds: where each changed column comes from. */

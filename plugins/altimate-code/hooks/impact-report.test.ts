@@ -660,3 +660,17 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   expect(withMore).toContain('  + 1 more changed column, not traced here (/lineage-report core__medical_claim.<column> traces one)')
   expect(withMore).not.toContain('✓ Every downstream model was read')
 })
+
+test('two same-named models, the package\'s and integration_tests\', each get their own traces in the band and the report', () => {
+  const mk = (id: string) => ({ model: 'fct_orders', id, file: 'models/fct_orders.sql', root: '/r', columns: [{ name: 'revenue', before: 'a', after: 'b' }], ended: '' })
+  const ours = mk('model.shop.fct_orders')
+  const theirs = mk('model.shop_tests.fct_orders')
+  const traces: ColumnTrace[] = [
+    { ...TRACE, id: 'model.shop_tests.fct_orders', modelLevel: 1 },
+    { ...TRACE, id: 'model.shop.fct_orders', modelLevel: 6 },
+  ]
+  const lines = summaryLines(summaryOf([ours, theirs], traces, null))
+  expect(lines.filter(line => line.startsWith('fct_orders'))).toEqual(['fct_orders · 6 downstream models at model level', 'fct_orders · 1 downstream model at model level'])
+  const data = reportData([ours, theirs], traces, TASK)
+  expect(data.focuses.map(one => one.modelLevel)).toEqual([6, 1])
+})
