@@ -5,7 +5,7 @@ All notable changes to this plugin will be documented in this file.
 ## [Unreleased]
 
 ### Changed
-- The plugin needs altimate-code 0.12.12 or later, the release with the dbt Power User tools the cost check, project health, team comments, `/runs`, `/profile-ctes`, `/sql-graph`, `/to-model` and `/defer` call. The session-start notice (status line) now names a 0.12.11 install, which it used to leave alone, and the "update altimate-code" lines in the task band and report name 0.12.12.
+- The plugin needs altimate-code 0.12.12 or later, the release with the dbt Power User tools the cost check, project health, team comments, `/runs`, `/profile-ctes`, `/sql-graph`, `/to-model` and `/defer` call, and the documentation coverage after a model edit (`dbt_docs_coverage`). The session-start notice (status line) now names a 0.12.11 install, which it used to leave alone, and the "update altimate-code" lines in the task band and report name 0.12.12.
 
 ### Fixed
 - After `/clear`, the new conversation loads the team comments again (the band, and the threads Claude gets when it reads a commented model) instead of waiting for `/comments` or the next poll, and project health keeps its baseline, the changes not yet checked and the issues found (`/health` no longer says the session has no project; a check the `/clear` cut short runs again). The status line keeps the integrations and altimate-code parts; health draws its own again.

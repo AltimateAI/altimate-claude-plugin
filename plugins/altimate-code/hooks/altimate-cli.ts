@@ -3,9 +3,9 @@ import type { EngineInterface } from 'claude-code'
 
 /**
  * The oldest altimate-code release the plugin is made for: the first with the dbt Power User tools the
- * cost check, health, comments, runs, CTE timing, SQL graph, to-model and defer features call
- * (`dbt_cost_estimate`, `dbt_health`, `dbt_run_results`, `dbt_cte_profile`, `dbt_sql_graph`,
- * `dbt_map_relations`, `dbt_defer_state`, `dbt_docs_share`), on top of the column answer 0.12.11 added.
+ * cost check, health, comments, runs, CTE timing, SQL graph, to-model, defer and docs
+ * coverage features call (`dbt_cost_estimate`, `dbt_health`, `dbt_run_results`, `dbt_cte_profile`,
+ * `dbt_sql_graph`, `dbt_map_relations`, `dbt_defer_state`, `docs_share_comments`, `dbt_docs_coverage`), on top of the column answer 0.12.11 added.
  * Stated in README.md and CHANGELOG.md too.
  */
 export const MIN_ALTIMATE_CODE = '0.12.12'
