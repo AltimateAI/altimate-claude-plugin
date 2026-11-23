@@ -474,15 +474,21 @@ async function start($: any, on: any, options: Options = {}) {
 kitTest('a text table is cut at the rule\'s pipes, so a value with a pipe stays whole; one that does not fit is declined', () => {
   const table = (...lines: string[]) => lines.join('\n')
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b   | c     |'))).toEqual({ columns: ['value', 'other'], rows: [['a|b', 'c']] })
-  expect(textTable(table('| id | note  |', '| -- | ----- |', '| 1  | x|y|z |'))).toEqual({ columns: ['id', 'note'], rows: [[1, 'x|y|z']] })
+  expect(textTable(table('| id | note  |', '| -- | ----- |', '|  1 | x|y|z |'))).toEqual({ columns: ['id', 'note'], rows: [[1, 'x|y|z']] })
   // agate pads by code points: an emoji is one cell.
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| 🙂🙂    | c     |', '| a|🙂   | d     |'))).toEqual({ columns: ['value', 'other'], rows: [['🙂🙂', 'c'], ['a|🙂', 'd']] })
   // A line out of step with the rule is not guessed at: nothing is captured.
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b  | c     |'))).toBeNull()
   // A column with a leading-zero code stays text, as dbt's JSON gives it; 0 and 0.5 are still numbers.
-  expect(textTable(table('| zip   | n   |', '| ----- | --- |', '| 00123 | 0   |', '| 00501 | 0.5 |'))).toEqual({ columns: ['zip', 'n'], rows: [['00123', 0], ['00501', 0.5]] })
+  expect(textTable(table('| zip   |   n |', '| ----- | --- |', '| 00123 |   0 |', '| 00501 | 0.5 |'))).toEqual({ columns: ['zip', 'n'], rows: [['00123', 0], ['00501', 0.5]] })
+  // dbt draws text left-aligned and numbers right-aligned (as dbt 1.11 prints them): a text column of versions keeps 1.10.
+  expect(textTable(table('| v     | s      |        n |       i |', '| ----- | ------ | -------- | ------- |', '| 1.10  | a      | 12,345.5 |       7 |', '| 10.25 | bbbbbb |      3.1 | 1234567 |'))).toEqual({
+    columns: ['v', 's', 'n', 'i'],
+    rows: [['1.10', 'a', 12345.5, 7], ['10.25', 'bbbbbb', 3.1, 1234567]],
+  })
+  expect(textTable(table('| ver  |', '| ---- |', '| 1.10 |', '| 1.20 |'))).toEqual({ columns: ['ver'], rows: [['1.10'], ['1.20']] })
   // A column of numbers comes back as numbers, the way dbt's JSON output gives them, so Re-run shows them the same.
-  expect(textTable(table('| region  | revenue   | id                  |', '| ------- | --------- | ------------------- |', '| central | 21,109.09 | 1234567890123456789 |', '| east    | 20,476.10 | 7                   |'))).toEqual({
+  expect(textTable(table('| region  |   revenue |                  id |', '| ------- | --------- | ------------------- |', '| central | 21,109.09 | 1234567890123456789 |', '| east    | 20,476.10 |                   7 |'))).toEqual({
     columns: ['region', 'revenue', 'id'],
     rows: [['central', 21109.09, '1234567890123456789'], ['east', 20476.1, 7]],
   })
@@ -772,6 +778,27 @@ test('only the columns an edit left undocumented are its gaps, from what the war
   expect(await after.find({ type: 'Text', text: /no new gaps with schema\.yml/ })).toBeDefined()
   expect(await after.find({ type: 'Text', text: /undocumented before this edit/ })).toBeUndefined()
   await after.unmount()
+})
+
+test('a package repo with no manifest of its own: the doctor and model context read the one integration_tests writes', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    target: 'integration_tests/target',
+    files: {
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+    },
+  })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /manifest\.json is missing/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^current \(written \d+ min ago\)$/ })).toBeDefined()
+  await ui.unmount()
+  const result: any = await $.tool.call({ tool: 'Read', file_path: ORDERS })
+  await clock.settle()
+  expect(result.context?.some((one: string) => one.startsWith('dbt model context for orders'))).toBe(true)
 })
 
 test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {

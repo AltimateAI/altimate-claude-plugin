@@ -73,7 +73,8 @@ const hiddenAtom = atom({ plugin: 'altimate-code', key: 'isLineageSummaryHidden'
 type Layout = { models: string[] }
 type GitStart = { top: string; dirty: Map<string, string | null> }
 type RootState = { snapshot: string | null; layout: Layout; git: GitStart | null }
-type Task = { roots: Map<string, Promise<RootState>>; originals: Map<string, { root: string; text: string }> }
+// copies: the task's one copy per manifest, which a package and the project below it that installs it share.
+type Task = { roots: Map<string, Promise<RootState>>; originals: Map<string, { root: string; text: string }>; copies: Map<string, Promise<string | null>> }
 
 /** The last task that changed a model: all a report needs, frozen as the task ended. */
 type Finished = {
@@ -93,7 +94,7 @@ let finished: Finished | null = null
 let finishSeq = 0
 let planSeq = 0
 
-const newTask = (): Task => ({ roots: new Map(), originals: new Map() })
+const newTask = (): Task => ({ roots: new Map(), originals: new Map(), copies: new Map() })
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
 const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const modelName = (file: string) => (file.split(/[\\/]/).pop() ?? file).replace(/\.sql$/i, '')
@@ -132,15 +133,21 @@ function prepareRoot($: EngineInterface, t: Task, root: string): Promise<RootSta
     const layout = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
     // Models only: impact_analysis does not take a snapshot as the column's model.
     const models = { models: layout.models }
-    let snapshot: string | null = null
     const manifest = await manifestFile($, root)
-    if (await $.fs.exists(manifest).catch(() => false)) {
-      // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read; beside it, so a package's
-      // copy of integration_tests/target/manifest.json is read from that project too.
-      const copy = `${dirname(manifest)}/${runningManifest(await sessionTag($))}`
-      const copied = await $.process.run(['cp', manifest, copy], { timeoutMs: 20_000 }).catch(() => null)
-      if (copied?.exitCode === 0) snapshot = copy
+    // Copied once a task per manifest: a package and integration_tests read the same one, from the task's start.
+    let copying = t.copies.get(manifest)
+    if (!copying) {
+      copying = (async () => {
+        if (!(await $.fs.exists(manifest).catch(() => false))) return null
+        // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read; beside it, so a package's
+        // copy of integration_tests/target/manifest.json is read from that project too.
+        const copy = `${dirname(manifest)}/${runningManifest(await sessionTag($))}`
+        const copied = await $.process.run(['cp', manifest, copy], { timeoutMs: 20_000 }).catch(() => null)
+        return copied?.exitCode === 0 ? copy : null
+      })()
+      t.copies.set(manifest, copying)
     }
+    const snapshot = await copying
     const top = (await git($, ['-C', root, 'rev-parse', '--show-toplevel']))?.trim()
     let gitStart: GitStart | null = null
     if (top) {
@@ -290,6 +297,8 @@ const stamp = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T
 async function freezeManifests($: EngineInterface, t: Task, changes: ModelChange[]): Promise<Record<string, string | null>> {
   const out: Record<string, string | null> = {}
   const tag = await sessionTag($)
+  // A copy two projects share is moved once; both read the frozen one.
+  const frozenCopies = new Map<string, string>()
   for (const root of new Set(changes.map(one => one.root))) {
     const state = await t.roots.get(root)?.catch(() => null)
     // The copies sit beside the manifest they were taken from: the project's target/, or the one below that installs it.
@@ -305,9 +314,15 @@ async function freezeManifests($: EngineInterface, t: Task, changes: ModelChange
       out[root] = null
       continue
     }
+    const shared = frozenCopies.get(state.snapshot)
+    if (shared) {
+      out[root] = shared
+      continue
+    }
     const frozen = `${dir}/${taskManifest(tag)}`
     const moved = await $.process.run(['mv', '-f', state.snapshot, frozen], { timeoutMs: 5_000 }).catch(() => null)
     out[root] = moved?.exitCode === 0 ? frozen : state.snapshot
+    frozenCopies.set(state.snapshot, out[root]!)
   }
   return out
 }

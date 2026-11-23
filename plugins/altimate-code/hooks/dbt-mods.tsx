@@ -414,6 +414,19 @@ async function targetOf($: EngineInterface, root: string): Promise<string> {
   return normalize(path.startsWith('/') ? path : `${root}/${path}`)
 }
 
+/**
+ * The folder holding the manifest the helpers read for `root`: its own artifact folder, else, for a package repo with
+ * no manifest of its own, the one of the project below that installs it (integration_tests), where dbt writes it.
+ */
+async function manifestTarget($: EngineInterface, root: string): Promise<string> {
+  const own = await targetOf($, root)
+  if (await $.fs.exists(`${own}/manifest.json`).catch(() => false)) return own
+  const runner = await runnerOf($, root).catch(() => null)
+  if (!runner) return own
+  const theirs = await targetOf($, runner)
+  return (await $.fs.exists(`${theirs}/manifest.json`).catch(() => false)) ? theirs : own
+}
+
 /** Where the plugin's own dbt runs in the project write their artifacts (SCRATCH_TARGET): never the project's own. */
 async function scratchOf($: EngineInterface, root: string): Promise<string> {
   return `${await targetOf($, root)}/${SCRATCH_TARGET}`
@@ -445,7 +458,7 @@ async function pythonFor($: EngineInterface, root: string): Promise<string> {
  * project's Python, as the lineage half reads one through altimate-code.
  */
 async function readManifest($: EngineInterface, root: string, rel?: string, dir?: string, pkg?: string | null): Promise<{ manifest: any; mtimeMs: number } | null> {
-  const path = `${dir ?? (await targetOf($, root))}/manifest.json`
+  const path = `${dir ?? (await manifestTarget($, root))}/manifest.json`
   const stat = await $.fs.stat(path).catch(() => null)
   if (!stat || stat.kind !== 'file') return null
   try {
@@ -1112,7 +1125,9 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
   let listed: string[] = []
   if (manifest) {
     // The project's name from the manifest, else dbt_project.yml's (older manifests do not record it).
-    const project = manifest.manifest.metadata?.project_name ?? (await projectName($, root))
+    // A package repo's manifest is the project's below it: the package's own files are the ones named by its name.
+    const borrowed = (await manifestTarget($, root)) !== (await targetOf($, root))
+    const project = borrowed ? await projectName($, root) : (manifest.manifest.metadata?.project_name ?? (await projectName($, root)))
     const own = (one: any) => !project || !one?.package_name || one.package_name === project
     const files = (group: any) => Object.values<any>(group ?? {}).filter(own)
     const disabled = Object.values<any>(manifest.manifest.disabled ?? {}).flat().filter(own)
@@ -1468,7 +1483,7 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
 
 /** The doctor's manifest line: whether the manifest is missing, current, or older than files of the project. */
 async function manifestCheck($: EngineInterface, root: string): Promise<{ check: DoctorCheck; staleFiles: string[] }> {
-  const target = await targetOf($, root)
+  const target = await manifestTarget($, root)
   const stat = await $.fs.stat(`${target}/manifest.json`).catch(() => null)
   const shown = target.startsWith(`${root}/`) ? relative(root, target) : target
   if (!stat) return { check: { id: 'manifest', label: 'Manifest', status: 'warn', detail: `${shown}/manifest.json is missing: lineage, model context and docs need it`, fix: 'dbt parse' }, staleFiles: [] }
@@ -1502,7 +1517,7 @@ let manifestRead: { key: string; check: DoctorCheck; staleFiles: string[] } | nu
  * a tool call may have changed a file. Nothing is published to the doctor's state, so no older read can overwrite a newer one.
  */
 async function manifestNow($: EngineInterface, root: string): Promise<{ check: DoctorCheck; staleFiles: string[] }> {
-  const target = await targetOf($, root)
+  const target = await manifestTarget($, root)
   const stat = await $.fs.stat(`${target}/manifest.json`).catch(() => null)
   const key = `${root}\u0000${stat?.mtimeMs ?? 'none'}\u0000${fileChanges}`
   if (manifestRead?.key === key) return manifestRead

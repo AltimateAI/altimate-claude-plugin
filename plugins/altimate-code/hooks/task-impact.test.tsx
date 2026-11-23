@@ -38,6 +38,8 @@ type Options = {
   /** HEAD's text per project-relative path. */
   head?: Record<string, string>
   noManifest?: boolean
+  /** More files from the start, by absolute path (a project below that the session start already sees). */
+  extra?: Record<string, string>
   /** Other paths that exist, such as Windows' explorer.exe under /mnt/c. */
   present?: string[]
   /** target/manifest.json has gone since the start. */
@@ -66,6 +68,7 @@ async function start($: any, on: any, options: Options = {}) {
     [STAGING]: PAYMENTS_SQL,
     [MACRO]: '{% macro cents(x) %}{{ x }} / 100{% endmacro %}',
     [SNAPSHOT_SQL]: '{% snapshot orders_snap %}select id, status from orders{% endsnapshot %}',
+    ...options.extra,
   }
   const runs: string[][] = []
   const tools: Record<string, any>[] = []
@@ -1041,9 +1044,11 @@ test('a value change on Tuva: the band says tracing until the trace answers, nev
 test('a package repo with no manifest of its own: the band reads the manifest integration_tests writes, its copy beside it', async ($, on) => {
   const RUNNER = `${ROOT}/integration_tests`
   const THEIRS = `${RUNNER}/target/manifest.json`
-  const { turn, files, runs, tools } = await start($, on, { noManifest: true, present: [THEIRS] })
-  files[`${RUNNER}/dbt_project.yml`] = "name: 'shop_tests'\n"
-  files[`${RUNNER}/packages.yml`] = 'packages:\n  - local: ../\n'
+  const { turn, runs, tools } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    extra: { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' },
+  })
   await turn('t1', async () => {
     await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
   })
@@ -1056,6 +1061,33 @@ test('a package repo with no manifest of its own: the band reads the manifest in
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: /revenue\s+reaches/ })).toBeDefined()
   await band.unmount()
+})
+
+test('a task that changes a package model and an integration_tests model copies their one manifest once, and both read it', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const TEST_MODEL = `${RUNNER}/models/orders_check.sql`
+  const { turn, runs, tools, copies } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    extra: {
+      [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\nmodel-paths: ['models']\n",
+      [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n',
+      [TEST_MODEL]: 'select\n  order_id,\n  revenue as checked\nfrom {{ ref("fct_orders") }}\n',
+    },
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+    await $.tool.call({ tool: 'Edit', file_path: TEST_MODEL, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+  })
+  expect(runs.filter(one => one[0] === 'cp').map(one => one[1])).toEqual([THEIRS])
+  const asked = tools.filter(one => one.direction === 'downstream' && (one.column === 'revenue' || one.column === 'checked'))
+  expect(new Set(asked.map(one => one.column))).toEqual(new Set(['revenue', 'checked']))
+  const paths = new Set(asked.map(one => String(one.manifest_path)))
+  expect(paths.size).toBe(1)
+  const [frozen] = [...paths]
+  expect(frozen!.startsWith(`${RUNNER}/target/.altimate-task-manifest.`)).toBe(true)
+  expect(copies.has(frozen!)).toBe(true)
 })
 
 test('a task that changes four output columns traces three and says one more changed', async ($, on) => {

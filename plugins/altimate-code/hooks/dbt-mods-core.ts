@@ -212,9 +212,17 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
     const ruleChars = [...rule]
     const edges = ruleChars.flatMap((char, at) => (char === '|' ? [at] : []))
     // A line fits when it is as long as the rule and has a `|` at every edge.
-    const cells = (line: string) => {
+    const padded = (line: string) => {
       const chars = [...line]
-      return chars.length === ruleChars.length && edges.every(at => chars[at] === '|') ? edges.slice(1).map((end, k) => chars.slice(edges[k]! + 1, end).join('').trim()) : null
+      return chars.length === ruleChars.length && edges.every(at => chars[at] === '|') ? edges.slice(1).map((end, k) => chars.slice(edges[k]! + 1, end).join('')) : null
+    }
+    // How each cell sits in its column: dbt pads a number on the left (right-aligned) and text on the right.
+    const alignments: ('left' | 'right' | null)[][] = []
+    const cells = (line: string) => {
+      const raw = padded(line)
+      if (!raw) return null
+      alignments.push(raw.map(cell => (/^ {2,}\S/.test(cell) ? 'right' : /\S {2,}$/.test(cell) ? 'left' : null)))
+      return raw.map(cell => cell.trim())
     }
     const columns = cells(header)
     if (!columns) return null
@@ -231,7 +239,10 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
     const kept = rows.map(row => keep.map(i => row[i] ?? null))
     // A column of numbers is read as numbers, as dbt's JSON output gives them: the table's grouping commas and
     // padded decimals (21,109.09, 20,476.10) would show apart from the same query run again through JSON.
-    const numeric = keep.map((_, k) => kept.length > 0 && kept.every(row => row[k] === null || row[k] === '' || TABLE_NUMBER.test(row[k]!)) && kept.some(row => !!row[k]))
+    // A column dbt drew left-aligned (a cell padded on the right) is text, though its values look like numbers (versions
+    // such as 1.10); dbt draws numbers right-aligned. A column whose cells are all as wide as it shows neither.
+    const aligned = (i: number) => !alignments.some(one => one[i] === 'left')
+    const numeric = keep.map((i, k) => kept.length > 0 && aligned(i) && kept.every(row => row[k] === null || row[k] === '' || TABLE_NUMBER.test(row[k]!)) && kept.some(row => !!row[k]))
     return { columns: keep.map(i => columns[i]!), rows: kept.map(row => row.map((cell, k) => (numeric[k] && cell ? tableNumber(cell) : cell))) }
   }
   return null
