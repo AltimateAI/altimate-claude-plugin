@@ -7,7 +7,7 @@ import type { EngineInterface, On, RenderElement } from 'claude-code'
 import type { PlanImpactView, TaskSummaryView } from '../types'
 import { later, runAltimate, runTool, within } from './altimate-cli'
 import { usageOff } from './usage'
-import { manifestFile } from './package-runner'
+import { manifestFile, projectName } from './package-runner'
 import {
   answerOf,
   changedColumnsAll,
@@ -191,7 +191,11 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     // No select item changed (a value computed in a Jinja block the select reads, say): the names the change rewrote
     // are asked of the manifest, and the ones it has are traced as columns whose values change.
     const values = columns.length === 0 ? valueCandidates(one.original, current) : []
-    changes.push({ model: modelName(file), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
+    // A package repo reading integration_tests' manifest: that manifest holds integration_tests' own models too, so the
+    // model is asked for by its unique_id. (A project's own manifest keeps the name: a versioned model goes by it.)
+    const borrowed = (await manifestFile($, one.root)) !== `${one.root}/target/manifest.json`
+    const pkg = borrowed ? await projectName($, one.root) : null
+    changes.push({ model: modelName(file), ...(pkg ? { id: `model.${pkg}.${modelName(file)}` } : {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }
   if (changes.length > MAX_MODELS) $.ui.log(`lineage-summary · ${changes.length} models changed; tracing the first ${MAX_MODELS}`)
   return changes.slice(0, MAX_MODELS)
@@ -221,7 +225,7 @@ async function manifestOf($: EngineInterface, done: Finished, root: string): Pro
 async function ask($: EngineInterface, done: Finished, change: ModelChange, column: string | null, direction: 'downstream' | 'upstream') {
   // Known limit: the model goes by its file name, which misses a versioned model (x_v2.sql) or a file
   // named apart from its model.
-  const args = { manifest_path: await manifestOf($, done, change.root), model: change.model, ...(column && { column }), change_type: 'modify', direction }
+  const args = { manifest_path: await manifestOf($, done, change.root), model: change.id ?? change.model, ...(column && { column }), change_type: 'modify', direction }
   // Through the CLI: nobody asked for these calls by name, and a call over MCP can raise a permission dialog.
   const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
   return result?.ok ? result.metadata : null

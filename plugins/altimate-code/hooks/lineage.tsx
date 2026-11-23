@@ -427,11 +427,21 @@ async function readGraph($: EngineInterface, manifest: string): Promise<LineageG
  * nodes, marked `truncated`). Run through the CLI, whose --json carries the whole metadata (the MCP
  * server leaves big structured results out). Cached per manifest revision and model.
  */
-async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string, pkg?: string | null) {
+async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string, pkg?: string | null): Promise<{ graph: LineageGraph; id: string; columns: any } | null> {
+  const found = await graphFromToolsOnce($, manifest, mtimeMs, path ?? model, path)
+  // The path matched another package's node (integration_tests' model at the same path): the project's own, by its id.
+  if (found && path && pkg && found.id.split('.')[1] !== pkg) {
+    const own = await graphFromToolsOnce($, manifest, mtimeMs, `model.${pkg}.${model}`)
+    return checkPath(own, path, pkg)
+  }
+  return checkPath(found, path, pkg)
+}
+
+/** One dbt_lineage lookup by name, path or unique_id, cached per manifest revision; the node whatever its path. */
+async function graphFromToolsOnce($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string) {
   // A file is looked up by its path: snapshots and versioned models do not go by the file's name.
-  model = path ?? model
   const key = `${manifest}\u0000${mtimeMs}\u0000${model}`
-  if (toolsCache.has(key)) return checkPath(toolsCache.get(key)!, path, pkg)
+  if (toolsCache.has(key)) return checkPath(toolsCache.get(key)!, path)
   const result = await shared(`graph\u0000${key}`, () => runTool($, 'dbt_lineage', { manifest_path: manifest, model, include_graph: true }, { cliOnly: true }))
   const graph = result.metadata?.graph as LineageGraph | undefined
   const id: string | undefined = result.metadata?.model_unique_id ?? undefined
@@ -444,7 +454,7 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
   // One revision per manifest: a recompile replaces the old graphs.
   for (const old of toolsCache.keys()) if (old.startsWith(`${manifest}\u0000`) && !old.startsWith(`${manifest}\u0000${mtimeMs}\u0000`)) toolsCache.delete(old)
   toolsCache.set(key, built)
-  return checkPath(built, path, pkg)
+  return checkPath(built, path)
 }
 
 /**
@@ -567,7 +577,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     return false
   }
   const pkg = await projectName($, root)
-  let id = graph ? findModel(graph, wanted, pkg) : null
+  let id = graph ? findModel(graph, wanted, pkg, !!input.file) : null
   if (graph && !id) {
     const split = withoutColumn()
     const model = split ? findModel(graph, split.model, pkg) : null
@@ -905,7 +915,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   if (!stat) return null
   let graph = await readGraph($, manifest).catch(() => null)
   const pkg = await projectName($, root)
-  let id = graph ? findModel(graph, relative(root, file), pkg) : null
+  let id = graph ? findModel(graph, relative(root, file), pkg, true) : null
   if (!graph) {
     const name = (file.split(/[\\/]/).pop() ?? file).replace(/\.sql$/i, '')
     const built = await graphFromTools($, manifest, stat.mtimeMs, name, relative(root, file), pkg).catch(() => {

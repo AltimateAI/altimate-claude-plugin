@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean; cliId?: (model: string) => string; cliModels?: string[] }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -222,6 +222,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}${args.column ? `:${args.column}` : ''}`)
+    if (tool === 'dbt_lineage') options.cliModels?.push(String(args.model))
     // A column that fails, or answers late, as the MCP server does in the tests below.
     if (tool === 'impact_analysis' && args.column === options.failColumn) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'boom', metadata: {} }), stderr: '' } }
     if (tool === 'impact_analysis' && options.holdReach && args.column === options.holdReach.column) {
@@ -237,7 +238,7 @@ async function start($: any, on: any, options: Options = {}) {
     const graph = args.include_graph ? { graph: options.cliGraph ? options.cliGraph(sub) : sub } : {}
     const body =
       tool === 'dbt_lineage'
-        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...graph } : (options.cliLineage ?? { model_name: 'fct_orders', confidence: 'high' }) }
+        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...(options.cliId && { model_unique_id: options.cliId(String(args.model)) }), ...graph } : (options.cliLineage ?? { model_name: 'fct_orders', confidence: 'high' }) }
         : { status: 'ok', output: '', metadata: reach }
     return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '' } }
   })
@@ -341,6 +342,34 @@ test('a package repo reading integration_tests\' manifest: the package\'s own mo
   await ui.unmount()
   await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
   await clock.settle()
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+})
+
+test('a package repo: a file whose own node the manifest lacks is not taken for integration_tests\' model at its path', async ($, on) => {
+  // Only integration_tests' fct_orders sits at models/fct_orders.sql (the package's is new, not parsed yet).
+  const manifest = JSON.parse(JSON.stringify(MANIFEST).replaceAll('model.shop.fct_orders', 'model.shop_tests.fct_orders'))
+  const { clock, notes, calls } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(calls.some(one => one.startsWith('cli:impact_analysis'))).toBe(false)
+  expect(notes).toEqual([])
+})
+
+test('a package repo over 4 MiB: when the path finds integration_tests\' model, the package\'s own is looked up by its unique_id', async ($, on) => {
+  const asked: string[] = []
+  const cliGraph = (graph: any) => ({ ...graph, nodes: { ...graph.nodes, 'model.shop_tests.fct_orders': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop_tests.fct_orders' } } })
+  const { clock, notes } = await start($, on, {
+    packageRepo: true,
+    size: 6 * 1024 * 1024,
+    cliGraph,
+    cliModels: asked,
+    cliId: model => (model === 'model.shop.fct_orders' ? 'model.shop.fct_orders' : 'model.shop_tests.fct_orders'),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined),
+  })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(asked).toContain('models/fct_orders.sql')
+  expect(asked).toContain('model.shop.fct_orders')
   expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
 })
 

@@ -35,6 +35,8 @@ type RawExposure = { unique_id?: string; name?: string; label?: string; type?: s
 /** A model file the task changed, with the columns it changed (at most three). */
 export type ModelChange = {
   model: string
+  /** The model's unique_id, when its name alone may name another project's model (a package repo's borrowed manifest). */
+  id?: string
   file: string
   root: string
   columns: { name: string; before: string | null; after: string | null }[]

@@ -240,9 +240,10 @@ export function findModelOrColumn(graph: LineageGraph, wanted: string): string |
 /**
  * The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. With `pkg` (the
  * project's own name), a node of that package wins over another's at the same path or name: a manifest holding
- * several projects' nodes (a package repo reading integration_tests') can have two `models/orders.sql`.
+ * several projects' nodes (a package repo reading integration_tests') can have two `models/orders.sql`. With `ownOnly`
+ * (a file of the project), another package's node is never taken.
  */
-export function findModel(graph: LineageGraph, wanted: string, pkg?: string | null): string | null {
+export function findModel(graph: LineageGraph, wanted: string, pkg?: string | null, ownOnly = false): string | null {
   if (FOLLOWABLE.has(graph.nodes[wanted]?.type ?? '')) return wanted
   const lowered = wanted.toLowerCase()
   let other: string | null = null
@@ -252,7 +253,8 @@ export function findModel(graph: LineageGraph, wanted: string, pkg?: string | nu
     if (!pkg || node.id.split('.')[1] === pkg) return node.id
     other ??= node.id
   }
-  return other
+  // A file of the project is one of its own nodes or none: another package's node at its path is not it.
+  return ownOnly && pkg ? null : other
 }
 
 /** dbt's data tests and unit tests: counted downstream, never drawn. */

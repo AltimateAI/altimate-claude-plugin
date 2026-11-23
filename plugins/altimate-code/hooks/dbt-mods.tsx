@@ -454,18 +454,19 @@ async function readManifest($: EngineInterface, root: string, rel?: string, dir?
     }
     if (!rel) return null
     // One slice per file and manifest revision: a re-read in the same turn, and an edit's checks, reuse it.
-    const key = JSON.stringify([path, rel, stat.mtimeMs])
+    // The project's name picks the file's node: a package and integration_tests share one manifest and its paths.
+    const project = (pkg !== undefined ? pkg : await projectName($, root)) ?? ''
+    const key = JSON.stringify([path, rel, stat.mtimeMs, project])
     const cached = slices.get(key)
     if (cached) return { manifest: await cached, mtimeMs: stat.mtimeMs }
     const slicing = (async () => {
       const python = await pythonFor($, root)
-      const project = (pkg !== undefined ? pkg : await projectName($, root)) ?? ''
       const run = await $.process.run([python, '-c', MANIFEST_SLICE, path, rel, project], { cwd: root, timeoutMs: 60_000 })
       if (run.exitCode !== 0 || run.isStdoutTruncated) throw new Error('manifest slice failed')
       return JSON.parse(run.stdout)
     })()
     // Only the newest revision of each file is kept, and at most a few files.
-    for (const old of [...slices.keys()]) if (JSON.parse(old)[1] === rel && JSON.parse(old)[0] === path) slices.delete(old)
+    for (const old of [...slices.keys()]) if (JSON.parse(old)[1] === rel && JSON.parse(old)[0] === path && JSON.parse(old)[3] === project) slices.delete(old)
     while (slices.size >= MAX_SLICES) slices.delete(slices.keys().next().value!)
     slices.set(key, slicing)
     slicing.catch(() => slices.delete(key))

@@ -1090,6 +1090,8 @@ test('a package repo with no manifest of its own: the band reads the manifest in
   const asked = tools.filter(one => one.direction === 'downstream' && one.column === 'revenue')
   expect(asked.length).toBeGreaterThan(0)
   expect(asked.every(one => String(one.manifest_path).startsWith(`${RUNNER}/target/.altimate-task-manifest.`))).toBe(true)
+  // integration_tests' manifest holds its own models too: the package's is asked for by its unique_id.
+  expect(asked.every(one => one.model === 'model.shop.fct_orders')).toBe(true)
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: /revenue\s+reaches/ })).toBeDefined()
   await band.unmount()
