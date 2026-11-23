@@ -460,7 +460,8 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
     // name does not give: it is not found this way.)
     let own: Awaited<ReturnType<typeof graphFromToolsOnce>> = null
     for (const id of [`model.${pkg}.${model}`, `snapshot.${pkg}.${model}`]) {
-      own = await graphFromToolsOnce($, manifest, mtimeMs, id).catch(() => null)
+      // A failed lookup is a failure, not an absence: the other package's node is never shown in its place.
+      own = await graphFromToolsOnce($, manifest, mtimeMs, id)
       if (own) break
     }
     return path ? checkPath(own, path, pkg) : (own ?? found)
@@ -634,15 +635,17 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   if (!graph) {
     const name = asPath ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
     let failure: string | null = null
-    const lookUp = (model: string) =>
-      graphFromTools($, manifest, mtimeMs, model, asPath ? wanted : undefined, pkg).catch(error => {
+    const lookUp = (model: string, path?: string) =>
+      graphFromTools($, manifest, mtimeMs, model, path, pkg).catch(error => {
         failure = String(error?.message ?? error)
         return null
       })
-    let built = await lookUp(name)
+    let built = await lookUp(name, asPath ? wanted : undefined)
     const split = withoutColumn()
     if (!built && !failure && split) {
-      built = await lookUp(split.model)
+      // models/orders.sql.amount: the file is models/orders.sql.
+      const splitPath = /[\\/]|\.sql$/i.test(split.model)
+      built = await lookUp(splitPath ? (split.model.split('/').pop() ?? split.model).replace(/\.sql$/, '') : split.model, splitPath ? split.model : undefined)
       if (built) [wanted, column] = [split.model, split.column]
     }
     if (failure) {
@@ -1484,8 +1487,11 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
       const columns = (e as any).column || trace?.focus?.column ? null : lineageFromOutput(output)
       const manifest = typeof (e as any).manifest_path === 'string' ? String((e as any).manifest_path) : undefined
       // The node the call answered for, by its unique_id: in a manifest two projects share, its bare name may be either's.
-      const answered = (output as any)?.model_unique_id ?? parseJson(textOf(output))?.model_unique_id
-      later($, async () => void (await follow($, { model: typeof answered === 'string' ? answered : String((e as any).model), columns, auto: true, manifest })))
+      const parsed = parseJson(textOf(output)) as any
+      const answered = [trace?.focus?.uniqueId, (output as any)?.model_unique_id, (output as any)?.structuredContent?.model_unique_id, parsed?.model_unique_id, parsed?.structuredContent?.model_unique_id].find(one => typeof one === 'string')
+      // Only for a call that named its manifest (one a package repo may share with integration_tests); otherwise the name
+      // is followed in the project shown, as before.
+      later($, async () => void (await follow($, { model: manifest && typeof answered === 'string' ? answered : String((e as any).model), columns, auto: true, manifest })))
     }
     if (isSql) later($, async () => void (await follow($, { file: file!, auto: true })))
     else if (e.tool === 'Bash' && 'command' in e) {

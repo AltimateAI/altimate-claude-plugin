@@ -1126,24 +1126,27 @@ test('a result the MCP server left out for size is fetched again through the CLI
   await ui.unmount()
 })
 
-test("following Claude's own dbt_lineage call in a package repo follows the node it answered for, by its unique_id", async ($, on) => {
-  const manifest = { ...MANIFEST, nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes } }
-  const { clock } = await start($, on, {
-    packageRepo: true,
-    manifest,
-    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
-    toolResult: () => ({ content: [{ type: 'text', text: JSON.stringify({ model_name: 'fct_orders', model_unique_id: 'model.shop.fct_orders' }) }] }),
+for (const [shape, result] of [
+  ['its text', { content: [{ type: 'text', text: JSON.stringify({ model_name: 'fct_orders', model_unique_id: 'model.shop.fct_orders' }) }] }],
+  ['structuredContent', { structuredContent: { model_name: 'fct_orders', model_unique_id: 'model.shop.fct_orders' } }],
+] as const) {
+  test(`following Claude's own dbt_lineage call in a package repo follows the node it answered for (${shape}), in the package`, async ($, on) => {
+    const manifest = { ...MANIFEST, nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes } }
+    const { clock } = await start($, on, {
+      packageRepo: true,
+      manifest,
+      // The package's file is newer than the manifest: said only when the package's own node, in the package, is followed.
+      fileMtime: path => (path === FILE ? 5 : undefined),
+      fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+      toolResult: () => result,
+    })
+    await $.tool.call({ tool: 'mcp__plugin_altimate-code_altimate-code__dbt_lineage', manifest_path: `${ROOT}/integration_tests/target/manifest.json`, model: 'fct_orders' } as any)
+    await clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
+    await ui.unmount()
   })
-  await $.tool.call({ tool: 'mcp__plugin_altimate-code_altimate-code__dbt_lineage', manifest_path: `${ROOT}/integration_tests/target/manifest.json`, model: 'fct_orders' } as any)
-  await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'lineage-view' })
-  await clock.settle()
-  // The package's fct_orders reads int_orders; integration_tests' reads nothing.
-  expect(await ui.find({ type: 'Text', text: /int_orders/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /models\/fct_orders\.sql/ })).toBeDefined()
-  await ui.unmount()
-})
+}
 
 test("following Claude's own dbt_lineage call uses the manifest it named", async ($, on) => {
   const { clock } = await start($, on)
