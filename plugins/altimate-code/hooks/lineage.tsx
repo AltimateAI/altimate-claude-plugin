@@ -13,7 +13,7 @@ import type {
 } from '../types'
 import { later, parseJson, runTool, textOf, within } from './altimate-cli'
 import { openTracked } from './usage'
-import { manifestFile, projectName, runnerManifest } from './package-runner'
+import { localPackages, manifestFile, projectName, runnerManifest } from './package-runner'
 import { featuresSessionEnd, featuresTurnComplete, featuresTurnStart } from './features'
 import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
@@ -270,8 +270,8 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
   // A node of the project whose manifest a package repo borrows (integration_tests' own model) is that project's. Where the
   // manifest is counts, whether or not it could be read (over 4 MiB, the names come from the SQL files).
   const located = shownManifest ?? manifest
-  const borrowedRoot = dirname(dirname(located)) !== root ? dirname(dirname(located)) : null
-  const rootOf = (id: string) => (borrowedRoot && pkg && packageOf(id) !== pkg ? borrowedRoot : root)
+  const sessionRoot = await $.session.root().catch(() => root)
+  const rootOf = (id: string) => nodeOwner($, id, located, root, sessionRoot)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
   const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
   // A path written out names the model of the project it is in, and only that: the project is found from the path itself
@@ -297,7 +297,7 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
     if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue
     const word = match[0].toLowerCase()
     const id = byName.get(word)
-    if (id && (word.includes('_') || ticked.has(word))) mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: match[0], root: rootOf(id) })
+    if (id && (word.includes('_') || ticked.has(word))) mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: match[0], root: await rootOf(id) })
   }
   const found = new Map<string, AnswerModel>()
   for (const one of mentions.sort((x, y) => x.at - y.at)) {
@@ -493,6 +493,20 @@ async function graphFromToolsOnce($: EngineInterface, manifest: string, mtimeMs:
 }
 
 /**
+ * The project a node of a manifest belongs to: `root` when the node is of its package, else, in a manifest two local
+ * projects share, the one whose name is the node's package: the manifest's own project, a package it installs by a local
+ * path, or the session's project. `root` when none is.
+ */
+async function nodeOwner($: EngineInterface, id: string, manifest: string, root: string, sessionRoot: string): Promise<string> {
+  const pkg = packageOf(id)
+  if (!pkg || pkg === (await projectName($, root))) return root
+  const theirs = dirname(dirname(manifest))
+  const candidates = [theirs, ...(await localPackages($, theirs)), await projectRoot($, sessionRoot, false).catch(() => null)]
+  for (const one of candidates) if (one && (await projectName($, one)) === pkg) return one
+  return root
+}
+
+/**
  * The project a model followed in a given manifest belongs to: the manifest's own project, unless the model is a unique_id
  * of the session's project, whose package repo borrows that manifest (integration_tests'), when it is the session's.
  */
@@ -677,6 +691,9 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // An answer's follow whose turn is over leaves the pane to the newer turn. Checked here, before any
   // write: once a follow claims the pane it writes all of its state or a newer follow replaces it.
   if (claimedSeq > seq || (input.fromAnswer !== undefined && input.fromAnswer !== turnCount)) return false
+  // The node's own project (a package's model reached from integration_tests' graph, or the other way): its files are
+  // the ones the pane's out-of-date check reads.
+  const owner = via === 'sql' ? root : await nodeOwner($, id, manifest, root, sessionRoot)
   claimedSeq = seq
   ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
   // The person's own follows; Claude's reads and the answer's follow are not asks.
@@ -694,7 +711,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // The graph lands before the focus, so a redraw between the two never pairs the new focus with the old graph.
   await update($, graphAtom, prev => (superseded() ? prev : (via === 'tools' ? graph! : subgraph(graph!, id!))))
   if (superseded()) return false
-  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs, stamp: began })))
+  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root: owner, manifest, via, readMs, mtimeMs, stamp: began })))
   if (superseded()) return false
   await update($, messageAtom, prev => (superseded() ? prev : fromSql ? `No target/manifest.json: lineage from the SQL files' ref() and source()${graph!.partial ? ', the first 5000 files only' : ''}. Run \`dbt parse\` for columns and dashboards.` : null))
   if (isNew) {
@@ -724,7 +741,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     if (opened && opened.isPlaced === false && !input.open) await narrowHint($, opened.reason)
     else if (opened) await update($, narrowAtom, () => null)
   }
-  const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
+  const focus: LineageFocus = { model: id, root: owner, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
   // for this model (by unique_id when the answer gives one, else by name).
   const preload = columns && (columns.id ? columns.id === id : columns.model === node.name) ? columns : null

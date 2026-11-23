@@ -81,6 +81,15 @@ export async function sharesManifest($: EngineInterface, root: string, manifest:
   return /^\s*-?\s*local:\s*\S/m.test(declared)
 }
 
+/** The folders a project installs packages from by a local path (`local: ../`), spelled one way. */
+export async function localPackages($: EngineInterface, root: string): Promise<string[]> {
+  const declared = `${await $.fs.read(`${root}/packages.yml`).catch(() => '')}\n${await $.fs.read(`${root}/dependencies.yml`).catch(() => '')}`
+  return [...declared.matchAll(/^\s*-?\s*local:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/gm)].map(one => {
+    const path = one[1]!.trim()
+    return normalize(path.startsWith('/') ? path : `${root}/${path}`)
+  })
+}
+
 /** Where the project below a package repo that installs it writes its manifest; null when there is no such project. */
 export async function runnerManifest($: EngineInterface, root: string): Promise<string | null> {
   const runner = await runnerOf($, root).catch(() => null)
