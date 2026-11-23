@@ -262,6 +262,8 @@ export function mergeConsumers(traces: ColumnTrace[]): ReportConsumers {
 /** The traced answers for one changed column: downstream and upstream, each null when not asked or failed. */
 export type ColumnTrace = {
   model: string
+  /** The change's unique_id when it has one (ModelChange.id): which of two same-named models the trace is of. */
+  id?: string
   column: string | null
   down: ColumnAnswer | null
   up: ColumnAnswer | null

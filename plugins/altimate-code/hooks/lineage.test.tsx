@@ -489,6 +489,20 @@ test('a package repo: a shell read of a package file the manifest lacks is not f
   expect(calls.some(one => one.includes('dbt_lineage'))).toBe(false)
 })
 
+test('a package repo: an absolute path names its own project\'s model, and over 4 MiB integration_tests\' path still names none of the package\'s', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const text = (path: string) => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined)
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: text })
+  await $.turn.start({ text: 'which file?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: `It is ${ROOT}/integration_tests/models/fct_orders.sql.`, durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })

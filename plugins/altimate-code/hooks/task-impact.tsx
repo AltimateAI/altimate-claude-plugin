@@ -258,7 +258,7 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
     if (change.columns.length === 0) {
       jobs.push(async () => {
         const meta = await ask($, done, change, null, 'downstream')
-        return { model: change.model, column: null, down: null, up: null, modelLevel: modelLevelOf(meta), failed: meta === null, consumers: consumersOf(meta) }
+        return { model: change.model, ...(change.id ? { id: change.id } : {}), column: null, down: null, up: null, modelLevel: modelLevelOf(meta), failed: meta === null, consumers: consumersOf(meta) }
       })
       // Names the change rewrote: only those the manifest has as the model's columns are kept (null drops the rest).
       for (const name of change.values ?? []) {
@@ -269,7 +269,7 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
           // A name the change rewrote that reaches nothing is no evidence (an operand, not the output that changed):
           // left out, so the band never reads as a value change reaching 0.
           if (!unknownReach(answer) && reachOf(answer).columns === 0) return null
-          return { model: change.model, column: name, down: answer, up: null, modelLevel: modelLevelOf(meta), failed: false, value: true, ...unknownOf(answer), consumers: consumersOf(meta) }
+          return { model: change.model, ...(change.id ? { id: change.id } : {}), column: name, down: answer, up: null, modelLevel: modelLevelOf(meta), failed: false, value: true, ...unknownOf(answer), consumers: consumersOf(meta) }
         })
       }
     }
@@ -289,7 +289,7 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
         const unchecked = col.before === null && !!meta && lacks
         // An altimate-code from before the column answer gives neither the answer nor its error.
         const stale = !noModel && !answer && !!meta && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
-        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
+        return { model: change.model, ...(change.id ? { id: change.id } : {}), column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
       })
     }
   }
@@ -303,7 +303,7 @@ async function traceFull($: EngineInterface, done: Finished): Promise<ColumnTrac
   const downs = await (done.downs ??= traceDown($, done))
   const jobs = downs.map(trace => async () => {
     if (!trace.column || trace.unchecked) return trace
-    const change = done.changes.find(one => one.model === trace.model)!
+    const change = done.changes.find(one => (one.id ?? one.model) === (trace.id ?? trace.model))!
     return { ...trace, up: answerOf(await ask($, done, change, trace.column, 'upstream')) }
   })
   return pool(jobs, PARALLEL)

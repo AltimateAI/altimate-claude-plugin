@@ -830,6 +830,32 @@ test('a package repo with a manifest small enough to read: each project\'s chang
   expect(tools.filter(one => one.direction).map(one => one.model)).toEqual(['model.shop.fct_orders.v1', 'model.shop.fct_orders.v1'])
 })
 
+test('a task\'s report traces each of two same-named models, the package\'s and integration_tests\', with its own id both ways', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const TEST_MODEL = `${RUNNER}/models/fct_orders.sql`
+  const { turn, tools, clock } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    openers: { 'xdg-open': 0 },
+    extra: {
+      [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\nmodel-paths: ['models']\n",
+      [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n',
+      [TEST_MODEL]: 'select\n  order_id,\n  revenue as checked\nfrom {{ ref("fct_orders") }}\n',
+    },
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+    await $.tool.call({ tool: 'Edit', file_path: TEST_MODEL, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+  })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  await band.unmount()
+  const up = new Set(tools.filter(one => one.direction === 'upstream').map(one => `${one.model}:${one.column}`))
+  expect(up).toEqual(new Set(['model.shop.fct_orders:revenue', 'model.shop_tests.fct_orders:checked']))
+})
+
 test('/lineage-report on a column the manifest answers without reaching is a plain error, never a report that it reaches 0', async ($, on) => {
   const { runs, writes } = await start($, on, { openers: { 'xdg-open': 0 }, impact: args => (args.column ? { model: 'fct_orders', column_answer: NOT_IN_MANIFEST(args.column) } : {}) })
   const shown: any = await $.command.run({ command: 'lineage-report', args: 'fct_orders.fresh' } as any)

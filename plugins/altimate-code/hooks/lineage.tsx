@@ -266,42 +266,39 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
     const name = node.name.toLowerCase()
     if (!byName.has(name) || packageOf(node.id) === pkg) byName.set(name, node.id)
   }
-  // A node of the project whose manifest a package repo borrows (integration_tests' own model) is that project's.
-  const borrowedRoot = kept && dirname(dirname(kept)) !== root ? dirname(dirname(kept)) : null
+  // A node of the project whose manifest a package repo borrows (integration_tests' own model) is that project's. Where the
+  // manifest is counts, whether or not it could be read (over 4 MiB, the names come from the SQL files).
+  const located = shownManifest ?? manifest
+  const borrowedRoot = dirname(dirname(located)) !== root ? dirname(dirname(located)) : null
   const rootOf = (id: string) => (borrowedRoot && pkg && packageOf(id) !== pkg ? borrowedRoot : root)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
   const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
-  // A path written out names its project's model, and only that: under the borrowed manifest's project
-  // (integration_tests/…), that project's node at the rest of the path; else the project's own node at it. A path no node
-  // has names nothing (its file name is not looked up as a name, which another project's model may have).
-  const below = borrowedRoot ? `${relative(root, borrowedRoot)}/` : null
-  const theirPkg = borrowedRoot ? await projectName($, borrowedRoot) : null
-  const mentions: { at: number; end: number; id: string | null; name: string }[] = []
+  // A path written out names the model of the project it is in, and only that: the project is found from the path itself
+  // (integration_tests/…, ../models/…, an absolute path), its node is the one of that project's package at the path. A
+  // path no node of its project has names nothing, so another project's model of that file name is never taken for it.
+  const mentions: { at: number; end: number; id: string | null; name: string; root: string }[] = []
   for (const match of text.matchAll(/[\w./-]+\.sql\b/g)) {
-    const written = match[0].startsWith(`${root}/`) ? match[0].slice(root.length + 1) : match[0]
-    const rel = written.replace(/^(?:\.\/)+/, '')
-    const theirs = !!below && rel.startsWith(below)
-    const path = theirs ? rel.slice(below!.length) : rel
-    const want = theirs ? theirPkg : pkg
+    const abs = normalize(match[0].startsWith('/') ? match[0] : `${root}/${match[0]}`)
+    const owner = (await projectRoot($, abs, true).catch(() => null)) ?? root
+    const want = owner === root ? pkg : await projectName($, owner)
+    const path = relative(owner, abs)
     const mine = (one: { id: string; type: string }) => FOLLOWABLE.has(one.type) && (!want || packageOf(one.id) === want)
-    // The node at that path, else (a path written from a subfolder) one whose path ends with it, else, for the project's
-    // own files, its model of that file name: all of that project's.
-    const node =
-      Object.values(graph.nodes).find(one => mine(one) && one.path === path) ??
-      Object.values(graph.nodes).find(one => mine(one) && !!one.path?.endsWith(`/${path}`))
-    const byFile = !node && !theirs ? byName.get(path.split('/').pop()!.replace(/\.sql$/i, '').toLowerCase()) : undefined
+    // The node at that path, else (for the project's own files, a path written from a subfolder) one whose path ends with
+    // it, else its model of that file name.
+    const node = Object.values(graph.nodes).find(one => mine(one) && one.path === path) ?? (owner === root ? Object.values(graph.nodes).find(one => mine(one) && !!one.path?.endsWith(`/${path}`)) : undefined)
+    const byFile = !node && owner === root ? byName.get(path.split('/').pop()!.replace(/\.sql$/i, '').toLowerCase()) : undefined
     const id = node?.id ?? (byFile && (!pkg || packageOf(byFile) === pkg) ? byFile : null)
-    mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: node?.name ?? (id ? graph.nodes[id]?.name ?? '' : '') })
+    mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: id ? (graph.nodes[id]?.name ?? '') : '', root: owner })
   }
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
     if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue
     const word = match[0].toLowerCase()
     const id = byName.get(word)
-    if (id && (word.includes('_') || ticked.has(word))) mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: match[0] })
+    if (id && (word.includes('_') || ticked.has(word))) mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: match[0], root: rootOf(id) })
   }
   const found = new Map<string, AnswerModel>()
   for (const one of mentions.sort((x, y) => x.at - y.at)) {
-    if (one.id && !found.has(one.id)) found.set(one.id, { id: one.id, name: one.name, root: rootOf(one.id), ...(kept && { manifest: kept }) })
+    if (one.id && !found.has(one.id)) found.set(one.id, { id: one.id, name: one.name, root: one.root, ...(kept && { manifest: kept }) })
   }
   return [...found.values()].slice(0, 12)
 }
