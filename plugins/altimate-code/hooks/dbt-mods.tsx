@@ -1777,16 +1777,16 @@ export async function dbtModsReadOrEditAfter($: EngineInterface, e: { tool: stri
   return pendingLines(agentId)
 }
 
-/**
- * A conversation ended (a /clear): its notes, context, check and failed run are not the next one's.
- * Called from the plugin's one session.end hook. A check still running lands nowhere.
- */
-/** What the dbt doctor found for /feedback: the versions only, null before it has run. */
+/** What the dbt doctor found for /altimate-feedback: the versions only, null before it has run. */
 export async function dbtModsDoctorFacts($: EngineInterface): Promise<DoctorFacts> {
   const view = await read($, doctorAtom)
   return view ? doctorFacts(view.checks) : null
 }
 
+/**
+ * A conversation ended (a /clear): its notes, context, check and failed run are not the next one's.
+ * Called from the plugin's one session.end hook. A check still running lands nowhere.
+ */
 export async function endDbtMods($: EngineInterface) {
   generation++
   // A check of the conversation that ended answers nobody in the next.

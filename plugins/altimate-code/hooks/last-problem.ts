@@ -1,4 +1,4 @@
-// What /feedback may attach, kept apart from feedback.ts so the dbt helpers can record into it without importing it: the
+// What /altimate-feedback may attach, kept apart from feedback.ts so the dbt helpers can record into it without importing it: the
 // last plugin error (in memory only) and the versions the dbt doctor found.
 // The last plugin error is never kept as text. An error's message can hold a path, SQL, a relation, model or column name or a
 // secret, in any form, so only what a fixed list recognises is taken out of it at once: the error's type, an errno or SQLSTATE code,
