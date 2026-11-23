@@ -874,7 +874,8 @@ test('the band\'s Run /savings pressed while a typed /savings check is going sta
   expect(runs.length).toBe(2)
   await band.unmount()
   // A bare /savings meanwhile asks for the first connection, which the running check is not reading.
-  expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane. Run /savings again when it finishes.')
+  // prod_dbx is not in a list that could be read: it is checked as Databricks only as a guess, so no platform is named.
+  expect((await savings($)).text).toBe('The savings check is already running in the side pane. Run /savings again when it finishes.')
   finish()
   await clock.settle()
 })
@@ -2573,9 +2574,11 @@ test('without altimate-code, with both kinds of connection, the install message 
 })
 
 test('a connection the list could not tell the kind of, refused as not Databricks, is not sent to a Databricks one', async ($, on) => {
-  const { clock } = await start($, on, { answer: failure('The Databricks savings check is not available for snowflake warehouses. Try one of: dbx.') })
+  const { clock, toasts } = await start($, on, { answer: failure('The Databricks savings check is not available for snowflake warehouses. Try one of: dbx.') })
   await savings($, 'sf_prod')
   await clock.settle()
+  // Run as Databricks only as a guess: the notice names no platform.
+  expect(toasts.at(-1)).toMatch(/^Savings check: That connection is not a Databricks one, and altimate-code's connection list could not be read/)
   const ui = await mountFull($)
   expect(await ui.find({ type: 'Text', text: /^That connection is not a Databricks one, and altimate-code's connection list could not be read to tell its kind\.$/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^Run \/savings with no connection to check each of yours/ })).toBeDefined()
@@ -3403,6 +3406,25 @@ test('with two connections on one workspace that both drafted the fix, its line 
   expect(lines).toHaveLength(1)
   const titles = texts.map((text, at) => (text.includes(' · Databricks · ') ? at : -1)).filter(at => at >= 0)
   expect(texts.indexOf(lines[0]!)).toBe(titles[0]! + 2)
+  await ui.unmount()
+})
+
+test('with two connections on one workspace that both drafted a fix whose finding has cleared, its line shows once', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  answer.metadata.report.findings = answer.metadata.report.findings.filter((one: any) => one.resource_id !== 'wh-classic')
+  const store = {
+    [`savings-fix:project:${ROOT}/dbxmega::sql_warehouse:wh-classic`]: FIX,
+    [`savings-fix:project:${ROOT}/classic::sql_warehouse:wh-classic`]: { ...FIX, date: '2026-11-02' },
+  }
+  const { clock } = await start($, on, { list: BOTH, answer, now: Date.parse('2026-11-18T10:00:00Z'), store })
+  await savings($, 'dbxmega')
+  await clock.settle()
+  answer.metadata.warehouse = 'classic'
+  await savings($, 'classic')
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const texts = ((await ui.findAll({ type: 'Text' })) as any[]).map(one => String(one.text))
+  expect(texts.filter(text => /^Classic: fix drafted /.test(text))).toHaveLength(1)
   await ui.unmount()
 })
 

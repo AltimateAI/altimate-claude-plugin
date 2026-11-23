@@ -972,6 +972,14 @@ async function detectPlatforms($: EngineInterface) {
 
 type Target = { platform: SavingsPlatform; connection: string | null }
 
+/**
+ * Whether the connection list says which platform a run reads: the one named is listed as Databricks or Snowflake,
+ * or, with none named, the list holds one of them. Otherwise the Databricks tool runs as a guess, and nothing names
+ * a platform.
+ */
+const targetsKnown = (asked: string | null, connections: readonly SavingsConnection[] | null) =>
+  asked ? !!connections?.some(one => one.name === asked && one.platform !== null) : !!connections?.some(one => one.platform !== null)
+
 /** Whether a named connection's kind came from the connection list, rather than a guess. */
 const kindOf = (connection: string | null, connections: readonly SavingsConnection[] | null) =>
   !connection || !!connections?.some(one => one.name === connection && one.platform !== null)
@@ -1208,7 +1216,10 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
     return {
       platform,
       why: MISSING_BINARY.test(String(error))
-        ? { text: 'altimate-code is not installed.', recovery: `Install it (\`${INSTALL}\`), add a ${PLATFORM_NAME[platform]} connection, then run /savings again.` }
+        ? {
+            text: 'altimate-code is not installed.',
+            recovery: `Install it (\`${INSTALL}\`), add a ${targetsKnown(connection, connections) ? PLATFORM_NAME[platform] : 'Databricks or Snowflake'} connection, then run /savings again.`,
+          }
         : explain(String(error), connection, platform, kindOf(connection, connections)),
     }
   }
@@ -1257,7 +1268,7 @@ async function runCheck($: EngineInterface, mine: Claim) {
       const targets = targetsFor(asked, known)
       // A platform is named, and the refusal filed under it, only when the list was read, the run covered that one
       // alone and the connection asked for is in the list: otherwise it is a guess and could be the wrong one.
-      const one = !!known && targets.length === 1 && kindOf(asked, known)
+      const one = targetsKnown(asked, known) && targets.length === 1
       const name = one ? checkName(targets) : 'savings check'
       const noCheck = `This altimate-code has no ${name}.`
       await refuse(
@@ -1298,8 +1309,11 @@ async function runCheck($: EngineInterface, mine: Claim) {
       return
     }
     const targets = targetsFor(asked, connections)
-    mine.name = checkName(targets)
-    await update($, busyAtom, now => (live() ? busyFor(targets) : now))
+    // The tool runs for what is asked: a check with no connection named is the platform its tool reads, but a named
+    // connection the list does not show the kind of is checked as Databricks only as a guess, so nothing names one.
+    const sure = !asked || kindOf(asked, connections)
+    mine.name = sure ? checkName(targets) : 'savings check'
+    await update($, busyAtom, now => (live() ? (sure ? busyFor(targets) : BUSY_UNKNOWN) : now))
     mine.reading = true
     const answers = await Promise.all(targets.map(target => checkOne($, target, connections, until, live))).finally(() => {
       mine.reading = false
@@ -1308,7 +1322,7 @@ async function runCheck($: EngineInterface, mine: Claim) {
     const now = await $.clock.now()
     if (!live()) return
     const notices: string[] = []
-    const refusals: { platform: SavingsPlatform; text: string; recovery: string }[] = []
+    const refusals: { platform: SavingsPlatform | null; text: string; recovery: string }[] = []
     const fresh: Record<string, SavingsKept> = {}
     let unsaved = false
     for (const answer of answers) {
@@ -1322,8 +1336,8 @@ async function runCheck($: EngineInterface, mine: Claim) {
         if (!saved) unsaved = true
         notices.push(summary(answer.view))
       } else {
-        refusals.push({ platform: answer.platform, ...answer.why })
-        notices.push(`${PLATFORM_NAME[answer.platform]} savings check: ${answer.why.text} ${answer.why.recovery}`)
+        refusals.push({ platform: sure ? answer.platform : null, ...answer.why })
+        notices.push(`${sure ? `${PLATFORM_NAME[answer.platform]} savings check` : 'Savings check'}: ${answer.why.text} ${answer.why.recovery}`)
       }
     }
     await update($, whatIfAtom, now => (live() ? null : now))
@@ -1339,7 +1353,7 @@ async function runCheck($: EngineInterface, mine: Claim) {
     if (!live()) return
     // A platform is named only when the list was read, the run covered that one alone and the connection asked for
     // is in the list: otherwise it is a guess and could be the wrong one.
-    const one = !!known && targets.length === 1 && kindOf(asked, known)
+    const one = targetsKnown(asked, known) && targets.length === 1
     const why = MISSING_BINARY.test(String(error))
       ? { text: 'altimate-code is not installed.', recovery: `Install it (\`${INSTALL}\`), add a ${one ? PLATFORM_NAME[platform] : 'Databricks or Snowflake'} connection, then run /savings again.` }
       : explain(String(error), asked, platform, kindOf(asked, known))
@@ -1721,7 +1735,17 @@ export function register(on: On, _context: FeatureContext) {
       // have cleared it) is shown on its own, after the top findings.
       // A fix whose resource is not among the findings shown (not flagged now, or below the top few) is listed on its own.
       // A line of another connection that reads the same workspace belongs to the copy shown, not to the list.
-      const unflagged = views.flatMap(view => view.fixes.filter(line => !top.some(one => sameAccount(one.view, view) && sameResource(view, one.finding, line))))
+      // Two connections that read one account list the same fix: it is shown once (`resourceKey`).
+      const listed = new Set<string>()
+      const unflagged = views.flatMap(view =>
+        view.fixes.filter(line => {
+          if (top.some(one => sameAccount(one.view, view) && sameResource(view, one.finding, line))) return false
+          const key = resourceKey(view, line)
+          if (listed.has(key)) return false
+          listed.add(key)
+          return true
+        }),
+      )
       return cleanTree(
         <Box flexDirection="column" gap={1}>
           {refusals}
