@@ -474,6 +474,8 @@ kitTest('a text table is cut at the rule\'s pipes, so a value with a pipe stays 
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| 🙂🙂    | c     |', '| a|🙂   | d     |'))).toEqual({ columns: ['value', 'other'], rows: [['🙂🙂', 'c'], ['a|🙂', 'd']] })
   // A line out of step with the rule is not guessed at: nothing is captured.
   expect(textTable(table('| value | other |', '| ----- | ----- |', '| a|b  | c     |'))).toBeNull()
+  // A column with a leading-zero code stays text, as dbt's JSON gives it; 0 and 0.5 are still numbers.
+  expect(textTable(table('| zip   | n   |', '| ----- | --- |', '| 00123 | 0   |', '| 00501 | 0.5 |'))).toEqual({ columns: ['zip', 'n'], rows: [['00123', 0], ['00501', 0.5]] })
   // A column of numbers comes back as numbers, the way dbt's JSON output gives them, so Re-run shows them the same.
   expect(textTable(table('| region  | revenue   | id                  |', '| ------- | --------- | ------------------- |', '| central | 21,109.09 | 1234567890123456789 |', '| east    | 20,476.10 | 7                   |'))).toEqual({
     columns: ['region', 'revenue', 'id'],

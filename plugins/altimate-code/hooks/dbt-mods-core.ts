@@ -185,7 +185,8 @@ function jsonLines(stdout: string): any[] {
 }
 
 // A number as dbt's text table writes it: grouped by commas or not, with an optional sign and decimals.
-const TABLE_NUMBER = /^-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$/
+// No leading zero before a digit: a column holding 00123 is a code (a postal code, an id), which dbt's JSON keeps as text.
+const TABLE_NUMBER = /^-?(?:[1-9]\d{0,2}(?:,\d{3})+|0|[1-9]\d*)(?:\.\d+)?$/
 
 /** A number from the text table as a number, unless that would round it (more digits than a double holds): then its digits as text. */
 function tableNumber(cell: string): number | string {
