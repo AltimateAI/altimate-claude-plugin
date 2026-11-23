@@ -503,6 +503,26 @@ test('a package repo: an absolute path names its own project\'s model, and over 
   await ui.unmount()
 })
 
+test('a package repo with the pane on integration_tests: written-out paths are the session\'s, so each still names its own project\'s model', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    present: [`${ROOT}/integration_tests/models/fct_orders.sql`],
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/integration_tests/models/fct_orders.sql` })
+  await clock.settle()
+  await $.turn.start({ text: 'which files?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'See `models/fct_orders.sql` and `integration_tests/models/fct_orders.sql`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  await ui.unmount()
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
@@ -1129,6 +1149,8 @@ test('a result the MCP server left out for size is fetched again through the CLI
 for (const [shape, result] of [
   ['its text', { content: [{ type: 'text', text: JSON.stringify({ model_name: 'fct_orders', model_unique_id: 'model.shop.fct_orders' }) }] }],
   ['structuredContent', { structuredContent: { model_name: 'fct_orders', model_unique_id: 'model.shop.fct_orders' } }],
+  ['a text report', { content: [{ type: 'text', text: 'Model: fct_orders\nID: model.shop.fct_orders' }] }],
+  ['a report cut for size', { content: [{ type: 'text', text: JSON.stringify({ report: 'Model: fct_orders\nID: model.shop.fct_orders', truncated: true }) }] }],
 ] as const) {
   test(`following Claude's own dbt_lineage call in a package repo follows the node it answered for (${shape}), in the package`, async ($, on) => {
     const manifest = { ...MANIFEST, nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes } }

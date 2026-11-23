@@ -277,8 +277,10 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
   // (integration_tests/…, ../models/…, an absolute path), its node is the one of that project's package at the path. A
   // path no node of its project has names nothing, so another project's model of that file name is never taken for it.
   const mentions: { at: number; end: number; id: string | null; name: string; root: string }[] = []
+  // A relative path is the session's, whatever project the pane shows.
+  const base = await $.session.root().catch(() => root)
   for (const match of text.matchAll(/[\w./-]+\.sql\b/g)) {
-    const abs = normalize(match[0].startsWith('/') ? match[0] : `${root}/${match[0]}`)
+    const abs = normalize(match[0].startsWith('/') ? match[0] : `${base}/${match[0]}`)
     const owner = (await projectRoot($, abs, true).catch(() => null)) ?? root
     const want = owner === root ? pkg : await projectName($, owner)
     const path = relative(owner, abs)
@@ -1488,7 +1490,9 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
       const manifest = typeof (e as any).manifest_path === 'string' ? String((e as any).manifest_path) : undefined
       // The node the call answered for, by its unique_id: in a manifest two projects share, its bare name may be either's.
       const parsed = parseJson(textOf(output)) as any
-      const answered = [trace?.focus?.uniqueId, (output as any)?.model_unique_id, (output as any)?.structuredContent?.model_unique_id, parsed?.model_unique_id, parsed?.structuredContent?.model_unique_id].find(one => typeof one === 'string')
+      // A text report (or one cut for size, `{report, truncated}`) names it on its `ID:` line.
+      const reported = /^\s*ID:\s*((?:model|snapshot)\.[^\s]+)\s*$/m.exec([textOf(output), typeof parsed?.report === 'string' ? parsed.report : ''].join('\n'))?.[1]
+      const answered = [trace?.focus?.uniqueId, (output as any)?.model_unique_id, (output as any)?.structuredContent?.model_unique_id, parsed?.model_unique_id, parsed?.structuredContent?.model_unique_id, reported].find(one => typeof one === 'string')
       // Only for a call that named its manifest (one a package repo may share with integration_tests); otherwise the name
       // is followed in the project shown, as before.
       later($, async () => void (await follow($, { model: manifest && typeof answered === 'string' ? answered : String((e as any).model), columns, auto: true, manifest })))
