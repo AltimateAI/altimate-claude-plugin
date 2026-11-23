@@ -598,9 +598,18 @@ async function buildColumnReport($: EngineInterface, model: string, column: stri
   if (!root) return { error: 'No dbt project here: /lineage-report <model>.<column> reads the target/manifest.json of the dbt project this session runs in.' }
   const manifest = await manifestFile($, root)
   if (!(await $.fs.exists(manifest).catch(() => false))) return { error: 'This project has no target/manifest.json yet. Run `dbt parse` or `dbt compile`, then ask again.' }
-  const args = { manifest_path: manifest, model, column, change_type: 'modify' }
   // Through the CLI, as for a task: nobody asked for these calls by name.
-  const [down, up] = await Promise.all((['downstream', 'upstream'] as const).map(direction => runTool($, 'impact_analysis', { ...args, direction }, { cliOnly: true }).catch(() => null)))
+  const traceAs = (asked: string) =>
+    Promise.all((['downstream', 'upstream'] as const).map(direction => runTool($, 'impact_analysis', { manifest_path: manifest, model: asked, column, change_type: 'modify', direction }, { cliOnly: true }).catch(() => null)))
+  // integration_tests' manifest, which a package repo borrows, holds its own models too: a bare name is asked for as the
+  // package's model first, then, when the package has none of that name, as it is.
+  const pkg = manifest !== `${root}/target/manifest.json` && !model.includes('.') ? await projectName($, root) : null
+  let [down, up] = await traceAs(pkg ? `model.${pkg}.${model}` : model)
+  let asOwn = !!pkg
+  if (pkg && (down?.metadata as any)?.success === false) {
+    ;[down, up] = await traceAs(model)
+    asOwn = false
+  }
   for (const result of [down, up]) {
     const meta = result?.metadata as any
     // The model isn't in the manifest: the CLI's own words, which name some that are.
@@ -613,7 +622,7 @@ async function buildColumnReport($: EngineInterface, model: string, column: stri
   if (!downAnswer && !upAnswer) return { error: 'This altimate-code traces no single column. Update it to use /lineage-report <model>.<column>.' }
   // An answer that never reached the column traced nothing: no report says it reaches 0.
   if (downAnswer && !downAnswer.columns.some(one => one.hop === 0)) return { error: `${model} has no column ${column} in target/manifest.json. Run \`dbt parse\` or \`dbt compile\` if it was just added, then ask again.` }
-  const name = typeof (down.metadata as any)?.model === 'string' ? String((down.metadata as any).model) : model
+  const name = !asOwn && typeof (down.metadata as any)?.model === 'string' ? String((down.metadata as any).model) : model
   const trace: ColumnTrace = { model: name, column, down: downAnswer, up: upAnswer, modelLevel: modelLevelOf(down.metadata), failed: false, ...unknownOf(downAnswer), consumers: consumersOf(down.metadata) }
   const data = columnReportData(name, column, trace, { builtAt: stamp(await $.clock.now()), manifest: 'target/manifest.json as it is now' })
   const path = `${root}/${LINEAGE_DIR}/${COLUMN_REPORT}`

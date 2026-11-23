@@ -19,6 +19,7 @@ import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, 
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
+  packageOf,
   buildGraph,
   columnsFromMetadata,
   countText,
@@ -263,11 +264,11 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
   for (const node of Object.values(graph.nodes)) {
     if (!FOLLOWABLE.has(node.type) || !node.path) continue
     const name = node.name.toLowerCase()
-    if (!byName.has(name) || node.id.split('.')[1] === pkg) byName.set(name, node.id)
+    if (!byName.has(name) || packageOf(node.id) === pkg) byName.set(name, node.id)
   }
   // A node of the project whose manifest a package repo borrows (integration_tests' own model) is that project's.
   const borrowedRoot = kept && dirname(dirname(kept)) !== root ? dirname(dirname(kept)) : null
-  const rootOf = (id: string) => (borrowedRoot && pkg && id.split('.')[1] !== pkg ? borrowedRoot : root)
+  const rootOf = (id: string) => (borrowedRoot && pkg && packageOf(id) !== pkg ? borrowedRoot : root)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
   const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
   const found = new Map<string, AnswerModel>()
@@ -429,10 +430,11 @@ async function readGraph($: EngineInterface, manifest: string): Promise<LineageG
  */
 async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string, pkg?: string | null): Promise<{ graph: LineageGraph; id: string; columns: any } | null> {
   const found = await graphFromToolsOnce($, manifest, mtimeMs, path ?? model, path)
-  // The path matched another package's node (integration_tests' model at the same path): the project's own, by its id.
-  if (found && path && pkg && found.id.split('.')[1] !== pkg) {
-    const own = await graphFromToolsOnce($, manifest, mtimeMs, `model.${pkg}.${model}`)
-    return checkPath(own, path, pkg)
+  // The path or name matched another package's node (integration_tests' model of the same path or name): the project's
+  // own, by its unique_id. A file must be the project's own; a name keeps the other package's model when the project has none.
+  if (found && pkg && packageOf(found.id) !== pkg && (path || !model.includes('.'))) {
+    const own = await graphFromToolsOnce($, manifest, mtimeMs, `model.${pkg}.${model}`).catch(() => null)
+    return path ? checkPath(own, path, pkg) : (own ?? found)
   }
   return checkPath(found, path, pkg)
 }
@@ -462,7 +464,7 @@ async function graphFromToolsOnce($: EngineInterface, manifest: string, mtimeMs:
  * the model is the project's own: in a manifest holding another project's `models/orders.sql`, that one is not the file's.
  */
 function checkPath<T extends { graph: LineageGraph; id: string } | null>(built: T, path?: string, pkg?: string | null): T | null {
-  return built && (!path || (built.graph.nodes[built.id]?.path === path && (!pkg || built.id.split('.')[1] === pkg))) ? built : null
+  return built && (!path || (built.graph.nodes[built.id]?.path === path && (!pkg || packageOf(built.id) === pkg))) ? built : null
 }
 
 type FollowInput = {

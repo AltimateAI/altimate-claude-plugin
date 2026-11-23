@@ -373,6 +373,41 @@ test('a package repo over 4 MiB: when the path finds integration_tests\' model, 
   expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
 })
 
+test('a package repo over 4 MiB: /lineage <name> that the CLI answers with integration_tests\' model shows the package\'s own', async ($, on) => {
+  const asked: string[] = []
+  const cliGraph = (graph: any) => ({ ...graph, nodes: { ...graph.nodes, 'model.shop_tests.fct_orders': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop_tests.fct_orders' } } })
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    size: 6 * 1024 * 1024,
+    cliGraph,
+    cliModels: asked,
+    cliId: model => (model === 'model.shop.fct_orders' ? 'model.shop.fct_orders' : 'model.shop_tests.fct_orders'),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined),
+  })
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(asked.slice(0, 2)).toEqual(['fct_orders', 'model.shop.fct_orders'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a package repo: a name the answer gives that integration_tests shares follows the package\'s own model', async ($, on) => {
+  const manifest = {
+    ...MANIFEST,
+    // integration_tests' own fct_orders listed last, so a name map that keeps the last would take it.
+    nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} } },
+  }
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.turn.start({ text: 'how is revenue built?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'Revenue is summed in `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })

@@ -775,6 +775,24 @@ test('a column the queried manifest does not know is not shown as 0, even when t
   await band.unmount()
 })
 
+test('/lineage-report <model>.<column> on a package repo asks for the package\'s model by its unique_id, and for a name only integration_tests has as it is', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const { tools } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    openers: { 'xdg-open': 0 },
+    extra: { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' },
+    // The package has no model named only_tests: the CLI says so for its unique_id.
+    answer: args => (args.model === 'model.shop.only_tests' ? { status: 'ok', output: 'Model "model.shop.only_tests" not found in manifest.', metadata: { success: false } } : undefined),
+  })
+  await $.command.run({ command: 'lineage-report', args: 'fct_orders.revenue' } as any)
+  expect(tools.filter(one => one.direction).map(one => one.model)).toEqual(['model.shop.fct_orders', 'model.shop.fct_orders'])
+  tools.length = 0
+  await $.command.run({ command: 'lineage-report', args: 'only_tests.revenue' } as any)
+  expect(tools.filter(one => one.direction && one.model === 'only_tests').length).toBe(2)
+})
+
 test('/lineage-report on a column the manifest answers without reaching is a plain error, never a report that it reaches 0', async ($, on) => {
   const { runs, writes } = await start($, on, { openers: { 'xdg-open': 0 }, impact: args => (args.column ? { model: 'fct_orders', column_answer: NOT_IN_MANIFEST(args.column) } : {}) })
   const shown: any = await $.command.run({ command: 'lineage-report', args: 'fct_orders.fresh' } as any)

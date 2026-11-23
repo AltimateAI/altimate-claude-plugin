@@ -237,6 +237,9 @@ export function findModelOrColumn(graph: LineageGraph, wanted: string): string |
   return findModel(graph, wanted) ?? (at > 0 ? findModel(graph, wanted.slice(0, at)) : null)
 }
 
+/** The package a node's unique_id names (`model.<package>.<name>[.v<N>]`). */
+export const packageOf = (id: string) => id.split('.')[1]
+
 /**
  * The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. With `pkg` (the
  * project's own name), a node of that package wins over another's at the same path or name: a manifest holding
@@ -250,7 +253,7 @@ export function findModel(graph: LineageGraph, wanted: string, pkg?: string | nu
   for (const node of Object.values(graph.nodes)) {
     if (!FOLLOWABLE.has(node.type)) continue
     if (node.path !== wanted && node.name.toLowerCase() !== lowered) continue
-    if (!pkg || node.id.split('.')[1] === pkg) return node.id
+    if (!pkg || packageOf(node.id) === pkg) return node.id
     other ??= node.id
   }
   // A file of the project is one of its own nodes or none: another package's node at its path is not it.
