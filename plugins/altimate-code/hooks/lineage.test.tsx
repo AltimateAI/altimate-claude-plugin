@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void> }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean; cliId?: (model: string) => string; cliModels?: string[]; present?: string[]; listed?: string[]; missing?: (path: string) => boolean; holdRead?: (path: string) => Promise<void> | undefined }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -114,12 +114,18 @@ async function start($: any, on: any, options: Options = {}) {
   // sqlFiles: a project with no manifest, its files by project-relative path.
   const sql = options.sqlFiles
   const hasManifest = !sql
+  // packageRepo: a package repo with no target/ of its own, run from integration_tests, which installs it by `local: ../`.
+  const RUNNER = `${ROOT}/integration_tests`
+  const runnerFiles: Record<string, string> = options.packageRepo ? { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' } : {}
+  const MANIFEST_AT = options.packageRepo ? `${RUNNER}/target/manifest.json` : MANIFEST_PATH
   on('fs.exists', (_: unknown, e: { path: string }) => ({
-    value: (e.path === `${ROOT}/dbt_project.yml` && !options.noRootProject) || (hasManifest && e.path === MANIFEST_PATH) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
+    value: (e.path === `${ROOT}/dbt_project.yml` && !options.noRootProject) || (hasManifest && e.path === MANIFEST_AT && !options.runnerManifestGone?.()) || e.path in runnerFiles || !!options.present?.includes(e.path) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
   }))
   on('fs.stat', async (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
     if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
+    if (options.missing?.(e.path)) throw new Error(`ENOENT: no such file or directory, stat '${e.path}'`)
+    if (options.packageRepo && (e.path === MANIFEST_PATH || (e.path === MANIFEST_AT && options.runnerManifestGone?.()))) throw new Error('ENOENT')
     // A model's own file can be newer than the manifest (edited after the last compile).
     const fileMtime = e.path === MANIFEST_PATH ? undefined : options.fileMtime?.(e.path)
     return { value: { kind: 'file', size, mtimeMs: fileMtime ?? mtime(), isLink: false } }
@@ -129,7 +135,8 @@ async function start($: any, on: any, options: Options = {}) {
     // The project root itself lists as the empty prefix.
     const prefix = e.path === ROOT ? '' : `${e.path.slice(ROOT.length + 1)}/`
     const names = new Map<string, 'file' | 'dir'>()
-    for (const path of Object.keys(sql ?? {})) {
+    if (options.packageRepo && e.path === ROOT) names.set('integration_tests', 'dir')
+    for (const path of [...Object.keys(sql ?? {}), ...(options.listed ?? [])]) {
       if (!path.startsWith(prefix)) continue
       const [head, ...rest] = path.slice(prefix.length).split('/')
       names.set(head!, rest.length ? 'dir' : 'file')
@@ -140,6 +147,7 @@ async function start($: any, on: any, options: Options = {}) {
   let heldSql = false
   let manifestStats = 0
   on('fs.read', async (_: unknown, e: { path: string }) => {
+    await options.holdRead?.(e.path)
     // A test can pause the first manifest read to make one follow resolve after a newer one.
     if (e.path === MANIFEST_PATH && options.holdFirstManifestRead && !held) {
       held = true
@@ -155,7 +163,11 @@ async function start($: any, on: any, options: Options = {}) {
       if (!options.persisted?.readable) throw new Error('EACCES')
       return { value: JSON.stringify({ ...reach, report: 'Impact' }) }
     }
-    return { value: e.path === MANIFEST_PATH ? JSON.stringify(options.manifest ?? MANIFEST) : 'select 1' }
+    const given = options.fileText?.(e.path)
+    if (given !== undefined) return { value: given }
+    if (e.path in runnerFiles) return { value: runnerFiles[e.path] }
+    if (options.packageRepo && e.path === MANIFEST_PATH) throw new Error('ENOENT')
+    return { value: e.path === MANIFEST_AT ? JSON.stringify(options.manifest ?? MANIFEST) : 'select 1' }
   })
   on('tool.list', () => ({
     value: warehouse ? [{ name: 'mcp__altimate_saas__table_lineage', description: 'Snowflake table lineage', mcp: true }] : [],
@@ -203,6 +215,8 @@ async function start($: any, on: any, options: Options = {}) {
   on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const inert = nothingToReport(e.argv)
     if (inert) return { value: inert }
+    const shell = options.shell?.(e.argv)
+    if (shell) return { value: { ...shell, stderr: '' } }
     const [, command, , tool] = e.argv
     // A slow CLI dbt_lineage: it answers once the test lets it.
     if (command === 'tool' && tool === 'dbt_lineage' && options.holdCliLineage) await options.holdCliLineage
@@ -210,6 +224,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (command !== 'tool') return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     const args = JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1] ?? '{}'))
     calls.push(`cli:${tool}${args.include_graph ? ':graph' : ''}${args.column ? `:${args.column}` : ''}`)
+    if (tool === 'dbt_lineage') options.cliModels?.push(String(args.model))
     // A column that fails, or answers late, as the MCP server does in the tests below.
     if (tool === 'impact_analysis' && args.column === options.failColumn) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'boom', metadata: {} }), stderr: '' } }
     if (tool === 'impact_analysis' && options.holdReach && args.column === options.holdReach.column) {
@@ -221,19 +236,23 @@ async function start($: any, on: any, options: Options = {}) {
     if (options.cliCutOff?.(tool)) return { value: { exitCode: options.cliCutOffExit ?? 0, stdout: '{"status":"ok","out', stderr: '' } }
     if (options.cliStdout !== undefined) return { value: { exitCode: 0, stdout: options.cliStdout, stderr: '' } }
     // altimate-code's dbt_lineage with include_graph returns the subgraph the pane would build itself.
-    const graph = args.include_graph ? { graph: subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders') } : {}
+    const sub = subgraph(buildGraph(MANIFEST), 'model.shop.fct_orders')
+    const graph = args.include_graph ? { graph: options.cliGraph ? options.cliGraph(sub) : sub } : {}
     const body =
       tool === 'dbt_lineage'
-        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...graph } : (options.cliLineage ?? { model_name: 'fct_orders', confidence: 'high' }) }
+        ? { status: 'ok', output: LINEAGE_TEXT, metadata: args.include_graph ? { ...LINEAGE, ...(options.cliId && { model_unique_id: options.cliId(String(args.model)) }), ...graph } : (options.cliLineage ?? { model_name: 'fct_orders', confidence: 'high' }) }
         : { status: 'ok', output: '', metadata: reach }
     return { value: { exitCode: 0, stdout: JSON.stringify(body), stderr: '' } }
   })
   // The tool itself, beneath the plugin.
-  on('tool.call', (_: unknown, e: { tool: string }) => {
+  on('tool.call', async (_: unknown, e: { tool: string }) => {
     calls.push(`tool:${e.tool}`)
+    await options.duringTool?.()
     const result = options.toolResult?.(e)
     // A denial is the hook's own answer, not a result.
     if (result && typeof result === 'object' && 'deny' in result) return result
+    // A failed call: the host's own isError beside its output.
+    if (result && typeof result === 'object' && 'isError' in result) return { result: { stdout: (result as any).text }, isError: true, text: (result as any).text }
     return { result: result ?? { ok: true } }
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
@@ -265,6 +284,385 @@ test('the lineage pane keeps its default size and Min / Default / Max resize it'
   await ui.unmount()
 })
 
+test('a package repo with no target/ of its own: the pane and the per-edit note read the manifest integration_tests writes', async ($, on) => {
+  const { clock, logs, notes, calls } = await start($, on, { packageRepo: true })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(logs.some(line => line.startsWith('lineage-pane · integration_tests/target/manifest.json · ') && line.endsWith('offline'))).toBe(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /No target\/manifest.json/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(calls).toContain('cli:impact_analysis:revenue')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+})
+
+test('a package repo whose integration_tests manifest went away (dbt clean): r falls back to the SQL files, as a project of its own does', async ($, on) => {
+  let gone = false
+  const { clock, toasts, logs } = await start($, on, { packageRepo: true, runnerManifestGone: () => gone })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  gone = true
+  await ui.press({ key: 'lineage-refresh' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /No dbt manifest at that path/ })).toBeUndefined()
+  expect([...toasts, ...logs].some(one => one.includes('No dbt manifest at that path'))).toBe(false)
+  await ui.unmount()
+})
+
+test('a package repo: a model the answer names is followed in the package, so its SQL newer than the borrowed manifest is said', async ($, on) => {
+  const { clock } = await start($, on, { packageRepo: true, fileMtime: path => (path === FILE ? 5 : undefined) })
+  await $.turn.start({ text: 'how is revenue built?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'Revenue is summed in `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.press({ key: 'answer-model.shop.fct_orders' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a package repo reading integration_tests\' manifest: the package\'s own model is followed, not integration_tests\' model at the same path', async ($, on) => {
+  // integration_tests' own fct_orders, at the same project-relative path, listed first.
+  const manifest = {
+    ...MANIFEST,
+    nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes },
+  }
+  const { clock, notes } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The package's model has int_orders upstream; integration_tests' has nothing.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /int_orders/ })).toBeDefined()
+  await ui.unmount()
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+})
+
+test('a package repo: a file whose own node the manifest lacks is not taken for integration_tests\' model at its path', async ($, on) => {
+  // Only integration_tests' fct_orders sits at models/fct_orders.sql (the package's is new, not parsed yet).
+  const manifest = JSON.parse(JSON.stringify(MANIFEST).replaceAll('model.shop.fct_orders', 'model.shop_tests.fct_orders'))
+  const { clock, notes, calls } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(calls.some(one => one.startsWith('cli:impact_analysis'))).toBe(false)
+  expect(notes).toEqual([])
+})
+
+test('a package repo over 4 MiB: when the path finds integration_tests\' model, the package\'s own is looked up by its unique_id', async ($, on) => {
+  const asked: string[] = []
+  const cliGraph = (graph: any) => ({ ...graph, nodes: { ...graph.nodes, 'model.shop_tests.fct_orders': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop_tests.fct_orders' } } })
+  const { clock, notes } = await start($, on, {
+    packageRepo: true,
+    size: 6 * 1024 * 1024,
+    cliGraph,
+    cliModels: asked,
+    cliId: model => (model === 'model.shop.fct_orders' ? 'model.shop.fct_orders' : 'model.shop_tests.fct_orders'),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined),
+  })
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(asked).toContain('models/fct_orders.sql')
+  expect(asked).toContain('model.shop.fct_orders')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+})
+
+test('a package repo over 4 MiB: /lineage <name> that the CLI answers with integration_tests\' model shows the package\'s own', async ($, on) => {
+  const asked: string[] = []
+  const cliGraph = (graph: any) => ({ ...graph, nodes: { ...graph.nodes, 'model.shop_tests.fct_orders': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop_tests.fct_orders' } } })
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    size: 6 * 1024 * 1024,
+    cliGraph,
+    cliModels: asked,
+    cliId: model => (model === 'model.shop.fct_orders' ? 'model.shop.fct_orders' : 'model.shop_tests.fct_orders'),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined),
+  })
+  // By its name: the CLI's answer is integration_tests' model, so the package's own is asked for by its unique_id.
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(asked).toEqual(['fct_orders', 'model.shop.fct_orders'])
+})
+
+test('a package repo over 4 MiB: /lineage <name> whose package model is versioned shows that one, found by its file, not integration_tests\'', async ($, on) => {
+  const asked: string[] = []
+  const V1 = `${ROOT}/models/fct_orders_v1.sql`
+  const cliGraph = (graph: any) => ({
+    ...graph,
+    nodes: {
+      ...graph.nodes,
+      'model.shop_tests.fct_orders': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop_tests.fct_orders' },
+      'model.shop.fct_orders.v1': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop.fct_orders.v1', path: 'models/fct_orders_v1.sql' },
+    },
+  })
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    size: 6 * 1024 * 1024,
+    cliGraph,
+    cliModels: asked,
+    // No node is model.shop.fct_orders: the package's is versioned. Its file finds it.
+    cliId: model => (model === 'fct_orders' ? 'model.shop_tests.fct_orders' : model === 'models/fct_orders_v1.sql' ? 'model.shop.fct_orders.v1' : ''),
+    listed: ['models/fct_orders_v1.sql'],
+    // The package's file is newer than the manifest: said only when the package's own versioned node is shown.
+    fileMtime: path => (path === V1 ? 5 : undefined),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(asked).toEqual(['fct_orders', 'model.shop.fct_orders', 'snapshot.shop.fct_orders', 'models/fct_orders_v1.sql'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /fct_orders_v1\.sql changed after the manifest was written/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a package repo over 4 MiB: /lineage <path> that the CLI answers with integration_tests\' model looks the package\'s own up', async ($, on) => {
+  const asked: string[] = []
+  const cliGraph = (graph: any) => ({ ...graph, nodes: { ...graph.nodes, 'model.shop_tests.fct_orders': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop_tests.fct_orders' } } })
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    size: 6 * 1024 * 1024,
+    cliGraph,
+    cliModels: asked,
+    cliId: model => (model === 'model.shop.fct_orders' ? 'model.shop.fct_orders' : 'model.shop_tests.fct_orders'),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined),
+  })
+  await $.command.run({ command: 'lineage', args: 'models/fct_orders.sql', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(asked).toEqual(['models/fct_orders.sql', 'model.shop.fct_orders'])
+})
+
+test('a package repo: Read of a package file whose node the manifest lacks shows no model, not integration_tests\' at its path', async ($, on) => {
+  const manifest = JSON.parse(JSON.stringify(MANIFEST).replaceAll('model.shop.fct_orders', 'model.shop_tests.fct_orders'))
+  const { clock, calls } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(calls.some(one => one.includes('dbt_lineage'))).toBe(false)
+})
+
+test('a package repo: written-out paths name their own project\'s model each; a path no node has names nothing', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs, 'model.shop_tests.only_tests': { ...theirs, name: 'only_tests', original_file_path: 'models/only_tests.sql' } } }
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.turn.start({ text: 'which files?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'See `models/fct_orders.sql`, `integration_tests/models/fct_orders.sql` and `models/only_tests.sql`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  // models/only_tests.sql is no file of the package: integration_tests' only_tests is not taken for it.
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.only_tests' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo: a name the answer gives that integration_tests shares follows the package\'s own model (listed last)', async ($, on) => {
+  const manifest = {
+    ...MANIFEST,
+    // integration_tests' own fct_orders listed last, so a name map that keeps the last would take it.
+    nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} } },
+  }
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.turn.start({ text: 'how is revenue built?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'Revenue is summed in `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo: a name the answer gives that integration_tests shares follows the package\'s own model (listed first)', async ($, on) => {
+  const manifest = {
+    ...MANIFEST,
+    // integration_tests' own fct_orders listed first, so a name map that keeps the first would take it.
+    nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes },
+  }
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.turn.start({ text: 'how is revenue built?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'Revenue is summed in `fct_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo: an answer that writes out integration_tests\' path names integration_tests\' model, not the package\'s of that name', async ($, on) => {
+  const manifest = {
+    ...MANIFEST,
+    nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} } },
+  }
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.turn.start({ text: 'which test model?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'The check lives in `integration_tests/models/fct_orders.sql`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo: a shell read of a package file the manifest lacks is not followed by its name to integration_tests\' model', async ($, on) => {
+  const manifest = JSON.parse(JSON.stringify(MANIFEST).replaceAll('model.shop.fct_orders', 'model.shop_tests.fct_orders'))
+  const { clock, calls } = await start($, on, { packageRepo: true, manifest, present: [FILE], fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined), toolResult: () => ({ stdout: 'select 1' }) })
+  await $.tool.call({ tool: 'Bash', command: 'cat models/fct_orders.sql' } as any)
+  await clock.settle()
+  // integration_tests' fct_orders would be drawn, its columns asked of dbt_lineage.
+  expect(calls.some(one => one.includes('dbt_lineage'))).toBe(false)
+})
+
+test('a package repo: an absolute path names its own project\'s model, not the package\'s of the same file name', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const text = (path: string) => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined)
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: text })
+  await $.turn.start({ text: 'which file?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: `It is ${ROOT}/integration_tests/models/fct_orders.sql.`, durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo: a path written with backslashes names its own project\'s model, as with slashes', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const text = (path: string) => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined)
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: text })
+  await $.turn.start({ text: 'which file?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'It is integration_tests\\models\\fct_orders.sql.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo over 4 MiB: integration_tests\' path names none of the package\'s models, though the package has that file name', async ($, on) => {
+  const text = (path: string) => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined)
+  // The names come from the package's SQL files, which have a models/fct_orders.sql.
+  const { clock } = await start($, on, { packageRepo: true, size: 6 * 1024 * 1024, fileText: text, listed: ['models/fct_orders.sql'] })
+  await $.turn.start({ text: 'which file?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'It is integration_tests/models/fct_orders.sql.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+  // The package's own path, in the same answer shape, does name its model.
+  await $.turn.start({ text: 'which file?', turnId: 't2' } as any)
+  await $.turn.complete({ answer: 'It is models/fct_orders.sql.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't2' } as any)
+  await clock.settle()
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await again.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  await again.unmount()
+})
+
+test('a package repo with the pane on integration_tests: written-out paths are the session\'s, so each still names its own project\'s model', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    present: [`${ROOT}/integration_tests/models/fct_orders.sql`],
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/integration_tests/models/fct_orders.sql` })
+  await clock.settle()
+  await $.turn.start({ text: 'which files?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'See `models/fct_orders.sql` and `integration_tests/models/fct_orders.sql`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a package repo with the pane on integration_tests: /lineage <path> is the session\'s path, in the package', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    present: [`${ROOT}/integration_tests/models/fct_orders.sql`],
+    // The package's file is newer than the manifest: said only when the package's model is followed, in the package.
+    fileMtime: path => (path === FILE ? 5 : undefined),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: `${ROOT}/integration_tests/models/fct_orders.sql` })
+  await clock.settle()
+  for (const args of ['models/fct_orders.sql', 'models/fct_orders.sql.revenue']) {
+    await $.command.run({ command: 'lineage', args, origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+    await clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
+
+test('a package repo: a shell read through ../ from integration_tests still reads the manifest integration_tests writes', async ($, on) => {
+  const through = `${ROOT}/integration_tests/../models/fct_orders.sql`
+  const { clock, logs } = await start($, on, { packageRepo: true, present: [through, FILE], toolResult: () => ({ stdout: 'select 1' }) })
+  await $.tool.call({ tool: 'Bash', command: 'cd integration_tests && cat ../models/fct_orders.sql' } as any)
+  await clock.settle()
+  expect(logs.some(line => line.startsWith('lineage-pane · integration_tests/target/manifest.json · '))).toBe(true)
+})
+
+test('a package repo: integration_tests\' model reached from the package\'s pane is checked against integration_tests\' files', async ($, on) => {
+  const RUNNER_FILE = `${ROOT}/integration_tests/models/fct_orders_check.sql`
+  const theirs = { resource_type: 'model', name: 'fct_orders_check', original_file_path: 'models/fct_orders_check.sql', depends_on: { nodes: ['model.shop.fct_orders'] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders_check': theirs } }
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    // integration_tests' file is newer than the manifest: said only when its own project's file is the one checked.
+    fileMtime: path => (path === RUNNER_FILE ? 5 : undefined),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  await $.command.run({ command: 'lineage', args: 'model.shop_tests.fct_orders_check', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /fct_orders_check\.sql changed after the manifest was written/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a package repo: an answer that writes a unique_id names that node, not the package\'s model of the same name', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined) })
+  await $.turn.start({ text: 'which model?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'It is model.shop_tests.fct_orders.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo over 4 MiB: a unique_id written in an answer is kept as written, not read as its name', async ($, on) => {
+  const { clock } = await start($, on, { packageRepo: true, size: 6 * 1024 * 1024, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined) })
+  await $.turn.start({ text: 'which model?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'It is model.shop_tests.fct_orders.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
@@ -275,6 +673,9 @@ test('reading a model points the pane at it: the manifest graph, then its column
   expect(logs.some(line => line.startsWith('lineage-pane · target/manifest.json · ') && line.endsWith('offline'))).toBe(true)
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Wider than the pane, it opens as its ends: v picks the whole graph.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /GRAPH · manifest/ })).toBeDefined()
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
@@ -437,8 +838,8 @@ test('[c] picks a column and shows its reach; [d] unfolds downstream; a model in
   await clock.settle()
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  // The text lists: graph → ends only → folders → list.
-  for (let i = 0; i < 3; i++) await ui.press({ key: 'lineage-view' })
+  // The text lists: the whole graph (it opened as its ends, being wider than the pane) → ends only → folders → list.
+  for (let i = 0; i < 4; i++) await ui.press({ key: 'lineage-view' })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: /2 more models/ })).toBeDefined()
   await ui.press({ key: 'lineage-down' })
@@ -468,6 +869,10 @@ test('the graph view draws boxes a press follows; [v] cycles the views and [l] t
 
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /┏━+┓/ })).toBeDefined()
+  // Wider than the pane, it opens as its ends: v picks the whole graph, and then cycles the views.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /GRAPH · manifest/ })).toBeDefined()
   for (const title of [/ENDS ONLY · manifest/, /FOLDERS · manifest/, 'UPSTREAM · manifest', /GRAPH · manifest/]) {
     await ui.press({ key: 'lineage-view' })
     await clock.settle()
@@ -607,7 +1012,7 @@ test('a model whose SQL changed after the manifest was written says so; r keeps 
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const warning = /⚠ fct_orders\.sql changed after the manifest was written: run `dbt compile`, then r/
+  const warning = /⚠ fct_orders\.sql changed after the manifest was written: run `dbt compile`, then press r$/
   expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
   // r reads the same manifest again: still out of date.
   await ui.press({ key: 'lineage-refresh' })
@@ -658,7 +1063,8 @@ test('a graph too big for Claude Code to draw is shown as folders, saying why, n
   const { clock } = await start($, on, { manifest: { ...MANIFEST, nodes } })
   await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
   await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // A pane wide enough for the small graph below, so it is drawn whole rather than as its ends.
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 200 }, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /^FOLDERS · manifest/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /the whole graph is more than Claude Code can draw in a pane, so it is shown as folders/ })).toBeDefined()
   // A small graph (upstream of a report, away from the 600) is still drawn whole.
@@ -817,6 +1223,9 @@ test('a manifest over 4 MiB is read through altimate-code: the graph comes from 
   await clock.settle()
   expect(calls).toEqual(['tool:Read', 'cli:dbt_lineage:graph'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Wider than the pane, it opens as its ends: v picks the whole graph.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   expect(await ui.find({ type: 'Text', text: /GRAPH · altimate-code/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /5 direct · 1 transitive · 1 test ·/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /← int_orders\.revenue\s+Transformation/ })).toBeDefined()
@@ -876,6 +1285,32 @@ test('a result the MCP server left out for size is fetched again through the CLI
   expect(await ui.find({ type: 'Text', text: /read by 2 models · 1 dashboard(?!s)/ })).toBeDefined()
   await ui.unmount()
 })
+
+for (const [shape, result] of [
+  ['its text', { content: [{ type: 'text', text: JSON.stringify({ model_name: 'fct_orders', model_unique_id: 'model.shop.fct_orders' }) }] }],
+  ['structuredContent', { structuredContent: { model_name: 'fct_orders', model_unique_id: 'model.shop.fct_orders' } }],
+  ['a text report', { content: [{ type: 'text', text: 'Model: fct_orders\nID: model.shop.fct_orders' }] }],
+  ['a report cut for size', { content: [{ type: 'text', text: JSON.stringify({ report: 'Model: fct_orders\nID: model.shop.fct_orders', truncated: true }) }] }],
+] as const) {
+  test(`following Claude's own dbt_lineage call in a package repo follows the node it answered for (${shape}), in the package`, async ($, on) => {
+    const manifest = { ...MANIFEST, nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes } }
+    const { clock, logs } = await start($, on, {
+      packageRepo: true,
+      manifest,
+      // The package's file is newer than the manifest: said only when the package's own node, in the package, is followed.
+      fileMtime: path => (path === FILE ? 5 : undefined),
+      fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+      toolResult: () => result,
+    })
+    await $.tool.call({ tool: 'mcp__plugin_altimate-code_altimate-code__dbt_lineage', manifest_path: `${ROOT}/integration_tests/target/manifest.json`, model: 'fct_orders' } as any)
+    await clock.settle()
+    const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+    expect(await ui.find({ type: 'Text', text: /fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
+    await ui.unmount()
+    // The pane's project is the package, which borrows integration_tests' manifest: not integration_tests.
+    expect(logs.some(line => line.startsWith('lineage-pane · integration_tests/target/manifest.json · '))).toBe(true)
+  })
+}
 
 test("following Claude's own dbt_lineage call uses the manifest it named", async ($, on) => {
   const { clock } = await start($, on)
@@ -1241,6 +1676,9 @@ test('the graph is one canvas with every level and whole names; h and l pan it, 
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/${name(3)}.sql` })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 60 }, surface: 'terminal' })
+  // Wider than the pane, it opens as its ends; v shows the whole graph.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   const range = async () => /columns (\d+)–(\d+) of (\d+)/.exec((await ui.find({ type: 'Text', text: /columns \d+–\d+ of \d+/ }))!.text!)!.slice(1).map(Number)
   const [start1, , total] = await range()
   // Centred on the model, whose name is drawn whole; never a fold or a cut.
@@ -1278,6 +1716,8 @@ test('every parent is drawn, no "+N more", each followable after panning to it',
   await $.tool.call({ tool: 'Read', file_path: `${ROOT}/models/${long('focus')}.sql` })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 120 }, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   expect(await ui.find({ type: 'Button', text: /\+\d+ more/ })).toBeUndefined()
   // The parents sit left of the model: pan there.
   for (let i = 0; i < 10; i++) await ui.press({ key: 'lineage-pan-left' })
@@ -1751,6 +2191,9 @@ test("a press on a graph box asks for warehouse lineage; the pane following Clau
   await clock.settle()
   expect(calls).not.toContain('mcp:table_lineage')
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // Wider than the pane, it opens as its ends: v picks the whole graph.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
   const box = await ui.find({ type: 'Button', text: /int_orders/ })
   await ui.press({ key: box!.key! })
   await clock.settle()
@@ -1907,4 +2350,246 @@ optionTest('show_edit_impact also shows the per-edit impact note to the person',
   await clock.settle()
   expect(debug).toContain(NOTE)
   expect(logs).toContain(NOTE)
+})
+
+optionTest('a model a shell command rewrites gets the per-edit impact note too, to Claude and the person', { show_edit_impact: true }, async ($, on) => {
+  const before = 'select sum(amount) as revenue from orders'
+  let text = before
+  let changed = 1
+  const { clock, logs, debug } = await start($, on, {
+    fileText: path => (path === FILE ? text : undefined),
+    fileMtime: path => (path === FILE ? changed : undefined),
+    // find lists the files changed in the last minute; git has the model's text from the last commit.
+    shell: argv => (argv[0] === 'find' ? { exitCode: 0, stdout: changed > 1 ? `${FILE}\n` : '' } : argv[0] === 'git' && argv[3] === 'rev-parse' ? { exitCode: 0, stdout: `${ROOT}\n` } : argv[0] === 'git' && argv[3] === 'show' ? { exitCode: 0, stdout: before } : undefined),
+    toolResult: e => {
+      // The command rewrites the model, as `python3 -c` or `sed -i` does.
+      if (e.tool === 'Bash') {
+        text = 'select sum(amount) - sum(refunds) as revenue from orders'
+        changed = Number.MAX_SAFE_INTEGER
+      }
+      return undefined
+    },
+  })
+  const result: any = await $.tool.call({ tool: 'Bash', command: `python3 -c "import pathlib; p = pathlib.Path('models/fct_orders.sql'); p.write_text(p.read_text().replace('sum(amount)', 'sum(amount) - sum(refunds)'))"` })
+  await clock.settle()
+  expect(debug).toContain(NOTE)
+  expect(logs).toContain(NOTE)
+  expect(result.context?.some((one: string) => one.startsWith("Altimate lineage for 'fct_orders.revenue'") || one.startsWith('Altimate lineage for fct_orders.revenue'))).toBe(true)
+  // A command that reads a model changes nothing: no note.
+  const read: any = await $.tool.call({ tool: 'Bash', command: 'cat models/fct_orders.sql' })
+  await clock.settle()
+  expect((read.context ?? []).some((one: string) => one.startsWith('Altimate lineage for'))).toBe(false)
+})
+
+test('the pane moves to the model being edited as the edit starts, before the edit lands', async ($, on) => {
+  let release!: () => void
+  const until = new Promise<void>(resolve => (release = resolve))
+  let ran = false
+  const { clock } = await start($, on, {
+    holdReach: { column: 'revenue', until },
+    toolResult: e => {
+      if (e.tool === 'Edit') ran = true
+      return undefined
+    },
+  })
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pane.find({ type: 'Text', text: /fct_orders/ })).toBeUndefined()
+  const edit = $.tool.call(EDIT)
+  // The edit is held while its impact lookup runs: the pane already shows the model being edited.
+  for (let i = 0; i < 10; i++) await clock.advance(100)
+  expect(ran).toBe(false)
+  expect(await pane.find({ type: 'Text', text: /fct_orders/ })).toBeDefined()
+  release()
+  await edit
+  await clock.settle()
+  await pane.unmount()
+})
+
+test('a graph wider than the pane opens as its ends, which fit, with its dashboards named; v shows the whole graph', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, props: { ...PANE.props, bodyColumns: 50 }, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^ENDS ONLY/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /wider than the pane: ends only · v for the whole graph/ })).toBeDefined()
+  // No window onto a wider canvas: nothing runs off the right.
+  expect(await ui.find({ type: 'Text', text: /columns \d+–\d+ of \d+/ })).toBeUndefined()
+  // The dashboard is in view: drawn as a box, or named under the drawing.
+  const drawn = await ui.find({ type: 'Button', text: /Exec Revenue/ })
+  const named = await ui.find({ type: 'Text', text: /dashboard.* downstream.*Exec Revenue/ })
+  expect(drawn ?? named).toBeDefined()
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /^GRAPH/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /columns \d+–\d+ of \d+/ })).toBeDefined()
+  // Whatever the window shows, the dashboards stay named.
+  expect((await ui.find({ type: 'Button', text: /Exec Revenue/ })) ?? (await ui.find({ type: 'Text', text: /Exec Revenue/ }))).toBeDefined()
+  await ui.unmount()
+})
+
+test('a shell command that runs past a minute still has the model it changed found: the search covers its whole run', async ($, on) => {
+  const finds: string[][] = []
+  let clockRef: any
+  const { clock } = await start($, on, {
+    shell: argv => {
+      if (argv[0] === 'find') finds.push([...argv])
+      return argv[0] === 'find' ? { exitCode: 0, stdout: '' } : undefined
+    },
+    duringTool: async () => void (await clockRef.advance(70_000)),
+  })
+  clockRef = clock
+  await $.tool.call({ tool: 'Bash', command: "sed -i 's/a/b/' models/fct_orders.sql && sleep 70" })
+  await clock.settle()
+  expect(finds.at(-1)).toContain('-mmin')
+  expect(finds.at(-1)![finds.at(-1)!.indexOf('-mmin') + 1]).toBe('-2')
+})
+
+test('a shell command in a session opened above its dbt project looks for changed models in the projects below', async ($, on) => {
+  const finds: string[][] = []
+  const { clock } = await start($, on, {
+    noRootProject: true,
+    sqlFiles: { 'analytics/dbt_project.yml': "name: 'shop'\n", 'analytics/models/orders.sql': 'select 1' },
+    shell: argv => {
+      if (argv[0] === 'find') finds.push([...argv])
+      return argv[0] === 'find' ? { exitCode: 0, stdout: '' } : undefined
+    },
+  })
+  await $.tool.call({ tool: 'Bash', command: "python3 -c \"print('rewrite')\"" })
+  await clock.settle()
+  expect(finds.at(-1)?.[1]).toBe(`${ROOT}/analytics/models`)
+})
+
+test('a shell command in a dbt project also looks in the projects below it', async ($, on) => {
+  const finds: string[][] = []
+  const { clock } = await start($, on, {
+    sqlFiles: { 'models/orders.sql': 'select 1', 'analytics/dbt_project.yml': "name: 'inner'\n", 'analytics/models/x.sql': 'select 1' },
+    shell: argv => {
+      if (argv[0] === 'find') finds.push([...argv])
+      return argv[0] === 'find' ? { exitCode: 0, stdout: '' } : undefined
+    },
+  })
+  await $.tool.call({ tool: 'Bash', command: "python3 -c \"print('rewrite')\"" })
+  await clock.settle()
+  expect(finds.map(one => one[1])).toEqual([`${ROOT}/models`, `${ROOT}/analytics/models`])
+})
+
+test('a shell command that fails after rewriting a model (python3 … && dbt test) still gets the impact note', async ($, on) => {
+  const before = 'select sum(amount) as revenue from orders'
+  let text = before
+  let changed = 1
+  const { clock } = await start($, on, {
+    fileText: path => (path === FILE ? text : undefined),
+    fileMtime: path => (path === FILE ? changed : undefined),
+    shell: argv => (argv[0] === 'find' ? { exitCode: 0, stdout: changed > 1 ? `${FILE}\n` : '' } : argv[0] === 'git' && argv[3] === 'rev-parse' ? { exitCode: 0, stdout: `${ROOT}\n` } : argv[0] === 'git' && argv[3] === 'show' ? { exitCode: 0, stdout: before } : undefined),
+    toolResult: e => {
+      if (e.tool !== 'Bash') return undefined
+      text = 'select sum(amount) - sum(refunds) as revenue from orders'
+      changed = Number.MAX_SAFE_INTEGER
+      return { isError: true, text: 'dbt test: 1 failure' }
+    },
+  })
+  const result: any = await $.tool.call({ tool: 'Bash', command: `python3 rewrite.py models/fct_orders.sql && dbt test` })
+  await clock.settle()
+  expect(result.context?.some((one: string) => one.startsWith('Altimate lineage for'))).toBe(true)
+})
+
+test('the log line for a column one model reads says "1 model", not "1 models"', async ($, on) => {
+  const one = { ...REACH, column_reach: { ...REACH.column_reach, models: [REACH.column_reach.models[0]] } }
+  const { clock, logs } = await start($, on, { reach: one })
+  await $.command.run({ command: 'lineage', args: 'fct_orders.revenue', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 120 } } as any)
+  await clock.settle()
+  expect(logs.some(line => line.endsWith('impact_analysis(fct_orders, column: revenue) · read by 1 model'))).toBe(true)
+})
+
+test("a schema.yml edited after the manifest was written says so: the pane's test count comes from it", async ($, on) => {
+  const YML = 'models/marts/schema.yml'
+  const nodes: Record<string, any> = { ...MANIFEST.nodes, 'model.shop.fct_orders': { ...(MANIFEST.nodes as any)['model.shop.fct_orders'], patch_path: `shop://${YML}` } }
+  let ymlMtime = 1
+  const { clock } = await start($, on, { manifest: { ...MANIFEST, nodes }, mtime: () => 2, fileMtime: path => (path === `${ROOT}/${YML}` ? ymlMtime : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then press r$/
+  expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
+  // Claude removes the model's tests from its schema.yml.
+  ymlMtime = 5
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/${YML}`, old_string: 'tests:', new_string: '' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a schema.yml deleted after the manifest was written says so: the pane's tests came from it", async ($, on) => {
+  const YML = 'models/marts/schema.yml'
+  const nodes: Record<string, any> = { ...MANIFEST.nodes, 'model.shop.fct_orders': { ...(MANIFEST.nodes as any)['model.shop.fct_orders'], patch_path: `shop://${YML}` } }
+  let deleted = false
+  const { clock } = await start($, on, { manifest: { ...MANIFEST, nodes }, mtime: () => 2, fileMtime: path => (path === `${ROOT}/${YML}` ? 1 : undefined), missing: path => deleted && path === `${ROOT}/${YML}`, toolResult: () => ({ stdout: '' }) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const warning = /⚠ schema\.yml was removed after the manifest was written: run `dbt parse`, then press r$/
+  expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
+  deleted = true
+  await $.tool.call({ tool: 'Bash', command: `rm ${YML}` } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a follow that finds its node\'s project after a newer follow claimed the pane leaves the newer one shown', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders_check', original_file_path: 'models/fct_orders_check.sql', depends_on: { nodes: ['model.shop.fct_orders'] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders_check': theirs } }
+  // The older follow pauses where it looks for its node's project (integration_tests' local packages).
+  let release: () => void = () => {}
+  const until = new Promise<void>(resolve => (release = resolve))
+  let armed = false
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+    holdRead: path => (armed && path === `${ROOT}/integration_tests/dependencies.yml` ? until : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  armed = true
+  const older = $.command.run({ command: 'lineage', args: 'model.shop_tests.fct_orders_check', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  armed = false
+  await $.command.run({ command: 'lineage', args: 'int_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  release()
+  await older
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders_check/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test("a manifest over 4 MiB: the schema.yml altimate-code's graph names is checked too", async ($, on) => {
+  const YML = 'models/marts/schema.yml'
+  let ymlMtime = 1
+  const cliGraph = (graph: any) => ({ ...graph, nodes: { ...graph.nodes, 'model.shop.fct_orders': { ...graph.nodes['model.shop.fct_orders'], yml: YML } } })
+  const { clock } = await start($, on, { size: 6 * 1024 * 1024, cliGraph, mtime: () => 2, fileMtime: path => (path === `${ROOT}/${YML}` ? ymlMtime : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then press r$/
+  expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
+  ymlMtime = 5
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/${YML}`, old_string: 'tests:', new_string: '' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the pane\'s key hints wrap in a narrow pane instead of squeezing the last ones a letter a line', async ($, on) => {
+  const { clock } = await start($, on)
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const keys: any = await ui.find({ key: 'lineage-keys' })
+  expect(keys?.props).toMatchObject({ flexDirection: 'row', flexWrap: 'wrap' })
+  expect(await ui.find({ key: 'lineage-ask' })).toBeDefined()
+  await ui.unmount()
 })
