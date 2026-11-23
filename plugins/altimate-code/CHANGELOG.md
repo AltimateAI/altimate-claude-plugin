@@ -20,6 +20,7 @@ All notable changes to this plugin will be documented in this file.
 - `/scan-cost` with no model keeps the planner label of the last Snowflake or Databricks estimate ("Snowflake plan estimate").
 
 ### Added
+- The README documents the cost check, project health, team comments, `/runs`, `/profile-ctes`, `/sql-graph`, `/to-model`, `/defer` and `/target`, and `/propagate`, lists the hooks module among the components, and says those need altimate-code 0.12.12 (the release with the dbt Power User tools they call) while the plugin itself runs from 0.12.11.
 - The README explains `altimate-dbt`, the dbt command line that comes with altimate-code, what the agent uses it for, and that you do not need to run it.
 
 ## [1.8.2] — 2026-11-19
