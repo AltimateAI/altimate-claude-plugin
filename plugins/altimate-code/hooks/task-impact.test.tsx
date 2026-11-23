@@ -3,14 +3,15 @@ import { expect, mock, test } from 'claude-code/testing'
 import { MIN_ALTIMATE_CODE } from './altimate-cli'
 import { DOWN, UP, embedded } from './impact-report.test'
 import { nothingToReport } from './inert-features'
+import { TUVA_MEDICAL_CLAIM_SQL, TUVA_MODEL_LEVEL, TUVA_PAID_AMOUNT } from './tuva-answer.fixture'
 
 const ROOT = '/repo'
 const MANIFEST = `${ROOT}/target/manifest.json`
 // The manifest copies carry the session's id: read from the copy the task start made.
 let RUNS: string[][] = []
-const tag = () => RUNS.map(one => (one[0] === 'cp' ? /\/manifest-before\.([^/]+)\.json$/.exec(one[2] ?? '')?.[1] : undefined)).find(Boolean) ?? ''
-const snapshot = () => `${ROOT}/target/.altimate-lineage/manifest-before.${tag()}.json`
-const frozen = () => `${ROOT}/target/.altimate-lineage/task-manifest.${tag()}.json`
+const tag = () => RUNS.map(one => (one[0] === 'cp' ? /\/\.altimate-manifest-before\.([^/]+)\.json$/.exec(one[2] ?? '')?.[1] : undefined)).find(Boolean) ?? ''
+const snapshot = () => `${ROOT}/target/.altimate-manifest-before.${tag()}.json`
+const frozen = () => `${ROOT}/target/.altimate-task-manifest.${tag()}.json`
 const TASK_FILE = `${ROOT}/target/.altimate-lineage/last-task.json`
 const REPORT = `${ROOT}/target/.altimate-lineage/report.html`
 const MODEL = `${ROOT}/models/fct_orders.sql`
@@ -37,6 +38,10 @@ type Options = {
   /** HEAD's text per project-relative path. */
   head?: Record<string, string>
   noManifest?: boolean
+  /** More files from the start, by absolute path (a project below that the session start already sees). */
+  extra?: Record<string, string>
+  /** Files small enough for the plugin to read itself (a manifest under 4 MiB). */
+  small?: string[]
   /** Other paths that exist, such as Windows' explorer.exe under /mnt/c. */
   present?: string[]
   /** target/manifest.json has gone since the start. */
@@ -49,8 +54,9 @@ type Options = {
   conversation?: () => number
   turns?: () => number
   /** The CLI's whole answer for a call, in place of the usual one. */
-  answer?: (args: Record<string, any>) => { status: string; output: string; metadata: Record<string, unknown> } | undefined
+  answer?: (args: Record<string, any>) => Answer | undefined | Promise<Answer | undefined>
 }
+type Answer = { status: string; output: string; metadata: Record<string, unknown> }
 
 /**
  * A dbt project at /repo in a git repo, its files held in memory (edits apply to them), altimate-code
@@ -58,12 +64,15 @@ type Options = {
  */
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
+  // Every path read, in order.
+  const reads: string[] = []
   const files: Record<string, string> = {
     [`${ROOT}/dbt_project.yml`]: "name: 'shop'\nmodel-paths: ['models']\n",
     [MODEL]: ORDERS_SQL,
     [STAGING]: PAYMENTS_SQL,
     [MACRO]: '{% macro cents(x) %}{{ x }} / 100{% endmacro %}',
     [SNAPSHOT_SQL]: '{% snapshot orders_snap %}select id, status from orders{% endsnapshot %}',
+    ...options.extra,
   }
   const runs: string[][] = []
   const tools: Record<string, any>[] = []
@@ -97,7 +106,7 @@ async function start($: any, on: any, options: Options = {}) {
   }))
   on('fs.stat', (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST && options.noManifest) throw new Error('ENOENT')
-    return { value: { kind: 'file', size: 50 * 1024 * 1024, mtimeMs: 1, isLink: false } }
+    return { value: { kind: 'file', size: options.small?.some(one => e.path === one || e.path.startsWith(one.replace(/manifest\.json$/, '.altimate-'))) ? 2_000 : 50 * 1024 * 1024, mtimeMs: 1, isLink: false } }
   })
   // What sits directly in a folder of the held files: a manifest over 4 MiB leaves the names to the SQL files.
   on('fs.list', (_: unknown, e: { path: string }) => {
@@ -110,6 +119,7 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
+    reads.push(e.path)
     if (e.path === MANIFEST) throw new Error('over 4 MiB')
     if (e.path in files) return { value: files[e.path] }
     if (writes.has(e.path)) return { value: writes.get(e.path) }
@@ -139,7 +149,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('session.id', () => ({ value: 'a1b2c3d4-0000-4000-8000-000000000001' }))
   on('session.usage', () => ({ value: { startedAt: options.conversation?.() ?? 1_000 } }))
   on('session.turns', () => ({ value: options.turns?.() ?? 1 }))
-  on('process.run', (_: unknown, e: { argv: readonly string[] }) => {
+  on('process.run', async (_: unknown, e: { argv: readonly string[] }) => {
     const argv = [...e.argv]
     const inert = nothingToReport(argv)
     if (inert) return { value: inert }
@@ -150,7 +160,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin === 'altimate') {
       const args = JSON.parse(String(argv[argv.indexOf('--args') + 1] ?? '{}'))
       if (options.cliFails) return { value: { exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'no', metadata: {} }), stderr: '' } }
-      const own = options.answer?.(args)
+      const own = await options.answer?.(args)
       if (own) {
         tools.push(args)
         return ok(JSON.stringify(own))
@@ -160,11 +170,13 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin === 'mkdir') return ok()
     if (bin === 'cp') {
       copies.add(argv[2]!)
+      if (argv[1]! in files) files[argv[2]!] = files[argv[1]!]!
       return ok()
     }
     if (bin === 'mv') {
       copies.delete(argv[2]!)
       copies.add(argv[3]!)
+      if (argv[2]! in files) files[argv[3]!] = files[argv[2]!]!
       return ok()
     }
     if (bin === 'rm') {
@@ -208,17 +220,18 @@ async function start($: any, on: any, options: Options = {}) {
     await clock.settle()
   }
   RUNS = runs
-  return { clock, files, runs, tools, writes, logs, toasts, copies, dialogs, mcpAsked, turn }
+  return { clock, files, runs, tools, writes, logs, toasts, copies, dialogs, mcpAsked, turn, reads }
 }
 
 const directional = (tools: Record<string, any>[]) => tools.filter(one => one.direction)
 
-test('a task start copies the manifest aside, never reading it', async ($, on) => {
+test('a task start copies the manifest aside, never reading it, in target/ itself so altimate-code finds the project above it', async ($, on) => {
   const { runs, turn } = await start($, on)
   await turn('t1', async () => {})
-  expect(runs).toContainEqual(['mkdir', '-p', `${ROOT}/target/.altimate-lineage`])
   expect(runs).toContainEqual(['cp', MANIFEST, snapshot()])
-  expect(runs.findIndex(one => one[0] === 'mkdir')).toBeLessThan(runs.findIndex(one => one[0] === 'cp'))
+  // altimate-code takes the folder above the manifest's as the project (a seed's CSV header): a copy one folder
+  // deeper traced nothing through a `select *` from a seed.
+  expect(snapshot().replace(/\/[^/]+$/, '')).toBe(`${ROOT}/target`)
 })
 
 test("each session's manifest copies carry its id, so another session's task never replaces them; a task's end clears copies a day old", async ($, on) => {
@@ -236,7 +249,9 @@ test("each session's manifest copies carry its id, so another session's task nev
   expect(runs).toContainEqual(['mv', '-f', snapshot(), frozen()])
   expect(directional(tools).every(one => one.manifest_path === frozen())).toBe(true)
   const clear = runs.findIndex(one => one[0] === 'find')
-  expect(runs[clear]).toEqual(['find', `${ROOT}/target/.altimate-lineage`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', '+1440', '-delete'])
+  expect(runs[clear]).toEqual(['find', `${ROOT}/target`, '-maxdepth', '1', '-name', '.altimate-*manifest*.json', '-mmin', '+1440', '-delete'])
+  // Copies an older version kept below target/.altimate-lineage go too.
+  expect(runs[clear + 1]).toEqual(['find', `${ROOT}/target/.altimate-lineage`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', '+1440', '-delete'])
   expect(clear).toBeLessThan(runs.findIndex(one => one[0] === 'mv'))
 })
 
@@ -516,7 +531,7 @@ test('a change to no output column falls back to the model-level count', async (
   expect(directional(tools)).toEqual([{ manifest_path: frozen(), model: 'stg_payments', change_type: 'modify', direction: 'downstream' }])
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: 'stg_payments · 6 downstream models at model level' })).toBeDefined()
-  expect(await band.find({ type: 'Text', text: '  no output column changed: the model-level count stands' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: '  values may change downstream; the model-level count stands' })).toBeDefined()
   await band.unmount()
   await $.command.run({ command: 'lineage-report', args: '' } as any)
   expect(embedded(writes.get(REPORT)!).focuses[0]).toMatchObject({ model: 'stg_payments', column: null, modelLevel: 6 })
@@ -767,6 +782,83 @@ test('a column the queried manifest does not know is not shown as 0, even when t
   await band.unmount()
 })
 
+test('/lineage-report <model>.<column> on a package repo asks for the package\'s model by its unique_id, and for a name only integration_tests has as it is', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const { tools } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    openers: { 'xdg-open': 0 },
+    extra: { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' },
+    // The package has no model named only_tests: the CLI says so for its unique_id.
+    answer: args => (args.model === 'model.shop.only_tests' ? { status: 'ok', output: 'Model "model.shop.only_tests" not found in manifest.', metadata: { success: false } } : undefined),
+  })
+  await $.command.run({ command: 'lineage-report', args: 'fct_orders.revenue' } as any)
+  expect(tools.filter(one => one.direction).map(one => one.model)).toEqual(['model.shop.fct_orders', 'model.shop.fct_orders'])
+  tools.length = 0
+  await $.command.run({ command: 'lineage-report', args: 'only_tests.revenue' } as any)
+  expect(tools.filter(one => one.direction && one.model === 'only_tests').length).toBe(2)
+})
+
+test('a package repo with a manifest small enough to read: each project\'s changed model, versioned or not, is asked for by its own unique_id', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const TEST_MODEL = `${RUNNER}/models/fct_orders.sql`
+  const node = (id: string, path: string, name = 'fct_orders') => ({ unique_id: id, resource_type: 'model', name, original_file_path: path, depends_on: { nodes: [] }, config: {}, columns: {} })
+  // The package's fct_orders is versioned; integration_tests has a fct_orders of its own.
+  const manifest = { nodes: { 'model.shop_tests.fct_orders': node('model.shop_tests.fct_orders', 'models/fct_orders.sql'), 'model.shop.fct_orders.v1': { ...node('model.shop.fct_orders.v1', 'models/fct_orders.sql'), version: 1 } }, sources: {}, exposures: {}, parent_map: {}, child_map: {} }
+  const { turn, tools, copies } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    small: [THEIRS],
+    openers: { 'xdg-open': 0 },
+    extra: {
+      [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\nmodel-paths: ['models']\n",
+      [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n',
+      [THEIRS]: JSON.stringify(manifest),
+      [TEST_MODEL]: 'select\n  order_id,\n  revenue as checked\nfrom {{ ref("fct_orders") }}\n',
+    },
+  })
+  void copies
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+    await $.tool.call({ tool: 'Edit', file_path: TEST_MODEL, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+    // A package model the manifest does not have yet: by the package's id, never the name integration_tests may answer to.
+    await $.tool.call({ tool: 'Write', file_path: `${ROOT}/models/fresh.sql`, content: 'select 1 as order_id\n' })
+  })
+  const models = new Set(tools.filter(one => one.direction === 'downstream' && one.column).map(one => `${one.model}:${one.column}`))
+  expect(models).toEqual(new Set(['model.shop.fct_orders.v1:revenue', 'model.shop_tests.fct_orders:checked', 'model.shop.fresh:order_id']))
+  tools.length = 0
+  await $.command.run({ command: 'lineage-report', args: 'fct_orders.revenue' } as any)
+  expect(tools.filter(one => one.direction).map(one => one.model)).toEqual(['model.shop.fct_orders.v1', 'model.shop.fct_orders.v1'])
+})
+
+test('a task\'s report traces each of two same-named models, the package\'s and integration_tests\', with its own id both ways', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const TEST_MODEL = `${RUNNER}/models/fct_orders.sql`
+  const { turn, tools, clock } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    openers: { 'xdg-open': 0 },
+    extra: {
+      [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\nmodel-paths: ['models']\n",
+      [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n',
+      [TEST_MODEL]: 'select\n  order_id,\n  revenue as checked\nfrom {{ ref("fct_orders") }}\n',
+    },
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+    await $.tool.call({ tool: 'Edit', file_path: TEST_MODEL, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+  })
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'lineage-report-open' })
+  await clock.settle()
+  await band.unmount()
+  const up = new Set(tools.filter(one => one.direction === 'upstream').map(one => `${one.model}:${one.column}`))
+  expect(up).toEqual(new Set(['model.shop.fct_orders:revenue', 'model.shop_tests.fct_orders:checked']))
+})
+
 test('/lineage-report on a column the manifest answers without reaching is a plain error, never a report that it reaches 0', async ($, on) => {
   const { runs, writes } = await start($, on, { openers: { 'xdg-open': 0 }, impact: args => (args.column ? { model: 'fct_orders', column_answer: NOT_IN_MANIFEST(args.column) } : {}) })
   const shown: any = await $.command.run({ command: 'lineage-report', args: 'fct_orders.fresh' } as any)
@@ -965,4 +1057,217 @@ test('a model the task created, which the manifest from before it lacks, has its
   expect(line).toContain('region_revenue')
   expect(line).toContain('region  not in the manifest from before the task (new in it?): its reach is unknown, not zero')
   expect(line).not.toContain('update altimate-code')
+})
+
+test('a value change names the columns the manifest has that reach downstream; one that reaches nothing is left out, never shown as 0', async ($, on) => {
+  const answerFor = (column: string, reach: number) => ({
+    status: 'ok',
+    output: 'Impact',
+    metadata: {
+      model_level: 2,
+      column_answer: {
+        version: 1, focus: { model: 'model.shop.fct_orders', column }, direction: 'downstream',
+        nodes: [{ id: 'model.shop.fct_orders', name: 'fct_orders' }, { id: 'model.shop.rpt', name: 'rpt' }],
+        columns: [{ model: 0, column, hop: 0 }, ...(reach ? [{ model: 1, column, hop: 1, end: true }] : [])],
+        counts: { columns: reach, models: reach ? 1 : 0, ends: reach, hops: reach ? 1 : 0, may_carry_models: 0, model_level: 2 },
+        unresolved: [], may_carry: [],
+      },
+    },
+  })
+  const { turn, clock } = await start($, on, {
+    answer: args => (args.direction === 'downstream' && args.column ? answerFor(args.column, args.column === 'total_amount' ? 1 : 0) : undefined),
+  })
+  const sql = (expr: string) => `{% set cols %}\npaid_amount,\nunits,\n${expr} as total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}`
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: MODEL, content: sql('paid_amount + units') })
+  })
+  await turn('t2', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'paid_amount + units as', new_string: 'paid_amount + units * 2 as' })
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /values may change in total_amount → reaches 1 column in 1 model/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /values may change in (paid_amount|units)/ })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: /reaches 0 column/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('value changes in two models: each model keeps up to three traced, so a second model\'s is not dropped by the first\'s', async ($, on) => {
+  const answerFor = (model: string, column: string) => ({
+    status: 'ok',
+    output: 'Impact',
+    metadata: {
+      model_level: 2,
+      column_answer: {
+        version: 1, focus: { model: `model.shop.${model}`, column }, direction: 'downstream',
+        nodes: [{ id: `model.shop.${model}`, name: model }, { id: 'model.shop.rpt', name: 'rpt' }],
+        columns: [{ model: 0, column, hop: 0 }, { model: 1, column, hop: 1, end: true }],
+        counts: { columns: 1, models: 1, ends: 1, hops: 1, may_carry_models: 0, model_level: 2 },
+        unresolved: [], may_carry: [],
+      },
+    },
+  })
+  const { turn, logs } = await start($, on, { answer: args => (args.direction === 'downstream' && args.column ? answerFor(args.model, args.column) : undefined) })
+  const sql = (expr: string) => `{% set cols %}\npaid_amount,\nunits,\n${expr} as total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}`
+  const other = (expr: string) => `{% set cols %}\n${expr} as fee\n{% endset %}\nselect {{ cols }} from {{ ref('y') }}`
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: MODEL, content: sql('paid_amount + units') })
+    await $.tool.call({ tool: 'Write', file_path: STAGING, content: other('base_fee') })
+  })
+  await turn('t2', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'paid_amount + units as', new_string: 'paid_amount * 2 + units * 3 + discount as' })
+    await $.tool.call({ tool: 'Edit', file_path: STAGING, old_string: 'base_fee as', new_string: 'base_fee * 2 as' })
+  })
+  const line = logs.filter(one => one.startsWith('◆ Lineage after this task')).at(-1)!
+  // Three for fct_orders (its four names capped), two for stg_payments.
+  expect(line.match(/values may change in \w+ → reaches/g)?.length).toBe(5)
+  expect(line).toMatch(/stg_payments .*values may change in (base_fee|fee) → reaches 1 column/)
+})
+
+test('a value change on Tuva: the band says tracing until the trace answers, never that the model-level count stands, then the reach impact-first gave', async ($, on) => {
+  const CLAIM = `${ROOT}/models/core/final/core__medical_claim.sql`
+  let release!: () => void
+  const held = new Promise<void>(resolve => (release = resolve))
+  const ok = (metadata: Record<string, unknown>) => ({ status: 'ok', output: 'Impact', metadata })
+  const { files, clock } = await start($, on, {
+    answer: async args => {
+      if (args.model !== 'core__medical_claim' || !args.direction) return undefined
+      if (!args.column) return ok(TUVA_MODEL_LEVEL)
+      if (args.column !== 'paid_amount') return ok({ ...TUVA_MODEL_LEVEL, column_answer_error: `no column ${args.column}` })
+      await held
+      return ok(TUVA_PAID_AMOUNT)
+    },
+  })
+  files[CLAIM] = TUVA_MEDICAL_CLAIM_SQL
+  await $.turn.start({ text: 'treat negative paid_amount as 0', turnId: 't1' })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: CLAIM, old_string: '    , med.paid_amount\n', new_string: '    , case when med.paid_amount < 0 then 0 else med.paid_amount end as paid_amount\n' })
+  await clock.settle()
+  await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  // While paid_amount is traced: no line that reads as the answer.
+  expect(await band.find({ type: 'Text', text: /model-level count stands/ })).toBeUndefined()
+  expect(await band.find({ type: 'Text', text: '  tracing…' })).toBeDefined()
+  release()
+  await clock.settle()
+  expect(await band.find({ type: 'Text', text: 'core__medical_claim · 97 downstream models at model level' })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /^  values may change in paid_amount → reaches 124 columns in 13 models/ })).toBeDefined()
+  expect(await band.find({ type: 'Text', text: /model-level count stands/ })).toBeUndefined()
+  await band.unmount()
+})
+
+test('a task changing many models of one project reads what their unique_ids are judged by once, not once per model', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const node = (id: string, path: string, name: string) => ({ unique_id: id, resource_type: 'model', name, original_file_path: path, depends_on: { nodes: [] }, config: {}, columns: {} })
+  const names = ['check_a', 'check_b', 'check_c']
+  const manifest = { nodes: Object.fromEntries(names.map(name => [`model.shop_tests.${name}`, node(`model.shop_tests.${name}`, `models/${name}.sql`, name)])), sources: {}, exposures: {}, parent_map: {}, child_map: {} }
+  const { turn, tools, reads } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    small: [THEIRS],
+    openers: { 'xdg-open': 0 },
+    extra: {
+      [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\nmodel-paths: ['models']\n",
+      [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n',
+      [THEIRS]: JSON.stringify(manifest),
+      ...Object.fromEntries(names.map(name => [`${RUNNER}/models/${name}.sql`, 'select\n  order_id,\n  revenue as checked\nfrom {{ ref("fct_orders") }}\n'])),
+    },
+  })
+  await turn('t1', async () => {
+    for (const name of names) await $.tool.call({ tool: 'Edit', file_path: `${RUNNER}/models/${name}.sql`, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+  })
+  expect(new Set(tools.filter(one => one.direction === 'downstream' && one.column).map(one => one.model))).toEqual(new Set(names.map(name => `model.shop_tests.${name}`)))
+  // One read by the search for the project that installs the package, one by the task's changes.
+  expect(reads.filter(path => path === `${RUNNER}/dependencies.yml`).length).toBe(2)
+})
+
+test('a package repo with no manifest of its own: the band reads the manifest integration_tests writes, its copy beside it', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const { turn, runs, tools } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    extra: { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' },
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const copy = runs.find(one => one[0] === 'cp')
+  expect(copy?.slice(1, 2)).toEqual([THEIRS])
+  expect(copy?.[2]?.startsWith(`${RUNNER}/target/.altimate-manifest-before.`)).toBe(true)
+  const asked = tools.filter(one => one.direction === 'downstream' && one.column === 'revenue')
+  expect(asked.length).toBeGreaterThan(0)
+  expect(asked.every(one => String(one.manifest_path).startsWith(`${RUNNER}/target/.altimate-task-manifest.`))).toBe(true)
+  // integration_tests' manifest holds its own models too: the package's is asked for by its unique_id.
+  expect(asked.every(one => one.model === 'model.shop.fct_orders')).toBe(true)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /revenue\s+reaches/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('a package repo over 4 MiB: a changed model whose made-up unique_id the manifest lacks (a versioned one) is asked for by name', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const { turn, tools } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    extra: { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' },
+    // The package's fct_orders is model.shop.fct_orders.v1: no node has the id made from its file name.
+    impact: args => (args.model === 'model.shop.fct_orders' ? { success: false, column_answer: undefined } : {}),
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const asked = tools.filter(one => one.direction === 'downstream' && one.column === 'revenue').map(one => one.model)
+  expect(asked).toEqual(['model.shop.fct_orders', 'fct_orders'])
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /revenue\s+reaches/ })).toBeDefined()
+  await band.unmount()
+})
+
+test('a task that changes a package model and an integration_tests model copies their one manifest once, and both read it', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const TEST_MODEL = `${RUNNER}/models/orders_check.sql`
+  const { turn, runs, tools, copies } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    extra: {
+      [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\nmodel-paths: ['models']\n",
+      [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n',
+      [TEST_MODEL]: 'select\n  order_id,\n  revenue as checked\nfrom {{ ref("fct_orders") }}\n',
+    },
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+    await $.tool.call({ tool: 'Edit', file_path: TEST_MODEL, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+  })
+  expect(runs.filter(one => one[0] === 'cp').map(one => one[1])).toEqual([THEIRS])
+  const asked = tools.filter(one => one.direction === 'downstream' && (one.column === 'revenue' || one.column === 'checked'))
+  expect(new Set(asked.map(one => one.column))).toEqual(new Set(['revenue', 'checked']))
+  // The manifest is too large to read here: each project's model goes by its own package's unique_id.
+  expect(new Set(asked.map(one => `${one.model}:${one.column}`))).toEqual(new Set(['model.shop.fct_orders:revenue', 'model.shop_tests.orders_check:checked']))
+  const paths = new Set(asked.map(one => String(one.manifest_path)))
+  expect(paths.size).toBe(1)
+  const [frozen] = [...paths]
+  expect(frozen!.startsWith(`${RUNNER}/target/.altimate-task-manifest.`)).toBe(true)
+  expect(copies.has(frozen!)).toBe(true)
+})
+
+test('a task that changes four output columns traces three and says one more changed', async ($, on) => {
+  const NEW_MODEL = `${ROOT}/models/marts/monthly_region_revenue.sql`
+  const { turn, logs } = await start($, on, {
+    answer: args => (args.model === 'monthly_region_revenue' ? { status: 'ok', output: 'Model "monthly_region_revenue" not found in manifest.', metadata: { success: false, truncated: false } } : undefined),
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: NEW_MODEL, content: 'select\n  region,\n  order_month,\n  count(*) as orders,\n  sum(amount) as revenue\nfrom {{ ref("fct_orders") }}\ngroup by 1, 2\n' })
+  })
+  const line = logs.find(one => one.startsWith('◆ Lineage after this task'))!
+  expect(line.match(/new in it\?/g)?.length).toBe(3)
+  expect(line).toContain('+ 1 more changed column, not traced here (/lineage-report monthly_region_revenue.<column> traces one)')
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: '  + 1 more changed column, not traced here (/lineage-report monthly_region_revenue.<column> traces one)' })).toBeDefined()
+  await band.unmount()
 })
