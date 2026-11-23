@@ -1182,6 +1182,15 @@ test('a failed run also comes as a notice, for a terminal too narrow for the pan
   expect(toasts.at(-1)).toMatch(/^Databricks savings check: A query was refused: \[TABLE_OR_VIEW_NOT_FOUND\].* ask a workspace admin for SELECT/)
 })
 
+test('the published 0.12.12, which has neither the savings tool nor assessment mode, is never started for the check', async ($, on) => {
+  const { clock, runs, versionRuns, toasts } = await start($, on, { version: '0.12.12' })
+  await savings($)
+  await clock.settle()
+  expect(versionRuns.length).toBe(1)
+  expect(runs).toEqual([])
+  expect(toasts.at(-1)).toContain(`It is 0.12.12; update it to ${SAVINGS_MIN_ALTIMATE_CODE} or later`)
+})
+
 test('an altimate-code older than the check is never started for it: only `--version` runs', async ($, on) => {
   // 0.12.11 has no assessment mode: its `tool run` would send the one-time opt-out event before failing.
   const { clock, runs, versionRuns, toasts } = await start($, on, { version: '0.12.11' })
@@ -1198,11 +1207,11 @@ test('an altimate-code older than the check is never started for it: only `--ver
 test('a version that cannot be read, or a source build, is refused; the first release with the check runs it', async ($, on) => {
   // A source build prints `local` whatever its age, old checkouts without assessment mode included.
   // A prerelease of the minimum is older than it, as semver orders them; a preview build (0.0.0-…) is older still.
-  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12-beta.1', '0.0.0-main-202611191200']) {
+  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12', 'v0.12.12', 'altimate-code 0.12.12', '0.12.13-beta.1', '0.0.0-main-202611191200']) {
     expect(supportsSavings(version)).toBe(false)
   }
   // Read as the status line reads it: the last version printed, with or without the CLI's name or a runtime note.
-  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', 'altimate-code 0.12.12', 'node v22.1.0\n0.12.13']) {
+  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.13', '0.12.14', '0.13.0', '1.0.0', 'altimate-code 0.12.13', 'node v22.1.0\n0.12.13']) {
     expect(supportsSavings(version)).toBe(true)
   }
   const local = await start($, on, { version: 'local' })

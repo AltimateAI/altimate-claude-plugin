@@ -13,7 +13,7 @@ All notable changes to this plugin will be documented in this file.
 - `/savings` sends no plugin usage event: neither the command nor its pane is counted, and its queries and results never go to Altimate.
 - A line above the prompt when the session edits Databricks bundle or Terraform files or runs a `databricks` compute command: the flagged resource's saving, or a once-a-session offer of `/savings`.
 - One connection checks every workspace the account's system tables show; the pane counts every workspace the CLI read (`workspaces_checked`), one with only clusters or jobs and no finding included, and names each finding's workspace. With a CLI that does not report the count, it counts the workspaces of the warehouses and findings.
-- `/savings` asks `altimate --version` first and does not start an altimate-code older than 0.12.12, or a source build, for the check: before assessment mode, its `tool run` would send the one-time telemetry opt-out event.
+- `/savings` asks `altimate --version` first and does not start an altimate-code 0.12.12 or older, or a source build, for the check: before assessment mode, its `tool run` would send the one-time telemetry opt-out event.
 - `runTool` takes an environment and `noDaemon` for one CLI run, and hands back a CLI's raw output when it is not an answer (an altimate-code too old for the tool gets "update").
 
 ### Fixed

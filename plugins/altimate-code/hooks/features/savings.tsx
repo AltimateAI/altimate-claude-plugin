@@ -40,17 +40,18 @@ const PERSON_ORIGINS = new Set(['composer', 'bridge'])
 const LOCAL_ONLY = { ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' }
 
 /**
- * The first altimate-code release the check may start. Up to 0.12.11 (the latest release when this was
- * written) altimate-code has neither the savings tool nor assessment mode, so `tool run` there would only
- * send the CLI's one-time telemetry opt-out event and then fail. `altimate --version` starts no telemetry,
- * so it is asked first and an older CLI is never started for the check.
+ * The first altimate-code release the check may start. Up to 0.12.12 (published without them) altimate-code
+ * has neither the savings tool nor assessment mode, so `tool run` there would only send the CLI's one-time
+ * telemetry opt-out event and then fail. `altimate --version` starts no telemetry, so it is asked first and an
+ * older CLI is never started for the check. The release that ships both is not out yet: this names the next
+ * version until it is, and is set to that release's version before the plugin is published.
  */
-export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.12'
+export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.13'
 const VERSION_TIMEOUT_MS = 15_000
 
 /**
  * Whether what `altimate --version` printed names a release the check may start. The version is read as
- * the status line reads it (the last version printed, so `altimate-code 0.12.12` or a runtime note before
+ * the status line reads it (the last version printed, so `altimate-code 0.12.13` or a runtime note before
  * it still reads), and compared as semver does: a prerelease of the minimum is older than it. A source
  * build prints `local` whatever its age (an old checkout without assessment mode does too), so it is
  * refused like any version that cannot be read; a build made with the release script carries its version.
