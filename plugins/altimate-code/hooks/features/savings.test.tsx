@@ -704,25 +704,79 @@ test('the band\'s Run /savings pressed while a typed /savings check is going sta
   await clock.settle()
 })
 
-test('a check from before a /clear that ends after it does not free the new conversation\'s check', async ($, on) => {
+test('a /savings typed after a /clear, while the earlier check still reads the warehouse, starts no second check', async ($, on) => {
   const options: any = {}
   const { clock, runs } = await start($, on, options)
   let finishOld = () => {}
   options.hold = new Promise<void>(done => (finishOld = done))
   await savings($)
   await clock.settle()
+  expect(runs.length).toBe(1)
+  await $.session.end({ reason: 'clear' } as any)
+  options.hold = undefined
+  expect((await savings($)).text).toBe('The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  // Once it ends, its answer stays out of the new conversation and the next /savings runs.
+  finishOld()
+  await clock.settle()
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(2)
+})
+
+test('a band press after a /clear, while the earlier check still reads the warehouse, starts nothing and says why', async ($, on) => {
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  const options: any = { files }
+  const { clock, runs, toasts } = await start($, on, options)
+  let finish = () => {}
+  options.hold = new Promise<void>(done => (finish = done))
+  await savings($)
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  await band.press({ key: 'savings-run' })
+  await band.unmount()
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect(toasts.at(-1)).toBe('The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.')
+  finish()
+  await clock.settle()
+})
+
+test('a check dropped by a /clear before it reached the warehouse, ending later, does not free the new conversation\'s check', async ($, on) => {
+  const options: any = {}
+  const { clock, runs } = await start($, on, options)
+  // The first check waits in its version probe, before any warehouse read.
+  let probed = () => {}
+  const probing = new Promise<void>(resolve => (probed = resolve))
+  let releaseProbe = () => {}
+  const probeHeld = new Promise<void>(resolve => (releaseProbe = resolve))
+  options.onStep = async (step: string) => {
+    if (step !== 'version probe') return
+    options.onStep = undefined
+    probed()
+    await probeHeld
+  }
+  const first = savings($)
+  const settling = clock.settle()
+  await probing
+  await first
   await $.session.end({ reason: 'clear' } as any)
   let finishNew = () => {}
   options.hold = new Promise<void>(done => (finishNew = done))
   await savings($)
   await clock.settle()
-  expect(runs.length).toBe(2)
-  // The old check ends: the new one is still going, and still the only one.
-  finishOld()
+  expect(runs.length).toBe(1)
+  // The old check ends without reaching the warehouse: the new one is still going, and still the only one.
+  releaseProbe()
+  await settling
   await clock.settle()
   expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
   await clock.settle()
-  expect(runs.length).toBe(2)
+  expect(runs.length).toBe(1)
   finishNew()
   await clock.settle()
 })
@@ -1813,8 +1867,9 @@ test('a press queued when the session ends does not hold the next session\'s Run
   const { clock, runs } = await start($, on, options)
   await savings($)
   await clock.settle()
-  // A run that does not finish before the session ends.
-  options.hold = new Promise<void>(() => {})
+  // A run that does not finish before the session ends: it ends after, as the CLI's deadline ends any run.
+  let finish = () => {}
+  options.hold = new Promise<void>(done => (finish = done))
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   await ui.press({ key: 'again' })
   await clock.settle()
@@ -1822,6 +1877,8 @@ test('a press queued when the session ends does not hold the next session\'s Run
   await $.session.end({ reason: 'clear' } as any)
   await clock.settle()
   options.hold = undefined
+  finish()
+  await clock.settle()
   await savings($)
   await clock.settle()
   const again = await $.ui.mount({ ...PANE, surface: 'terminal' })

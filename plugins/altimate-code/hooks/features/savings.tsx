@@ -90,7 +90,13 @@ let lastConnection: string | null = null
 // one, with no await between that decision and this claim, until its run ends or a /clear drops it. Starting a run
 // is decided here, not from the running flag in `$.state`, which only draws the pane: a hook's read of that flag
 // can answer as it was when the hook started.
-let claim: { connection: string | null } | null = null
+let claim: Claim | null = null
+// A claim: the connection its check reads, the conversation it was asked in, and whether its CLI is reading the
+// warehouse now. A /clear keeps a claim whose CLI is reading, so a second check never runs on the same warehouse
+// beside one whose answer the /clear threw away.
+type Claim = { connection: string | null; conversation: number; reading?: boolean }
+// What /savings or a press says while a check from before a /clear still reads the warehouse.
+const STILL_READING = 'The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.'
 /**
  * Lets go of the claim if `mine` still holds it: when its run ends, and when a step before its run fails, since no
  * run was started to let go of it then.
@@ -651,7 +657,7 @@ async function openPane($: EngineInterface) {
  * One check, for the claim it was started under: a /clear or a session end since then (even in the same tick,
  * before this scheduled run started) dropped that claim, so a late run never lands in the new conversation.
  */
-async function runCheck($: EngineInterface, mine: { connection: string | null }) {
+async function runCheck($: EngineInterface, mine: Claim) {
   if (claim !== mine) return
   const connection = mine.connection
   const at = ++generation
@@ -702,7 +708,10 @@ async function runCheck($: EngineInterface, mine: { connection: string | null })
       return
     }
     // Typing /savings is the user's go-ahead, which the tool asks for before it queries the warehouse.
-    const result = await runTool($, TOOL, savingsArgs(connection), { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true })
+    mine.reading = true
+    const result = await runTool($, TOOL, savingsArgs(connection), { cliOnly: true, until, env: LOCAL_ONLY, noDaemon: true }).finally(() => {
+      mine.reading = false
+    })
     if (!live()) return
     const metadata = result.metadata as ToolMetadata | null
     const view = toView(metadata)
@@ -827,6 +836,7 @@ export function register(on: On, _context: FeatureContext) {
     const cleared = { text: 'The conversation was cleared before the Databricks savings check started. Run /savings again.' }
     // One check at a time, decided before anything waits.
     const going = claim
+    if (going?.conversation !== undefined && going.conversation !== conversation) return { text: STILL_READING }
     if (going) {
       const inConversation = conversation
       await openPane($)
@@ -837,7 +847,7 @@ export function register(on: On, _context: FeatureContext) {
       const other = (asked || null) !== going.connection ? ` Run /savings${asked ? ` ${asked}` : ''} again when it finishes.` : ''
       return { text: `The Databricks savings check is already running in the side pane.${other}` }
     }
-    const mine = { connection: asked || null }
+    const mine: Claim = { connection: asked || null, conversation }
     claim = mine
     await update($, busyAtom, now => (claim === mine ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now)).catch((error: unknown) => {
       letGo(mine)
@@ -1012,7 +1022,9 @@ export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>,
 export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   generation += 1
   conversation += 1
-  claim = null
+  // A check whose CLI is reading the warehouse keeps its claim until it ends: its answer is dropped, but a second
+  // check must not run beside it. One that has not reached the warehouse is dropped with the conversation.
+  if (!claim?.reading) claim = null
   lastConnection = null
   offered = false
   pressQueued = null
@@ -1057,8 +1069,13 @@ function pressRun($: EngineInterface, first?: (live: () => boolean) => Promise<u
       const live = () => at === generation
       if (!live()) return
       await first?.(live)
-      if (!live() || claim) return
-      const run = { connection: lastConnection }
+      if (!live()) return
+      if (claim) {
+        // A press in the new conversation while a check from before the /clear still reads the warehouse.
+        if (claim.conversation !== conversation) $.ui.toast(STILL_READING)
+        return
+      }
+      const run: Claim = { connection: lastConnection, conversation }
       claim = run
       await update($, busyAtom, now => (claim === run ? { label: "Checking the workspace's warehouses, clusters and jobs…" } : now)).catch((error: unknown) => {
         letGo(run)
