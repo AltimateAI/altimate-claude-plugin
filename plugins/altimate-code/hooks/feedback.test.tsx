@@ -581,7 +581,7 @@ test('a description at the read limit is redacted whole and quickly, whatever sh
 })
 
 test('a long run that no rule matches is read once, not once per position: each shape at the read limit is redacted quickly', () => {
-  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000), 'eyJ-'.repeat(25_000), '-eyJ'.repeat(25_000), 'password:\n'.repeat(10_000), ';pwd={'.repeat(16_000), ', token: '.repeat(11_000), '--token-'.repeat(12_000), `--token ${'a'.repeat(99_000)}`, '{password:'.repeat(10_000), 'x\\ '.repeat(33_000)]) {
+  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000), 'eyJ-'.repeat(25_000), '-eyJ'.repeat(25_000), 'password:\n'.repeat(10_000), ';pwd={'.repeat(16_000), ', token: '.repeat(11_000), '--token-'.repeat(12_000), `--token ${'a'.repeat(99_000)}`, '{password:'.repeat(10_000), 'x\\ '.repeat(33_000), 'secret_'.repeat(14_000), `${'secret_'.repeat(14_000)}=x`, 'a='.repeat(50_000), '--a '.repeat(25_000), '{a: '.repeat(25_000), 'token=a\\'.repeat(12_000)]) {
     const started = Date.now()
     cleanDescription(text.slice(0, 100_000), [HOME])
     expect(Date.now() - started).toBeLessThan(1500)
@@ -699,6 +699,19 @@ test('a credential in a YAML flow mapping, a shell-escaped value, a command-line
   expect(redactSecrets('dbt debug --password hunter2-production-key --target dev')).toBe('dbt debug --password ‹redacted› --target dev')
   expect(redactSecrets('the dbt Cloud token dbtc_AbCdEfGhIjKlMnOpQrStUvWx failed')).toBe('the dbt Cloud token ‹redacted› failed')
   expect(redactSecrets('posted to https://hooks.slack.com/services/T0000/B0000/XXXXXXXXXXXX today')).toBe('posted to https://hooks.slack.com/services/‹redacted› today')
+})
+
+test('a flag argument that is quoted or shell-escaped, a flow-mapping value on the next line, and a key with a credential word inside its name are cut whole', () => {
+  for (const argument of ['"correct horse battery staple"', "'correct horse battery staple'", 'correct\\ horse\\ battery\\ staple']) {
+    expect(redactSecrets(`mongosh --password ${argument} --host db`)).toBe('mongosh --password ‹redacted› --host db')
+  }
+  for (const space of ['', ' ']) {
+    expect(redactSecrets(`outputs: {password:${space}\n  correct horse battery staple, user: alice}`)).toBe(`outputs: {password:${space}\n  ‹redacted›, user: alice}`)
+  }
+  expect(redactSecrets('export SECRET_KEY=Hunter2!pw DBT_ENV_SECRET_PG=Hunter3!pw and dbt debug failed')).toBe('export SECRET_KEY=‹redacted› DBT_ENV_SECRET_PG=‹redacted› and dbt debug failed')
+  expect(redactSecrets(['encryption_key: Hunter4!pw', 'user: bob'].join('\n'))).toBe(['encryption_key: ‹redacted›', 'user: bob'].join('\n'))
+  // A name that only holds a credential word inside another word is not a credential key.
+  expect(redactSecrets('passenger_count=4 and compass_heading: north')).toBe('passenger_count=4 and compass_heading: north')
 })
 
 test('a password in a URL is cut whatever comes before its scheme', () => {

@@ -54,11 +54,19 @@ const HOME_MASK = '<path under home>'
 
 type Span = { start: number; end: number; home: boolean }
 
-const CREDENTIAL_KEY = String.raw`(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?`
+const CREDENTIAL_WORD = String.raw`(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|(?:encryption|signing|master|client)[_-]?key|credential|cookie|session[_-]?id|authorization)s?`
+const ENDS_IN_CREDENTIAL = new RegExp(`${CREDENTIAL_WORD}$`, 'i')
+const CREDENTIAL_SEGMENT = new RegExp(String.raw`(?:^|[_.-])${CREDENTIAL_WORD}[_.-]`, 'i')
+/**
+ * Whether a key names a credential: it ends in a credential word (DBT_PASSWORD, access_token, client_secret, mypassword), or has one as a
+ * whole part of its name (SECRET_KEY, DBT_ENV_SECRET_PG, password_file). Keys are found whole first and only then tested, so no rule
+ * reads a long name again from every position in it.
+ */
+export const isCredentialKey = (name: string) => name.length <= 200 && (ENDS_IN_CREDENTIAL.test(name) || CREDENTIAL_SEGMENT.test(name))
 // A YAML line of a credential key: a block-scalar header (`password: |`, `secret: >- # note`) or an empty value takes the indented lines after it,
 // a quoted value that does not close on its line takes the indented lines after it up to its closing quote, and a plain value
 // (`password: correct horse battery staple`) is the rest of its line and its indented continuation lines.
-const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?[ \t]*:[ \t]*)`
+const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?([\w.-]+)(?:\\*["'])?[ \t]*:[ \t]*)`
 const BLOCK_HEADER = new RegExp(String.raw`${KEY_LINE}[|>](?:\d[+-]?|[+-]\d?)?[ \t]*(?:#.*)?$`, 'i')
 const PLAIN_VALUE = new RegExp(String.raw`${KEY_LINE}(?![|>"'])(\S.*)$`, 'i')
 const EMPTY_VALUE = new RegExp(String.raw`${KEY_LINE}(?:#.*)?$`, 'i')
@@ -96,20 +104,25 @@ const SECRET_PATTERNS: RegExp[] = [
   // A connection string's password: a quoted or braced value to its own closing delimiter (ODBC `PWD={a b};`, `}}` is a literal brace), or a
   // value that runs to the next `;`, spaces included; the last field of a string (after a `;`, or alone on its line) runs to the end of the line,
   // or to its closing quote when it is quoted, so the words after it stay.
-  /((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\}){0,1000}\}|[^;\n]{0,1000}(?=;))/gi,
-  /((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\}){0,1000}\}|(?=[^\s;])[^;\n]*$)/gim,
-  // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
-  // backslash escape or a doubled quote is inside it; so is a JSON-escaped quote, to the escaped quote of the same depth; a quote left open runs to
-  // the end of its line, never past it) or the rest of the word, a shell-escaped space (`correct\ horse`) included, up to a `;` that starts the
-  // next `key=` field.
-  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.|"")*(?:"|(?=\n)|$)|'(?:[^'\\\n]|\\.|'')*(?:'|(?=\n)|$)|(?<!\\)(\\+)"(?:(?!(?<!\\)\2")[^\n])*(?<!\\)\2"|(?:\\[^\n]|[^\s;\\]|;(?!\w+=))+)`, 'gi'),
-  // A credential key inside a YAML flow mapping (`{password: correct horse, user: bob}`): the value runs to the next `,` or `}`, over indented
-  // lines too.
-  new RegExp(String.raw`([{,][ \t]*["']?[\w.-]*?${CREDENTIAL_KEY}["']?[ \t]*:[ \t]+)(?!["'])[^,}\n]+(?:\n[ \t]+[^,}\n]+)*`, 'gi'),
-  // A command-line flag that names a credential (`--password hunter2`): its argument.
-  new RegExp(String.raw`((?<![\w-])--?[\w-]*?${CREDENTIAL_KEY}[ \t]+)(?!-)\S+`, 'gi'),
+  /((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\}){0,256}\}|[^;\n]{0,256}(?=;))/gi,
+  /((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\}){0,256}\}|(?=[^\s;])[^;\n]*$)/gim,
   // A long unbroken run of key-like characters.
   /(?<![A-Za-z0-9_+-])(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g,
+]
+
+// A value after a credential key: a quoted value to its own closing quote (a backslash escape or a doubled quote is inside it; so is a
+// JSON-escaped quote, to the escaped quote of the same depth; a quote left open runs to the end of its line, never past it) or the rest of
+// the word, a shell-escaped space (`correct\ horse`) included, up to a `;` that starts the next `key=` field. Read from where the key ends.
+const KEY_VALUE = /(?:"(?:[^"\\\n]|\\.|"")*(?:"|(?=\n)|$)|'(?:[^'\\\n]|\\.|'')*(?:'|(?=\n)|$)|(?<!\\)(\\+)"(?:(?!(?<!\\)\1")[^\n])*(?<!\\)\1"|(?:\\[^\n]|[^\s;\\]|;(?!\w+=))+)/y
+/** Each rule's group 1 is the text before the value, group 2 the key's name; the value is read with KEY_VALUE, or is group 3 when there is one. */
+const KEYED_PATTERNS: RegExp[] = [
+  // `key=value`, `key: value`, `"key": "value"`, JSON-escaped keys.
+  /(?<![\w.-])(([\w.-]+)(?:\\*["'])?\s*[:=]\s*)/g,
+  // A key inside a YAML flow mapping (`{password: correct horse, user: bob}`): the value runs to the next `,` or `}`, over indented lines too,
+  // and may start on the line after its key.
+  /([{,][ \t]*["']?([\w.-]+)["']?[ \t]*:(?:[ \t]+|[ \t]*\n[ \t]+))(?!["'])([^,}\n]+(?:\n[ \t]+[^,}\n]+)*)/g,
+  // A command-line flag (`--password hunter2`, `--password "correct horse"`): its argument.
+  /(?<![\w-])(--?([\w-]+)[ \t]+)(?!-)/g,
 ]
 
 function patternSpans(text: string): Span[] {
@@ -119,6 +132,21 @@ function patternSpans(text: string): Span[] {
       const start = match.index + (match[1]?.length ?? 0)
       const end = match.index + match[0].length
       if (end > start) spans.push({ start, end, home: false })
+    }
+  }
+  for (const pattern of KEYED_PATTERNS) {
+    pattern.lastIndex = 0
+    for (let match = pattern.exec(text); match; match = pattern.exec(text)) {
+      if (!isCredentialKey(match[2]!)) continue
+      const start = match.index + match[1]!.length
+      let end = match.index + match[0].length
+      if (match[3] === undefined) {
+        KEY_VALUE.lastIndex = start
+        end = KEY_VALUE.exec(text) ? KEY_VALUE.lastIndex : start
+      }
+      if (end > start) spans.push({ start, end, home: false })
+      // The next key is looked for after the value: one already cut is not read again from every key inside it.
+      pattern.lastIndex = Math.max(pattern.lastIndex, end)
     }
   }
   return spans
@@ -145,14 +173,14 @@ function yamlSpans(text: string): Span[] {
     const header = plainValue ? null : (BLOCK_HEADER.exec(line) ?? EMPTY_VALUE.exec(line))
     const quoted = plainValue || header ? null : QUOTED_VALUE.exec(line)
     // A quoted value that closes on its own line is the credential-key pattern's to cut.
-    if (quoted && closesOnLine(quoted[2]!, quoted[3]!)) continue
+    if (quoted && closesOnLine(quoted[3]!, quoted[4]!)) continue
     const keyLine = plainValue ?? header ?? quoted
-    if (!keyLine) continue
+    if (!keyLine || !isCredentialKey(keyLine[2]!)) continue
     // The value goes on over the lines after it indented deeper than its key (a list item's `- ` counts as indentation), or as deep but not
     // a key themselves (tab-indented text pasted under a key): a plain value's continuation lines, a block's or an empty value's indented
     // lines. A sibling key at the key's depth, or a shallower line, ends it. A quoted value ends at the line that closes its quote.
     const keyIndent = /^[ \t]*(?:-[ \t]+)?/.exec(line)![0]
-    const closing = quoted ? new RegExp(quoted[2] === '"' ? '(?:^|[^\\\\])(?:\\\\\\\\)*"' : "(?:^|[^'])(?:'')*'(?!')") : null
+    const closing = quoted ? new RegExp(quoted[3] === '"' ? '(?:^|[^\\\\])(?:\\\\\\\\)*"' : "(?:^|[^'])(?:'')*'(?!')") : null
     let last = i
     for (let next = i + 1; next < lines.length; next++) {
       const candidate = bare(lines[next]!)
