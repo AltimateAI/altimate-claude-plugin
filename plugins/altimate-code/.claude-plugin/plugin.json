@@ -65,6 +65,12 @@
       "title": "Show edit impact notes",
       "description": "When on, the note on what a model edit reaches downstream (read by N models, dashboards) is also shown in the transcript; off sends it to Claude and the debug log only. Optional; default: off.",
       "default": false
+    },
+    "info_toasts": {
+      "type": "boolean",
+      "title": "Toasts that repeat the transcript",
+      "description": "When on, a toast also says what the transcript or the band above the prompt already shows: model context added for Claude, a model compiled and validated, the dbt doctor passing. Off leaves those to the transcript and the band; failures still toast. Optional; default: on.",
+      "default": true
     }
   }
 }
