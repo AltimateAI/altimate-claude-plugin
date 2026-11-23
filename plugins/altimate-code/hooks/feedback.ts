@@ -74,7 +74,7 @@ const SECRET_PATTERNS: RegExp[] = [
   /((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)[^;\n]*$/gim,
   // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
   // backslash escape or a doubled quote is inside it; so is a JSON-escaped quote, to the escaped quote of the same depth) or the rest of the word, up to a `;` that starts the next `key=` field.
-  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|(\\+)"(?:(?!\2")[^\n])*\2"|(?:[^\s;]|;(?!\w+=))+)`, 'gi'),
+  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|(?<!\\)(\\+)"(?:(?!(?<!\\)\2")[^\n])*(?<!\\)\2"|(?:[^\s;]|;(?!\w+=))+)`, 'gi'),
   // A long unbroken run of key-like characters.
   /\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g,
 ]

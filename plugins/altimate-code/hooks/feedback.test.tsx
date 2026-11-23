@@ -645,6 +645,18 @@ test('a multi-word password inside JSON strings escaped one, two or three times 
   }
 })
 
+test('a password that holds quotes, inside JSON strings escaped any number of times, is cut whole', () => {
+  for (const password of ['alpha"omega-secret', 'prefix"private suffix', 'a\\b"c d"e-secret']) {
+    let value = JSON.stringify({ password, user: 'bob' })
+    for (let depth = 0; depth < 4; depth++) {
+      const out = redactSecrets(value)
+      expect(out).not.toMatch(/omega|private|suffix|e-secret|c d/)
+      expect(out).toContain('bob')
+      value = JSON.stringify({ message: value })
+    }
+  }
+})
+
 test('ADO.NET doubled quotes inside a quoted password are part of it, and a profile value that is also a key name does not hide the key', () => {
   const out = redactSecrets('Server=db;Password="alpha""omega-secret";Encrypt=yes')
   expect(out).not.toMatch(/alpha|omega/)
