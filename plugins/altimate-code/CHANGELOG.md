@@ -13,6 +13,9 @@ All notable changes to this plugin will be documented in this file.
 - `--defer --state …`, `--favor-state` and `--target …` that `/defer` and `/target` add to Claude's dbt commands are no longer invisible: Claude's result says what the command ran as, and a line above the prompt shows it until the next prompt.
 - **Resolve** on a thread the lagging comment list still shows after it was resolved elsewhere is done (the thread is hidden) instead of answering "not an open thread"; a reply to such a thread says it is no longer open and reads the list again.
 
+### Privacy
+- PRIVACY.md has a section on the dbt Power User features: what team comments, the model context note, the dbt run history, the cost check, project health, the SQL graph, CTE timing, `/to-model`, defer, docs coverage and the lineage pane read and send, what the run history keeps and where, and which tools run with `--allow-write` without asking. The README's note on write permission lists them too.
+
 ## [1.8.3] — 2026-11-19
 
 ### Fixed
