@@ -7,7 +7,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later, runTool } from './altimate-cli'
 import { openTracked } from './usage'
-import { normalize, runnerOf } from './package-runner'
+import { normalize, projectName, runnerOf } from './package-runner'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
   cellText,
@@ -360,11 +360,6 @@ for x in bad:
 meta = r.get('metadata') or {}
 print(json.dumps({'results': bad, 'metadata': {k: meta.get(k) for k in ('invocation_id', 'generated_at')}}))
 `
-
-/** The project's name in dbt_project.yml: which manifest nodes are its own, not an installed package's. */
-async function projectName($: EngineInterface, root: string): Promise<string | null> {
-  return /^name:\s*['"]?([\w-]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1] ?? null
-}
 
 /** What a project's packages.yml (or a dependencies.yml with packages) asks for, and whether anything is installed; null when it declares none. */
 async function packagesOf($: EngineInterface, root: string): Promise<{ file: string; installPath: string; installed: boolean } | null> {
@@ -1631,7 +1626,8 @@ async function parseNow($: EngineInterface, root: string) {
   // a package repo borrows that one, else where compile and validate runs dbt (which also notes the runner's package).
   const runs = await runPlaceOf($, root)
   const own = await targetOf($, root)
-  const place = (await $.fs.exists(`${own}/manifest.json`).catch(() => false)) ? root : (await manifestTarget($, root)) !== own ? ((await runnerOf($, root)) ?? runs) : runs
+  const target = await manifestTarget($, root)
+  const place = target !== own ? ((await runnerOf($, root).catch(() => null)) ?? root) : (await $.fs.exists(`${own}/manifest.json`).catch(() => false)) ? root : runs
   const run = await runDbt($, place, ['parse', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   if (run.exitCode !== 0) {
     const reason = dbtTail({ stdout: run.stdout || run.stderr, stderr: '' }, 3, true, ' ').slice(0, 200)

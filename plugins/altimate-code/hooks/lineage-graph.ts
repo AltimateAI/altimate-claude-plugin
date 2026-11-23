@@ -237,15 +237,22 @@ export function findModelOrColumn(graph: LineageGraph, wanted: string): string |
   return findModel(graph, wanted) ?? (at > 0 ? findModel(graph, wanted.slice(0, at)) : null)
 }
 
-/** The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. */
-export function findModel(graph: LineageGraph, wanted: string): string | null {
+/**
+ * The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. With `pkg` (the
+ * project's own name), a node of that package wins over another's at the same path or name: a manifest holding
+ * several projects' nodes (a package repo reading integration_tests') can have two `models/orders.sql`.
+ */
+export function findModel(graph: LineageGraph, wanted: string, pkg?: string | null): string | null {
   if (FOLLOWABLE.has(graph.nodes[wanted]?.type ?? '')) return wanted
   const lowered = wanted.toLowerCase()
+  let other: string | null = null
   for (const node of Object.values(graph.nodes)) {
     if (!FOLLOWABLE.has(node.type)) continue
-    if (node.path === wanted || node.name.toLowerCase() === lowered) return node.id
+    if (node.path !== wanted && node.name.toLowerCase() !== lowered) continue
+    if (!pkg || node.id.split('.')[1] === pkg) return node.id
+    other ??= node.id
   }
-  return null
+  return other
 }
 
 /** dbt's data tests and unit tests: counted downstream, never drawn. */

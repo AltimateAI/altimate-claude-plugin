@@ -1008,6 +1008,38 @@ test('a value change names the columns the manifest has that reach downstream; o
   await band.unmount()
 })
 
+test('value changes in two models: each model keeps up to three traced, so a second model\'s is not dropped by the first\'s', async ($, on) => {
+  const answerFor = (model: string, column: string) => ({
+    status: 'ok',
+    output: 'Impact',
+    metadata: {
+      model_level: 2,
+      column_answer: {
+        version: 1, focus: { model: `model.shop.${model}`, column }, direction: 'downstream',
+        nodes: [{ id: `model.shop.${model}`, name: model }, { id: 'model.shop.rpt', name: 'rpt' }],
+        columns: [{ model: 0, column, hop: 0 }, { model: 1, column, hop: 1, end: true }],
+        counts: { columns: 1, models: 1, ends: 1, hops: 1, may_carry_models: 0, model_level: 2 },
+        unresolved: [], may_carry: [],
+      },
+    },
+  })
+  const { turn, logs } = await start($, on, { answer: args => (args.direction === 'downstream' && args.column ? answerFor(args.model, args.column) : undefined) })
+  const sql = (expr: string) => `{% set cols %}\npaid_amount,\nunits,\n${expr} as total_amount\n{% endset %}\nselect {{ cols }} from {{ ref('x') }}`
+  const other = (expr: string) => `{% set cols %}\n${expr} as fee\n{% endset %}\nselect {{ cols }} from {{ ref('y') }}`
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Write', file_path: MODEL, content: sql('paid_amount + units') })
+    await $.tool.call({ tool: 'Write', file_path: STAGING, content: other('base_fee') })
+  })
+  await turn('t2', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'paid_amount + units as', new_string: 'paid_amount * 2 + units * 3 + discount as' })
+    await $.tool.call({ tool: 'Edit', file_path: STAGING, old_string: 'base_fee as', new_string: 'base_fee * 2 as' })
+  })
+  const line = logs.filter(one => one.startsWith('◆ Lineage after this task')).at(-1)!
+  // Three for fct_orders (its four names capped), two for stg_payments.
+  expect(line.match(/values may change in \w+ → reaches/g)?.length).toBe(5)
+  expect(line).toMatch(/stg_payments .*values may change in (base_fee|fee) → reaches 1 column/)
+})
+
 test('a value change on Tuva: the band says tracing until the trace answers, never that the model-level count stands, then the reach impact-first gave', async ($, on) => {
   const CLAIM = `${ROOT}/models/core/final/core__medical_claim.sql`
   let release!: () => void

@@ -783,11 +783,14 @@ test('only the columns an edit left undocumented are its gaps, from what the war
 })
 
 test('a package repo with no manifest of its own: the doctor and model context read the one integration_tests writes', async ($, on) => {
+  // integration_tests' manifest: its own project's name, and a model of its own, at a path only it has.
+  const borrowed = { ...MANIFEST, metadata: { project_name: 'shop_tests' }, nodes: { ...Object.fromEntries(Object.entries(MANIFEST.nodes).map(([id, node]) => [id, { ...node, package_name: 'shop' }])), 'model.shop_tests.only_in_tests': { name: 'only_in_tests', resource_type: 'model', package_name: 'shop_tests', original_file_path: 'models/only_in_tests.sql', config: {}, columns: {}, depends_on: { nodes: [] } } } }
   const { clock } = await start($, on, {
     interactive: true,
     now: 200_000,
     target: 'integration_tests/target',
     files: {
+      'target/manifest.json': JSON.stringify(borrowed),
       'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
       'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
       'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",

@@ -14,6 +14,11 @@ export function normalize(path: string): string {
   return out.join('/') || '/'
 }
 
+/** The project's name in its dbt_project.yml; null when it has none. */
+export async function projectName($: EngineInterface, root: string): Promise<string | null> {
+  return /^name:\s*['"]?([\w-]+)/m.exec(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))?.[1] ?? null
+}
+
 // The project below a package's folder that installs it, by package folder: found once a session.
 const runners = new Map<string, Promise<string | null>>()
 

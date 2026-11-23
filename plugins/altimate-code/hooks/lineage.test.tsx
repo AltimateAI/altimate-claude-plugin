@@ -324,6 +324,26 @@ test('a package repo: a model the answer names is followed in the package, so it
   await ui.unmount()
 })
 
+test('a package repo reading integration_tests\' manifest: the package\'s own model is followed, not integration_tests\' model at the same path', async ($, on) => {
+  // integration_tests' own fct_orders, at the same project-relative path, listed first.
+  const manifest = {
+    ...MANIFEST,
+    nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes },
+  }
+  const { clock, notes } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  // The package's model has int_orders upstream; integration_tests' has nothing.
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /int_orders/ })).toBeDefined()
+  await ui.unmount()
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })

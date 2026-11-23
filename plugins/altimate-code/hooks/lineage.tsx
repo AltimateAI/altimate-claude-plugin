@@ -13,7 +13,7 @@ import type {
 } from '../types'
 import { later, parseJson, runTool, textOf, within } from './altimate-cli'
 import { openTracked } from './usage'
-import { manifestFile, runnerManifest } from './package-runner'
+import { manifestFile, projectName, runnerManifest } from './package-runner'
 import { featuresSessionEnd, featuresTurnComplete, featuresTurnStart } from './features'
 import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
@@ -257,15 +257,24 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
   // 4 MiB), else the default one when it was read; none when the names came from the SQL files.
   const kept = shownManifest ?? (fromManifest ? manifest : undefined)
   const graph = fromManifest ?? (await sqlGraph($, root))
+  const pkg = await projectName($, root)
   const byName = new Map<string, string>()
-  for (const node of Object.values(graph.nodes)) if (FOLLOWABLE.has(node.type) && node.path) byName.set(node.name.toLowerCase(), node.id)
+  // The project's own node wins a name two packages share (a package repo reading integration_tests' manifest).
+  for (const node of Object.values(graph.nodes)) {
+    if (!FOLLOWABLE.has(node.type) || !node.path) continue
+    const name = node.name.toLowerCase()
+    if (!byName.has(name) || node.id.split('.')[1] === pkg) byName.set(name, node.id)
+  }
+  // A node of the project whose manifest a package repo borrows (integration_tests' own model) is that project's.
+  const borrowedRoot = kept && dirname(dirname(kept)) !== root ? dirname(dirname(kept)) : null
+  const rootOf = (id: string) => (borrowedRoot && pkg && id.split('.')[1] !== pkg ? borrowedRoot : root)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
   const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
   const found = new Map<string, AnswerModel>()
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
     const word = match[0].toLowerCase()
     const id = byName.get(word)
-    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root, ...(kept && { manifest: kept }) })
+    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root: rootOf(id), ...(kept && { manifest: kept }) })
   }
   return [...found.values()].slice(0, 12)
 }
@@ -418,11 +427,11 @@ async function readGraph($: EngineInterface, manifest: string): Promise<LineageG
  * nodes, marked `truncated`). Run through the CLI, whose --json carries the whole metadata (the MCP
  * server leaves big structured results out). Cached per manifest revision and model.
  */
-async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string) {
+async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string, pkg?: string | null) {
   // A file is looked up by its path: snapshots and versioned models do not go by the file's name.
   model = path ?? model
   const key = `${manifest}\u0000${mtimeMs}\u0000${model}`
-  if (toolsCache.has(key)) return checkPath(toolsCache.get(key)!, path)
+  if (toolsCache.has(key)) return checkPath(toolsCache.get(key)!, path, pkg)
   const result = await shared(`graph\u0000${key}`, () => runTool($, 'dbt_lineage', { manifest_path: manifest, model, include_graph: true }, { cliOnly: true }))
   const graph = result.metadata?.graph as LineageGraph | undefined
   const id: string | undefined = result.metadata?.model_unique_id ?? undefined
@@ -435,12 +444,15 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
   // One revision per manifest: a recompile replaces the old graphs.
   for (const old of toolsCache.keys()) if (old.startsWith(`${manifest}\u0000`) && !old.startsWith(`${manifest}\u0000${mtimeMs}\u0000`)) toolsCache.delete(old)
   toolsCache.set(key, built)
-  return checkPath(built, path)
+  return checkPath(built, path, pkg)
 }
 
-/** A file is that model only when its path is the model's: a macro or analysis of the same name is not. */
-function checkPath<T extends { graph: LineageGraph; id: string } | null>(built: T, path?: string): T | null {
-  return built && (!path || built.graph.nodes[built.id]?.path === path) ? built : null
+/**
+ * A file is that model only when its path is the model's (a macro or analysis of the same name is not) and, with `pkg`,
+ * the model is the project's own: in a manifest holding another project's `models/orders.sql`, that one is not the file's.
+ */
+function checkPath<T extends { graph: LineageGraph; id: string } | null>(built: T, path?: string, pkg?: string | null): T | null {
+  return built && (!path || (built.graph.nodes[built.id]?.path === path && (!pkg || built.id.split('.')[1] === pkg))) ? built : null
 }
 
 type FollowInput = {
@@ -554,10 +566,11 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     await say(`Could not read ${relative(root, manifest) || manifest}: is dbt still writing it? Press r to retry.`, true)
     return false
   }
-  let id = graph ? findModel(graph, wanted) : null
+  const pkg = await projectName($, root)
+  let id = graph ? findModel(graph, wanted, pkg) : null
   if (graph && !id) {
     const split = withoutColumn()
-    const model = split ? findModel(graph, split.model) : null
+    const model = split ? findModel(graph, split.model, pkg) : null
     if (split && model) [id, wanted, column] = [model, split.model, split.column]
   }
   let via: LineageFocus['via'] = fromSql ? 'sql' : 'manifest'
@@ -566,7 +579,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     const name = input.file ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
     let failure: string | null = null
     const lookUp = (model: string) =>
-      graphFromTools($, manifest, mtimeMs, model, input.file ? wanted : undefined).catch(error => {
+      graphFromTools($, manifest, mtimeMs, model, input.file ? wanted : undefined, pkg).catch(error => {
         failure = String(error?.message ?? error)
         return null
       })
@@ -891,10 +904,11 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   progress.project = !!stat
   if (!stat) return null
   let graph = await readGraph($, manifest).catch(() => null)
-  let id = graph ? findModel(graph, relative(root, file)) : null
+  const pkg = await projectName($, root)
+  let id = graph ? findModel(graph, relative(root, file), pkg) : null
   if (!graph) {
     const name = (file.split(/[\\/]/).pop() ?? file).replace(/\.sql$/i, '')
-    const built = await graphFromTools($, manifest, stat.mtimeMs, name, relative(root, file)).catch(() => {
+    const built = await graphFromTools($, manifest, stat.mtimeMs, name, relative(root, file), pkg).catch(() => {
       progress.failed = true
       return null
     })
