@@ -30,7 +30,7 @@ Then restart Claude Code.
 
 ## Prerequisites
 
-The altimate-code CLI must be installed and configured on your PATH, version 0.12.11 or later. Older releases give no column answer, so the end-of-task summary and report can't say which columns a change reaches. Install it with npm:
+The altimate-code CLI must be installed and configured on your PATH, version 0.12.12 or later. That release brings the dbt Power User tools the cost check, project health, team comments, `/runs`, `/profile-ctes`, `/sql-graph`, `/to-model` and `/defer` call, and the column answer the end-of-task summary and report need. Older releases give no column answer, so the end-of-task summary and report can't say which columns a change reaches. Install it with npm:
 
 ```bash
 npm i -g @altimateai/altimate-code   # requires Node 20+; exposes `altimate` and `altimate-code`
