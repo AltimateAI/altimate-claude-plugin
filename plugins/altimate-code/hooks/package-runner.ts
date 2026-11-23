@@ -42,11 +42,7 @@ export function runnerOf($: EngineInterface, folder: string): Promise<string | n
           const sub = `${dir}/${entry.name}`
           next.push(sub)
           if (!(await $.fs.exists(`${sub}/dbt_project.yml`).catch(() => false))) continue
-          const declared = `${await $.fs.read(`${sub}/packages.yml`).catch(() => '')}\n${await $.fs.read(`${sub}/dependencies.yml`).catch(() => '')}`
-          for (const one of declared.matchAll(/^\s*-?\s*local:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/gm)) {
-            const path = one[1]!.trim()
-            if (normalize(path.startsWith('/') ? path : `${sub}/${path}`) === root) return sub
-          }
+          if ((await localPackages($, sub)).includes(root)) return sub
         }
       }
       level = next.slice(0, 200)
@@ -76,9 +72,9 @@ export async function manifestFile($: EngineInterface, folder: string): Promise<
  * by a local path (integration_tests itself), whose manifest holds that package's models.
  */
 export async function sharesManifest($: EngineInterface, root: string, manifest: string): Promise<boolean> {
-  if (!manifest.startsWith(`${root}/`) || manifest.slice(root.length + 1).split('/').length > 2) return true
-  const declared = `${await $.fs.read(`${root}/packages.yml`).catch(() => '')}\n${await $.fs.read(`${root}/dependencies.yml`).catch(() => '')}`
-  return /^\s*-?\s*local:\s*\S/m.test(declared)
+  // Any manifest but the project's own (the one manifestFile gives first) is another project's it borrows.
+  if (manifest !== `${root}/target/manifest.json`) return true
+  return (await localPackages($, root)).length > 0
 }
 
 /** The folders a project installs packages from by a local path (`local: ../`), spelled one way. */

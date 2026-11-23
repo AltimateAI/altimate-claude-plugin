@@ -64,6 +64,8 @@ type Answer = { status: string; output: string; metadata: Record<string, unknown
  */
 async function start($: any, on: any, options: Options = {}) {
   const clock = mock.clock(on)
+  // Every path read, in order.
+  const reads: string[] = []
   const files: Record<string, string> = {
     [`${ROOT}/dbt_project.yml`]: "name: 'shop'\nmodel-paths: ['models']\n",
     [MODEL]: ORDERS_SQL,
@@ -117,6 +119,7 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: [...names].map(([name, kind]) => ({ name, kind, size: 1, mtimeMs: 1, isLink: false })) }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
+    reads.push(e.path)
     if (e.path === MANIFEST) throw new Error('over 4 MiB')
     if (e.path in files) return { value: files[e.path] }
     if (writes.has(e.path)) return { value: writes.get(e.path) }
@@ -217,7 +220,7 @@ async function start($: any, on: any, options: Options = {}) {
     await clock.settle()
   }
   RUNS = runs
-  return { clock, files, runs, tools, writes, logs, toasts, copies, dialogs, mcpAsked, turn }
+  return { clock, files, runs, tools, writes, logs, toasts, copies, dialogs, mcpAsked, turn, reads }
 }
 
 const directional = (tools: Record<string, any>[]) => tools.filter(one => one.direction)
@@ -1152,6 +1155,32 @@ test('a value change on Tuva: the band says tracing until the trace answers, nev
   expect(await band.find({ type: 'Text', text: /^  values may change in paid_amount → reaches 124 columns in 13 models/ })).toBeDefined()
   expect(await band.find({ type: 'Text', text: /model-level count stands/ })).toBeUndefined()
   await band.unmount()
+})
+
+test('a task changing many models of one project reads what their unique_ids are judged by once, not once per model', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const node = (id: string, path: string, name: string) => ({ unique_id: id, resource_type: 'model', name, original_file_path: path, depends_on: { nodes: [] }, config: {}, columns: {} })
+  const names = ['check_a', 'check_b', 'check_c']
+  const manifest = { nodes: Object.fromEntries(names.map(name => [`model.shop_tests.${name}`, node(`model.shop_tests.${name}`, `models/${name}.sql`, name)])), sources: {}, exposures: {}, parent_map: {}, child_map: {} }
+  const { turn, tools, reads } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    small: [THEIRS],
+    openers: { 'xdg-open': 0 },
+    extra: {
+      [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\nmodel-paths: ['models']\n",
+      [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n',
+      [THEIRS]: JSON.stringify(manifest),
+      ...Object.fromEntries(names.map(name => [`${RUNNER}/models/${name}.sql`, 'select\n  order_id,\n  revenue as checked\nfrom {{ ref("fct_orders") }}\n'])),
+    },
+  })
+  await turn('t1', async () => {
+    for (const name of names) await $.tool.call({ tool: 'Edit', file_path: `${RUNNER}/models/${name}.sql`, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+  })
+  expect(new Set(tools.filter(one => one.direction === 'downstream' && one.column).map(one => one.model))).toEqual(new Set(names.map(name => `model.shop_tests.${name}`)))
+  // One read by the search for the project that installs the package, one by the task's changes.
+  expect(reads.filter(path => path === `${RUNNER}/dependencies.yml`).length).toBe(2)
 })
 
 test('a package repo with no manifest of its own: the band reads the manifest integration_tests writes, its copy beside it', async ($, on) => {

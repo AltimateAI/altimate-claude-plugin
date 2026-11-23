@@ -269,19 +269,20 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
   }
   // A node of the project whose manifest a package repo borrows (integration_tests' own model) is that project's. Where the
   // manifest is counts, whether or not it could be read (over 4 MiB, the names come from the SQL files).
-  const located = shownManifest ?? manifest
   const sessionRoot = await $.session.root().catch(() => root)
-  const rootOf = (id: string) => nodeOwner($, id, located, root, sessionRoot)
+  const rootOf = (id: string) => nodeOwner($, id, manifest, root, sessionRoot)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
-  const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
+  const ticked = new Set([...text.matchAll(/`([\w./\\-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split(/[\\/]/).pop()!))
   // A path written out names the model of the project it is in, and only that: the project is found from the path itself
   // (integration_tests/…, ../models/…, an absolute path), its node is the one of that project's package at the path. A
   // path no node of its project has names nothing, so another project's model of that file name is never taken for it.
   const mentions: { at: number; end: number; id: string | null; name: string; root: string }[] = []
   // A relative path is the session's, whatever project the pane shows.
   const base = await $.session.root().catch(() => root)
-  for (const match of text.matchAll(/[\w./-]+\.sql\b/g)) {
-    const abs = normalize(match[0].startsWith('/') ? match[0] : `${base}/${match[0]}`)
+  // Either separator: a Windows path (integration_tests\models\orders.sql) is the same file.
+  for (const match of text.matchAll(/[\w./\\-]+\.sql\b/g)) {
+    const written = match[0].replace(/\\/g, '/')
+    const abs = normalize(written.startsWith('/') ? written : `${base}/${written}`)
     const owner = (await projectRoot($, abs, true).catch(() => null)) ?? root
     const want = owner === root ? pkg : await projectName($, owner)
     const path = relative(owner, abs)

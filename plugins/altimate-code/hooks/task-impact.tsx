@@ -4,7 +4,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderElement } from 'claude-code'
 
-import type { PlanImpactView, TaskSummaryView } from '../types'
+import type { LineageGraph, PlanImpactView, TaskSummaryView } from '../types'
 import { later, runAltimate, runTool, within } from './altimate-cli'
 import { usageOff } from './usage'
 import { manifestFile, projectName, sharesManifest } from './package-runner'
@@ -14,6 +14,7 @@ import {
   columnReportData,
   type ColumnAnswer,
   type ColumnTrace,
+  sameModel,
   consumersOf,
   fingerprint,
   MAX_TASK_COLUMNS,
@@ -181,6 +182,8 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     }
   }
   const changes: ModelChange[] = []
+  // What a change's unique_id is judged by, read once per project and copy of its manifest, not once per changed file.
+  const projects = new Map<string, Promise<ProjectIds>>()
   for (const [file, one] of files) {
     const state = await t.roots.get(one.root)?.catch(() => null)
     if (state && !isModelFile(state.layout, relative(one.root, file))) continue
@@ -191,11 +194,26 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     // No select item changed (a value computed in a Jinja block the select reads, say): the names the change rewrote
     // are asked of the manifest, and the ones it has are traced as columns whose values change.
     const values = columns.length === 0 ? valueCandidates(one.original, current) : []
-    const id = await changeId($, one.root, state?.snapshot ?? null, relative(one.root, file), modelName(file))
+    const snapshot = state?.snapshot ?? null
+    const key = `${one.root}\0${snapshot ?? ''}`
+    if (!projects.has(key)) projects.set(key, projectIds($, one.root, snapshot))
+    const id = changeId(await projects.get(key)!, relative(one.root, file), modelName(file))
     changes.push({ model: modelName(file), ...(id ? { id } : {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }
   if (changes.length > MAX_MODELS) $.ui.log(`lineage-summary · ${changes.length} models changed; tracing the first ${MAX_MODELS}`)
   return changes.slice(0, MAX_MODELS)
+}
+
+type ProjectIds = { pkg: string | null; graph: LineageGraph | null; shared: boolean }
+
+/** A project's name, its manifest's graph and whether that manifest is shared: from the task's copy when it has one. */
+async function projectIds($: EngineInterface, root: string, snapshot: string | null): Promise<ProjectIds> {
+  const pkg = await projectName($, root)
+  const manifest = snapshot ?? (await manifestFile($, root))
+  const graph = await readGraph($, manifest).catch(() => null)
+  // Judged by the copy the task reads (taken at its start), else by the manifest as it is now.
+  const shared = await sharesManifest($, root, snapshot ? `${dirname(snapshot)}/manifest.json` : manifest)
+  return { pkg, graph, shared }
 }
 
 /**
@@ -205,15 +223,10 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
  * model it lacks (new) or one it is too large to read for is `model.<package>.<name>`, never the bare name another
  * project's model may answer to. Undefined otherwise: the model goes by its name, as before.
  */
-async function changeId($: EngineInterface, root: string, snapshot: string | null, rel: string, name: string): Promise<string | undefined> {
-  const pkg = await projectName($, root)
-  const manifest = snapshot ?? (await manifestFile($, root))
-  const graph = await readGraph($, manifest).catch(() => null)
-  const own = graph ? findModel(graph, rel, pkg, true) : null
+function changeId(project: ProjectIds, rel: string, name: string): string | undefined {
+  const own = project.graph ? findModel(project.graph, rel, project.pkg, true) : null
   if (own) return own
-  // Judged by the copy the task reads (taken at its start), else by the manifest as it is now.
-  const shared = await sharesManifest($, root, snapshot ? `${dirname(snapshot)}/manifest.json` : manifest)
-  return shared && pkg ? `model.${pkg}.${name}` : undefined
+  return project.shared && project.pkg ? `model.${project.pkg}.${name}` : undefined
 }
 
 /** Runs the work items at most `limit` at a time, keeping their order. */
@@ -295,7 +308,7 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
   }
   const traces = (await pool(jobs, PARALLEL)).filter((one): one is ColumnTrace => one !== null)
   // At most three columns whose values change per model, the most named first, as for changed select items.
-  return traces.filter(one => !one.value || traces.filter(other => other.value && (other.id ?? other.model) === (one.id ?? one.model)).indexOf(one) < MAX_TASK_COLUMNS)
+  return traces.filter(one => !one.value || traces.filter(other => other.value && sameModel(other, one)).indexOf(one) < MAX_TASK_COLUMNS)
 }
 
 /** What a report adds: where each changed column comes from. */
@@ -303,7 +316,7 @@ async function traceFull($: EngineInterface, done: Finished): Promise<ColumnTrac
   const downs = await (done.downs ??= traceDown($, done))
   const jobs = downs.map(trace => async () => {
     if (!trace.column || trace.unchecked) return trace
-    const change = done.changes.find(one => (one.id ?? one.model) === (trace.id ?? trace.model))!
+    const change = done.changes.find(one => sameModel(trace, one))!
     return { ...trace, up: answerOf(await ask($, done, change, trace.column, 'upstream')) }
   })
   return pool(jobs, PARALLEL)

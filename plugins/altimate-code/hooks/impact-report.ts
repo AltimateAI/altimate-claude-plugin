@@ -259,10 +259,10 @@ export function mergeConsumers(traces: ColumnTrace[]): ReportConsumers {
   }
 }
 
-/** The traced answers for one changed column: downstream and upstream, each null when not asked or failed. */
 /** A trace is a change's when its unique_id is the change's (two same-named models, the package's and integration_tests'), else by name. */
 export const sameModel = (trace: { model: string; id?: string }, change: { model: string; id?: string }) => (trace.id ?? trace.model) === (change.id ?? change.model)
 
+/** The traced answers for one changed column: downstream and upstream, each null when not asked or failed. */
 export type ColumnTrace = {
   model: string
   /** The change's unique_id when it has one (ModelChange.id): which of two same-named models the trace is of. */

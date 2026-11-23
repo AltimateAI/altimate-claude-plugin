@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean; cliId?: (model: string) => string; cliModels?: string[]; present?: string[] }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean; cliId?: (model: string) => string; cliModels?: string[]; present?: string[]; listed?: string[] }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -131,11 +131,11 @@ async function start($: any, on: any, options: Options = {}) {
   })
   on('fs.list', (_: unknown, e: { path: string }) => {
     lists.push(e.path)
-    if (options.packageRepo && e.path === ROOT) return { value: [{ name: 'integration_tests', kind: 'dir', size: 1, mtimeMs: 1, isLink: false }] }
     // The project root itself lists as the empty prefix.
     const prefix = e.path === ROOT ? '' : `${e.path.slice(ROOT.length + 1)}/`
     const names = new Map<string, 'file' | 'dir'>()
-    for (const path of Object.keys(sql ?? {})) {
+    if (options.packageRepo && e.path === ROOT) names.set('integration_tests', 'dir')
+    for (const path of [...Object.keys(sql ?? {}), ...(options.listed ?? [])]) {
       if (!path.startsWith(prefix)) continue
       const [head, ...rest] = path.slice(prefix.length).split('/')
       names.set(head!, rest.length ? 'dir' : 'file')
@@ -489,7 +489,7 @@ test('a package repo: a shell read of a package file the manifest lacks is not f
   expect(calls.some(one => one.includes('dbt_lineage'))).toBe(false)
 })
 
-test('a package repo: an absolute path names its own project\'s model, and over 4 MiB integration_tests\' path still names none of the package\'s', async ($, on) => {
+test('a package repo: an absolute path names its own project\'s model, not the package\'s of the same file name', async ($, on) => {
   const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
   const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
   const text = (path: string) => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined)
@@ -501,6 +501,39 @@ test('a package repo: an absolute path names its own project\'s model, and over 
   expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
   await ui.unmount()
+})
+
+test('a package repo: a path written with backslashes names its own project\'s model, as with slashes', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const text = (path: string) => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined)
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: text })
+  await $.turn.start({ text: 'which file?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'It is integration_tests\\models\\fct_orders.sql.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('a package repo over 4 MiB: integration_tests\' path names none of the package\'s models, though the package has that file name', async ($, on) => {
+  const text = (path: string) => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined)
+  // The names come from the package's SQL files, which have a models/fct_orders.sql.
+  const { clock } = await start($, on, { packageRepo: true, size: 6 * 1024 * 1024, fileText: text, listed: ['models/fct_orders.sql'] })
+  await $.turn.start({ text: 'which file?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'It is integration_tests/models/fct_orders.sql.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+  // The package's own path, in the same answer shape, does name its model.
+  await $.turn.start({ text: 'which file?', turnId: 't2' } as any)
+  await $.turn.complete({ answer: 'It is models/fct_orders.sql.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't2' } as any)
+  await clock.settle()
+  const again = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await again.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeDefined()
+  await again.unmount()
 })
 
 test('a package repo with the pane on integration_tests: written-out paths are the session\'s, so each still names its own project\'s model', async ($, on) => {
@@ -1228,7 +1261,7 @@ for (const [shape, result] of [
 ] as const) {
   test(`following Claude's own dbt_lineage call in a package repo follows the node it answered for (${shape}), in the package`, async ($, on) => {
     const manifest = { ...MANIFEST, nodes: { 'model.shop_tests.fct_orders': { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }, ...MANIFEST.nodes } }
-    const { clock } = await start($, on, {
+    const { clock, logs } = await start($, on, {
       packageRepo: true,
       manifest,
       // The package's file is newer than the manifest: said only when the package's own node, in the package, is followed.
@@ -1241,6 +1274,8 @@ for (const [shape, result] of [
     const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
     expect(await ui.find({ type: 'Text', text: /fct_orders\.sql changed after the manifest was written/ })).toBeDefined()
     await ui.unmount()
+    // The pane's project is the package, which borrows integration_tests' manifest: not integration_tests.
+    expect(logs.some(line => line.startsWith('lineage-pane · integration_tests/target/manifest.json · '))).toBe(true)
   })
 }
 
