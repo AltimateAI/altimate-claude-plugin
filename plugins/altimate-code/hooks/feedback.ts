@@ -5,9 +5,9 @@
 //
 // What is attached: plugin version, altimate-code version and binary name (never its path), Claude Code
 // version, OS, dbt-core / adapter / Python versions when the dbt doctor has run, and the plugin's own
-// on/off settings. The last plugin error is attached only when asked for with `--with-error`; it is
-// redacted first (the dbt profile's secret values, tokens, home-directory and other absolute paths, lines
-// that look like SQL, relation and node names). No paths, SQL, project, model or column names are collected.
+// on/off settings as they are in effect. The kind of the last plugin error is attached only when asked for
+// with `--with-error`: its error type and codes, never its message (see last-problem.ts). No paths, SQL,
+// project, model or column names are collected.
 import type { EngineInterface, On, PluginOptions } from 'claude-code'
 
 import { MISSING_BINARY, parseVersion } from './altimate-cli'
@@ -17,6 +17,8 @@ import { asVersion, forgetProblem, problemNoted, type DoctorFacts } from './last
 import { pluginVersion } from './usage'
 
 export const REPO = 'AltimateAI/altimate-claude-plugin'
+/** The repository as `gh` is given it: with its host, so a `GH_HOST` set for another GitHub never redirects the call. */
+const GH_REPO = `github.com/${REPO}`
 export const COMMAND = 'altimate-feedback'
 export const LABEL = 'feedback'
 /** The issue link is kept under this many characters: GitHub refuses a longer one. */
@@ -29,12 +31,17 @@ const CONFIRM = '--confirm'
 const CANCEL = '--cancel'
 const WITH_ERROR = '--with-error'
 const TRUNCATION_NOTE = '\n\n[Cut to fit the link: the full text was shown before it was opened.]'
-/** The plugin settings that are shown: an allow-list, so a setting that holds a path or a name is never read. */
-const SETTINGS: ReadonlyArray<readonly [string, string]> = [
-  ['dbt_mods', 'dbt helpers'],
-  ['healthBlocksPush', 'project health blocks git push'],
-  ['commentsInContext', 'team comments in context'],
-  ['show_edit_impact', 'edit impact notes'],
+const onUnlessFalse = (value: unknown) => value !== false
+const offUnlessTrue = (value: unknown) => value === true || value === 'true'
+/**
+ * The plugin settings that are shown, each read the way the feature it switches reads it, so the issue says what is in effect:
+ * an allow-list, so a setting that holds a path or a name is never read.
+ */
+const SETTINGS: ReadonlyArray<readonly [string, string, (value: unknown) => boolean]> = [
+  ['dbt_mods', 'dbt helpers', onUnlessFalse],
+  ['healthBlocksPush', 'project health blocks git push', offUnlessTrue],
+  ['commentsInContext', 'team comments in context', onUnlessFalse],
+  ['show_edit_impact', 'edit impact notes', offUnlessTrue],
 ]
 
 // ─── Redaction ────────────────────────────────────────────────────────────────────────────────────────
@@ -49,11 +56,22 @@ const HOME_MASK = '<path under home>'
 type Span = { start: number; end: number; home: boolean }
 
 const CREDENTIAL_KEY = String.raw`(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|account[_-]?key|shared[_-]?access[_-]?key|private[_-]?key|credential|cookie|session[_-]?id|authorization)s?`
-// A YAML line of a credential key: a block-scalar header (`password: |`, `secret: >- # note`) takes the indented lines after it, and a plain value
+// A YAML line of a credential key: a block-scalar header (`password: |`, `secret: >- # note`) takes the indented lines after it, a quoted value
+// that does not close on its line takes the indented lines after it up to its closing quote, and a plain value
 // (`password: correct horse battery staple`) is the rest of its line.
 const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?[ \t]*:[ \t]*)`
-const BLOCK_HEADER = new RegExp(String.raw`${KEY_LINE}[|>][+-]?\d?[ \t]*(?:#.*)?$`, 'i')
+const BLOCK_HEADER = new RegExp(String.raw`${KEY_LINE}[|>](?:\d[+-]?|[+-]\d?)?[ \t]*(?:#.*)?$`, 'i')
 const PLAIN_VALUE = new RegExp(String.raw`${KEY_LINE}(?![|>"'])(\S.*)$`, 'i')
+const QUOTED_VALUE = new RegExp(String.raw`${KEY_LINE}(["'])(.*)$`, 'i')
+/** A YAML quoted value that closes on its own line: `"…"` with backslash escapes, `'…'` with doubled apostrophes. */
+const closesOnLine = (quote: string, rest: string) => (quote === '"' ? /^(?:[^"\\]|\\.)*"/ : /^(?:[^']|'')*'(?!')/).test(rest)
+/** A line's indentation in columns, a tab to the next multiple of `tab` (pasted text mixes tabs and spaces, so both readings are used). */
+function widthOf(indent: string, tab: number): number {
+  let width = 0
+  for (const char of indent) width = char === '\t' ? width + tab - (width % tab) : width + 1
+  return width
+}
+const SIBLING_KEY = /^[ \t]*(?:-[ \t]+)?["']?[^\s:"']+["']?[ \t]*:(?:[ \t]|$)/
 
 /** Each pattern's group 1, when it has one, is text that stays (a key, a scheme); the rest of the match is cut. */
 const SECRET_PATTERNS: RegExp[] = [
@@ -66,17 +84,20 @@ const SECRET_PATTERNS: RegExp[] = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /\b((?:proxy-)?authorization["']?\s*[:=]\s*)[^\n]+/gi,
   /\b((?:Bearer|Basic|Digest|Token)\s+)[A-Za-z0-9._~+/=-]{8,}/g,
-  // user:password@host in a connection string or URL.
-  /(\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+(?=@)/gi,
+  // user:password@host in a connection string or URL. A rule that may fail after reading far starts only where its run of characters
+  // starts, or reads a bounded length from each start, so a long run that never matches is not read to its end from every position in it.
+  /((?<![a-z0-9+.-])[0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^\s/@:]*:[^\s/@]+(?=@)/gi,
   // A connection string's password: a quoted or braced value to its own closing delimiter (ODBC `PWD={a b};`, `}}` is a literal brace), or a
-  // value that runs to the next `;`, spaces included; the last field of a string (after a `;`, or alone on its line) runs to the end of the line.
-  /((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\})*\}|[^;\n]*(?=;))/gi,
-  /((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)[^;\n]*$/gim,
+  // value that runs to the next `;`, spaces included; the last field of a string (after a `;`, or alone on its line) runs to the end of the line,
+  // or to its closing quote when it is quoted, so the words after it stay.
+  /((?<![\w.-])(?:pwd|password|pass|accountkey|sharedaccesskey)\s*=\s*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\}){0,1000}\}|[^;\n]{0,1000}(?=;))/gi,
+  /((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\}){0,1000}\}|(?=[^\s;])[^;\n]*$)/gim,
   // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
-  // backslash escape or a doubled quote is inside it; so is a JSON-escaped quote, to the escaped quote of the same depth) or the rest of the word, up to a `;` that starts the next `key=` field.
-  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?\s*[:=]\s*)(?:"(?:[^"\\]|\\.|"")*"|'(?:[^'\\]|\\.|'')*'|(?<!\\)(\\+)"(?:(?!(?<!\\)\2")[^\n])*(?<!\\)\2"|(?:[^\s;]|;(?!\w+=))+)`, 'gi'),
+  // backslash escape or a doubled quote is inside it; so is a JSON-escaped quote, to the escaped quote of the same depth; a quote left open runs to
+  // the end of its line, never past it) or the rest of the word, up to a `;` that starts the next `key=` field.
+  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.|"")*(?:"|(?=\n)|$)|'(?:[^'\\\n]|\\.|'')*(?:'|(?=\n)|$)|(?<!\\)(\\+)"(?:(?!(?<!\\)\2")[^\n])*(?<!\\)\2"|(?:[^\s;]|;(?!\w+=))+)`, 'gi'),
   // A long unbroken run of key-like characters.
-  /\b(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g,
+  /(?<![A-Za-z0-9_+-])(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g,
 ]
 
 function patternSpans(text: string): Span[] {
@@ -91,7 +112,10 @@ function patternSpans(text: string): Span[] {
   return spans
 }
 
-/** The YAML values under credential keys: the rest of a line, or the indented lines (blank ones between them too) after a block-scalar header. */
+/**
+ * The YAML values under credential keys: the rest of a line; the indented lines (blank ones between them too) after a block-scalar header;
+ * the indented lines after a quoted value left open on its line, up to the one that closes it.
+ */
 function yamlSpans(text: string): Span[] {
   const spans: Span[] = []
   const lines = text.split('\n')
@@ -110,13 +134,26 @@ function yamlSpans(text: string): Span[] {
       continue
     }
     const header = BLOCK_HEADER.exec(line)
-    if (!header) continue
+    const quoted = header ? null : QUOTED_VALUE.exec(line)
+    if (!header && !(quoted && !closesOnLine(quoted[2]!, quoted[3]!))) continue
+    const keyLine = (header ?? quoted)!
+    // The value is the lines after it indented deeper than its key (a list item's `- ` counts as indentation), or as deep but not a key
+    // themselves (tab-indented text pasted under a key); a sibling key at the key's depth, or a shallower line, ends it. A quoted value
+    // ends at the line that closes its quote.
+    const keyIndent = /^[ \t]*(?:-[ \t]+)?/.exec(line)![0]
+    const closing = quoted ? new RegExp(quoted[2] === '"' ? '(?:^|[^\\\\])(?:\\\\\\\\)*"' : "(?:^|[^'])(?:'')*'(?!')") : null
     let last = i
     for (let next = i + 1; next < lines.length; next++) {
-      if (/^[ \t]+\S/.test(lines[next]!)) last = next
-      else if (!/^[ \t]*\r?$/.test(lines[next]!)) break
+      const candidate = bare(lines[next]!)
+      if (!/\S/.test(candidate)) continue
+      const indent = /^[ \t]*/.exec(candidate)![0]
+      // Deeper with a tab read as 8 columns or as 1 counts, so a mix of tabs and spaces is read toward cutting.
+      const deeper = widthOf(indent, 8) > widthOf(keyIndent, 8) || widthOf(indent, 1) > widthOf(keyIndent, 1)
+      if (!(deeper || (widthOf(indent, 8) === widthOf(keyIndent, 8) && indent !== '' && !SIBLING_KEY.test(candidate)))) break
+      last = next
+      if (closing?.test(candidate)) break
     }
-    spans.push({ start: starts[i]! + header[1]!.length, end: starts[last]! + bare(lines[last]!).length, home: false })
+    spans.push({ start: starts[i]! + keyLine[1]!.length, end: starts[last]! + bare(lines[last]!).length, home: false })
     i = last
   }
   return spans
@@ -237,7 +274,6 @@ export type Draft = { title: string; body: string; withProblem: boolean }
 
 const OS = new Set(['macos', 'linux', 'windows', 'wsl'])
 
-
 async function homesOf($: EngineInterface): Promise<string[]> {
   const [home, profile] = await Promise.all([$.env.get('HOME').catch(() => undefined), $.env.get('USERPROFILE').catch(() => undefined)])
   return [home, profile].filter((one): one is string => typeof one === 'string' && one !== '')
@@ -274,10 +310,7 @@ export async function collectFacts($: EngineInterface, ask: Ask, extra: { doctor
       .catch(() => 'unknown'),
   ])
   const settings: Array<[string, boolean]> = []
-  for (const [key, label] of SETTINGS) {
-    const value = extra.settings[key]
-    if (typeof value === 'boolean') settings.push([label, value])
-  }
+  for (const [key, label, inEffect] of SETTINGS) settings.push([label, inEffect(extra.settings[key])])
   const problem = ask.withProblem ? problemNoted() : null
   return { plugin, altimate, claudeCode, os, doctor: extra.doctor, settings, problem }
 }
@@ -386,14 +419,14 @@ export async function send($: EngineInterface, draft: Draft): Promise<string> {
   let withLabel = false
   if (!dry) {
     try {
-      const labels = await $.process.run(['gh', 'label', 'list', '--repo', REPO, '--json', 'name', '--limit', '500'], { timeoutMs: 20_000 })
+      const labels = await $.process.run(['gh', 'label', 'list', '--repo', GH_REPO, '--json', 'name', '--limit', '500'], { timeoutMs: 20_000 })
       const names = labels.exitCode === 0 ? (JSON.parse(labels.stdout) as Array<{ name?: unknown }>) : []
       withLabel = Array.isArray(names) && names.some(one => one?.name === LABEL)
     } catch {
       withLabel = false
     }
   }
-  const argv = ['gh', 'issue', 'create', '--repo', REPO, '--title', draft.title, '--body-file', '-', ...(withLabel ? ['--label', LABEL] : [])]
+  const argv = ['gh', 'issue', 'create', '--repo', GH_REPO, '--title', draft.title, '--body-file', '-', ...(withLabel ? ['--label', LABEL] : [])]
   if (dry) {
     return [`Dry run (${DRY_RUN_ENV} is set): nothing was created. This would run, with the body shown above on stdin:`, argv.map((word, i) => (i === 6 ? quote(word) : word)).join(' '), `(adds --label ${LABEL} when the repository has that label)`].join('\n')
   }

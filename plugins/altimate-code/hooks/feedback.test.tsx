@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { nothingToReport } from './inert-features'
 import { setRedactions, clearRedactions } from './dbt-mods-core'
-import { MAX_URL, buildDraft, cleanDescription, issueUrl, redactSecrets, titleOf, withoutHome, type Facts } from './feedback'
+import { MAX_URL, buildDraft, cleanDescription, collectFacts, issueUrl, redactSecrets, titleOf, withoutHome, type Facts } from './feedback'
 import { doctorFacts, errorKinds } from './last-problem'
 
 const HOME = '/Users/alice'
@@ -317,6 +317,20 @@ test('with no description the command asks for one and does nothing else', async
   expect(calls).toEqual([])
 })
 
+test('the settings line says what is in effect, read as each feature reads it: a string true is on, an unset setting is its default', async () => {
+  // Only the settings are looked at here: every other fact is left unreadable, which collectFacts allows.
+  const engine = {
+    process: { run: async () => Promise.reject(new Error('spawn ENOENT')) },
+    session: { version: async () => ({ version: '2.1.329' }), info: async () => ({ platform: 'macos' }) },
+    fs: { read: async () => Promise.reject(new Error('ENOENT')) },
+    plugin: { root: '/nowhere' },
+  } as any
+  const read = async (settings: Record<string, unknown>) => (await collectFacts(engine, { withProblem: false }, { doctor: null, settings: settings as any })).settings
+  expect(await read({})).toEqual([['dbt helpers', true], ['project health blocks git push', false], ['team comments in context', true], ['edit impact notes', false]])
+  expect(await read({ dbt_mods: false, healthBlocksPush: 'true', commentsInContext: false, show_edit_impact: true })).toEqual([['dbt helpers', false], ['project health blocks git push', true], ['team comments in context', false], ['edit impact notes', true]])
+  expect(await read({ healthBlocksPush: 'yes', show_edit_impact: 'false' })).toEqual([['dbt helpers', true], ['project health blocks git push', false], ['team comments in context', true], ['edit impact notes', false]])
+})
+
 test('a description gives the exact draft and sends nothing: no gh call, no browser, no issue', async ($, on) => {
   const { run, calls } = await start($, on)
   const text = await run('The band said nothing after a failed run')
@@ -359,13 +373,17 @@ test('a description that holds the word --confirm is a description, not a confir
 })
 
 test('gh installed and signed in: the confirmed draft is created with gh, labelled feedback, body and title as shown', async ($, on) => {
-  const { run, creates, opens } = await start($, on)
+  const { run, creates, opens, calls } = await start($, on)
   const preview = await run('The band said nothing after a failed run')
   const done = await run('--confirm')
   expect(done).toBe(`Created: ${REPO_URL}/77`)
+  // Every gh call names github.com, so a GH_HOST set for another GitHub does not redirect it.
+  expect(calls.map(one => one.argv.slice(0, 2).join(' '))).toEqual(['gh auth', 'gh label', 'gh issue'])
+  expect(calls[1]!.argv).toEqual(['gh', 'label', 'list', '--repo', 'github.com/AltimateAI/altimate-claude-plugin', '--json', 'name', '--limit', '500'])
+  expect(calls[0]!.argv).toContain('github.com')
   expect(creates()).toHaveLength(1)
   const { argv, stdin } = creates()[0]!
-  expect(argv).toEqual(['gh', 'issue', 'create', '--repo', 'AltimateAI/altimate-claude-plugin', '--title', shownTitle(preview), '--body-file', '-', '--label', 'feedback'])
+  expect(argv).toEqual(['gh', 'issue', 'create', '--repo', 'github.com/AltimateAI/altimate-claude-plugin', '--title', shownTitle(preview), '--body-file', '-', '--label', 'feedback'])
   expect(stdin).toBe(shownBody(preview))
   expect(opens()).toEqual([])
 })
@@ -442,7 +460,7 @@ test('ALTIMATE_FEEDBACK_DRY_RUN prints the gh command and creates nothing, opens
   await run("it's broken")
   const done = await run('--confirm')
   expect(done).toContain('Dry run')
-  expect(done).toContain("gh issue create --repo AltimateAI/altimate-claude-plugin --title 'Feedback: it'\\''s broken' --body-file -")
+  expect(done).toContain("gh issue create --repo github.com/AltimateAI/altimate-claude-plugin --title 'Feedback: it'\\''s broken' --body-file -")
   expect(creates()).toEqual([])
   expect(opens()).toEqual([])
 })
@@ -537,6 +555,14 @@ test('a description at the read limit is redacted whole and quickly, whatever sh
   expect(Date.now() - worst).toBeLessThan(3000)
 })
 
+test('a long run that no rule matches is read once, not once per position: each shape at the read limit is redacted quickly', () => {
+  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000)]) {
+    const started = Date.now()
+    cleanDescription(text.slice(0, 100_000), [HOME])
+    expect(Date.now() - started).toBeLessThan(1500)
+  }
+})
+
 test('a quoted secret value is cut whole, whatever escaped quotes it holds', () => {
   for (const text of ['{"password":"alpha\\"omega-secret"}', "password='alpha\\'omega-secret'", 'secret = "x" and then password=plain-secret']) {
     const out = redactSecrets(text)
@@ -598,6 +624,41 @@ test('a YAML credential under a quoted key, or with a value of several words, is
   expect(out).not.toMatch(/correct|horse|staple|quoted-key|folded-quoted|two words/)
   expect(out).toContain('name: kept')
   expect(out.split('\n')[0]).toBe('password: ‹redacted›')
+})
+
+test('a YAML block header with its indentation before its chomping indicator is a block too, and the block ends at a sibling key', () => {
+  for (const header of ['|2-', '>2+', '|1', '>-2', '|+', '|0']) {
+    const out = redactSecrets([`password: ${header}`, '  private-warehouse-value', 'user: bob'].join('\n'))
+    expect(out).toBe(['password: ‹redacted›', 'user: bob'].join('\n'))
+  }
+  const nested = redactSecrets(['config:', '  password: |', '    private-value', '', '    more-private', '  user: alice', '  threads: 4'].join('\n'))
+  expect(nested).toBe(['config:', '  password: ‹redacted›', '  user: alice', '  threads: 4'].join('\n'))
+  const listed = redactSecrets(['outputs:', '  - password: |', '      private-value', '    user: alice'].join('\n'))
+  expect(listed).toBe(['outputs:', '  - password: ‹redacted›', '    user: alice'].join('\n'))
+  // Tab-indented text pasted under a key is its value, as deep as the key or deeper.
+  for (const text of ['  password: |\n\tprivate-tab-line\nuser: x', '\tpassword: |\n\tprivate-tab-line\nuser: x', '\tpassword: |\n  private-tab-line\nuser: x', '\t\tpassword: |\n\t   private-tab-line\nuser: x']) {
+    expect(redactSecrets(text)).not.toContain('private-tab-line')
+    expect(redactSecrets(text)).toContain('user: x')
+  }
+})
+
+test('a YAML quoted credential that goes on to the next lines is cut to its closing quote, and the lines after it stay', () => {
+  const out = redactSecrets(['password: "first-half-of-private', '  second-half-of-private"', 'user: bob'].join('\n'))
+  expect(out).toBe(['password: ‹redacted›', 'user: bob'].join('\n'))
+  const single = redactSecrets(["  token: 'it''s first-private", "    it''s second-private'", '  user: bob'].join('\n'))
+  expect(single).toBe(['  token: ‹redacted›', '  user: bob'].join('\n'))
+})
+
+test('a password in a URL is cut whatever comes before its scheme', () => {
+  for (const before of ['-', '.', '1.', '+', '--url -', '_', '(']) {
+    expect(redactSecrets(`${before}postgres://admin:hunter2-production-key@db.internal/x`)).not.toContain('hunter2')
+  }
+})
+
+test('a quoted password ends at its closing quote: the words after it stay; a quote left open is cut to the end of its line only', () => {
+  expect(redactSecrets('password="hunter2-production-key" then the panel hangs')).toBe('password=‹redacted› then the panel hangs')
+  expect(redactSecrets("Server=db;Password='alpha omega';then it failed")).toBe("Server=db;Password=‹redacted›;then it failed")
+  expect(redactSecrets('password: "alpha omega by mistake\nthen dbt said "Database Error" on orders')).toBe('password: ‹redacted›\nthen dbt said "Database Error" on orders')
 })
 
 test('connection-string passwords are cut whole: braced, multi-word, and an Azure account key with slashes', () => {
