@@ -1,7 +1,7 @@
 # Privacy Policy — Altimate Code plugin for Claude Code
 
 **Effective date:** November 2, 2026
-**Last revised:** November 19, 2026
+**Last revised:** November 23, 2026
 **Applies to:** the `altimate-code` Claude Code plugin distributed from this repository, and the data flows it initiates through the [altimate-code](https://github.com/AltimateAI/altimate-code) MCP server and CLI.
 
 This policy supplements the Altimate AI [Privacy Policy](https://www.altimate.ai/privacy) and [Terms](https://www.altimate.ai/terms), which govern Altimate services generally. Where this document is silent, the master policy applies. Questions: **info@altimate.ai**.
@@ -178,7 +178,7 @@ The plugin and the altimate-code CLI are professional developer tools, not direc
 
 We will update this document in this repository and revise the effective date when our practices change. Material changes to Altimate-wide practices are governed by the master [Privacy Policy](https://www.altimate.ai/privacy).
 
-**November 19, 2026:** added [The Databricks savings check](#the-databricks-savings-check) (plugin 1.9.0): `/savings` runs altimate-code's savings tool with telemetry off, sends no plugin usage event, and keeps the findings out of the conversation.
+**November 23, 2026:** added [The Databricks savings check](#the-databricks-savings-check) (plugin 1.9.0): `/savings` runs altimate-code's savings tool with telemetry off, sends no plugin usage event, and keeps the findings out of the conversation.
 
 **November 19, 2026:** added [Plugin usage events](#plugin-usage-events) (plugin 1.8.2): the anonymous session start and feature-used events, and the plugin's own check of the telemetry opt-out.
 

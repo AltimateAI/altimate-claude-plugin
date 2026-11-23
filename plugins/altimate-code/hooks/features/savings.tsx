@@ -9,7 +9,7 @@ import { atom, read, update } from 'claude-code'
 import type { Args, EngineInterface, EventResult, On, RenderElement, ToolCallResult } from 'claude-code'
 
 import type { SavingsView, WarehouseConfig } from '../../types'
-import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
+import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, runAltimate, runTool } from '../altimate-cli'
 import { changedSettings, comparable, configLabel, configOf, covers, learns, loadConfig } from '../savings-config'
 import { oneLine } from '../savings-text'
 import { SHELLS, leaderEnd, shellScript, simpleCommands } from '../shell'
@@ -49,15 +49,27 @@ const LOCAL_ONLY = { ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MO
 export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.13'
 const VERSION_TIMEOUT_MS = 15_000
 
+// A line that is the CLI's own version: the version alone, or after the CLI's name.
+const OWN_VERSION = /^(?:altimate(?:-code)?\s+)?v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/
+
 /**
- * Whether what `altimate --version` printed names a release the check may start. The version is read as
- * the status line reads it (the last version printed, so `altimate-code 0.12.13` or a runtime note before
- * it still reads), and compared as semver does: a prerelease of the minimum is older than it. A source
- * build prints `local` whatever its age (an old checkout without assessment mode does too), so it is
- * refused like any version that cannot be read; a build made with the release script carries its version.
+ * The version `altimate --version` printed as its own: the one line that is a version alone (or after the CLI's
+ * name). A version elsewhere on a line (a runtime note, an update notice) is not the CLI's, and no such line, or two
+ * that differ, reads as no version, which is refused.
+ */
+export function ownVersion(text: string): string | null {
+  const found = text.split(/\r?\n/).map(line => OWN_VERSION.exec(line.trim())?.[1]).filter((one): one is string => !!one)
+  return new Set(found).size === 1 ? found[0]! : null
+}
+
+/**
+ * Whether what `altimate --version` printed names a release the check may start, compared as semver does: a
+ * prerelease of the minimum is older than it. A source build prints `local` whatever its age (an old checkout
+ * without assessment mode does too), so it is refused like any version that cannot be read; a build made with the
+ * release script carries its version.
  */
 export function supportsSavings(printed: string): boolean {
-  const version = parseVersion(printed)
+  const version = ownVersion(printed)
   return version !== null && compareVersions(version, SAVINGS_MIN_ALTIMATE_CODE) >= 0
 }
 
@@ -73,7 +85,7 @@ const ADD_CONNECTION =
   'Add a Databricks connection to altimate-code (in ~/.altimate-code/connections.json: type "databricks", server_hostname, the http_path of a SQL warehouse and an access_token), then run /savings again.'
 
 const reportAtom = atom({ plugin: 'altimate-code', key: 'savingsReport' } as const, null as SavingsView | null, { shape: 'savings-view-6' })
-const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, null as { label: string } | null)
+const busyAtom = atom({ plugin: 'altimate-code', key: 'savingsBusy' } as const, null as { label: string; carryover?: boolean } | null)
 const messageAtom = atom({ plugin: 'altimate-code', key: 'savingsMessage' } as const, null as { text: string; recovery: string } | null)
 const bandAtom = atom({ plugin: 'altimate-code', key: 'savingsBand' } as const, null as { text: string } | null)
 // The alternative pressed in the pane's what-if row: which warehouse, and which choice.
@@ -97,7 +109,10 @@ let claim: Claim | null = null
 // beside one whose answer the /clear threw away.
 type Claim = { connection: string | null; conversation: number; reading?: boolean }
 // What /savings or a press says while a check from before a /clear still reads the warehouse.
-const STILL_READING = 'The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.'
+const STILL_READING =
+  'The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It stops within 9 minutes of starting: run /savings again then.'
+// What the pane shows meanwhile, in place of Run again.
+const STILL_READING_BUSY = { label: 'A savings check from before this conversation is still reading your warehouse; its answer is not kept.', carryover: true }
 /**
  * Lets go of the claim if `mine` still holds it: when its run ends, and when a step before its run fails, since no
  * run was started to let go of it then.
@@ -686,7 +701,7 @@ async function runCheck($: EngineInterface, mine: Claim) {
     const stdout = String(printed.stdout ?? '').trim()
     const source = stdout.split('\n').pop()?.trim() === 'local'
     const failed = typeof (printed as { exitCode?: unknown }).exitCode === 'number' && (printed as { exitCode: number }).exitCode !== 0
-    const version = source || failed ? null : stdout ? parseVersion(stdout) : parseVersion(String(printed.stderr ?? ''))
+    const version = source || failed ? null : stdout ? ownVersion(stdout) : ownVersion(String(printed.stderr ?? ''))
     if (source || !version || !supportsSavings(version)) {
       const why = source
         ? {
@@ -745,7 +760,9 @@ async function runCheck($: EngineInterface, mine: Claim) {
     // The claim is let go only once the flag is cleared, so a run claimed next never has its flag cleared by this
     // one, and is let go even when that write fails.
     try {
-      await update($, busyAtom, now => (live() ? null : now))
+      // A run from before a /clear clears the flag the /clear left for it: no other run can start while it holds
+      // its claim.
+      await update($, busyAtom, now => (live() || now?.carryover ? null : now))
     } finally {
       letGo(mine)
     }
@@ -1032,7 +1049,8 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   await update($, bandAtom, () => null)
   await update($, whatIfAtom, () => null)
   await update($, reportAtom, () => null)
-  await update($, busyAtom, () => null)
+  // The pane in the new conversation says a kept check is still reading, rather than offering Run again.
+  await update($, busyAtom, () => (claim ? STILL_READING_BUSY : null))
   await update($, messageAtom, () => null)
 }
 

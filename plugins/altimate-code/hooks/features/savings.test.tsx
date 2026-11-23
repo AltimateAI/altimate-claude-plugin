@@ -714,12 +714,20 @@ test('a /savings typed after a /clear, while the earlier check still reads the w
   expect(runs.length).toBe(1)
   await $.session.end({ reason: 'clear' } as any)
   options.hold = undefined
-  expect((await savings($)).text).toBe('The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.')
+  expect((await savings($)).text).toBe('The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It stops within 9 minutes of starting: run /savings again then.')
   await clock.settle()
   expect(runs.length).toBe(1)
-  // Once it ends, its answer stays out of the new conversation and the next /savings runs.
+  // The new conversation's pane says so, with no Run again.
+  let ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^A savings check from before this conversation is still reading your warehouse/ })).toBeDefined()
+  expect(await ui.find({ key: 'again' })).toBeUndefined()
+  await ui.unmount()
+  // Once it ends, its answer stays out of the new conversation, the pane no longer says so, and the next /savings runs.
   finishOld()
   await clock.settle()
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^A savings check from before this conversation/ })).toBeUndefined()
+  await ui.unmount()
   await savings($)
   await clock.settle()
   expect(runs.length).toBe(2)
@@ -741,7 +749,7 @@ test('a band press after a /clear, while the earlier check still reads the wareh
   await band.unmount()
   await clock.settle()
   expect(runs.length).toBe(1)
-  expect(toasts.at(-1)).toBe('The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.')
+  expect(toasts.at(-1)).toBe('The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It stops within 9 minutes of starting: run /savings again then.')
   finish()
   await clock.settle()
 })
@@ -1207,7 +1215,7 @@ test('an altimate-code older than the check is never started for it: only `--ver
 test('a version that cannot be read, or a source build, is refused; the first release with the check runs it', async ($, on) => {
   // A source build prints `local` whatever its age, old checkouts without assessment mode included.
   // A prerelease of the minimum is older than it, as semver orders them; a preview build (0.0.0-…) is older still.
-  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12', 'v0.12.12', 'altimate-code 0.12.12', '0.12.13-beta.1', '0.0.0-main-202611191200']) {
+  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12', 'v0.12.12', 'altimate-code 0.12.12', '0.12.13-beta.1', '0.0.0-main-202611191200', '0.12.12\nnode v22.1.0', '0.12.12\nupdate available: 0.12.20', '0.12.12\n0.12.20', 'altimate-code 0.12.20 is available']) {
     expect(supportsSavings(version)).toBe(false)
   }
   // Read as the status line reads it: the last version printed, with or without the CLI's name or a runtime note.

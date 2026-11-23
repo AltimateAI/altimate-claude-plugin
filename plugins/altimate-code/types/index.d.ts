@@ -789,7 +789,8 @@ declare module 'claude-code' {
       /** The last /savings answer; null before one, or after /clear. */
       savingsReport: Shaped<SavingsView | null>
       /** What /savings is doing now; null when it is idle. */
-      savingsBusy: { label: string } | null
+      // `carryover`: left by a /clear for a check from before it that still reads the warehouse.
+      savingsBusy: { label: string; carryover?: boolean } | null
       /** Why there is no answer to show: the check's refusal and the step that fixes it. */
       savingsMessage: { text: string; recovery: string } | null
       /** The line above the prompt when the session touches Databricks config; null when there is none. */
