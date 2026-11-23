@@ -40,6 +40,8 @@ type Options = {
   noManifest?: boolean
   /** More files from the start, by absolute path (a project below that the session start already sees). */
   extra?: Record<string, string>
+  /** Files small enough for the plugin to read itself (a manifest under 4 MiB). */
+  small?: string[]
   /** Other paths that exist, such as Windows' explorer.exe under /mnt/c. */
   present?: string[]
   /** target/manifest.json has gone since the start. */
@@ -102,7 +104,7 @@ async function start($: any, on: any, options: Options = {}) {
   }))
   on('fs.stat', (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST && options.noManifest) throw new Error('ENOENT')
-    return { value: { kind: 'file', size: 50 * 1024 * 1024, mtimeMs: 1, isLink: false } }
+    return { value: { kind: 'file', size: options.small?.some(one => e.path === one || e.path.startsWith(one.replace(/manifest\.json$/, '.altimate-'))) ? 2_000 : 50 * 1024 * 1024, mtimeMs: 1, isLink: false } }
   })
   // What sits directly in a folder of the held files: a manifest over 4 MiB leaves the names to the SQL files.
   on('fs.list', (_: unknown, e: { path: string }) => {
@@ -165,11 +167,13 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin === 'mkdir') return ok()
     if (bin === 'cp') {
       copies.add(argv[2]!)
+      if (argv[1]! in files) files[argv[2]!] = files[argv[1]!]!
       return ok()
     }
     if (bin === 'mv') {
       copies.delete(argv[2]!)
       copies.add(argv[3]!)
+      if (argv[2]! in files) files[argv[3]!] = files[argv[2]!]!
       return ok()
     }
     if (bin === 'rm') {
@@ -791,6 +795,37 @@ test('/lineage-report <model>.<column> on a package repo asks for the package\'s
   tools.length = 0
   await $.command.run({ command: 'lineage-report', args: 'only_tests.revenue' } as any)
   expect(tools.filter(one => one.direction && one.model === 'only_tests').length).toBe(2)
+})
+
+test('a package repo with a manifest small enough to read: each project\'s changed model, versioned or not, is asked for by its own unique_id', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const TEST_MODEL = `${RUNNER}/models/fct_orders.sql`
+  const node = (id: string, path: string, name = 'fct_orders') => ({ unique_id: id, resource_type: 'model', name, original_file_path: path, depends_on: { nodes: [] }, config: {}, columns: {} })
+  // The package's fct_orders is versioned; integration_tests has a fct_orders of its own.
+  const manifest = { nodes: { 'model.shop_tests.fct_orders': node('model.shop_tests.fct_orders', 'models/fct_orders.sql'), 'model.shop.fct_orders.v1': { ...node('model.shop.fct_orders.v1', 'models/fct_orders.sql'), version: 1 } }, sources: {}, exposures: {}, parent_map: {}, child_map: {} }
+  const { turn, tools, copies } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    small: [THEIRS],
+    openers: { 'xdg-open': 0 },
+    extra: {
+      [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\nmodel-paths: ['models']\n",
+      [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n',
+      [THEIRS]: JSON.stringify(manifest),
+      [TEST_MODEL]: 'select\n  order_id,\n  revenue as checked\nfrom {{ ref("fct_orders") }}\n',
+    },
+  })
+  void copies
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+    await $.tool.call({ tool: 'Edit', file_path: TEST_MODEL, old_string: 'revenue as checked', new_string: 'revenue * 2 as checked' })
+  })
+  const models = new Set(tools.filter(one => one.direction === 'downstream' && one.column).map(one => `${one.model}:${one.column}`))
+  expect(models).toEqual(new Set(['model.shop.fct_orders.v1:revenue', 'model.shop_tests.fct_orders:checked']))
+  tools.length = 0
+  await $.command.run({ command: 'lineage-report', args: 'fct_orders.revenue' } as any)
+  expect(tools.filter(one => one.direction).map(one => one.model)).toEqual(['model.shop.fct_orders.v1', 'model.shop.fct_orders.v1'])
 })
 
 test('/lineage-report on a column the manifest answers without reaching is a plain error, never a report that it reaches 0', async ($, on) => {

@@ -31,8 +31,8 @@ import {
   valueCandidates,
   WINDOWS_EXPLORER,
 } from './impact-report'
-import { projectLayout } from './lineage-graph'
-import { modelsNamed, openPane, projectRoot } from './lineage'
+import { findModel, projectLayout } from './lineage-graph'
+import { modelsNamed, openPane, projectRoot, readGraph } from './lineage'
 
 export const REPORT_COMMAND = 'lineage-report'
 // Under the project's target/, which dbt already keeps out of git.
@@ -191,15 +191,27 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     // No select item changed (a value computed in a Jinja block the select reads, say): the names the change rewrote
     // are asked of the manifest, and the ones it has are traced as columns whose values change.
     const values = columns.length === 0 ? valueCandidates(one.original, current) : []
-    // A package repo reading integration_tests' manifest: that manifest holds integration_tests' own models too, so the
-    // model is asked for by its unique_id. (A project's own manifest keeps the name: a versioned model goes by it.)
-    // Judged by the copy the task reads (taken at its start), else by the manifest as it is now.
-    const borrowed = state?.snapshot ? !state.snapshot.startsWith(`${one.root}/target/`) : (await manifestFile($, one.root)) !== `${one.root}/target/manifest.json`
-    const pkg = borrowed ? await projectName($, one.root) : null
-    changes.push({ model: modelName(file), ...(pkg ? { id: `model.${pkg}.${modelName(file)}` } : {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
+    const id = await changeId($, one.root, state?.snapshot ?? null, relative(one.root, file), modelName(file))
+    changes.push({ model: modelName(file), ...(id ? { id } : {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }
   if (changes.length > MAX_MODELS) $.ui.log(`lineage-summary · ${changes.length} models changed; tracing the first ${MAX_MODELS}`)
   return changes.slice(0, MAX_MODELS)
+}
+
+/**
+ * The unique_id a changed model is asked for by, so a manifest holding another project's model of the same name (a
+ * package repo and integration_tests share one) never answers for it: read from the task's copy of the manifest when it
+ * is small enough to read (the project's own node at the file's path, versions included); for a borrowed manifest too
+ * large to read, `model.<package>.<name>`. Undefined otherwise: the model goes by its name, as before.
+ */
+async function changeId($: EngineInterface, root: string, snapshot: string | null, rel: string, name: string): Promise<string | undefined> {
+  const pkg = await projectName($, root)
+  const manifest = snapshot ?? (await manifestFile($, root))
+  const graph = await readGraph($, manifest).catch(() => null)
+  if (graph) return findModel(graph, rel, pkg, true) ?? undefined
+  // Judged by the copy the task reads (taken at its start), else by the manifest as it is now.
+  const borrowed = snapshot ? !snapshot.startsWith(`${root}/target/`) : manifest !== `${root}/target/manifest.json`
+  return borrowed && pkg ? `model.${pkg}.${name}` : undefined
 }
 
 /** Runs the work items at most `limit` at a time, keeping their order. */
@@ -604,10 +616,14 @@ async function buildColumnReport($: EngineInterface, model: string, column: stri
     Promise.all((['downstream', 'upstream'] as const).map(direction => runTool($, 'impact_analysis', { manifest_path: manifest, model: asked, column, change_type: 'modify', direction }, { cliOnly: true }).catch(() => null)))
   // integration_tests' manifest, which a package repo borrows, holds its own models too: a bare name is asked for as the
   // package's model first, then, when the package has none of that name, as it is.
-  const pkg = manifest !== `${root}/target/manifest.json` && !model.includes('.') ? await projectName($, root) : null
-  let [down, up] = await traceAs(pkg ? `model.${pkg}.${model}` : model)
-  let asOwn = !!pkg
-  if (pkg && (down?.metadata as any)?.success === false) {
+  const own = await projectName($, root)
+  // A manifest small enough to read says which node the name is: the project's own (any version) before another's.
+  const graph = !model.includes('.') ? await readGraph($, manifest).catch(() => null) : null
+  const known = graph ? findModel(graph, model, own) : null
+  const pkg = !graph && manifest !== `${root}/target/manifest.json` && !model.includes('.') ? own : null
+  let [down, up] = await traceAs(known ?? (pkg ? `model.${pkg}.${model}` : model))
+  let asOwn = !!known || !!pkg
+  if (!known && pkg && (down?.metadata as any)?.success === false) {
     ;[down, up] = await traceAs(model)
     asOwn = false
   }

@@ -271,10 +271,21 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
   const rootOf = (id: string) => (borrowedRoot && pkg && packageOf(id) !== pkg ? borrowedRoot : root)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
   const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
+  // A path written out names its project's model: under the borrowed manifest's project (integration_tests/…), that
+  // project's node at the rest of the path; else the project's own node at it.
+  const byPath = new Map<string, string>()
+  const below = borrowedRoot ? `${relative(root, borrowedRoot)}/` : null
+  for (const match of text.matchAll(/[\w./-]+\.sql\b/g)) {
+    const rel = match[0].replace(/^\.\//, '')
+    const theirs = !!below && rel.startsWith(below)
+    const path = theirs ? rel.slice(below!.length) : rel
+    const node = Object.values(graph.nodes).find(one => FOLLOWABLE.has(one.type) && one.path === path && (!pkg || (packageOf(one.id) === pkg) !== theirs))
+    if (node) byPath.set(node.name.toLowerCase(), node.id)
+  }
   const found = new Map<string, AnswerModel>()
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
     const word = match[0].toLowerCase()
-    const id = byName.get(word)
+    const id = byPath.get(word) ?? byName.get(word)
     if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root: rootOf(id), ...(kept && { manifest: kept }) })
   }
   return [...found.values()].slice(0, 12)
@@ -413,7 +424,7 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
 }
 
 /** The manifest's graph, read from the file once per change; null when the file is too big to read. */
-async function readGraph($: EngineInterface, manifest: string): Promise<LineageGraph | null> {
+export async function readGraph($: EngineInterface, manifest: string): Promise<LineageGraph | null> {
   const stat = await $.fs.stat(manifest)
   if (manifestCache?.path === manifest && manifestCache.mtimeMs === stat.mtimeMs) return manifestCache.graph
   if (stat.size > MAX_MANIFEST_BYTES) return null
@@ -590,7 +601,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   let id = graph ? findModel(graph, wanted, pkg, asPath) : null
   if (graph && !id) {
     const split = withoutColumn()
-    const model = split ? findModel(graph, split.model, pkg) : null
+    const model = split ? findModel(graph, split.model, pkg, /[\\/]|\.sql$/i.test(split.model)) : null
     if (split && model) [id, wanted, column] = [model, split.model, split.column]
   }
   let via: LineageFocus['via'] = fromSql ? 'sql' : 'manifest'
@@ -1467,8 +1478,12 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
           // a newer follow (another read) has started, this command's candidates stop.
           const start = startedSeq
           let own = 0
+          // A named file of a project that its manifest does not have as the project's own model is not followed by
+          // its name either (that name may be another package's model).
+          let projectFile = false
           for (const file of named) {
             if (!(await $.fs.exists(file).catch(() => false))) continue
+            if (await projectRoot($, file, true).catch(() => null)) projectFile = true
             // A read that started while this check waited owns the pane now.
             if (startedSeq - start > own) return
             own++
@@ -1477,7 +1492,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
           }
           // Only a name (find -name x.sql): the model of that name in the command's project, unless a
           // newer follow has started since this command's own ones.
-          if (startedSeq - start > own) return
+          if (startedSeq - start > own || projectFile) return
           await follow($, { model: named[0]!.split('/').pop()!.replace(/\.sql$/i, ''), root: dir, auto: true })
         })
       }
