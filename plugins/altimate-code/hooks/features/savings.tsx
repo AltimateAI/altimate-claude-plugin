@@ -110,7 +110,7 @@ let claim: Claim | null = null
 type Claim = { connection: string | null; conversation: number; reading?: boolean }
 // What /savings or a press says while a check from before a /clear still reads the warehouse.
 const STILL_READING =
-  'The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It stops within 9 minutes of starting: run /savings again then.'
+  'The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It is stopped within 10 minutes of starting: run /savings again then.'
 // What the pane shows meanwhile, in place of Run again.
 const STILL_READING_BUSY = { label: 'A savings check from before this conversation is still reading your warehouse; its answer is not kept.', carryover: true }
 /**

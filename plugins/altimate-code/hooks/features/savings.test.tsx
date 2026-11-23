@@ -714,7 +714,7 @@ test('a /savings typed after a /clear, while the earlier check still reads the w
   expect(runs.length).toBe(1)
   await $.session.end({ reason: 'clear' } as any)
   options.hold = undefined
-  expect((await savings($)).text).toBe('The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It stops within 9 minutes of starting: run /savings again then.')
+  expect((await savings($)).text).toBe('The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It is stopped within 10 minutes of starting: run /savings again then.')
   await clock.settle()
   expect(runs.length).toBe(1)
   // The new conversation's pane says so, with no Run again.
@@ -749,7 +749,7 @@ test('a band press after a /clear, while the earlier check still reads the wareh
   await band.unmount()
   await clock.settle()
   expect(runs.length).toBe(1)
-  expect(toasts.at(-1)).toBe('The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It stops within 9 minutes of starting: run /savings again then.')
+  expect(toasts.at(-1)).toBe('The Databricks savings check started before this conversation is still reading your warehouse, and its answer is not kept. It is stopped within 10 minutes of starting: run /savings again then.')
   finish()
   await clock.settle()
 })
@@ -1218,7 +1218,7 @@ test('a version that cannot be read, or a source build, is refused; the first re
   for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12', 'v0.12.12', 'altimate-code 0.12.12', '0.12.13-beta.1', '0.0.0-main-202611191200', '0.12.12\nnode v22.1.0', '0.12.12\nupdate available: 0.12.20', '0.12.12\n0.12.20', 'altimate-code 0.12.20 is available']) {
     expect(supportsSavings(version)).toBe(false)
   }
-  // Read as the status line reads it: the last version printed, with or without the CLI's name or a runtime note.
+  // The one line that is the version alone or after the CLI's name; a runtime note on another line is not the version.
   for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.13', '0.12.14', '0.13.0', '1.0.0', 'altimate-code 0.12.13', 'node v22.1.0\n0.12.13']) {
     expect(supportsSavings(version)).toBe(true)
   }
