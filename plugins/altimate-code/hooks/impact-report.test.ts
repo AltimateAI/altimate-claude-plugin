@@ -655,4 +655,8 @@ test('a change no select item shows (a value computed in a Jinja block) names th
   ])
   // None the manifest has: the values may still change, said without a count of 0.
   expect(summaryLines(summaryOf([change], traces.slice(0, 1), null))).toContain('  values may change downstream; the model-level count stands')
+  // A changed column left untraced (past the three) may reach other models: the tick is not claimed.
+  const withMore = summaryLines(summaryOf([{ ...change, more: 1 }], traces, null))
+  expect(withMore).toContain('  + 1 more changed column, not traced here (/lineage-report core__medical_claim.<column> traces one)')
+  expect(withMore).not.toContain('✓ Every downstream model was read')
 })

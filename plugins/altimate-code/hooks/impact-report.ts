@@ -367,6 +367,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
     // Columns past the three traced: said, so the list never reads as every column the task changed.
     if (model.more) lines.push(`  + ${plural(model.more, 'more changed column')}, not traced here (/lineage-report ${model.name}.<column> traces one)`)
   }
+  // The tick only when nothing was left out: a changed column past the three traced may reach models the traced ones do not.
   if (view.unresolved > 0 || view.truncated || (view.unseen ?? 0) > 0) {
     const why = [
       view.unresolved ? `${plural(view.unresolved, 'model')} could not be read` : '',
@@ -374,7 +375,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
       view.truncated ? 'the trace hit its limit' : '',
     ].filter(Boolean).join('; ')
     lines.push(`⚠ Lower bound: ${why}`)
-  } else if (view.state === 'ready' && view.models.some(one => one.columns.some(col => col.reach))) {
+  } else if (view.state === 'ready' && view.models.some(one => one.columns.some(col => col.reach)) && view.models.every(one => !one.more)) {
     lines.push('✓ Every downstream model was read')
   }
   return lines

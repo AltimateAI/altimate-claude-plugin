@@ -135,6 +135,8 @@ const CHECK = { ...RESULTS, requestId: 'altimate-check', props: { ...RESULTS.pro
 const DOCTOR = { ...RESULTS, requestId: 'altimate-doctor', props: { ...RESULTS.props, title: 'dbt doctor' } } as const
 
 type Options = {
+  /** Holds `dbt debug` (the doctor's connection test) until it resolves. */
+  holdDebug?: Promise<void>
   /** What dbt show answers: rows, or a failure's error lines. */
   show?: { rows?: Record<string, unknown>[]; error?: string; node?: string | null; onlyName?: string; mustInclude?: string; raw?: { exitCode: number; stdout: string; stderr?: string }; writes?: string; claudeWrites?: string; invocation?: string }
   /** The node names `dbt ls` prints; the default is none. */
@@ -405,7 +407,10 @@ async function start($: any, on: any, options: Options = {}) {
     }
     if (bin !== (options.pathDbtPython ? 'dbt' : DBT)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
-    if (verb === 'debug') return { value: { ...(options.debug ?? { exitCode: 0, stdout: DEBUG }), stderr: '' } }
+    if (verb === 'debug') {
+      if (options.holdDebug) await options.holdDebug
+      return { value: { ...(options.debug ?? { exitCode: 0, stdout: DEBUG }), stderr: '' } }
+    }
     if (verb === 'ls' && options.listFails) return { value: { exitCode: 1, stdout: '', stderr: 'ls failed' } }
     if (verb === 'ls') return { value: { exitCode: 0, stdout: `${(options.listed ?? []).map(one => JSON.stringify(typeof one === 'string' ? { name: one } : one)).join('\n')}\n`, stderr: '' } }
     if (verb === 'deps' && options.depsFails) return { value: { exitCode: options.depsExit ?? 1, stdout: '', stderr: options.depsFails } }
@@ -4354,6 +4359,27 @@ kitTest('with info_toasts off, a passing recheck raises no toast but the band sa
   await $.tool.call({ tool: 'Write', file_path: ORDERS, content: 'select order_dte from x' })
   await clock.settle()
   expect(toasts).toContain('✖ orders · dbt could not compile or run it · see the band')
+})
+
+test('an edit while /dbt-doctor tests the connection: the pane drawn after the run says stale, not the current the run read', async ($, on) => {
+  let release!: () => void
+  const holdDebug = new Promise<void>(resolve => (release = resolve))
+  const { clock, mtimes } = await start($, on, { now: 200_000, holdDebug, show: { rows: [{ order_id: 1, amount: 10 }] } })
+  await clock.settle()
+  const reply = $.command.run({ command: 'dbt-doctor', args: '' })
+  await clock.settle()
+  // The run has read the manifest as current and waits on dbt debug: the edit lands meanwhile.
+  mtimes['models/orders.sql'] = 150_000
+  const edit = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'select *', new_string: 'select  *' })
+  await clock.settle()
+  release()
+  await clock.settle()
+  await Promise.all([reply, edit])
+  await clock.settle()
+  const ui = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^current \(written/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /stale: 1 file changed since it was written .* \(models\/orders\.sql\)/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('a doctor shown before an edit reads the manifest again after it: it no longer says current once a model file is newer', async ($, on) => {
