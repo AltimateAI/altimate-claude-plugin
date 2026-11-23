@@ -675,3 +675,24 @@ test('two same-named models, the package\'s and integration_tests\', each get th
   expect(data.focuses.map(one => one.modelLevel)).toEqual([6, 1])  // Its untraced columns point at /lineage-report by its unique_id, which its name alone may not reach.
   expect(summaryLines(summaryOf([{ ...theirs, more: 1 }], traces, null))).toContain('  + 1 more changed column, not traced here (/lineage-report model.shop_tests.fct_orders.<column> traces one)')
 })
+
+test('more than three columns whose values change: the band shows three and counts the rest, whose unread models still count', () => {
+  const change = { model: 'core__medical_claim', file: 'models/c.sql', root: '/r', columns: [], values: ['a', 'b', 'c', 'd'], ended: '' } as any
+  const answer = (column: string, unresolved: { model: number }[] = []) =>
+    ({
+      version: 1, focus: { model: 'model.t.core__medical_claim', column }, direction: 'downstream',
+      nodes: [{ id: 'model.t.core__medical_claim', name: 'core__medical_claim' }, { id: 'model.t.fact_claims', name: 'fact_claims' }, { id: 'model.t.opaque', name: 'opaque' }],
+      columns: [{ model: 0, column, hop: 0 }, { model: 1, column, hop: 1, end: true }],
+      counts: { columns: 1, models: 1, ends: 1, hops: 1, may_carry_models: 0, model_level: 2 }, unresolved, may_carry: [],
+    }) as any
+  const value = (column: string, unresolved?: { model: number }[]) => ({ model: 'core__medical_claim', column, down: answer(column, unresolved), up: null, modelLevel: 2, failed: false, value: true })
+  const traces = [{ model: 'core__medical_claim', column: null, down: null, up: null, modelLevel: 2, failed: false }, value('a'), value('b'), value('c'), value('d', [{ model: 2 }])] as any
+  const view = summaryOf([change], traces, null)
+  expect(view.models[0]!.columns.map(one => one.name)).toEqual(['a', 'b', 'c'])
+  expect(view.models[0]!.moreValues).toBe(1)
+  expect(view.unresolved).toBe(1)
+  const lines = summaryLines(view)
+  expect(lines).toContain('  + 1 more column whose values may change, in the report')
+  expect(lines).toContain('⚠ Lower bound: 1 model could not be read')
+  expect(lines).not.toContain('✓ Every downstream model was read')
+})

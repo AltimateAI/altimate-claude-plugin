@@ -463,7 +463,7 @@ export async function readGraph($: EngineInterface, manifest: string): Promise<L
  * nodes, marked `truncated`). Run through the CLI, whose --json carries the whole metadata (the MCP
  * server leaves big structured results out). Cached per manifest revision and model.
  */
-async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string, pkg?: string | null): Promise<{ graph: LineageGraph; id: string; columns: any } | null> {
+async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string, pkg?: string | null, root?: string): Promise<{ graph: LineageGraph; id: string; columns: any } | null> {
   const found = await graphFromToolsOnce($, manifest, mtimeMs, path ?? model, path)
   // The path or name matched another package's node (integration_tests' model of the same path or name): the project's
   // own, by its unique_id. A file must be the project's own; a name keeps the other package's model when the project has none.
@@ -475,6 +475,16 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
       // A failed lookup is a failure, not an absence: the other package's node is never shown in its place.
       own = await graphFromToolsOnce($, manifest, mtimeMs, id)
       if (own) break
+    }
+    // A name: a versioned model of the project's own (model.<package>.orders.v2) is found by its file, named as dbt
+    // names a version's (orders.sql, orders_v2.sql), before the other package's model of that name is shown.
+    if (!own && !path && root) {
+      const file = new RegExp(`(^|/)${model.replace(/[^\w]/g, '\\$&')}(_v\\d+)?\\.sql$`, 'i')
+      const files = Object.values((await sqlGraph($, root).catch(() => null))?.nodes ?? {}).map(one => one.path).filter((one): one is string => !!one && file.test(one))
+      for (const one of files.slice(0, 5)) {
+        const at = await graphFromToolsOnce($, manifest, mtimeMs, one, one)
+        if (at && packageOf(at.id) === pkg) return at
+      }
     }
     return path ? checkPath(own, path, pkg) : (own ?? found)
   }
@@ -671,7 +681,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     const name = asPath ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
     let failure: string | null = null
     const lookUp = (model: string, path?: string) =>
-      graphFromTools($, manifest, mtimeMs, model, path, pkg).catch(error => {
+      graphFromTools($, manifest, mtimeMs, model, path, pkg, root).catch(error => {
         failure = String(error?.message ?? error)
         return null
       })
@@ -697,12 +707,12 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     return false
   }
   const readMs = Math.round((await $.clock.now()) - began)
+  // The node's own project (a package's model reached from integration_tests' graph, or the other way): its files are
+  // the ones the pane's out-of-date check reads. Found before the claim, so no await falls between the check and it.
+  const owner = via === 'sql' ? root : await nodeOwner($, id, manifest, root, sessionRoot)
   // An answer's follow whose turn is over leaves the pane to the newer turn. Checked here, before any
   // write: once a follow claims the pane it writes all of its state or a newer follow replaces it.
   if (claimedSeq > seq || (input.fromAnswer !== undefined && input.fromAnswer !== turnCount)) return false
-  // The node's own project (a package's model reached from integration_tests' graph, or the other way): its files are
-  // the ones the pane's out-of-date check reads.
-  const owner = via === 'sql' ? root : await nodeOwner($, id, manifest, root, sessionRoot)
   claimedSeq = seq
   ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
   // The person's own follows; Claude's reads and the answer's follow are not asks.
@@ -876,10 +886,14 @@ async function staleSql($: EngineInterface, root: string, node: GraphNode | unde
     const stat = await $.fs.stat(`${root}/${path}`).catch(() => null)
     return !!stat && stat.mtimeMs > manifestMtimeMs
   }
+  // Gone: no stat and no file. A file that exists but cannot be stat'ed (permissions) is not gone.
+  const gone = (path: string) => $.fs.stat(path).then(() => false, async () => (await $.fs.exists(path).catch(() => true)) === false)
   const base = (path: string) => path.split(/[\\/]/).pop()
   if (await newer(node.path)) return `${base(node.path)} changed after the manifest was written: run \`dbt compile\`, then press r`
-  // Its schema.yml: the tests and documented columns the pane counts come from there.
+  // Its schema.yml: the tests and documented columns the pane counts come from there. One deleted since leaves them
+  // all out of date too; one that cannot be read is not said to be either.
   if (node.yml && (await newer(node.yml))) return `${base(node.yml)} changed after the manifest was written: run \`dbt parse\`, then press r`
+  if (node.yml && (await gone(`${root}/${node.yml}`))) return `${base(node.yml)} was removed after the manifest was written: run \`dbt parse\`, then press r`
   return null
 }
 

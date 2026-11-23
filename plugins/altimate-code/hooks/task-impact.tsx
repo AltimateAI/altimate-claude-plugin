@@ -198,7 +198,7 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     const key = `${one.root}\0${snapshot ?? ''}`
     if (!projects.has(key)) projects.set(key, projectIds($, one.root, snapshot))
     const id = changeId(await projects.get(key)!, relative(one.root, file), modelName(file))
-    changes.push({ model: modelName(file), ...(id ? { id } : {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
+    changes.push({ model: modelName(file), ...(id ?? {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }
   if (changes.length > MAX_MODELS) $.ui.log(`lineage-summary · ${changes.length} models changed; tracing the first ${MAX_MODELS}`)
   return changes.slice(0, MAX_MODELS)
@@ -223,10 +223,10 @@ async function projectIds($: EngineInterface, root: string, snapshot: string | n
  * model it lacks (new) or one it is too large to read for is `model.<package>.<name>`, never the bare name another
  * project's model may answer to. Undefined otherwise: the model goes by its name, as before.
  */
-function changeId(project: ProjectIds, rel: string, name: string): string | undefined {
+function changeId(project: ProjectIds, rel: string, name: string): { id: string; guessed?: boolean } | undefined {
   const own = project.graph ? findModel(project.graph, rel, project.pkg, true) : null
-  if (own) return own
-  return project.shared && project.pkg ? `model.${project.pkg}.${name}` : undefined
+  if (own) return { id: own }
+  return project.shared && project.pkg ? { id: `model.${project.pkg}.${name}`, guessed: true } : undefined
 }
 
 /** Runs the work items at most `limit` at a time, keeping their order. */
@@ -253,11 +253,23 @@ async function manifestOf($: EngineInterface, done: Finished, root: string): Pro
 async function ask($: EngineInterface, done: Finished, change: ModelChange, column: string | null, direction: 'downstream' | 'upstream') {
   // Known limit: the model goes by its file name, which misses a versioned model (x_v2.sql) or a file
   // named apart from its model.
-  const args = { manifest_path: await manifestOf($, done, change.root), model: change.id ?? change.model, ...(column && { column }), change_type: 'modify', direction }
-  // Through the CLI: nobody asked for these calls by name, and a call over MCP can raise a permission dialog.
-  const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
-  return result?.ok ? result.metadata : null
+  const call = async (model: string) => {
+    const args = { manifest_path: await manifestOf($, done, change.root), model, ...(column && { column }), change_type: 'modify', direction }
+    // Through the CLI: nobody asked for these calls by name, and a call over MCP can raise a permission dialog.
+    const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
+    return result?.ok ? result.metadata : null
+  }
+  if (!change.guessed || byName.has(change)) return call(byName.has(change) ? change.model : (change.id ?? change.model))
+  // An id made from the file name, which the manifest lacks (a versioned model: model.<package>.orders.v1): asked by its
+  // name instead, as /lineage-report does, from then on for every column of that change.
+  const meta = await call(change.id!)
+  if ((meta as any)?.success !== false) return meta
+  byName.add(change)
+  return call(change.model)
 }
+
+/** Changes whose made-up unique_id the manifest did not have: asked for by name. */
+const byName = new WeakSet<ModelChange>()
 
 const unknownOf = (answer: ColumnAnswer | null) => {
   const unknown = unknownReach(answer)
@@ -306,9 +318,8 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
       })
     }
   }
-  const traces = (await pool(jobs, PARALLEL)).filter((one): one is ColumnTrace => one !== null)
-  // At most three columns whose values change per model, the most named first, as for changed select items.
-  return traces.filter(one => !one.value || traces.filter(other => other.value && sameModel(other, one)).indexOf(one) < MAX_TASK_COLUMNS)
+  // Every column whose value changes is kept for the report; the band shows the first few (summaryOf).
+  return (await pool(jobs, PARALLEL)).filter((one): one is ColumnTrace => one !== null)
 }
 
 /** What a report adds: where each changed column comes from. */

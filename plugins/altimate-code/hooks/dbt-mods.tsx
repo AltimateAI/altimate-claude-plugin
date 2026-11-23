@@ -1578,10 +1578,12 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
 
   // Packages: packages.yml with nothing installed (at packages-install-path) fails every parse. A package repo
   // whose own packages are not installed is fine when the project below it that installs it (integration_tests)
-  // has them: dbt is run from there.
+  // has them: dbt is run from there. Not when the package has a manifest of its own: Run dbt parse refreshes that
+  // one in the package itself, which needs the package's own packages.
   const packages = await packagesOf($, root)
   if (packages) {
-    const runner = packages.installed ? null : await runnerOf($, root)
+    const ownManifest = await $.fs.exists(`${await targetOf($, root)}/manifest.json`).catch(() => false)
+    const runner = packages.installed || ownManifest ? null : await runnerOf($, root)
     const theirs = runner ? await packagesOf($, runner) : null
     const has = packages.installed || (!!runner && (!theirs || theirs.installed))
     const detail = packages.installed ? `${packages.installPath} installed` : has ? `installed in ${relative(root, runner!)}, where dbt runs for this package` : `${packages.file} is not installed`

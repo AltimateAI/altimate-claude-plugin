@@ -1207,6 +1207,26 @@ test('a package repo with no manifest of its own: the band reads the manifest in
   await band.unmount()
 })
 
+test('a package repo over 4 MiB: a changed model whose made-up unique_id the manifest lacks (a versioned one) is asked for by name', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const { turn, tools } = await start($, on, {
+    noManifest: true,
+    present: [THEIRS],
+    extra: { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' },
+    // The package's fct_orders is model.shop.fct_orders.v1: no node has the id made from its file name.
+    impact: args => (args.model === 'model.shop.fct_orders' ? { success: false, column_answer: undefined } : {}),
+  })
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const asked = tools.filter(one => one.direction === 'downstream' && one.column === 'revenue').map(one => one.model)
+  expect(asked).toEqual(['model.shop.fct_orders', 'fct_orders'])
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /revenue\s+reaches/ })).toBeDefined()
+  await band.unmount()
+})
+
 test('a task that changes a package model and an integration_tests model copies their one manifest once, and both read it', async ($, on) => {
   const RUNNER = `${ROOT}/integration_tests`
   const THEIRS = `${RUNNER}/target/manifest.json`

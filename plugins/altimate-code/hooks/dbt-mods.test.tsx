@@ -849,6 +849,11 @@ test('a package repo with a manifest of its own: the doctor\'s Run dbt parse ref
   const at = runs.findIndex(argv => argv[1] === 'parse')
   expect(cwds[at]).toBe(ROOT)
   await band.unmount()
+  // A parse there needs the package's own packages: the doctor says they are not installed, not that integration_tests has them.
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
+  expect(await doctor.find({ type: 'Text', text: /where dbt runs for this package/ })).toBeUndefined()
+  await doctor.unmount()
 })
 
 test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {

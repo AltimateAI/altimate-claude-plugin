@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean; cliId?: (model: string) => string; cliModels?: string[]; present?: string[]; listed?: string[] }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean; cliId?: (model: string) => string; cliModels?: string[]; present?: string[]; listed?: string[]; missing?: (path: string) => boolean; holdRead?: (path: string) => Promise<void> | undefined }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -124,6 +124,7 @@ async function start($: any, on: any, options: Options = {}) {
   on('fs.stat', async (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
     if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
+    if (options.missing?.(e.path)) throw new Error(`ENOENT: no such file or directory, stat '${e.path}'`)
     if (options.packageRepo && (e.path === MANIFEST_PATH || (e.path === MANIFEST_AT && options.runnerManifestGone?.()))) throw new Error('ENOENT')
     // A model's own file can be newer than the manifest (edited after the last compile).
     const fileMtime = e.path === MANIFEST_PATH ? undefined : options.fileMtime?.(e.path)
@@ -146,6 +147,7 @@ async function start($: any, on: any, options: Options = {}) {
   let heldSql = false
   let manifestStats = 0
   on('fs.read', async (_: unknown, e: { path: string }) => {
+    await options.holdRead?.(e.path)
     // A test can pause the first manifest read to make one follow resolve after a newer one.
     if (e.path === MANIFEST_PATH && options.holdFirstManifestRead && !held) {
       held = true
@@ -388,6 +390,37 @@ test('a package repo over 4 MiB: /lineage <name> that the CLI answers with integ
   await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
   await clock.settle()
   expect(asked).toEqual(['fct_orders', 'model.shop.fct_orders'])
+})
+
+test('a package repo over 4 MiB: /lineage <name> whose package model is versioned shows that one, found by its file, not integration_tests\'', async ($, on) => {
+  const asked: string[] = []
+  const V1 = `${ROOT}/models/fct_orders_v1.sql`
+  const cliGraph = (graph: any) => ({
+    ...graph,
+    nodes: {
+      ...graph.nodes,
+      'model.shop_tests.fct_orders': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop_tests.fct_orders' },
+      'model.shop.fct_orders.v1': { ...graph.nodes['model.shop.fct_orders'], id: 'model.shop.fct_orders.v1', path: 'models/fct_orders_v1.sql' },
+    },
+  })
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    size: 6 * 1024 * 1024,
+    cliGraph,
+    cliModels: asked,
+    // No node is model.shop.fct_orders: the package's is versioned. Its file finds it.
+    cliId: model => (model === 'fct_orders' ? 'model.shop_tests.fct_orders' : model === 'models/fct_orders_v1.sql' ? 'model.shop.fct_orders.v1' : ''),
+    listed: ['models/fct_orders_v1.sql'],
+    // The package's file is newer than the manifest: said only when the package's own versioned node is shown.
+    fileMtime: path => (path === V1 ? 5 : undefined),
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+  })
+  await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(asked).toEqual(['fct_orders', 'model.shop.fct_orders', 'snapshot.shop.fct_orders', 'models/fct_orders_v1.sql'])
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /fct_orders_v1\.sql changed after the manifest was written/ })).toBeDefined()
+  await ui.unmount()
 })
 
 test('a package repo over 4 MiB: /lineage <path> that the CLI answers with integration_tests\' model looks the package\'s own up', async ($, on) => {
@@ -2483,6 +2516,53 @@ test("a schema.yml edited after the manifest was written says so: the pane's tes
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/${YML}`, old_string: 'tests:', new_string: '' })
   await clock.settle()
   expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a schema.yml deleted after the manifest was written says so: the pane's tests came from it", async ($, on) => {
+  const YML = 'models/marts/schema.yml'
+  const nodes: Record<string, any> = { ...MANIFEST.nodes, 'model.shop.fct_orders': { ...(MANIFEST.nodes as any)['model.shop.fct_orders'], patch_path: `shop://${YML}` } }
+  let deleted = false
+  const { clock } = await start($, on, { manifest: { ...MANIFEST, nodes }, mtime: () => 2, fileMtime: path => (path === `${ROOT}/${YML}` ? 1 : undefined), missing: path => deleted && path === `${ROOT}/${YML}`, toolResult: () => ({ stdout: '' }) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const warning = /⚠ schema\.yml was removed after the manifest was written: run `dbt parse`, then press r$/
+  expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
+  deleted = true
+  await $.tool.call({ tool: 'Bash', command: `rm ${YML}` } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a follow that finds its node\'s project after a newer follow claimed the pane leaves the newer one shown', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders_check', original_file_path: 'models/fct_orders_check.sql', depends_on: { nodes: ['model.shop.fct_orders'] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders_check': theirs } }
+  // The older follow pauses where it looks for its node's project (integration_tests' local packages).
+  let release: () => void = () => {}
+  const until = new Promise<void>(resolve => (release = resolve))
+  let armed = false
+  const { clock } = await start($, on, {
+    packageRepo: true,
+    manifest,
+    fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined),
+    holdRead: path => (armed && path === `${ROOT}/integration_tests/dependencies.yml` ? until : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  armed = true
+  const older = $.command.run({ command: 'lineage', args: 'model.shop_tests.fct_orders_check', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  armed = false
+  await $.command.run({ command: 'lineage', args: 'int_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  release()
+  await older
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders_check/ })).toBeUndefined()
   await ui.unmount()
 })
 

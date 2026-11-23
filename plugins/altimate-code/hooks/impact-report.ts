@@ -37,6 +37,8 @@ export type ModelChange = {
   model: string
   /** The model's unique_id, when its name alone may name another project's model (a package repo's borrowed manifest). */
   id?: string
+  /** The id was made from the package and file name, not read from a manifest (too large to read): a versioned model has another. */
+  guessed?: boolean
   file: string
   root: string
   columns: { name: string; before: string | null; after: string | null }[]
@@ -328,7 +330,11 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
   const models = changes.map(change => {
     const mine = traces.filter(one => sameModel(one, change))
     const modelLevel = mine.map(one => one.modelLevel ?? (one.down ? reachOf(one.down).modelLevel : null)).find(one => one !== null) ?? null
-    const columns = mine
+    // At most three columns whose values change are shown per model, the most named first, as for changed select items;
+    // the rest still count toward what could not be read, and are counted (so the band never says every model was read).
+    const values = mine.filter(one => one.value && one.column !== null)
+    const hidden = new Set(values.slice(MAX_TASK_COLUMNS))
+    const all = mine
       .filter(one => one.column !== null)
       .map(one => {
         const reach = one.down && !one.unknown ? reachOf(one.down) : null
@@ -339,9 +345,10 @@ export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report:
         if (one.unknown && one.down) for (const entry of unseenOf(one.down)) unseen.add(String((entry as any)?.id ?? (entry as any)?.name))
         if (reach?.truncated) truncated = true
         const note = one.unknown ?? (one.unchecked ? ADDED_NOTE : undefined)
-        return { name: one.column!, reach, failed: one.failed, ...(note && { note }), ...(one.value && { value: true }) }
+        return { trace: one, column: { name: one.column!, reach, failed: one.failed, ...(note && { note }), ...(one.value && { value: true }) } }
       })
-    return { name: change.model, ...(change.id ? { id: change.id } : {}), modelLevel, columns, ...(change.more ? { more: change.more } : {}) }
+    const columns = all.filter(one => !hidden.has(one.trace)).map(one => one.column)
+    return { name: change.model, ...(change.id ? { id: change.id } : {}), modelLevel, columns, ...(change.more ? { more: change.more } : {}), ...(hidden.size ? { moreValues: hidden.size } : {}) }
   })
   for (const id of unresolved) unseen.delete(id)
   return { state: 'ready', models, unresolved: unresolved.size, ...(unseen.size ? { unseen: unseen.size } : {}), truncated, report, openFailed: false }
@@ -373,6 +380,7 @@ export function summaryLines(view: TaskSummaryView): string[] {
     }
     // Columns past the three traced: said, so the list never reads as every column the task changed.
     if (model.more) lines.push(`  + ${plural(model.more, 'more changed column')}, not traced here (/lineage-report ${model.id ?? model.name}.<column> traces one)`)
+    if (model.moreValues) lines.push(`  + ${plural(model.moreValues, 'more column')} whose values may change, in the report`)
   }
   // The tick only when nothing was left out: a changed column past the three traced may reach models the traced ones do not.
   if (view.unresolved > 0 || view.truncated || (view.unseen ?? 0) > 0) {

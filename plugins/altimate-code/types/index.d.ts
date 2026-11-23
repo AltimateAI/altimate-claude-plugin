@@ -343,9 +343,10 @@ export type SummaryColumn = { name: string; reach: Reach | null; failed: boolean
 /** What the band shows after a task that changed models. */
 export type TaskSummaryView = {
   state: 'tracing' | 'ready'
-  /** `more`: changed columns past the three traced, counted only. */
+  /** `more`: changed columns past the three traced, counted only. `moreValues`: columns whose values may change past the
+   * three shown, traced and in the report. */
   /** id: the model's unique_id when its name may also be another local project's (a package repo and integration_tests). */
-  models: { name: string; id?: string; modelLevel: number | null; columns: SummaryColumn[]; more?: number }[]
+  models: { name: string; id?: string; modelLevel: number | null; columns: SummaryColumn[]; more?: number; moreValues?: number }[]
   /** Models whose SQL could not be read, across every column traced: the reach is a lower bound. */
   unresolved: number
   /** Models read in full that may pass a column on without naming it (`select *`), where no reach was traced. */
