@@ -1,0 +1,64 @@
+// A dbt package repo (Tuva, dbt_utils) is run from the project below it that installs it by a local path
+// (`integration_tests`): its packages are installed there, and dbt writes the manifest there. The dbt helpers run
+// dbt in that project; the lineage half reads the manifest it writes when the package has none of its own.
+import type { EngineInterface } from 'claude-code'
+
+/** `a/./b/../c` → `a/c`, so two spellings of one folder are one project. */
+function normalize(path: string): string {
+  const out: string[] = []
+  for (const part of path.replace(/\\/g, '/').split('/')) {
+    if (part === '.' || (part === '' && out.length > 0)) continue
+    if (part === '..' && out.length > 1 && out[out.length - 1] !== '..') out.pop()
+    else out.push(part)
+  }
+  return out.join('/') || '/'
+}
+
+// The project below a package's folder that installs it, by package folder: found once a session.
+const runners = new Map<string, Promise<string | null>>()
+
+/**
+ * A dbt project in a folder below `root`, a level or two down (a package's `integration_tests`), whose
+ * packages.yml or dependencies.yml installs `root` itself by a local path (`local: ../`). That is where dbt is run
+ * for a package repo: its packages are installed there, not in the package's own folder.
+ */
+export function runnerOf($: EngineInterface, root: string): Promise<string | null> {
+  const known = runners.get(root)
+  if (known) return known
+  const finding = (async () => {
+    let level = [root]
+    for (let depth = 0; depth < 2; depth++) {
+      const next: string[] = []
+      for (const dir of level) {
+        for (const entry of await $.fs.list(dir).catch(() => [])) {
+          if (entry.kind !== 'dir' || entry.name.startsWith('.') || ['node_modules', 'target', 'dbt_packages', 'dbt_modules', 'logs', 'venv'].includes(entry.name)) continue
+          const sub = `${dir}/${entry.name}`
+          next.push(sub)
+          if (!(await $.fs.exists(`${sub}/dbt_project.yml`).catch(() => false))) continue
+          const declared = `${await $.fs.read(`${sub}/packages.yml`).catch(() => '')}\n${await $.fs.read(`${sub}/dependencies.yml`).catch(() => '')}`
+          for (const one of declared.matchAll(/^\s*-?\s*local:\s*['"]?([^'"#\n]+?)['"]?\s*(?:#.*)?$/gm)) {
+            const path = one[1]!.trim()
+            if (normalize(path.startsWith('/') ? path : `${sub}/${path}`) === root) return sub
+          }
+        }
+      }
+      level = next.slice(0, 200)
+    }
+    return null
+  })()
+  runners.set(root, finding)
+  return finding
+}
+
+/**
+ * The manifest the lineage half reads for the project at `root`: its own `target/manifest.json`, else, for a package
+ * repo with none, the one dbt wrote in the project below that installs it (`integration_tests/target/manifest.json`),
+ * whose nodes for the package keep their paths relative to the package. The project's own path when neither exists.
+ */
+export async function manifestFile($: EngineInterface, root: string): Promise<string> {
+  const own = `${root}/target/manifest.json`
+  if (await $.fs.exists(own).catch(() => false)) return own
+  const runner = await runnerOf($, root).catch(() => null)
+  const theirs = runner ? `${runner}/target/manifest.json` : null
+  return theirs && (await $.fs.exists(theirs).catch(() => false)) ? theirs : own
+}

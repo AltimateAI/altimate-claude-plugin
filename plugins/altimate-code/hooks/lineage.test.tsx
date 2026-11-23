@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -114,18 +114,24 @@ async function start($: any, on: any, options: Options = {}) {
   // sqlFiles: a project with no manifest, its files by project-relative path.
   const sql = options.sqlFiles
   const hasManifest = !sql
+  // packageRepo: a package repo with no target/ of its own, run from integration_tests, which installs it by `local: ../`.
+  const RUNNER = `${ROOT}/integration_tests`
+  const runnerFiles: Record<string, string> = options.packageRepo ? { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' } : {}
+  const MANIFEST_AT = options.packageRepo ? `${RUNNER}/target/manifest.json` : MANIFEST_PATH
   on('fs.exists', (_: unknown, e: { path: string }) => ({
-    value: (e.path === `${ROOT}/dbt_project.yml` && !options.noRootProject) || (hasManifest && e.path === MANIFEST_PATH) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
+    value: (e.path === `${ROOT}/dbt_project.yml` && !options.noRootProject) || (hasManifest && e.path === MANIFEST_AT) || e.path in runnerFiles || (!!sql && e.path.slice(ROOT.length + 1) in sql),
   }))
   on('fs.stat', async (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
     if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
+    if (options.packageRepo && e.path === MANIFEST_PATH) throw new Error('ENOENT')
     // A model's own file can be newer than the manifest (edited after the last compile).
     const fileMtime = e.path === MANIFEST_PATH ? undefined : options.fileMtime?.(e.path)
     return { value: { kind: 'file', size, mtimeMs: fileMtime ?? mtime(), isLink: false } }
   })
   on('fs.list', (_: unknown, e: { path: string }) => {
     lists.push(e.path)
+    if (options.packageRepo && e.path === ROOT) return { value: [{ name: 'integration_tests', kind: 'dir', size: 1, mtimeMs: 1, isLink: false }] }
     // The project root itself lists as the empty prefix.
     const prefix = e.path === ROOT ? '' : `${e.path.slice(ROOT.length + 1)}/`
     const names = new Map<string, 'file' | 'dir'>()
@@ -157,7 +163,9 @@ async function start($: any, on: any, options: Options = {}) {
     }
     const given = options.fileText?.(e.path)
     if (given !== undefined) return { value: given }
-    return { value: e.path === MANIFEST_PATH ? JSON.stringify(options.manifest ?? MANIFEST) : 'select 1' }
+    if (e.path in runnerFiles) return { value: runnerFiles[e.path] }
+    if (options.packageRepo && e.path === MANIFEST_PATH) throw new Error('ENOENT')
+    return { value: e.path === MANIFEST_AT ? JSON.stringify(options.manifest ?? MANIFEST) : 'select 1' }
   })
   on('tool.list', () => ({
     value: warehouse ? [{ name: 'mcp__altimate_saas__table_lineage', description: 'Snowflake table lineage', mcp: true }] : [],
@@ -271,6 +279,21 @@ test('the lineage pane keeps its default size and Min / Default / Max resize it'
   await clock.settle()
   expect(opens.at(-1)).toMatchObject({ columns: 90, rows: 34 })
   await ui.unmount()
+})
+
+test('a package repo with no target/ of its own: the pane and the per-edit note read the manifest integration_tests writes', async ($, on) => {
+  const { clock, logs, notes, calls } = await start($, on, { packageRepo: true })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  expect(logs.some(line => line.startsWith('lineage-pane · integration_tests/target/manifest.json · ') && line.endsWith('offline'))).toBe(true)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /No target\/manifest.json/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  await ui.unmount()
+  await $.tool.call({ tool: 'Edit', file_path: FILE, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) - sum(refunds) as revenue' })
+  await clock.settle()
+  expect(calls).toContain('cli:impact_analysis:revenue')
+  expect(notes[0]).toBe('◆ impact-first · fct_orders.revenue is read by 2 models and 1 dashboard · Exec Revenue')
 })
 
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
@@ -622,7 +645,7 @@ test('a model whose SQL changed after the manifest was written says so; r keeps 
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const warning = /⚠ fct_orders\.sql changed after the manifest was written: run `dbt compile`, then r/
+  const warning = /⚠ fct_orders\.sql changed after the manifest was written: run `dbt compile`, then press r$/
   expect(await ui.find({ type: 'Text', text: warning })).toBeDefined()
   // r reads the same manifest again: still out of date.
   await ui.press({ key: 'lineage-refresh' })
@@ -2093,7 +2116,7 @@ test("a schema.yml edited after the manifest was written says so: the pane's tes
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then r/
+  const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then press r$/
   expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
   // Claude removes the model's tests from its schema.yml.
   ymlMtime = 5
@@ -2111,7 +2134,7 @@ test("a manifest over 4 MiB: the schema.yml altimate-code's graph names is check
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then r/
+  const warning = /⚠ schema\.yml changed after the manifest was written: run `dbt parse`, then press r$/
   expect(await ui.find({ type: 'Text', text: warning })).toBeUndefined()
   ymlMtime = 5
   await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/${YML}`, old_string: 'tests:', new_string: '' })

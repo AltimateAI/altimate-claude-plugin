@@ -1038,6 +1038,26 @@ test('a value change on Tuva: the band says tracing until the trace answers, nev
   await band.unmount()
 })
 
+test('a package repo with no manifest of its own: the band reads the manifest integration_tests writes, its copy beside it', async ($, on) => {
+  const RUNNER = `${ROOT}/integration_tests`
+  const THEIRS = `${RUNNER}/target/manifest.json`
+  const { turn, files, runs, tools } = await start($, on, { noManifest: true, present: [THEIRS] })
+  files[`${RUNNER}/dbt_project.yml`] = "name: 'shop_tests'\n"
+  files[`${RUNNER}/packages.yml`] = 'packages:\n  - local: ../\n'
+  await turn('t1', async () => {
+    await $.tool.call({ tool: 'Edit', file_path: MODEL, old_string: 'sum(amount) as revenue', new_string: 'sum(amount) * 2 as revenue' })
+  })
+  const copy = runs.find(one => one[0] === 'cp')
+  expect(copy?.slice(1, 2)).toEqual([THEIRS])
+  expect(copy?.[2]?.startsWith(`${RUNNER}/target/.altimate-manifest-before.`)).toBe(true)
+  const asked = tools.filter(one => one.direction === 'downstream' && one.column === 'revenue')
+  expect(asked.length).toBeGreaterThan(0)
+  expect(asked.every(one => String(one.manifest_path).startsWith(`${RUNNER}/target/.altimate-task-manifest.`))).toBe(true)
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  expect(await band.find({ type: 'Text', text: /revenue\s+reaches/ })).toBeDefined()
+  await band.unmount()
+})
+
 test('a task that changes four output columns traces three and says one more changed', async ($, on) => {
   const NEW_MODEL = `${ROOT}/models/marts/monthly_region_revenue.sql`
   const { turn, logs } = await start($, on, {

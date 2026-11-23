@@ -7,6 +7,7 @@ import type { EngineInterface, On, RenderElement } from 'claude-code'
 import type { PlanImpactView, TaskSummaryView } from '../types'
 import { later, runAltimate, runTool, within } from './altimate-cli'
 import { usageOff } from './usage'
+import { manifestFile } from './package-runner'
 import {
   answerOf,
   changedColumnsAll,
@@ -94,6 +95,7 @@ let planSeq = 0
 
 const newTask = (): Task => ({ roots: new Map(), originals: new Map() })
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
+const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const modelName = (file: string) => (file.split(/[\\/]/).pop() ?? file).replace(/\.sql$/i, '')
 
 /** Whether a project-relative path is a model's SQL. */
@@ -131,10 +133,11 @@ function prepareRoot($: EngineInterface, t: Task, root: string): Promise<RootSta
     // Models only: impact_analysis does not take a snapshot as the column's model.
     const models = { models: layout.models }
     let snapshot: string | null = null
-    const manifest = `${root}/target/manifest.json`
+    const manifest = await manifestFile($, root)
     if (await $.fs.exists(manifest).catch(() => false)) {
-      // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read.
-      const copy = `${root}/${COPY_DIR}/${runningManifest(await sessionTag($))}`
+      // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read; beside it, so a package's
+      // copy of integration_tests/target/manifest.json is read from that project too.
+      const copy = `${dirname(manifest)}/${runningManifest(await sessionTag($))}`
       const copied = await $.process.run(['cp', manifest, copy], { timeoutMs: 20_000 }).catch(() => null)
       if (copied?.exitCode === 0) snapshot = copy
     }
@@ -203,13 +206,15 @@ async function pool<T>(items: (() => Promise<T>)[], limit: number): Promise<T[]>
 }
 
 /** The copy of the manifest a project's answers read: the task's own, else the project's as it is now. */
-const manifestOf = (done: Finished, root: string) => done.manifests[root] ?? `${root}/target/manifest.json`
+async function manifestOf($: EngineInterface, done: Finished, root: string): Promise<string> {
+  return done.manifests[root] ?? (await manifestFile($, root))
+}
 
 /** One impact_analysis call for a change; null when it failed. */
 async function ask($: EngineInterface, done: Finished, change: ModelChange, column: string | null, direction: 'downstream' | 'upstream') {
   // Known limit: the model goes by its file name, which misses a versioned model (x_v2.sql) or a file
   // named apart from its model.
-  const args = { manifest_path: manifestOf(done, change.root), model: change.model, ...(column && { column }), change_type: 'modify', direction }
+  const args = { manifest_path: await manifestOf($, done, change.root), model: change.model, ...(column && { column }), change_type: 'modify', direction }
   // Through the CLI: nobody asked for these calls by name, and a call over MCP can raise a permission dialog.
   const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
   return result?.ok ? result.metadata : null
@@ -286,7 +291,9 @@ async function freezeManifests($: EngineInterface, t: Task, changes: ModelChange
   const out: Record<string, string | null> = {}
   const tag = await sessionTag($)
   for (const root of new Set(changes.map(one => one.root))) {
-    const dir = `${root}/${COPY_DIR}`
+    const state = await t.roots.get(root)?.catch(() => null)
+    // The copies sit beside the manifest they were taken from: the project's target/, or the one below that installs it.
+    const dir = state?.snapshot ? dirname(state.snapshot) : `${root}/${COPY_DIR}`
     await $.process
       .run(['find', dir, '-maxdepth', '1', '-name', COPY_GLOB, '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
       .catch(() => null)
@@ -294,7 +301,6 @@ async function freezeManifests($: EngineInterface, t: Task, changes: ModelChange
     await $.process
       .run(['find', `${root}/${LINEAGE_DIR}`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
       .catch(() => null)
-    const state = await t.roots.get(root)?.catch(() => null)
     if (!state?.snapshot) {
       out[root] = null
       continue
@@ -444,7 +450,7 @@ async function buildReport($: EngineInterface, done: Finished): Promise<{ path: 
       done.downs = null
       done.full = null
     }
-    if (!done.manifests[root] && !(await $.fs.exists(`${root}/target/manifest.json`).catch(() => false))) missing.push(root)
+    if (!done.manifests[root] && !(await $.fs.exists(await manifestFile($, root)).catch(() => false))) missing.push(root)
   }
   if (missing.length > 0) return { error: `The manifest this task was read from is gone. Run \`dbt compile\` and ask again.` }
   const traces = await (done.full ??= traceFull($, done))
@@ -487,9 +493,10 @@ async function planReady($: EngineInterface, e: { plan?: unknown; planFilePath?:
   const tracing: PlanImpactView = { state: 'tracing', models, more }
   await update($, planAtom, () => tracing)
   await update($, hiddenAtom, () => false)
+  const manifest = await manifestFile($, root)
   const looked = await pool(
     shown.map(one => async () => {
-      const args = { manifest_path: `${root}/target/manifest.json`, model: one.id, change_type: 'modify', direction: 'downstream' }
+      const args = { manifest_path: manifest, model: one.id, change_type: 'modify', direction: 'downstream' }
       // Through the CLI: over MCP this could raise a permission dialog on top of the plan's.
       const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
       const meta = result?.ok ? (result.metadata as any) : null
@@ -571,7 +578,7 @@ export function reportRequest(args: string): { kind: 'task' } | { kind: 'column'
 async function buildColumnReport($: EngineInterface, model: string, column: string): Promise<{ path: string; name: string } | { error: string }> {
   const root = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
   if (!root) return { error: 'No dbt project here: /lineage-report <model>.<column> reads the target/manifest.json of the dbt project this session runs in.' }
-  const manifest = `${root}/target/manifest.json`
+  const manifest = await manifestFile($, root)
   if (!(await $.fs.exists(manifest).catch(() => false))) return { error: 'This project has no target/manifest.json yet. Run `dbt parse` or `dbt compile`, then ask again.' }
   const args = { manifest_path: manifest, model, column, change_type: 'modify' }
   // Through the CLI, as for a task: nobody asked for these calls by name.

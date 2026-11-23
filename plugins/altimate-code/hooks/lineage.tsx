@@ -13,6 +13,7 @@ import type {
 } from '../types'
 import { later, parseJson, runTool, textOf, within } from './altimate-cli'
 import { openTracked } from './usage'
+import { manifestFile } from './package-runner'
 import { featuresSessionEnd, featuresTurnComplete, featuresTurnStart } from './features'
 import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
@@ -238,7 +239,7 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
   const roots = await projectsBelow($, start)
   for (const root of prefer && roots.includes(prefer) ? [prefer, ...roots.filter(one => one !== prefer)] : roots) {
     // Limit: a manifest over 4 MiB is looked up through its SQL files; the names are the same.
-    const graph = (await readGraph($, `${root}/target/manifest.json`).catch(() => null)) ?? (await sqlGraph($, root))
+    const graph = (await readGraph($, await manifestFile($, root)).catch(() => null)) ?? (await sqlGraph($, root))
     if (findModelOrColumn(graph, model)) return root
   }
   return null
@@ -250,7 +251,7 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
  * session's.
  */
 export async function modelsNamed($: EngineInterface, text: string, root: string, shownManifest?: string): Promise<AnswerModel[]> {
-  const manifest = shownManifest ?? `${root}/target/manifest.json`
+  const manifest = shownManifest ?? (await manifestFile($, root))
   const fromManifest = await readGraph($, manifest).catch(() => null)
   // The manifest an entry keeps: the shown graph's (read here, or through altimate-code when over
   // 4 MiB), else the default one when it was read; none when the names came from the SQL files.
@@ -519,11 +520,12 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     return false
   }
   if (seq > conversationSeq) projectSeen = true
-  const manifest = named ?? `${root}/target/manifest.json`
+  const fallback = await manifestFile($, root)
+  const manifest = named ?? fallback
   const stat = await $.fs.stat(manifest).catch(() => null)
   // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
   // A default manifest that went away (dbt clean) also falls back to the SQL files.
-  const fromSql = !stat && (!named || named === `${root}/target/manifest.json`)
+  const fromSql = !stat && (!named || named === fallback || named === `${root}/target/manifest.json`)
   if (!stat && !fromSql) {
     await say('No dbt manifest at that path: run `dbt parse` or `dbt compile` to see lineage.', true)
     return false
@@ -764,9 +766,9 @@ async function staleSql($: EngineInterface, root: string, node: GraphNode | unde
     return !!stat && stat.mtimeMs > manifestMtimeMs
   }
   const base = (path: string) => path.split(/[\\/]/).pop()
-  if (await newer(node.path)) return `${base(node.path)} changed after the manifest was written: run \`dbt compile\`, then r`
+  if (await newer(node.path)) return `${base(node.path)} changed after the manifest was written: run \`dbt compile\`, then press r`
   // Its schema.yml: the tests and documented columns the pane counts come from there.
-  if (node.yml && (await newer(node.yml))) return `${base(node.yml)} changed after the manifest was written: run \`dbt parse\`, then r`
+  if (node.yml && (await newer(node.yml))) return `${base(node.yml)} changed after the manifest was written: run \`dbt parse\`, then press r`
   return null
 }
 
@@ -882,7 +884,7 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   const root = await projectRoot($, file, true)
   if (!root) return null
   projectSeen = true
-  const manifest = `${root}/target/manifest.json`
+  const manifest = await manifestFile($, root)
   const stat = await $.fs.stat(manifest).catch(() => null)
   // A dbt project with a manifest: from here, running out of time is worth telling.
   progress.project = !!stat
