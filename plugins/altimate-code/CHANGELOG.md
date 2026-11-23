@@ -2,9 +2,19 @@
 
 All notable changes to this plugin will be documented in this file.
 
-## [Unreleased]
+## [1.9.0] — unreleased
 
 ### Added
+- `/savings [connection]`: a Databricks savings check beside the chat, over altimate-code's `finops_databricks_savings` tool (four checks: Migrate Classic/Pro to Serverless, Over-Sized Warehouse, Idle Cluster Detection, Job Running on All-Purpose Compute). It runs with your own Databricks connection, in altimate-code's assessment mode (telemetry off and no other contact with Altimate or GitHub: the warehouse is the only host reached; needs an altimate-code release with `ALTIMATE_ASSESSMENT_MODE`) and outside the tool daemon, and shows each finding with its evidence and a monthly range at list price, each resource counted once. Needs an altimate-code release with that tool; with an older one the pane says to update.
+- `/savings` gives the savings tool the go-ahead it asks for (`confirm: true`) only when you ran it yourself; a plugin, the SDK or a schedule gets no run. The check stops after 9 minutes, cancelling any query still on the warehouse, and a check that could not run is named with its reason.
+- Draft the fix: a finding's change goes into the prompt box for Claude to draft against the repository; nothing is sent until you press Enter.
+- What if: each flagged warehouse's cost as serverless and at every smaller size, and whether its cores still fit its queries.
+- Spend since a change: a flagged warehouse's size, type and cost are kept on this machine from one run, and a later run that finds the size or type changed shows its observed spend a month before and after. The two amounts come from different weeks, so the pane labels them as observed spend and does not call the difference saved.
+- `/savings` sends no plugin usage event: neither the command nor its pane is counted, and its queries and results never go to Altimate.
+- A line above the prompt when the session edits Databricks bundle or Terraform files or runs a `databricks` compute command: the flagged resource's saving, or a once-a-session offer of `/savings`.
+- One connection checks every workspace the account's system tables show; the pane counts every workspace the CLI read (`workspaces_checked`), one with only clusters or jobs and no finding included, and names each finding's workspace. With a CLI that does not report the count, it counts the workspaces of the warehouses and findings.
+- `/savings` asks `altimate --version` first and does not start an altimate-code 0.12.12 or older, or a source build, for the check: before assessment mode, its `tool run` would send the one-time telemetry opt-out event.
+- `runTool` takes an environment and `noDaemon` for one CLI run, and hands back a CLI's raw output when it is not an answer (an altimate-code too old for the tool gets "update").
 - `info_toasts` (on by default): off, the dbt helpers raise no toast for what the transcript or the band already shows (model context added for Claude, a model compiled and validated, the dbt doctor passing); failures still toast.
 
 ### Fixed

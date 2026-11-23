@@ -2,7 +2,8 @@ import { expect, mock, test as engineTest } from 'claude-code/testing'
 
 import { playsClear } from './clear-state.testkit'
 import { PHASE_TIMEOUT_MS } from './tool-chain'
-import { GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
+import { GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, toolArgs } from './features/health'
+import { simpleCommands } from './shell'
 
 // These tests are about the health check's own lines: the dbt helpers (their doctor and compile lines) are left off.
 const test = ((name: string, ...rest: any[]) => {
@@ -1155,4 +1156,12 @@ test('with ALTIMATE_TELEMETRY_DISABLED the push gate holds as before and sends n
   await $.command.run({ command: 'health', args: '' } as any)
   await clock.settle()
   expect(usage).toEqual([])
+})
+
+test('the push check reads a shell -c script past a redirection or an option it does not know, as it always has', () => {
+  expect(isGitPush("bash 2>/dev/null -c 'git push'")).toBe(true)
+  expect(isGitPush("zsh --emulate sh -c 'git push'")).toBe(true)
+  expect(isGitPush("bash -o pipefail -c 'git push'")).toBe(true)
+  expect(isGitPush("bash -euo pipefail -c 'git push'")).toBe(true)
+  expect(filesWrittenBy("bash 2>/dev/null -c 'sed -i s/a/b/ models/x.sql'")).toEqual(['models/x.sql'])
 })

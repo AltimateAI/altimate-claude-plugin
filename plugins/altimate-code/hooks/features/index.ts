@@ -1,7 +1,7 @@
 // The dbt Power User features, each in its own file here, and the one place that calls them, in a
-// fixed order: runs, defer, toModel, comments, cost, health, sqlGraph, docs, cteProfile. The dbt helpers
-// (hooks/dbt-mods.tsx: compile and validate, Explain and Fix, the Query results pane, model context, the
-// doctor) are called last, in the same phases and band; they have no status-line part.
+// fixed order: runs, defer, toModel, comments, cost, health, sqlGraph, docs, cteProfile, savings. The dbt
+// helpers (hooks/dbt-mods.tsx: compile and validate, Explain and Fix, the Query results pane, model
+// context, the doctor) are called last, in the same phases and band; they have no status-line part.
 //
 // A plugin hooks each shared event once (a second hook on an event without a matcher is refused), and
 // the engine refuses `$` handed to anything but a function it can name, so this file calls every
@@ -154,6 +154,20 @@ import {
   readOrEditAfter as cteProfileReadOrEditAfter,
   editReadsBefore as cteProfileEditReadsBefore,
 } from './cte-profile'
+import {
+  register as savingsRegister,
+  sessionStart as savingsSessionStart,
+  turnStart as savingsTurnStart,
+  turnComplete as savingsTurnComplete,
+  sessionEnd as savingsSessionEnd,
+  bandLine as savingsBandLine,
+  bashRewrite as savingsBashRewrite,
+  bashGate as savingsBashGate,
+  bashAfter as savingsBashAfter,
+  editAfter as savingsEditAfter,
+  readOrEditAfter as savingsReadOrEditAfter,
+  editReadsBefore as savingsEditReadsBefore,
+} from './savings'
 
 export type { FeatureId } from '../status-line'
 export { FEATURE_IDS } from '../status-line'
@@ -216,6 +230,9 @@ export function registerFeatures(on: On, context: FeatureContext) {
     cteProfileRegister(on, context)
   } catch {}
   try {
+    savingsRegister(on, context)
+  } catch {}
+  try {
     registerDbtMods(on, context)
   } catch {}
 }
@@ -230,6 +247,7 @@ export async function featuresSessionStart($: EngineInterface, e: Args<'session.
   await attempt($, 'sqlGraph', 'sessionStart', () => sqlGraphSessionStart($, e))
   await attempt($, 'docs', 'sessionStart', () => docsSessionStart($, e))
   await attempt($, 'cteProfile', 'sessionStart', () => cteProfileSessionStart($, e))
+  await attempt($, 'savings', 'sessionStart', () => savingsSessionStart($, e))
   await attempt($, 'dbtMods', 'sessionStart', () => sessionStartDbtMods($, e))
 }
 
@@ -274,6 +292,7 @@ export async function featuresTurnStart($: EngineInterface, e: Args<'turn.start'
   await attempt($, 'sqlGraph', 'turnStart', () => sqlGraphTurnStart($, e))
   await attempt($, 'docs', 'turnStart', () => docsTurnStart($, e))
   await attempt($, 'cteProfile', 'turnStart', () => cteProfileTurnStart($, e))
+  await attempt($, 'savings', 'turnStart', () => savingsTurnStart($, e))
   await attempt($, 'dbtMods', 'turnStart', () => newTurnDbtMods(e))
 }
 
@@ -287,6 +306,7 @@ export async function featuresTurnComplete($: EngineInterface, e: Args<'turn.com
   await attempt($, 'sqlGraph', 'turnComplete', () => sqlGraphTurnComplete($, e, out))
   await attempt($, 'docs', 'turnComplete', () => docsTurnComplete($, e, out))
   await attempt($, 'cteProfile', 'turnComplete', () => cteProfileTurnComplete($, e, out))
+  await attempt($, 'savings', 'turnComplete', () => savingsTurnComplete($, e, out))
 }
 
 export async function featuresSessionEnd($: EngineInterface, e: Args<'session.end'>) {
@@ -304,6 +324,7 @@ export async function featuresSessionEnd($: EngineInterface, e: Args<'session.en
   await attempt($, 'sqlGraph', 'sessionEnd', () => sqlGraphSessionEnd($, e))
   await attempt($, 'docs', 'sessionEnd', () => docsSessionEnd($, e))
   await attempt($, 'cteProfile', 'sessionEnd', () => cteProfileSessionEnd($, e))
+  await attempt($, 'savings', 'sessionEnd', () => savingsSessionEnd($, e))
   await attempt($, 'dbtMods', 'sessionEnd', () => endDbtMods($))
 }
 
@@ -322,6 +343,7 @@ export async function featureBandLines($: EngineInterface, ui: BandUi): Promise<
   add('sqlGraph', await attempt($, 'sqlGraph', 'bandLine', () => sqlGraphBandLine($, ui)))
   add('docs', await attempt($, 'docs', 'bandLine', () => docsBandLine($, ui)))
   add('cteProfile', await attempt($, 'cteProfile', 'bandLine', () => cteProfileBandLine($, ui)))
+  add('savings', await attempt($, 'savings', 'bandLine', () => savingsBandLine($, ui)))
   add('dbtMods', await attempt($, 'dbtMods', 'bandLine', () => bandDbtMods($, ui)))
   return lines
 }
@@ -341,6 +363,7 @@ export async function featuresBashRewrite($: EngineInterface, e: BashCall): Prom
   take(await attempt($, 'sqlGraph', 'bashRewrite', () => sqlGraphBashRewrite($, { ...e, command })))
   take(await attempt($, 'docs', 'bashRewrite', () => docsBashRewrite($, { ...e, command })))
   take(await attempt($, 'cteProfile', 'bashRewrite', () => cteProfileBashRewrite($, { ...e, command })))
+  take(await attempt($, 'savings', 'bashRewrite', () => savingsBashRewrite($, { ...e, command })))
   return command
 }
 
@@ -359,6 +382,7 @@ export async function featuresBashGate($: EngineInterface, e: BashCall): Promise
   if (!gate) take(await attempt($, 'sqlGraph', 'bashGate', () => sqlGraphBashGate($, e)))
   if (!gate) take(await attempt($, 'docs', 'bashGate', () => docsBashGate($, e)))
   if (!gate) take(await attempt($, 'cteProfile', 'bashGate', () => cteProfileBashGate($, e)))
+  if (!gate) take(await attempt($, 'savings', 'bashGate', () => savingsBashGate($, e)))
   return gate
 }
 
@@ -388,6 +412,7 @@ export async function featuresBashAfter($: EngineInterface, e: BashCall, result:
   addLines(lines, await attempt($, 'sqlGraph', 'bashAfter', () => sqlGraphBashAfter($, e, result)))
   addLines(lines, await attempt($, 'docs', 'bashAfter', () => docsBashAfter($, e, result)))
   addLines(lines, await attempt($, 'cteProfile', 'bashAfter', () => cteProfileBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'savings', 'bashAfter', () => savingsBashAfter($, e, result)))
   addLines(lines, await attempt($, 'dbtMods', 'bashAfter', () => dbtModsBashAfter($, e, result)))
   return lines
 }
@@ -399,7 +424,7 @@ export async function featuresBashAfter($: EngineInterface, e: BashCall, result:
 export const EDIT_AFTER_TIMEOUT_MS = dbtModsCheckHoldMs + 5_000
 
 /** Whether any feature's `editAfter` needs the file's text from before the edit. */
-export const EDIT_READS_BEFORE: boolean = runsEditReadsBefore || deferEditReadsBefore || toModelEditReadsBefore || commentsEditReadsBefore || costEditReadsBefore || healthEditReadsBefore || sqlGraphEditReadsBefore || docsEditReadsBefore || cteProfileEditReadsBefore
+export const EDIT_READS_BEFORE: boolean = runsEditReadsBefore || deferEditReadsBefore || toModelEditReadsBefore || commentsEditReadsBefore || costEditReadsBefore || healthEditReadsBefore || sqlGraphEditReadsBefore || docsEditReadsBefore || cteProfileEditReadsBefore || savingsEditReadsBefore
 
 /** The context lines every feature adds after an edit landed. */
 export async function featuresEditAfter($: EngineInterface, e: FileCall, result: ToolCallResult, file: EditedFile): Promise<string[]> {
@@ -413,6 +438,7 @@ export async function featuresEditAfter($: EngineInterface, e: FileCall, result:
   addLines(lines, await attempt($, 'sqlGraph', 'editAfter', () => sqlGraphEditAfter($, e, result, sqlGraphEditReadsBefore ? file : { path: file.path, before: null })))
   addLines(lines, await attempt($, 'docs', 'editAfter', () => docsEditAfter($, e, result, docsEditReadsBefore ? file : { path: file.path, before: null })))
   addLines(lines, await attempt($, 'cteProfile', 'editAfter', () => cteProfileEditAfter($, e, result, cteProfileEditReadsBefore ? file : { path: file.path, before: null })))
+  addLines(lines, await attempt($, 'savings', 'editAfter', () => savingsEditAfter($, e, result, savingsEditReadsBefore ? file : { path: file.path, before: null })))
   addLines(lines, await attempt($, 'dbtMods', 'editAfter', () => dbtModsEditAfter($, e, result, file)))
   return lines
 }
@@ -429,6 +455,7 @@ export async function featuresReadOrEditAfter($: EngineInterface, e: FileCall, r
   addLines(lines, await attempt($, 'sqlGraph', 'readOrEditAfter', () => sqlGraphReadOrEditAfter($, e, result, file)))
   addLines(lines, await attempt($, 'docs', 'readOrEditAfter', () => docsReadOrEditAfter($, e, result, file)))
   addLines(lines, await attempt($, 'cteProfile', 'readOrEditAfter', () => cteProfileReadOrEditAfter($, e, result, file)))
+  addLines(lines, await attempt($, 'savings', 'readOrEditAfter', () => savingsReadOrEditAfter($, e, result, file)))
   addLines(lines, await attempt($, 'dbtMods', 'readOrEditAfter', () => dbtModsReadOrEditAfter($, e, result, file)))
   return lines
 }

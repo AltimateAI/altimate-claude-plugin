@@ -69,7 +69,8 @@ test('a failure with no answer object keeps its first line of text; one with an 
   expect(await text(() => ({ exitCode: 1, stdout: JSON.stringify({ status: 'error', output: 'boom', metadata: {} }), stderr: 'noise' }))).toBe('boom')
   expect(await text(() => ({ exitCode: 1, stdout: JSON.stringify({ status: 'error', metadata: {} }), stderr: 'noise' }))).toBe('')
   const result = await runTool(failing(() => ({ exitCode: 2, stdout: 'plain failure' })), 'dbt_manifest', {})
-  expect(result).toEqual({ metadata: null, text: 'plain failure', ok: false })
+  // The whole output also comes back as `raw`, for a caller that reads more than its first line.
+  expect(result).toEqual({ metadata: null, text: 'plain failure', ok: false, raw: 'plain failure' })
 })
 
 test('within handles the work\'s rejection before it sets the deadline, so a throwing clock leaves none unhandled', async () => {
@@ -115,4 +116,20 @@ test('the last version printed is read, and a preview build is no release to com
   expect(isPreviewBuild('0.0.0-main-202611191200')).toBe(true)
   expect(isPreviewBuild('0.0.0--202611190701')).toBe(true)
   expect(isPreviewBuild('0.12.9')).toBe(false)
+})
+
+test('a call that sets an environment or bypasses the daemon goes through the CLI even without cliOnly', async () => {
+  let connects = 0
+  const { $, argvs, mcpCalls } = standIn(() => {
+    connects++
+    return { isConnected: true, server: 'altimate-code' }
+  })
+  await runTool($, 'finops_x', {}, { noDaemon: true })
+  await runTool($, 'finops_x', {}, { env: { ALTIMATE_TELEMETRY_DISABLED: 'true' } })
+  expect(connects).toBe(0)
+  expect(mcpCalls()).toBe(0)
+  expect(argvs.map(argv => argv.slice(1))).toEqual([
+    ['tool', 'run', 'finops_x', '--args', '{}', '--json', '--no-daemon'],
+    ['tool', 'run', 'finops_x', '--args', '{}', '--json'],
+  ])
 })
