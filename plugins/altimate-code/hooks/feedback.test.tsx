@@ -581,7 +581,7 @@ test('a description at the read limit is redacted whole and quickly, whatever sh
 })
 
 test('a long run that no rule matches is read once, not once per position: each shape at the read limit is redacted quickly', () => {
-  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000), 'eyJ-'.repeat(25_000), '-eyJ'.repeat(25_000), 'password:\n'.repeat(10_000), ';pwd={'.repeat(16_000), ', token: '.repeat(11_000), '--token-'.repeat(12_000), `--token ${'a'.repeat(99_000)}`, '{password:'.repeat(10_000), 'x\\ '.repeat(33_000), 'secret_'.repeat(14_000), `${'secret_'.repeat(14_000)}=x`, 'a='.repeat(50_000), '--a '.repeat(25_000), '{a: '.repeat(25_000), 'token=a\\'.repeat(12_000)]) {
+  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000), 'eyJ-'.repeat(25_000), '-eyJ'.repeat(25_000), 'password:\n'.repeat(10_000), ';pwd={'.repeat(16_000), ', token: '.repeat(11_000), '--token-'.repeat(12_000), `--token ${'a'.repeat(99_000)}`, '{password:'.repeat(10_000), 'x\\ '.repeat(33_000), 'secret_'.repeat(14_000), `${'secret_'.repeat(14_000)}=x`, 'a='.repeat(50_000), '--a '.repeat(25_000), '{a: '.repeat(25_000), 'token=a\\'.repeat(12_000), "\\'~/".repeat(25_000), '\\"~/'.repeat(25_000), '\\`~/'.repeat(25_000), `\\'${HOME}`.repeat(7_000), '{a: {b: '.repeat(12_000)]) {
     const started = Date.now()
     cleanDescription(text.slice(0, 100_000), [HOME])
     expect(Date.now() - started).toBeLessThan(1500)
@@ -710,6 +710,10 @@ test('a flag argument that is quoted or shell-escaped, a flow-mapping value on t
   }
   expect(redactSecrets('export SECRET_KEY=Hunter2!pw DBT_ENV_SECRET_PG=Hunter3!pw and dbt debug failed')).toBe('export SECRET_KEY=‹redacted› DBT_ENV_SECRET_PG=‹redacted› and dbt debug failed')
   expect(redactSecrets(['encryption_key: Hunter4!pw', 'user: bob'].join('\n'))).toBe(['encryption_key: ‹redacted›', 'user: bob'].join('\n'))
+  // A credential key in a mapping nested in a flow mapping or sequence, and a Ruby or PHP hash.
+  expect(redactSecrets('outputs: {prod: {password: correct horse battery staple, user: alice}}')).toBe('outputs: {prod: {password: ‹redacted›, user: alice}}')
+  expect(redactSecrets('targets: [{api-key: correct horse battery staple}]')).toBe('targets: [{api-key: ‹redacted›}]')
+  expect(redactSecrets('{"password" => "correct horse battery staple", "user" => "bob"}')).toBe('{"password" => ‹redacted›, "user" => "bob"}')
   // A name that only holds a credential word inside another word is not a credential key.
   expect(redactSecrets('passenger_count=4 and compass_heading: north')).toBe('passenger_count=4 and compass_heading: north')
 })

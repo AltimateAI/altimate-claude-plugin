@@ -63,7 +63,7 @@ const CREDENTIAL_SEGMENT = new RegExp(String.raw`(?:^|[_.-])${CREDENTIAL_WORD}[_
  * reads a long name again from every position in it.
  */
 export const isCredentialKey = (name: string) => name.length <= 200 && (ENDS_IN_CREDENTIAL.test(name) || CREDENTIAL_SEGMENT.test(name))
-// A YAML line of a credential key: a block-scalar header (`password: |`, `secret: >- # note`) or an empty value takes the indented lines after it,
+// A YAML line of a key (yamlSpans keeps only credential keys): a block-scalar header (`password: |`, `secret: >- # note`) or an empty value takes the indented lines after it,
 // a quoted value that does not close on its line takes the indented lines after it up to its closing quote, and a plain value
 // (`password: correct horse battery staple`) is the rest of its line and its indented continuation lines.
 const KEY_LINE = String.raw`^([ \t]*(?:-[ \t]+)?["']?([\w.-]+)(?:\\*["'])?[ \t]*:[ \t]*)`
@@ -116,11 +116,11 @@ const SECRET_PATTERNS: RegExp[] = [
 const KEY_VALUE = /(?:"(?:[^"\\\n]|\\.|"")*(?:"|(?=\n)|$)|'(?:[^'\\\n]|\\.|'')*(?:'|(?=\n)|$)|(?<!\\)(\\+)"(?:(?!(?<!\\)\1")[^\n])*(?<!\\)\1"|(?:\\[^\n]|[^\s;\\]|;(?!\w+=))+)/y
 /** Each rule's group 1 is the text before the value, group 2 the key's name; the value is read with KEY_VALUE, or is group 3 when there is one. */
 const KEYED_PATTERNS: RegExp[] = [
-  // `key=value`, `key: value`, `"key": "value"`, JSON-escaped keys.
-  /(?<![\w.-])(([\w.-]+)(?:\\*["'])?\s*[:=]\s*)/g,
+  // `key=value`, `key: value`, `"key": "value"`, `"key" => "value"`, JSON-escaped keys.
+  /(?<![\w.-])(([\w.-]+)(?:\\*["'])?\s*(?:=>|[:=])\s*)/g,
   // A key inside a YAML flow mapping (`{password: correct horse, user: bob}`): the value runs to the next `,` or `}`, over indented lines too,
-  // and may start on the line after its key.
-  /([{,][ \t]*["']?([\w.-]+)["']?[ \t]*:(?:[ \t]+|[ \t]*\n[ \t]+))(?!["'])([^,}\n]+(?:\n[ \t]+[^,}\n]+)*)/g,
+  // and may start on the line after its key. A value never holds a flow bracket, so a nested mapping's keys are read as keys.
+  /([{,][ \t]*["']?([\w.-]+)["']?[ \t]*:(?:[ \t]+|[ \t]*\n[ \t]+))(?!["'])([^,{}[\]\n]+(?:\n[ \t]+[^,{}[\]\n]+)*)/g,
   // A command-line flag (`--password hunter2`, `--password "correct horse"`): its argument.
   /(?<![\w-])(--?([\w-]+)[ \t]+)(?!-)/g,
 ]
@@ -232,14 +232,17 @@ const PATH_SEGMENT = `(?:[^\\s'"\`<>()\\\\/]|'(?=[A-Za-z0-9])|\\([^\\s()'"\`<>]*
 // ("Client Files/acme"). A path that ends in a space-separated word ("Client Files") is cut at the space unless it is quoted.
 const PATH_TAIL = `(?:[\\\\/]${PATH_SEGMENT}*(?: (?=(?:${PATH_SEGMENT}+ ){0,7}${PATH_SEGMENT}+[\\\\/])${PATH_SEGMENT}+)*)*`
 
-/** Every path under the home folder, and every `~/…` path: a quoted one up to its own closing quote (a quote of another kind, or an escaped one, is part of the name), an unquoted one with the spaces inside its folder names. */
+/**
+ * Every path under the home folder, and every `~/…` path: a quoted one up to its own closing quote within 1024 characters (a quote of another
+ * kind, or an escaped one, is part of the name), an unquoted one with the spaces inside its folder names.
+ */
 function homeSpans(text: string, homes: readonly string[]): Span[] {
   const spans: Span[] = []
   // `~` stands for the home folder whoever the user is, so it counts only before a separator.
   const forms = [...homeForms(homes).map(form => escapeRegex(form)), '(?<![\\w.~/\\\\-])~(?=[\\\\/])']
   for (const home of forms) {
     for (const quote of ['"', "'", '`']) {
-      for (const match of text.matchAll(new RegExp(`${quote}${home}(?:[^${quote}\\n\\\\]|\\\\.)*${quote}`, 'gi'))) spans.push({ start: match.index + 1, end: match.index + match[0].length - 1, home: true })
+      for (const match of text.matchAll(new RegExp(`${quote}${home}(?:[^${quote}\\n\\\\]|\\\\.){0,1024}${quote}`, 'gi'))) spans.push({ start: match.index + 1, end: match.index + match[0].length - 1, home: true })
     }
     for (const match of text.matchAll(new RegExp(`${home}${PATH_TAIL}`, 'gi'))) spans.push({ start: match.index, end: match.index + match[0].length, home: true })
   }
