@@ -193,7 +193,8 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     const values = columns.length === 0 ? valueCandidates(one.original, current) : []
     // A package repo reading integration_tests' manifest: that manifest holds integration_tests' own models too, so the
     // model is asked for by its unique_id. (A project's own manifest keeps the name: a versioned model goes by it.)
-    const borrowed = (await manifestFile($, one.root)) !== `${one.root}/target/manifest.json`
+    // Judged by the copy the task reads (taken at its start), else by the manifest as it is now.
+    const borrowed = state?.snapshot ? !state.snapshot.startsWith(`${one.root}/target/`) : (await manifestFile($, one.root)) !== `${one.root}/target/manifest.json`
     const pkg = borrowed ? await projectName($, one.root) : null
     changes.push({ model: modelName(file), ...(pkg ? { id: `model.${pkg}.${modelName(file)}` } : {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }

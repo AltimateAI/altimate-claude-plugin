@@ -433,7 +433,13 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
   // The path or name matched another package's node (integration_tests' model of the same path or name): the project's
   // own, by its unique_id. A file must be the project's own; a name keeps the other package's model when the project has none.
   if (found && pkg && packageOf(found.id) !== pkg && (path || !model.includes('.'))) {
-    const own = await graphFromToolsOnce($, manifest, mtimeMs, `model.${pkg}.${model}`).catch(() => null)
+    // The project's own model, else its snapshot, of that name. (A versioned model's id holds its version, which the file
+    // name does not give: it is not found this way.)
+    let own: Awaited<ReturnType<typeof graphFromToolsOnce>> = null
+    for (const id of [`model.${pkg}.${model}`, `snapshot.${pkg}.${model}`]) {
+      own = await graphFromToolsOnce($, manifest, mtimeMs, id).catch(() => null)
+      if (own) break
+    }
     return path ? checkPath(own, path, pkg) : (own ?? found)
   }
   return checkPath(found, path, pkg)
@@ -579,7 +585,9 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     return false
   }
   const pkg = await projectName($, root)
-  let id = graph ? findModel(graph, wanted, pkg, !!input.file) : null
+  // A file, or a model asked for by its path (/lineage models/orders.sql): the project's own node or none.
+  const asPath = !!input.file || /[\\/]|\.sql$/i.test(wanted)
+  let id = graph ? findModel(graph, wanted, pkg, asPath) : null
   if (graph && !id) {
     const split = withoutColumn()
     const model = split ? findModel(graph, split.model, pkg) : null
@@ -588,10 +596,10 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   let via: LineageFocus['via'] = fromSql ? 'sql' : 'manifest'
   let columns = input.columns ?? null
   if (!graph) {
-    const name = input.file ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
+    const name = asPath ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
     let failure: string | null = null
     const lookUp = (model: string) =>
-      graphFromTools($, manifest, mtimeMs, model, input.file ? wanted : undefined, pkg).catch(error => {
+      graphFromTools($, manifest, mtimeMs, model, asPath ? wanted : undefined, pkg).catch(error => {
         failure = String(error?.message ?? error)
         return null
       })

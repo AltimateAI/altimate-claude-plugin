@@ -384,9 +384,14 @@ test('a package repo over 4 MiB: /lineage <name> that the CLI answers with integ
     cliId: model => (model === 'model.shop.fct_orders' ? 'model.shop.fct_orders' : 'model.shop_tests.fct_orders'),
     fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : undefined),
   })
+  // Asked for by its path: the path's other-package node is not the file's.
+  await $.command.run({ command: 'lineage', args: 'models/fct_orders.sql', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
+  await clock.settle()
+  expect(asked).toEqual(['models/fct_orders.sql', 'model.shop.fct_orders'])
+  // By its name, the same (the package's own answer is already at hand).
   await $.command.run({ command: 'lineage', args: 'fct_orders', origin: { kind: 'composer' }, presentation: { isFullscreen: true, columns: 200 } })
   await clock.settle()
-  expect(asked.slice(0, 2)).toEqual(['fct_orders', 'model.shop.fct_orders'])
+  expect(asked).toEqual(['models/fct_orders.sql', 'model.shop.fct_orders', 'fct_orders'])
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   await ui.unmount()
