@@ -293,6 +293,12 @@ export async function modelsNamed($: EngineInterface, text: string, root: string
     const id = node?.id ?? (byFile && (!pkg || packageOf(byFile) === pkg) ? byFile : null)
     mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: id ? (graph.nodes[id]?.name ?? '') : '', root: owner })
   }
+  // A unique_id written out (model.shop_tests.orders) is that node.
+  for (const match of text.matchAll(/\b(?:model|snapshot)\.[A-Za-z_][\w]*\.[A-Za-z_][\w]*(?:\.v\d+)?\b/g)) {
+    if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue
+    const node = graph.nodes[match[0]]
+    if (node && FOLLOWABLE.has(node.type)) mentions.push({ at: match.index!, end: match.index! + match[0].length, id: node.id, name: node.name, root: await rootOf(node.id) })
+  }
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
     if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue
     const word = match[0].toLowerCase()
@@ -982,7 +988,9 @@ function cut(text: string, max: number): string {
  * columns, which downstream models and dashboards read that column. Logged, then added to
  * Claude's context with the edit's result.
  */
-async function impactFirst($: EngineInterface, e: any, file: string, deadline: number, progress: { project: boolean; failed?: boolean }, changedAt?: number | null): Promise<ImpactNote | null> {
+async function impactFirst($: EngineInterface, e: any, edited: string, deadline: number, progress: { project: boolean; failed?: boolean }, changedAt?: number | null): Promise<ImpactNote | null> {
+  // `integration_tests/../models/x.sql` is `models/x.sql`.
+  const file = normalize(edited)
   const root = await projectRoot($, file, true)
   if (!root) return null
   projectSeen = true

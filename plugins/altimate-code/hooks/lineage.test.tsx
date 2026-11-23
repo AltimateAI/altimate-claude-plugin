@@ -573,6 +573,19 @@ test('a package repo: integration_tests\' model reached from the package\'s pane
   await ui.unmount()
 })
 
+test('a package repo: an answer that writes a unique_id names that node, not the package\'s model of the same name', async ($, on) => {
+  const theirs = { resource_type: 'model', name: 'fct_orders', original_file_path: 'models/fct_orders.sql', depends_on: { nodes: [] }, config: { materialized: 'view' }, columns: {} }
+  const manifest = { ...MANIFEST, nodes: { ...MANIFEST.nodes, 'model.shop_tests.fct_orders': theirs } }
+  const { clock } = await start($, on, { packageRepo: true, manifest, fileText: path => (path === `${ROOT}/dbt_project.yml` ? "name: 'shop'\n" : path === `${ROOT}/integration_tests/dbt_project.yml` ? "name: 'shop_tests'\n" : undefined) })
+  await $.turn.start({ text: 'which model?', turnId: 't1' } as any)
+  await $.turn.complete({ answer: 'It is model.shop_tests.fct_orders.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't1' } as any)
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop_tests.fct_orders' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'answer-model.shop.fct_orders' })).toBeUndefined()
+  await ui.unmount()
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
