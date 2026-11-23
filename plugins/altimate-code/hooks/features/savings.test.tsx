@@ -878,25 +878,79 @@ test('the band\'s Run /savings pressed while a typed /savings check is going sta
   await clock.settle()
 })
 
-test('a check from before a /clear that ends after it does not free the new conversation\'s check', async ($, on) => {
+test('a /savings typed after a /clear, while the earlier check still reads the warehouse, starts no second check', async ($, on) => {
   const options: any = {}
   const { clock, runs } = await start($, on, options)
   let finishOld = () => {}
   options.hold = new Promise<void>(done => (finishOld = done))
   await savings($)
   await clock.settle()
+  expect(runs.length).toBe(1)
+  await $.session.end({ reason: 'clear' } as any)
+  options.hold = undefined
+  expect((await savings($)).text).toBe('The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.')
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  // Once it ends, its answer stays out of the new conversation and the next /savings runs.
+  finishOld()
+  await clock.settle()
+  await savings($)
+  await clock.settle()
+  expect(runs.length).toBe(2)
+})
+
+test('a band press after a /clear, while the earlier check still reads the warehouse, starts nothing and says why', async ($, on) => {
+  const files = { [`${ROOT}/resources/warehouses.yml`]: 'resources:\n  sql_warehouses:\n    bi:\n      cluster_size: Small\n' }
+  const options: any = { files }
+  const { clock, runs, toasts } = await start($, on, options)
+  let finish = () => {}
+  options.hold = new Promise<void>(done => (finish = done))
+  await savings($)
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/resources/warehouses.yml`, old_string: 'Small', new_string: 'Medium' })
+  await clock.settle()
+  const band = await $.ui.mount(BAND)
+  await band.press({ key: 'savings-run' })
+  await band.unmount()
+  await clock.settle()
+  expect(runs.length).toBe(1)
+  expect(toasts.at(-1)).toBe('The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.')
+  finish()
+  await clock.settle()
+})
+
+test('a check dropped by a /clear before it reached the warehouse, ending later, does not free the new conversation\'s check', async ($, on) => {
+  const options: any = {}
+  const { clock, runs } = await start($, on, options)
+  // The first check waits in its version probe, before any warehouse read.
+  let probed = () => {}
+  const probing = new Promise<void>(resolve => (probed = resolve))
+  let releaseProbe = () => {}
+  const probeHeld = new Promise<void>(resolve => (releaseProbe = resolve))
+  options.onStep = async (step: string) => {
+    if (step !== 'version probe') return
+    options.onStep = undefined
+    probed()
+    await probeHeld
+  }
+  const first = savings($)
+  const settling = clock.settle()
+  await probing
+  await first
   await $.session.end({ reason: 'clear' } as any)
   let finishNew = () => {}
   options.hold = new Promise<void>(done => (finishNew = done))
   await savings($)
   await clock.settle()
-  expect(runs.length).toBe(2)
-  // The old check ends: the new one is still going, and still the only one.
-  finishOld()
+  expect(runs.length).toBe(1)
+  // The old check ends without reaching the warehouse: the new one is still going, and still the only one.
+  releaseProbe()
+  await settling
   await clock.settle()
   expect((await savings($)).text).toBe('The Databricks savings check is already running in the side pane.')
   await clock.settle()
-  expect(runs.length).toBe(2)
+  expect(runs.length).toBe(1)
   finishNew()
   await clock.settle()
 })
@@ -1338,6 +1392,15 @@ test('a failed run also comes as a notice, for a terminal too narrow for the pan
   expect(toasts.at(-1)).toMatch(/^Databricks savings check: A query was refused: \[TABLE_OR_VIEW_NOT_FOUND\].* ask a workspace admin for SELECT/)
 })
 
+test('the published 0.12.12, which has neither the savings tool nor assessment mode, is never started for the check', async ($, on) => {
+  const { clock, runs, versionRuns, toasts } = await start($, on, { version: '0.12.12' })
+  await savings($)
+  await clock.settle()
+  expect(versionRuns.length).toBe(1)
+  expect(runs).toEqual([])
+  expect(toasts.at(-1)).toContain(`It is 0.12.12; update it to ${SAVINGS_MIN_ALTIMATE_CODE} or later`)
+})
+
 test('an altimate-code older than the check is never started for it: only `--version` runs', async ($, on) => {
   // 0.12.11 has no assessment mode: its `tool run` would send the one-time opt-out event before failing.
   const { clock, runs, versionRuns, toasts } = await start($, on, { version: '0.12.11' })
@@ -1355,11 +1418,11 @@ test('an altimate-code older than the check is never started for it: only `--ver
 test('a version that cannot be read, or a source build, is refused; the first release with the check runs it', async ($, on) => {
   // A source build prints `local` whatever its age, old checkouts without assessment mode included.
   // A prerelease of the minimum is older than it, as semver orders them; a preview build (0.0.0-…) is older still.
-  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12-beta.1', '0.0.0-main-202611191200']) {
+  for (const version of ['', 'altimate-code', '0.12', '0.10.0', 'local', '0.12.12', 'v0.12.12', 'altimate-code 0.12.12', '0.12.13-beta.1', '0.0.0-main-202611191200']) {
     expect(supportsSavings(version)).toBe(false)
   }
   // Read as the status line reads it: the last version printed, with or without the CLI's name or a runtime note.
-  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.12', '0.12.13', '0.13.0', '1.0.0', 'altimate-code 0.12.12', 'node v22.1.0\n0.12.13']) {
+  for (const version of [SAVINGS_MIN_ALTIMATE_CODE, 'v0.12.13', '0.12.14', '0.13.0', '1.0.0', 'altimate-code 0.12.13', 'node v22.1.0\n0.12.13']) {
     expect(supportsSavings(version)).toBe(true)
   }
   const local = await start($, on, { version: 'local' })
@@ -2252,9 +2315,9 @@ test('the band\'s Run button pressed twice starts one run', async ($, on) => {
   await band.unmount()
 })
 
-test('after /clear during a pressed run, Run again works at once', async ($, on) => {
+test('after /clear during a pressed run that reads the warehouse, Run again waits for it, then works', async ($, on) => {
   const options: Options = {}
-  const { clock, runs } = await start($, on, options)
+  const { clock, runs, toasts } = await start($, on, options)
   await savings($)
   await clock.settle()
   let release = () => {}
@@ -2266,11 +2329,18 @@ test('after /clear during a pressed run, Run again works at once', async ($, on)
   await clock.settle()
   options.hold = undefined
   await showAll(ui)
+  // The earlier check's CLI still reads the warehouse: no second check beside it.
+  await ui.press({ key: 'again' })
+  await clock.settle()
+  expect(runs.length).toBe(2)
+  expect(toasts.at(-1)).toBe('The Databricks savings check started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.')
+  // Once it ends, Run again starts the next one.
+  release()
+  await clock.settle()
+  await showAll(ui)
   await ui.press({ key: 'again' })
   await clock.settle()
   expect(runs.length).toBe(3)
-  release()
-  await clock.settle()
   await ui.unmount()
 })
 
@@ -3722,8 +3792,9 @@ test('a press queued when the session ends does not hold the next session\'s Run
   const { clock, runs } = await start($, on, options)
   await savings($)
   await clock.settle()
-  // A run that does not finish before the session ends.
-  options.hold = new Promise<void>(() => {})
+  // A run that does not finish before the session ends: it ends after, as the CLI's deadline ends any run.
+  let finish = () => {}
+  options.hold = new Promise<void>(done => (finish = done))
   const ui = await mountFull($)
   await ui.press({ key: 'again' })
   await clock.settle()
@@ -3731,6 +3802,8 @@ test('a press queued when the session ends does not hold the next session\'s Run
   await $.session.end({ reason: 'clear' } as any)
   await clock.settle()
   options.hold = undefined
+  finish()
+  await clock.settle()
   await savings($)
   await clock.settle()
   const again = await mountFull($)

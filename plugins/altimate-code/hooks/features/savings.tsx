@@ -68,17 +68,18 @@ const LIST_BUDGET_MS = 30_000
 const LOCAL_ONLY = { ALTIMATE_TELEMETRY_DISABLED: 'true', ALTIMATE_ASSESSMENT_MODE: 'true' }
 
 /**
- * The first altimate-code release the check may start. Up to 0.12.11 (the latest release when this was
- * written) altimate-code has neither the savings tool nor assessment mode, so `tool run` there would only
- * send the CLI's one-time telemetry opt-out event and then fail. `altimate --version` starts no telemetry,
- * so it is asked first and an older CLI is never started for the check.
+ * The first altimate-code release the check may start. Up to 0.12.12 (published without them) altimate-code
+ * has neither the savings tool nor assessment mode, so `tool run` there would only send the CLI's one-time
+ * telemetry opt-out event and then fail. `altimate --version` starts no telemetry, so it is asked first and an
+ * older CLI is never started for the check. The release that ships both is not out yet: this names the next
+ * version until it is, and is set to that release's version before the plugin is published.
  */
-export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.12'
+export const SAVINGS_MIN_ALTIMATE_CODE = '0.12.13'
 const VERSION_TIMEOUT_MS = 15_000
 
 /**
  * Whether what `altimate --version` printed names a release the check may start. The version is read as
- * the status line reads it (the last version printed, so `altimate-code 0.12.12` or a runtime note before
+ * the status line reads it (the last version printed, so `altimate-code 0.12.13` or a runtime note before
  * it still reads), and compared as semver does: a prerelease of the minimum is older than it. A source
  * build prints `local` whatever its age (an old checkout without assessment mode does too), so it is
  * refused like any version that cannot be read; a build made with the release script carries its version.
@@ -139,7 +140,14 @@ let heldNotices: string[] = []
 // one, with no await between that decision and this claim, until its run ends or a /clear drops it. Starting a run
 // is decided here, not from the running flag in `$.state`, which only draws the pane and the status line: a hook's
 // read of that flag can answer as it was when the hook started.
-let claim: { asked: string | null; name?: string } | null = null
+let claim: Claim | null = null
+// A claim: what its check was asked for and is called, the conversation it was asked in, and whether its CLI is
+// reading a warehouse now. A /clear keeps a claim whose CLI is reading, so a second check never runs on the same
+// warehouse beside one whose answer the /clear threw away.
+type Claim = { asked: string | null; name?: string; conversation: number; reading?: boolean }
+// What /savings or a press says while a check from before a /clear still reads the warehouse.
+const stillReading = (name = 'savings check') =>
+  `The ${name} started before the /clear is still reading your warehouse, and its answer is not kept. Run /savings again when it finishes.`
 /**
  * Lets go of the claim if `mine` still holds it: when its run ends, and when a step before its run fails, since no
  * run was started to let go of it then.
@@ -1211,7 +1219,7 @@ async function checkOne($: EngineInterface, target: Target, connections: readonl
  * press come here. A /clear or a session end since the claim (even in the same tick, before this scheduled run
  * started) dropped it, so a late run never lands in the new conversation.
  */
-async function runCheck($: EngineInterface, mine: { asked: string | null; name?: string }) {
+async function runCheck($: EngineInterface, mine: Claim) {
   if (claim !== mine) return
   const asked = mine.asked
   const at = ++generation
@@ -1292,7 +1300,10 @@ async function runCheck($: EngineInterface, mine: { asked: string | null; name?:
     const targets = targetsFor(asked, connections)
     mine.name = checkName(targets)
     await update($, busyAtom, now => (live() ? busyFor(targets) : now))
-    const answers = await Promise.all(targets.map(target => checkOne($, target, connections, until, live)))
+    mine.reading = true
+    const answers = await Promise.all(targets.map(target => checkOne($, target, connections, until, live))).finally(() => {
+      mine.reading = false
+    })
     if (!live()) return
     const now = await $.clock.now()
     if (!live()) return
@@ -1352,8 +1363,13 @@ async function runCheck($: EngineInterface, mine: { asked: string | null; name?:
  */
 async function startPressedRun($: EngineInterface, asked: string | null, at: number) {
   // A /clear since the press drops it; a check claimed or running starts nothing more.
-  if (claim || at !== generation) return
-  const mine: { asked: string | null; name?: string } = { asked }
+  if (at !== generation) return
+  if (claim) {
+    // A press in the new conversation while a check from before the /clear still reads the warehouse.
+    if (claim.conversation !== conversation) $.ui.toast(stillReading(claim.name))
+    return
+  }
+  const mine: Claim = { asked, conversation }
   claim = mine
   const connections = await read($, connectionsAtom).catch(letGoOnFailure(mine))
   // What "already running" calls this check: no platform until the list is read.
@@ -1576,8 +1592,9 @@ export function register(on: On, _context: FeatureContext) {
     }
     // One check at a time, decided before anything waits.
     const going = claim
+    if (going && going.conversation !== conversation) return { text: stillReading(going.name) }
     const inConversation = conversation
-    const mine: { asked: string | null; name?: string } = { asked: asked || null }
+    const mine: Claim = { asked: asked || null, conversation }
     if (!going) claim = mine
     const connections = await read($, connectionsAtom).catch(letGoOnFailure(mine))
     const targets = targetsFor(asked || null, connections)
@@ -1942,7 +1959,9 @@ export async function sessionEnd($: EngineInterface, _e: Args<'session.end'>) {
   offered = false
   turnRunning = false
   heldNotices = []
-  claim = null
+  // A check whose CLI is reading a warehouse keeps its claim until it ends: its answer is dropped, but a second
+  // check must not run beside it. One that has not reached a warehouse is dropped with the conversation.
+  if (!claim?.reading) claim = null
   await update($, bandAtom, () => null)
   await update($, whatIfAtom, () => null)
   await update($, busyAtom, () => null)

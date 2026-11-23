@@ -146,7 +146,7 @@ def node(name, kind, path, **rest):
 manifest = {
     'metadata': {'project_name': 'shop', 'env': {'DBT_ENV_SECRET_PASSWORD': secret}},
     'nodes': {
-        'model.shop.stg': node('stg', 'model', 'models/stg.sql', description=secret, columns={}, depends_on={'nodes': []}),
+        'model.shop.stg': node('stg', 'model', 'models/stg.sql', description=secret, columns={}, depends_on={'nodes': []}, config={'materialized': 'ephemeral', 'secret': secret}),
         'model.shop.orders': node('orders', 'model', 'models/orders.sql', description='One row per order', relation_name='"db"."orders"', patch_path='shop://models/schema.yml', config={'materialized': 'table'}, tags=[], columns={'id': {'name': 'id', 'description': 'key'}}, depends_on={'nodes': ['model.shop.stg']}),
         'model.shop.revenue': node('revenue', 'model', 'models/revenue.sql', description=secret, columns={'x': {'name': 'x', 'description': secret}}, depends_on={'nodes': ['model.shop.orders']}),
         'test.shop.unique_orders_id.abc': node('unique_orders_id', 'test', 'models/schema.yml', column_name='id', test_metadata={'name': 'unique'}, depends_on={'nodes': ['model.shop.orders']}),
@@ -174,7 +174,9 @@ assert names == ["orders", "revenue", "stg", "unique_orders_id"], names
 assert "model.shop.unrelated" not in s["nodes"]
 orders = s["nodes"]["model.shop.orders"]
 assert orders["description"] == "One row per order" and orders["columns"]["id"]["name"] == "id"
-assert set(s["nodes"]["model.shop.stg"]) == {"name", "resource_type"}
+assert set(s["nodes"]["model.shop.stg"]) == {"name", "resource_type", "config"}
+# A neighbour carries only its materialization of its config (ephemeral parents are read through).
+assert s["nodes"]["model.shop.stg"]["config"] == {"materialized": "ephemeral"}
 ' || fail "manifest slice ($file): the slice is not the file's node, its test and its neighbours by name"
 done
 out="$(script MANIFEST_SLICE "$TMP/manifest-broken.json" models/orders.sql shop 2>&1)"; code=$?
