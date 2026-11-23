@@ -181,7 +181,8 @@ const relative = (root: string, path: string) => path.slice(root.length).replace
 
 /** The dbt project above a file or folder: the closest folder holding dbt_project.yml. */
 export async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {
-  let dir = isFile ? dirname(start) : start
+  // Spelled one way (`integration_tests/../models` is `models`), so a project is one root whichever path reached it.
+  let dir = normalize(isFile ? dirname(start) : start)
   for (let i = 0; i < 40; i++) {
     if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) return dir
     const parent = dirname(dir)
@@ -537,7 +538,9 @@ type FollowInput = {
 }
 
 /** A follow; one Claude or the person started counts for the turn it started in, once it lands. */
-async function follow($: EngineInterface, input: FollowInput): Promise<boolean> {
+async function follow($: EngineInterface, given: FollowInput): Promise<boolean> {
+  // A file spelled through `..` (a shell read from integration_tests) is the file it names.
+  const input = given.file ? { ...given, file: normalize(given.file) } : given
   if (input.fromAnswer !== undefined) return followOnce($, input)
   // Claude's reads and the person's own presses alike: in flight, the answer waits for them; landed,
   // the answer leaves the pane where they put it.

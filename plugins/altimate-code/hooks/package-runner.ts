@@ -27,7 +27,9 @@ const runners = new Map<string, Promise<string | null>>()
  * packages.yml or dependencies.yml installs `root` itself by a local path (`local: ../`). That is where dbt is run
  * for a package repo: its packages are installed there, not in the package's own folder.
  */
-export function runnerOf($: EngineInterface, root: string): Promise<string | null> {
+export function runnerOf($: EngineInterface, folder: string): Promise<string | null> {
+  // `/repo/integration_tests/..` (a shell read through `../`) is `/repo`.
+  const root = normalize(folder)
   const known = runners.get(root)
   if (known) return known
   const finding = (async () => {
@@ -60,7 +62,8 @@ export function runnerOf($: EngineInterface, root: string): Promise<string | nul
  * repo with none, the one dbt wrote in the project below that installs it (`integration_tests/target/manifest.json`),
  * whose nodes for the package keep their paths relative to the package. The project's own path when neither exists.
  */
-export async function manifestFile($: EngineInterface, root: string): Promise<string> {
+export async function manifestFile($: EngineInterface, folder: string): Promise<string> {
+  const root = normalize(folder)
   const own = `${root}/target/manifest.json`
   if (await $.fs.exists(own).catch(() => false)) return own
   const theirs = await runnerManifest($, root)

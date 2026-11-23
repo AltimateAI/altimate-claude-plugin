@@ -545,6 +545,14 @@ test('a package repo with the pane on integration_tests: /lineage <path> is the 
   }
 })
 
+test('a package repo: a shell read through ../ from integration_tests still reads the manifest integration_tests writes', async ($, on) => {
+  const through = `${ROOT}/integration_tests/../models/fct_orders.sql`
+  const { clock, logs } = await start($, on, { packageRepo: true, present: [through, FILE], toolResult: () => ({ stdout: 'select 1' }) })
+  await $.tool.call({ tool: 'Bash', command: 'cd integration_tests && cat ../models/fct_orders.sql' } as any)
+  await clock.settle()
+  expect(logs.some(line => line.startsWith('lineage-pane · integration_tests/target/manifest.json · '))).toBe(true)
+})
+
 test('reading a model points the pane at it: the manifest graph, then its columns from dbt_lineage', async ($, on) => {
   const { clock, calls, logs } = await start($, on)
   await $.tool.call({ tool: 'Read', file_path: FILE })
