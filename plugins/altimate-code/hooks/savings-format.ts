@@ -98,9 +98,13 @@ export function limitedText(view: Pick<SavingsView, 'platform' | 'limited'>): st
 export const resourceKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: Pick<SavingsFinding, 'workspaceId' | 'resourceType' | 'resourceId'>) =>
   `${view.platform}:${view.scope ?? ''}:${one.workspaceId ?? ''}:${one.resourceType}:${one.resourceId}`
 
-/** The key a finding is counted once under: its resource's and its check's. Two connections that read one workspace list it twice. */
-export const findingKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: Pick<SavingsFinding, 'workspaceId' | 'resourceType' | 'resourceId' | 'checkId'>) =>
-  `${resourceKey(view, one)}:${one.checkId}`
+/**
+ * The key a finding is counted once under: its resource's and its check's. Two connections that read one workspace
+ * list it twice. An answer without the check's id names the check by its title, so two such findings on one resource
+ * stay two.
+ */
+export const findingKey = (view: Pick<SavingsView, 'platform' | 'scope'>, one: Pick<SavingsFinding, 'workspaceId' | 'resourceType' | 'resourceId' | 'checkId' | 'title'>) =>
+  `${resourceKey(view, one)}:${one.checkId || `title:${one.title}`}`
 
 /** How many findings the answers hold, each counted once (`findingKey`). */
 export const distinctFindingCount = (views: readonly SavingsView[]) => new Set(views.flatMap(view => view.findings.map(one => findingKey(view, one)))).size

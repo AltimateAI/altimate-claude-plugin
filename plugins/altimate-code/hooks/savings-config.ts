@@ -24,6 +24,13 @@ export function loadConfig(value: unknown): WarehouseConfig {
   return configOf(value as Partial<Record<Setting, unknown>>)
 }
 
+/** `was` with each setting it did not read taken from `now`; `was` itself when that fills none. */
+export function fillUnknown(was: WarehouseConfig, now: WarehouseConfig): WarehouseConfig {
+  const missing = SETTINGS.filter(setting => was[setting] === null && now[setting] !== null)
+  if (missing.length === 0) return was
+  return configOf({ ...was, ...Object.fromEntries(missing.map(setting => [setting, now[setting]])) })
+}
+
 /** The settings both reads know: the only ones a line may compare or name. */
 export const comparable = (was: WarehouseConfig, now: WarehouseConfig) => SETTINGS.filter(setting => was[setting] !== null && now[setting] !== null)
 

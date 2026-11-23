@@ -2,6 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { SNOWFLAKE_CAPTURE } from './savings-snowflake-capture.test-data'
 import { skippedChecks } from '../savings-checks'
+import { distinctFindingCount } from '../savings-format'
 import { SAVINGS_MIN_ALTIMATE_CODE, SIGNUP_URL, SLIM_WIDTH, apiSize, compared, dollars, errorText, evidenceLines, explain, fitLine, fixRequest, isDatabricksConfig, mentions, runsDatabricksCompute, slimTitle, statusText, supportsSavings, toView } from './savings'
 import { DATABRICKS_FACTS, DATABRICKS_REPORT, SNOWFLAKE_FACTS, SNOWFLAKE_REPORT } from './savings-core.testkit'
 
@@ -1555,6 +1556,23 @@ test('an altimate-code too old for assessment mode is not started to list connec
   expect(statuses.filter(Boolean)).toEqual([])
 })
 
+test('the published 0.12.12, with neither savings tool nor assessment mode, is not started to list connections', async ($, on) => {
+  // At session start only `altimate --version` runs: no `warehouse_list`, and no savings tool.
+  const { atStart, snowflakeRuns, statuses } = await start($, on, { list: BOTH, version: '0.12.12' })
+  expect(atStart).toEqual({ versionRuns: 1, listRuns: 0, runs: 0 })
+  expect(snowflakeRuns).toEqual([])
+  expect(statuses.filter(Boolean)).toEqual([])
+})
+
+test('a finding the answer gives no check id is counted apart from another on the same resource', async ($, on) => {
+  const answer = JSON.parse(JSON.stringify(ANSWER))
+  const findings = answer.metadata.report.findings
+  const first = findings[0]
+  findings.splice(0, findings.length, { ...first, check_id: undefined, title: 'Idle warehouse' }, { ...first, check_id: undefined, title: 'Over-sized warehouse' })
+  const view = toView(answer.metadata, 'databricks')!
+  expect(distinctFindingCount([view])).toBe(2)
+})
+
 test('a session nobody is at does not start the CLI to list connections', async ($, on) => {
   const { atStart } = await start($, on, { list: BOTH, headless: true })
   expect(atStart).toEqual({ versionRuns: 0, listRuns: 0, runs: 0 })
@@ -1915,6 +1933,21 @@ test('Draft the fix keeps the resource, its daily cost and the date; a second pr
   await ui.press({ key: 'fix-1' })
   await clock.settle()
   expect((store.get(FIX_KEY) as any).date).toBe('2026-11-17')
+  await ui.unmount()
+})
+
+test('a fix drafted before its size was read takes the size when the person drafts it again', async ($, on) => {
+  const { clock, store } = await start($, on, { store: { [FIX_KEY]: { ...FIX, changedSeen: undefined, config: { size: null, type: 'CLASSIC' } } } })
+  await savings($)
+  await clock.settle()
+  // A run alone leaves it unread: its size may be the fix, applied since.
+  expect((store.get(FIX_KEY) as any).config).toEqual({ size: null, type: 'CLASSIC' })
+  const ui = await mountFull($)
+  await ui.press({ key: 'fix-0' })
+  await clock.settle()
+  const kept = store.get(FIX_KEY) as any
+  expect(kept.config).toEqual({ size: 'SMALL', type: 'CLASSIC' })
+  expect(kept.date).toBe('2026-11-01')
   await ui.unmount()
 })
 

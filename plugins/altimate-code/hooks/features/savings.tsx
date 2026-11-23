@@ -16,7 +16,7 @@ import type { SavingsConnection, SavingsFinding, SavingsFixLine, SavingsKept, Sa
 import { INSTALL, MISSING_BINARY, compareVersions, isPreviewBuild, later, parseVersion, runAltimate, runTool } from '../altimate-cli'
 import type { DbtInvocation } from '../dbt-command'
 import { openReport } from '../open-report'
-import { changedSettings, comparable, configLabel, configOf, covers, learns, loadConfig } from '../savings-config'
+import { changedSettings, comparable, configLabel, configOf, covers, fillUnknown, learns, loadConfig } from '../savings-config'
 import { checksNotRun, HOSTED_CHECK_COUNT, LOCAL_CHECK_COUNT, nothingRan, skippedChecks } from '../savings-checks'
 import { FIX_PREFIX, fixChanged, fixConfig, fixKey, fixProgress, isFixRecord, readsAllKnown, sameWorkspace, severalWorkspaces, type FixRecord } from '../savings-fixes'
 import { amount, cleanText, cleanTree, combinedTotal, compared, count, DAY_MS, distinctFindingCount, dollars, findingKey, findingsTotal, known, limitedText, OBSERVED_NOTE, oneLine, PLATFORM_NAME, PLATFORMS, range, resourceKey, size, windowDays } from '../savings-format'
@@ -1386,7 +1386,13 @@ async function rememberFix($: EngineInterface, view: SavingsView, finding: Savin
   // Asked again before anything changed: the first draft's date and cost still stand.
   const heldConfig = isFixRecord(held) && held.config != null ? loadConfig(held.config) : null
   const sameConfig = isFixRecord(held) && (heldConfig === null ? config === null : config !== null && changedSettings(heldConfig, config).length === 0)
-  if (isFixRecord(held) && sameConfig && (config !== null || held.checkId === finding.checkId)) return true
+  if (isFixRecord(held) && sameConfig && (config !== null || held.checkId === finding.checkId)) {
+    // Drafted again by the person, so this row is what the fix is drafted against now: a setting the first draft
+    // did not read takes its value. A later run never fills one (its read may be the fix, applied since).
+    const filled = heldConfig && config ? fillUnknown(heldConfig, config) : heldConfig
+    if (filled === heldConfig) return true
+    return $.store.set(key, { ...held, config: filled }).then(() => true, () => false)
+  }
   // A fix that can be measured is not given up for one on the same warehouse that cannot.
   if (isFixRecord(held) && held.config !== null && config === null) return true
   const fix: FixRecord = {
