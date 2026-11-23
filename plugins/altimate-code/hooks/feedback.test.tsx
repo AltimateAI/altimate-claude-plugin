@@ -581,7 +581,7 @@ test('a description at the read limit is redacted whole and quickly, whatever sh
 })
 
 test('a long run that no rule matches is read once, not once per position: each shape at the read limit is redacted quickly', () => {
-  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000), 'eyJ-'.repeat(25_000), '-eyJ'.repeat(25_000), 'password:\n'.repeat(10_000)]) {
+  for (const text of ['a-'.repeat(50_000), 'pwd= '.repeat(20_000), 'a.b+c'.repeat(20_000), 'x://'.repeat(25_000), 'token="'.repeat(14_000), 'password: |\n'.repeat(8_000), 'pwd={'.repeat(20_000), `pwd=${' '.repeat(99_000)};`, `;pwd= ${' '.repeat(99_000)};x`, 'password: "\n'.repeat(8_000), '\\'.repeat(99_000), 'eyJ-'.repeat(25_000), '-eyJ'.repeat(25_000), 'password:\n'.repeat(10_000), ';pwd={'.repeat(16_000), ', token: '.repeat(11_000), '--token-'.repeat(12_000), `--token ${'a'.repeat(99_000)}`, '{password:'.repeat(10_000), 'x\\ '.repeat(33_000)]) {
     const started = Date.now()
     cleanDescription(text.slice(0, 100_000), [HOME])
     expect(Date.now() - started).toBeLessThan(1500)
@@ -688,6 +688,17 @@ test('a YAML plain credential that goes on over indented lines, or starts on the
 test('Databricks tokens and Google API keys are cut without a key name before them', () => {
   const out = redactSecrets(`my token is dapi${'0123456789abcdef'.repeat(2)} and the key AIza${'Sy0123456789abcdefghijklmnopqrstuvw'.slice(0, 35)} broke`)
   expect(out).toBe('my token is ‹redacted› and the key ‹redacted› broke')
+})
+
+test('a credential in a YAML flow mapping, a shell-escaped value, a command-line flag, a dbt Cloud token and a Slack webhook are cut whole', () => {
+  expect(redactSecrets('{password: correct horse battery staple}')).toBe('{password: ‹redacted›}')
+  expect(redactSecrets('outputs: {"password": correct horse battery staple, user: alice}')).toBe('outputs: {"password": ‹redacted›, user: alice}')
+  expect(redactSecrets('outputs: {client_secret: two private words, user: alice}')).toBe('outputs: {client_secret: ‹redacted›, user: alice}')
+  expect(redactSecrets('outputs: {token: firstprivatepiece\n  secondprivatepiece, user: alice}')).toBe('outputs: {token: ‹redacted›, user: alice}')
+  expect(redactSecrets('PGPASSWORD=correct\\ horse\\ battery\\ staple dbt debug')).toBe('PGPASSWORD=‹redacted› dbt debug')
+  expect(redactSecrets('dbt debug --password hunter2-production-key --target dev')).toBe('dbt debug --password ‹redacted› --target dev')
+  expect(redactSecrets('the dbt Cloud token dbtc_AbCdEfGhIjKlMnOpQrStUvWx failed')).toBe('the dbt Cloud token ‹redacted› failed')
+  expect(redactSecrets('posted to https://hooks.slack.com/services/T0000/B0000/XXXXXXXXXXXX today')).toBe('posted to https://hooks.slack.com/services/‹redacted› today')
 })
 
 test('a password in a URL is cut whatever comes before its scheme', () => {

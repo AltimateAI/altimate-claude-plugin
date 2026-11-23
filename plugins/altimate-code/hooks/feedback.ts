@@ -84,6 +84,9 @@ const SECRET_PATTERNS: RegExp[] = [
   // Databricks personal access tokens and Google API keys, which are shorter than a long run below.
   /\bdapi[0-9a-f]{32}(?:-\d)?\b/g,
   /\bAIza[0-9A-Za-z_-]{35}(?![0-9A-Za-z_-])/g,
+  // dbt Cloud service tokens and Slack webhook paths.
+  /\bdbtc_[A-Za-z0-9_-]{20,}/g,
+  /(hooks\.slack\.com\/services\/)[A-Za-z0-9/]+/g,
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /\b((?:proxy-)?authorization["']?\s*[:=]\s*)[^\n]+/gi,
   /\b((?:Bearer|Basic|Digest|Token)\s+)[A-Za-z0-9._~+/=-]{8,}/g,
@@ -97,8 +100,14 @@ const SECRET_PATTERNS: RegExp[] = [
   /((?:^|(?<=;))[ \t]*(?:pwd|password|pass|accountkey|sharedaccesskey)[ \t]*=[ \t]*)(?:"(?:[^"\\\n]|\\.|"")*"|'(?:[^'\\\n]|\\.|'')*'|\{(?:[^}\n]|\}\}){0,1000}\}|(?=[^\s;])[^;\n]*$)/gim,
   // A key that names a credential (DBT_PASSWORD, access_token, client_secret…), then its value: a quoted value to its own closing quote (a
   // backslash escape or a doubled quote is inside it; so is a JSON-escaped quote, to the escaped quote of the same depth; a quote left open runs to
-  // the end of its line, never past it) or the rest of the word, up to a `;` that starts the next `key=` field.
-  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.|"")*(?:"|(?=\n)|$)|'(?:[^'\\\n]|\\.|'')*(?:'|(?=\n)|$)|(?<!\\)(\\+)"(?:(?!(?<!\\)\2")[^\n])*(?<!\\)\2"|(?:[^\s;]|;(?!\w+=))+)`, 'gi'),
+  // the end of its line, never past it) or the rest of the word, a shell-escaped space (`correct\ horse`) included, up to a `;` that starts the
+  // next `key=` field.
+  new RegExp(String.raw`((?<![\w.-])[\w.-]*?${CREDENTIAL_KEY}(?:\\*["'])?\s*[:=]\s*)(?:"(?:[^"\\\n]|\\.|"")*(?:"|(?=\n)|$)|'(?:[^'\\\n]|\\.|'')*(?:'|(?=\n)|$)|(?<!\\)(\\+)"(?:(?!(?<!\\)\2")[^\n])*(?<!\\)\2"|(?:\\[^\n]|[^\s;\\]|;(?!\w+=))+)`, 'gi'),
+  // A credential key inside a YAML flow mapping (`{password: correct horse, user: bob}`): the value runs to the next `,` or `}`, over indented
+  // lines too.
+  new RegExp(String.raw`([{,][ \t]*["']?[\w.-]*?${CREDENTIAL_KEY}["']?[ \t]*:[ \t]+)(?!["'])[^,}\n]+(?:\n[ \t]+[^,}\n]+)*`, 'gi'),
+  // A command-line flag that names a credential (`--password hunter2`): its argument.
+  new RegExp(String.raw`((?<![\w-])--?[\w-]*?${CREDENTIAL_KEY}[ \t]+)(?!-)\S+`, 'gi'),
   // A long unbroken run of key-like characters.
   /(?<![A-Za-z0-9_+-])(?=[A-Za-z0-9_+-]*\d)[A-Za-z0-9_+-]{40,}={0,2}/g,
 ]
