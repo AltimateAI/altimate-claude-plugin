@@ -160,17 +160,41 @@ export function logErrors(stdout: string): string[] {
 
 /** The node names `dbt ls --output json --output-keys name` printed: one JSON object per line, among dbt's own log lines. */
 export function listedNames(stdout: string): string[] {
-  const names: string[] = []
+  // Only a model: a test selected with it by dbt's indirect selection is not the file's node.
+  return jsonLines(stdout)
+    .filter(one => typeof one?.name === 'string' && one.name && (one.resource_type === undefined || one.resource_type === 'model'))
+    .map(one => one.name as string)
+}
+
+/** The models `dbt ls --output json --output-keys "name version original_file_path"` lists, each with its file and version. */
+export function listedFiles(stdout: string): { name: string; version: unknown; file: string }[] {
+  return jsonLines(stdout)
+    .filter(one => typeof one?.name === 'string' && typeof one?.original_file_path === 'string')
+    .map(one => ({ name: one.name as string, version: one.version ?? null, file: one.original_file_path as string }))
+}
+
+/** The JSON objects of `dbt ls --output json`, one a line; other lines (logs) are skipped. */
+function jsonLines(stdout: string): any[] {
+  const out: any[] = []
   for (const line of stripAnsi(stdout).split('\n')) {
     const text = line.trim()
     if (!text.startsWith('{')) continue
     try {
-      const one = JSON.parse(text)
-      // Only a model: a test selected with it by dbt's indirect selection is not the file's node.
-      if (typeof one?.name === 'string' && one.name && (one.resource_type === undefined || one.resource_type === 'model')) names.push(one.name)
+      out.push(JSON.parse(text))
     } catch {}
   }
-  return names
+  return out
+}
+
+// A number as dbt's text table writes it: grouped by commas or not, with an optional sign and decimals.
+// No leading zero before a digit: a column holding 00123 is a code (a postal code, an id), which dbt's JSON keeps as text.
+const TABLE_NUMBER = /^-?(?:[1-9]\d{0,2}(?:,\d{3})+|0|[1-9]\d*)(?:\.\d+)?$/
+
+/** A number from the text table as a number, unless that would round it (more digits than a double holds): then its digits as text. */
+function tableNumber(cell: string): number | string {
+  const plain = cell.replace(/,/g, '')
+  const value = Number(plain)
+  return Number.isFinite(value) && plain.replace(/^-|\.|^0+/g, '').length <= 15 ? value : plain
 }
 
 /**
@@ -190,9 +214,17 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
     const ruleChars = [...rule]
     const edges = ruleChars.flatMap((char, at) => (char === '|' ? [at] : []))
     // A line fits when it is as long as the rule and has a `|` at every edge.
-    const cells = (line: string) => {
+    const padded = (line: string) => {
       const chars = [...line]
-      return chars.length === ruleChars.length && edges.every(at => chars[at] === '|') ? edges.slice(1).map((end, k) => chars.slice(edges[k]! + 1, end).join('').trim()) : null
+      return chars.length === ruleChars.length && edges.every(at => chars[at] === '|') ? edges.slice(1).map((end, k) => chars.slice(edges[k]! + 1, end).join('')) : null
+    }
+    // How each cell sits in its column: dbt pads a number on the left (right-aligned) and text on the right.
+    const alignments: ('left' | 'right' | null)[][] = []
+    const cells = (line: string) => {
+      const raw = padded(line)
+      if (!raw) return null
+      alignments.push(raw.map(cell => (/^ {2,}\S/.test(cell) ? 'right' : /\S {2,}$/.test(cell) ? 'left' : null)))
+      return raw.map(cell => cell.trim())
     }
     const columns = cells(header)
     if (!columns) return null
@@ -206,7 +238,15 @@ export function textTable(stdout: string): { columns: string[]; rows: unknown[][
     }
     // dbt's text table elides the columns past its width as one `...` column.
     const keep = columns.map((name, i) => (name === '...' ? -1 : i)).filter(i => i >= 0)
-    return { columns: keep.map(i => columns[i]!), rows: rows.map(row => keep.map(i => row[i] ?? null)) }
+    const kept = rows.map(row => keep.map(i => row[i] ?? null))
+    // A column of numbers is read as numbers, as dbt's JSON output gives them: the table's grouping commas and
+    // padded decimals (21,109.09, 20,476.10) would show apart from the same query run again through JSON.
+    // Only a column dbt drew right-aligned (a cell padded on the left, none on the right) is read as numbers: dbt draws
+    // text left-aligned, so a text column of versions (1.10) keeps its text, and one whose cells are all as wide as the
+    // column shows no alignment and stays text too.
+    const aligned = (i: number) => alignments.some(one => one[i] === 'right') && !alignments.some(one => one[i] === 'left')
+    const numeric = keep.map((i, k) => kept.length > 0 && aligned(i) && kept.every(row => row[k] === null || row[k] === '' || TABLE_NUMBER.test(row[k]!)) && kept.some(row => !!row[k]))
+    return { columns: keep.map(i => columns[i]!), rows: kept.map(row => row.map((cell, k) => (numeric[k] && cell ? tableNumber(cell) : cell))) }
   }
   return null
 }
@@ -756,7 +796,7 @@ export function modelContextNote(context: ModelContext, stale: boolean): string 
   ]
   if (context.description) lines.push(`- description: ${context.description.replace(/\s+/g, ' ')}`)
   if (context.columns.length) {
-    lines.push(`- columns (${context.columns.length}):`)
+    lines.push(`- columns schema.yml lists (${context.columns.length}; the model may return more):`)
     for (const column of context.columns.slice(0, 40)) {
       const facts = [column.type, column.tests.length ? `tests: ${column.tests.join(', ')}` : null, column.description?.replace(/\s+/g, ' ')].filter(Boolean)
       lines.push(`  - ${column.name}${facts.length ? ` — ${facts.join(' · ')}` : ''}`)
@@ -814,6 +854,21 @@ export function columnDrift(documented: string[], returned: string[], quoted: st
     missing: documented.filter(one => (exact.has(one) ? !returned.includes(one) : !has.has(one.toLowerCase()))),
     undocumented: returned.filter(one => !loose.has(one.toLowerCase()) && !exact.has(one)),
   }
+}
+
+/**
+ * Which undocumented columns an edit made, from what the warehouse returned, not from reading the SQL: one the model
+ * returned before the edit (`earlier`: the last check's columns, or, on a model's first check, what dbt showed of the
+ * model's relation as it was built) is from before; any other is the edit's, as is one an earlier edit in this
+ * conversation made and that is still undocumented (`ours`). Names match exactly (a case-sensitive `Amount` is not
+ * `amount`). With nothing to compare with, every column is the edit's.
+ */
+export function undocumentedByEdit(undocumented: string[], earlier: string[] | null, ours: string[] = []): { fresh: string[]; old: string[] } {
+  if (earlier === null) return { fresh: undocumented, old: [] }
+  const before = new Set(earlier)
+  const mine = new Set(ours)
+  const old = (name: string) => !mine.has(name) && before.has(name)
+  return { fresh: undocumented.filter(one => !old(one)), old: undocumented.filter(old) }
 }
 
 // What the history may keep: the plugin store takes 4 MiB of JSON in all, the history and bookmarks among

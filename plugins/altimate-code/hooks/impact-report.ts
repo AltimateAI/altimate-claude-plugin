@@ -35,9 +35,20 @@ type RawExposure = { unique_id?: string; name?: string; label?: string; type?: s
 /** A model file the task changed, with the columns it changed (at most three). */
 export type ModelChange = {
   model: string
+  /** The model's unique_id, when its name alone may name another project's model (a package repo's borrowed manifest). */
+  id?: string
+  /** The id was made from the package and file name, not read from a manifest (too large to read): a versioned model has another. */
+  guessed?: boolean
   file: string
   root: string
   columns: { name: string; before: string | null; after: string | null }[]
+  /**
+   * With no output column changed: names on the lines the change rewrote that may be the model's columns, whose
+   * values may change (an expression in a Jinja block the select list reads). The manifest says which are columns.
+   */
+  values?: string[]
+  /** Changed output columns past the first three, which are traced: counted, not traced. */
+  more?: number
   /** The file's fingerprint as the task ended, to tell whether it changed since. */
   ended?: string
 }
@@ -70,14 +81,57 @@ const lastExpr = (items: Map<string, string>, name: string) => items.get(name)?.
  * Empty when no output column changed (a filter, a join): the model-level count stands in.
  */
 export function changedColumns(original: string, current: string): ModelChange['columns'] {
+  return changedColumnsAll(original, current).slice(0, MAX_TASK_COLUMNS)
+}
+
+/** Every output column one file's change touches, ranked: the band traces the first three and counts the rest. */
+export function changedColumnsAll(original: string, current: string): ModelChange['columns'] {
   const before = selectItems(original)
   const after = selectItems(current)
   // Only output columns whose select item was rewritten, added or removed: a column merely named on a
   // changed line (a filter, a join) keeps its value.
   const rewritten = [...new Set([...before.keys(), ...after.keys()])].filter(name => name !== '*' && before.get(name) !== after.get(name))
-  return touchedColumns([original], [current], rewritten)
-    .slice(0, MAX_TASK_COLUMNS)
-    .map(name => ({ name, before: lastExpr(before, name), after: lastExpr(after, name) }))
+  return touchedColumns([original], [current], rewritten).map(name => ({ name, before: lastExpr(before, name), after: lastExpr(after, name) }))
+}
+
+// Words on a changed line that are SQL or Jinja, not a column.
+const NOT_COLUMNS = new Set(
+  ('select from where and or not null is in as on case when then else end cast coalesce nullif greatest least ' +
+    'join left right inner outer full cross group by order having limit distinct union all with over partition ' +
+    'sum count avg min max abs round floor ceil true false between like ilike exists any interval date ' +
+    'set endset if endif for endfor macro endmacro ref source config var this dbt type_string type_numeric ' +
+    'type_int type_float type_timestamp type_boolean quote_column int integer numeric decimal varchar text float double boolean').split(' '),
+)
+
+/**
+ * When no output column changed: the words on the lines the change added (comments, strings and Jinja left out) that
+ * may name the model's columns, the most named first. Nothing here reads SQL structure: the manifest (impact_analysis)
+ * says which are the model's columns, and the band says their values *may* change.
+ */
+export function valueCandidates(original: string, current: string, max = MAX_TASK_COLUMNS * 2): string[] {
+  const lines = (text: string) =>
+    text
+      .replace(/\/\*[\s\S]*?\*\/|\{#[\s\S]*?#\}|\{\{[\s\S]*?\}\}|\{%[\s\S]*?%\}|'(?:[^']|'')*'|--[^\n]*/g, ' ')
+      .split('\n')
+      .map(line => line.replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+  const left = new Map<string, number>()
+  for (const line of lines(original)) left.set(line, (left.get(line) ?? 0) + 1)
+  const counts = new Map<string, number>()
+  for (const line of lines(current)) {
+    const n = left.get(line) ?? 0
+    if (n > 0) {
+      left.set(line, n - 1)
+      continue
+    }
+    // A line that filters or joins (by its first word; `left(…)` and `right(…)` are functions, not joins) names no value.
+    if (/^(?:where|and|or|on|join|group|order|having|qualify|limit|from)\b/i.test(line) || /^(?:left|right|inner|full|cross)\b(?!\s*\()/i.test(line)) continue
+    for (const match of line.matchAll(/(?<![\w.])(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\b(?!\s*\()/g)) {
+      const name = match[1]!.toLowerCase()
+      if (!NOT_COLUMNS.has(name) && name.length > 1) counts.set(name, (counts.get(name) ?? 0) + 1)
+    }
+  }
+  return [...counts].sort((a, b) => b[1] - a[1]).slice(0, max).map(([name]) => name)
 }
 
 /** The column answer in an impact_analysis result's metadata, or null when it carries none. */
@@ -207,9 +261,14 @@ export function mergeConsumers(traces: ColumnTrace[]): ReportConsumers {
   }
 }
 
+/** A trace is a change's when its unique_id is the change's (two same-named models, the package's and integration_tests'), else by name. */
+export const sameModel = (trace: { model: string; id?: string }, change: { model: string; id?: string }) => (trace.id ?? trace.model) === (change.id ?? change.model)
+
 /** The traced answers for one changed column: downstream and upstream, each null when not asked or failed. */
 export type ColumnTrace = {
   model: string
+  /** The change's unique_id when it has one (ModelChange.id): which of two same-named models the trace is of. */
+  id?: string
   column: string | null
   down: ColumnAnswer | null
   up: ColumnAnswer | null
@@ -221,6 +280,8 @@ export type ColumnTrace = {
   unchecked?: boolean
   /** Why the reach is unknown though the column was found: the answer reached nothing, and models it reads were not read. */
   unknown?: string
+  /** A column whose values the change alters though no select item changed (ModelChange.values). */
+  value?: boolean
   consumers?: ReportConsumers
 }
 
@@ -236,13 +297,24 @@ export function unknownReach(answer: ColumnAnswer | null): string | null {
   // whichever names more.
   const partly = Array.isArray(answer.may_carry) ? answer.may_carry.filter(one => PARTLY_READ.has(String((one as any)?.reason ?? ''))).length : 0
   const unread = Math.max(r.unresolved, answer.unresolved?.length ?? 0, partly)
-  if (r.columns > 0 || r.models > 0 || unread === 0) return null
+  if (r.columns > 0 || r.models > 0) return null
+  if (unread === 0) {
+    // Read in full, but in a way that may pass the value on without naming it (`select *`): a 0 would be a guess.
+    const unseen = unseenOf(answer)
+    if (unseen.length === 0) return null
+    const how = [...new Set(unseen.map(one => UNSEEN[String((one as any)?.reason)]))].join(', ')
+    return `not traced: ${count(unseen.length, 'downstream model')} may read it without naming it (${how})`
+  }
   const missing = (answer.unresolved ?? []).filter(one => /no compiled sql/i.test(String(one?.reason ?? ''))).length
   if (missing > 0 && missing >= unread) return `not traced: ${count(missing, 'downstream model')} ${missing === 1 ? 'has' : 'have'} no compiled SQL (run \`dbt compile\`)`
   if (missing > 0) return `not traced: ${count(unread, 'downstream model')} could not be read (${missing} with no compiled SQL: run \`dbt compile\`)`
   const why = (answer.unresolved ?? []).map(one => String(one?.reason ?? '')).find(Boolean)
   return `not traced: ${count(unread, 'downstream model')} could not be read${why ? ` (${why})` : ''}`
 }
+
+/** The may-carry reasons for a model read in full that may still pass the value on without naming it. */
+const UNSEEN: Record<string, string> = { star: 'select *', natural_join: 'NATURAL JOIN', dynamic_name: 'columns named at run time', row_reference: 'a whole row as a value' }
+const unseenOf = (answer: ColumnAnswer) => (Array.isArray(answer.may_carry) ? answer.may_carry.filter(one => String((one as any)?.reason ?? '') in UNSEEN) : [])
 
 /** The may-carry reasons for a model whose SQL was not read in full: its reach from the column is not known. */
 const PARTLY_READ = new Set(['unresolved', 'read_in_part', 'read_columns_unknown', 'unclear_sql', 'capped'])
@@ -253,24 +325,33 @@ const ADDED_NOTE = 'not in the manifest from before the task (new in it?): its r
 /** The band's view of a finished task. */
 export function summaryOf(changes: ModelChange[], traces: ColumnTrace[], report: string | null): TaskSummaryView {
   const unresolved = new Set<string>()
+  const unseen = new Set<string>()
   let truncated = false
   const models = changes.map(change => {
-    const mine = traces.filter(one => one.model === change.model)
+    const mine = traces.filter(one => sameModel(one, change))
     const modelLevel = mine.map(one => one.modelLevel ?? (one.down ? reachOf(one.down).modelLevel : null)).find(one => one !== null) ?? null
-    const columns = mine
+    // At most three columns whose values change are shown per model, the most named first, as for changed select items;
+    // the rest still count toward what could not be read, and are counted (so the band never says every model was read).
+    const values = mine.filter(one => one.value && one.column !== null)
+    const hidden = new Set(values.slice(MAX_TASK_COLUMNS))
+    const all = mine
       .filter(one => one.column !== null)
       .map(one => {
         const reach = one.down && !one.unknown ? reachOf(one.down) : null
         for (const entry of one.down?.unresolved ?? []) unresolved.add(one.down!.nodes[entry.model]?.id ?? one.down!.nodes[entry.model]?.name ?? String(entry.model))
         // A reach left unknown by models read only in part: those count as unread too, so the footer never says all were read.
         if (one.unknown) for (const entry of Array.isArray(one.down?.may_carry) ? one.down!.may_carry : []) if (PARTLY_READ.has(String((entry as any)?.reason ?? ''))) unresolved.add(String((entry as any)?.id ?? (entry as any)?.name))
+        // Read in full but passing the value on unnamed: the footer says so, never that the reach is settled.
+        if (one.unknown && one.down) for (const entry of unseenOf(one.down)) unseen.add(String((entry as any)?.id ?? (entry as any)?.name))
         if (reach?.truncated) truncated = true
         const note = one.unknown ?? (one.unchecked ? ADDED_NOTE : undefined)
-        return { name: one.column!, reach, failed: one.failed, ...(note && { note }) }
+        return { trace: one, column: { name: one.column!, reach, failed: one.failed, ...(note && { note }), ...(one.value && { value: true }) } }
       })
-    return { name: change.model, modelLevel, columns }
+    const columns = all.filter(one => !hidden.has(one.trace)).map(one => one.column)
+    return { name: change.model, ...(change.id ? { id: change.id } : {}), modelLevel, columns, ...(change.more ? { more: change.more } : {}), ...(hidden.size ? { moreValues: hidden.size } : {}) }
   })
-  return { state: 'ready', models, unresolved: unresolved.size, truncated, report, openFailed: false }
+  for (const id of unresolved) unseen.delete(id)
+  return { state: 'ready', models, unresolved: unresolved.size, ...(unseen.size ? { unseen: unseen.size } : {}), truncated, report, openFailed: false }
 }
 
 /** The band's lines, as text: what the summary says, for the log and for tests. */
@@ -279,24 +360,37 @@ export function summaryLines(view: TaskSummaryView): string[] {
   const lines = [`◆ Lineage after this task · ${plural(view.models.length, 'model')} changed`]
   for (const model of view.models) {
     lines.push(`${model.name}${model.modelLevel !== null ? ` · ${plural(model.modelLevel, 'downstream model')} at model level` : ''}`)
-    if (model.columns.length === 0) lines.push('  no output column changed: the model-level count stands')
+    // No output column changed: while the names it rewrote are traced, nothing that reads as the answer.
+    if (model.columns.length === 0 && view.state === 'tracing') lines.push('  tracing…')
+    // None whose values change could be named: the values may still change.
+    else if (model.columns.length === 0) lines.push(model.modelLevel === 0 ? '  no model reads it downstream' : '  values may change downstream; the model-level count stands')
     for (const col of model.columns) {
+      // A column named by its values changing, not by its select item: said so.
+      const name = col.value ? `values may change in ${col.name} →` : `${col.name} `
       if (view.state === 'tracing' && !col.reach) lines.push(`  ${col.name}  tracing…`)
-      else if (col.note) lines.push(`  ${col.name}  ${col.note}`)
-      else if (!col.reach) lines.push(`  ${col.name}  ${col.failed ? 'could not be traced' : `no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later`}`)
+      else if (col.note) lines.push(`  ${name} ${col.note}`)
+      else if (!col.reach) lines.push(`  ${name} ${col.failed ? 'could not be traced' : `no column answer: update altimate-code to ${MIN_ALTIMATE_CODE} or later`}`)
       else {
         const r = col.reach
         // What the value reaches, and how many more it may reach: nothing is reported unaffected.
         const parts = [`reaches ${plural(r.columns, 'column')} in ${plural(r.models, 'model')} (${plural(r.ends, 'end column')})`]
         parts.push(`${r.mayCarry} more may change`)
-        lines.push(`  ${col.name}  ${parts.join(' · ')}`)
+        lines.push(`  ${name} ${parts.join(' · ')}`)
       }
     }
+    // Columns past the three traced: said, so the list never reads as every column the task changed.
+    if (model.more) lines.push(`  + ${plural(model.more, 'more changed column')}, not traced here (/lineage-report ${model.id ?? model.name}.<column> traces one)`)
+    if (model.moreValues) lines.push(`  + ${plural(model.moreValues, 'more column')} whose values may change, in the report`)
   }
-  if (view.unresolved > 0 || view.truncated) {
-    const why = [view.unresolved ? `${plural(view.unresolved, 'model')} could not be read` : '', view.truncated ? 'the trace hit its limit' : ''].filter(Boolean).join('; ')
+  // The tick only when nothing was left out: a changed column past the three traced may reach models the traced ones do not.
+  if (view.unresolved > 0 || view.truncated || (view.unseen ?? 0) > 0) {
+    const why = [
+      view.unresolved ? `${plural(view.unresolved, 'model')} could not be read` : '',
+      view.unseen ? `${plural(view.unseen, 'model')} may read it without naming it` : '',
+      view.truncated ? 'the trace hit its limit' : '',
+    ].filter(Boolean).join('; ')
     lines.push(`⚠ Lower bound: ${why}`)
-  } else if (view.state === 'ready' && view.models.some(one => one.columns.some(col => col.reach))) {
+  } else if (view.state === 'ready' && view.models.some(one => one.columns.some(col => col.reach)) && view.models.every(one => !one.more)) {
     lines.push('✓ Every downstream model was read')
   }
   return lines
@@ -451,7 +545,7 @@ export function impactWords(model: string, column: string | null, trace: ColumnT
   const r = reachOf(down)
   const lines: Words[] = []
   const value = [...new Set(down.columns.filter(one => one.hop > 0).map(one => one.model))].map(index => down.nodes[index]).filter(Boolean)
-  if (r.models > 0) lines.push([...downstream, 'The value of ', { code: column }, ` flows into ${r.models} of them, in ${count(r.columns, 'column')}. ${lookup ? 'A wrong value here shows up there too' : 'Expect those to change with it'}: `, ...namesList(carriersOf(down).map(one => one.name)), '.'])
+  if (r.models > 0) lines.push([...downstream, 'The value of ', { code: column }, ` flows into ${r.models} of them, in ${count(r.columns, 'column')}. ${lookup ? 'A wrong value here shows up there too' : trace?.value ? 'If its values changed (it is named on a line the change rewrote), those may change with it' : 'Expect those to change with it'}: `, ...namesList(carriersOf(down).map(one => one.name)), '.'])
   else if (level !== 0) lines.push([...downstream, 'The value of ', { code: column }, " doesn't flow into any column of theirs."])
   else lines.push(downstream)
   const them = r.mayCarry === 1 ? 'it' : 'them'
@@ -595,8 +689,10 @@ export function focusOf(change: ModelChange, column: ModelChange['columns'][numb
 export function reportData(changes: ModelChange[], traces: ColumnTrace[], task: ReportTask): ReportData {
   const focuses: ReportFocus[] = []
   for (const change of changes) {
-    if (change.columns.length === 0) focuses.push(focusOf(change, null, traces.find(one => one.model === change.model && one.column === null)))
-    for (const col of change.columns) focuses.push(focusOf(change, col, traces.find(one => one.model === change.model && one.column === col.name)))
+    if (change.columns.length === 0) focuses.push(focusOf(change, null, traces.find(one => sameModel(one, change) && one.column === null)))
+    // Columns whose values the change alters, found by name in the manifest: each its own section.
+    for (const trace of traces) if (trace.value && sameModel(trace, change) && trace.column) focuses.push(focusOf(change, { name: trace.column, before: null, after: null }, trace))
+    for (const col of change.columns) focuses.push(focusOf(change, col, traces.find(one => sameModel(one, change) && one.column === col.name)))
   }
   const names = changes.map(one => one.model)
   return {

@@ -186,7 +186,7 @@ To see what would run without creating anything, set `ALTIMATE_FEEDBACK_DRY_RUN=
 
 ## Settings
 
-The plugin has seven settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). All are optional: Claude Code may report them as "not set", and each then takes the default below. `dbt_mods` is used by the dbt helpers, `maxScanBytes` by the scan check (BigQuery, Snowflake, Databricks), `healthBlocksPush` and `healthConfigPath` by the project health check, the two comments settings by team comments, and `show_edit_impact` by the per-edit impact note.
+The plugin has eight settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). All are optional: Claude Code may report them as "not set", and each then takes the default below. `dbt_mods` is used by the dbt helpers, `maxScanBytes` by the scan check (BigQuery, Snowflake, Databricks), `healthBlocksPush` and `healthConfigPath` by the project health check, the two comments settings by team comments, `show_edit_impact` by the per-edit impact note, and `info_toasts` by the dbt helpers' toasts.
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
@@ -197,6 +197,7 @@ The plugin has seven settings, shown when you enable it (`userConfig` in `.claud
 | `commentsPollSeconds` | 900 | How often, in seconds, the team's comments on shared docs are fetched again in an interactive session (30 to 86400). |
 | `commentsInContext` | on | Whether the open comments on a model Claude reads or edits are added to its context. |
 | `show_edit_impact` | off | When on, the note on what a model edit reaches downstream is also shown in the transcript; off sends it to Claude and the debug log only. |
+| `info_toasts` | on | When on, a toast also says what the transcript or the band above the prompt already shows (model context added for Claude, a model compiled and validated, the dbt doctor passing). Off leaves those to the transcript and the band; failures still toast. |
 
 ## Example prompts
 
