@@ -4,6 +4,9 @@ All notable changes to this plugin will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- The plugin needs altimate-code 0.12.12 or later, the release with the dbt Power User tools the cost check, project health, team comments, `/runs`, `/profile-ctes`, `/sql-graph`, `/to-model` and `/defer` call, and the documentation coverage after a model edit (`dbt_docs_coverage`). The session-start notice (status line) now names a 0.12.11 install, which it used to leave alone, and the "update altimate-code" lines in the task band and report name 0.12.12.
+
 ### Added
 - `info_toasts` (on by default): off, the dbt helpers raise no toast for what the transcript or the band already shows (model context added for Claude, a model compiled and validated, the dbt doctor passing); failures still toast.
 
@@ -36,6 +39,9 @@ All notable changes to this plugin will be documented in this file.
 - The end-of-task band traces the first three changed columns of a model and now says how many more changed ("+ 1 more changed column, not traced here (/lineage-report <model>.<column> traces one)"), instead of listing three as if they were all.
 - Claude's `dbt show` text table and **Re-run** show numbers the same way: a column of numbers in dbt's text table (`21,109.09`, `20,476.10`) is read as numbers, as dbt's JSON output gives them (`21109.09`, `20476.1`). A number with more digits than a double holds keeps its digits as text. Only a column dbt draws right-aligned (as it draws numbers) is read as numbers: a text column (versions such as `1.10`), one whose cells give no alignment, and one holding leading-zero codes (`00501`) stay text.
 - `/profile-ctes`: a CTE whose count took less than the CTEs it reads took on their own (the warehouse shares their work inside the count) shows "≈0 ms (the CTEs it reads cost less inside this query)" instead of "+0 ms".
+
+### Added
+- `/altimate-feedback <what happened>` drafts a GitHub issue for this plugin's repository from your words and a few facts the plugin knows (plugin, altimate-code and Claude Code versions, the altimate-code binary name, OS, dbt-core, adapter and Python versions when the dbt doctor has run, and the plugin's on/off settings), shows the exact title and body, and creates it only after `--confirm`: with `gh issue create` (labelled `feedback` when the repository has that label) when `gh` is installed and signed in, otherwise as a prefilled new-issue link. `--with-error` also attaches the kind of the last plugin error (its type and code only, none of its message); `--cancel` discards the draft.
 
 ### Privacy
 - PRIVACY.md has a section on the dbt Power User features: what team comments, the model context note, the dbt run history, the cost check, project health, the SQL graph, CTE timing, `/to-model`, defer, docs coverage and the lineage pane read and send, what the run history keeps and where, and which tools run with `--allow-write` without asking. The README's note on write permission lists them too.

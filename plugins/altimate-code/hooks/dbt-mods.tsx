@@ -7,6 +7,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later, runTool } from './altimate-cli'
 import { openTracked } from './usage'
+import { doctorFacts, noteProblem, type DoctorFacts } from './last-problem'
 import { normalize, projectName, runnerOf } from './package-runner'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import {
@@ -943,6 +944,7 @@ async function recordRun($: EngineInterface, command: string, verb: string, sele
   if (generation !== mineGeneration) return null
   await update($, failureAtom, () => view)
   const names = failures.map(one => one.name)
+  noteProblem(`dbt ${verb} failed`, failures[0]!.message)
   $.ui.toast(`✖ dbt ${verb} failed · ${names.slice(0, 3).join(', ')}${names.length > 3 ? ` +${names.length - 3}` : ''} · Explain or Fix above the prompt`, { timeoutMs: 8000 })
   return view
 }
@@ -2023,6 +2025,12 @@ export async function dbtModsReadOrEditAfter($: EngineInterface, e: { tool: stri
     }
   }
   return pendingLines(agentId)
+}
+
+/** What the dbt doctor found for /altimate-feedback: the versions only, null before it has run. */
+export async function dbtModsDoctorFacts($: EngineInterface): Promise<DoctorFacts> {
+  const view = await read($, doctorAtom)
+  return view ? doctorFacts(view.checks) : null
 }
 
 /**

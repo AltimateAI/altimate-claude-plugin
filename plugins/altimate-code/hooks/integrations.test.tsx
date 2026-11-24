@@ -688,23 +688,29 @@ const versionOnly = (version: string) => (argv: readonly string[]) =>
 test('a session start with an altimate-code older than the plugin needs keeps a line on the status line with the version, the binary and the install command', async ($, on) => {
   const { drawn, toasts } = await startWithVersion($, on, versionOnly('0.12.9'))
   const line = drawn.filter(Boolean).join('\n')
-  expect(line).toContain('altimate 0.12.9 found at /opt/bin/altimate; this plugin needs ≥ 0.12.11: npm i -g @altimateai/altimate-code')
+  expect(line).toContain('altimate 0.12.9 found at /opt/bin/altimate; this plugin needs ≥ 0.12.12: npm i -g @altimateai/altimate-code')
+  expect(toasts).toEqual([])
+})
+
+test('a session start with altimate-code 0.12.11 asks for the upgrade to 0.12.12', async ($, on) => {
+  const { drawn, toasts } = await startWithVersion($, on, versionOnly('altimate-code 0.12.11'))
+  expect(drawn.filter(Boolean).join('\n')).toContain('altimate 0.12.11 found at /opt/bin/altimate; this plugin needs ≥ 0.12.12: npm i -g @altimateai/altimate-code')
   expect(toasts).toEqual([])
 })
 
 test('a session start with a current altimate-code leaves the status line without the line', async ($, on) => {
-  const { drawn } = await startWithVersion($, on, versionOnly('altimate-code 0.12.11'))
+  const { drawn } = await startWithVersion($, on, versionOnly('altimate-code 0.12.12'))
   expect(drawn.filter(Boolean).join('\n')).not.toContain('npm i -g')
 })
 
 test('a session start with no altimate-code on PATH says it is not installed on the status line', async ($, on) => {
   const { drawn } = await startWithVersion($, on, () => 'missing')
-  expect(drawn.filter(Boolean).join('\n')).toContain('altimate-code is not installed; this plugin needs ≥ 0.12.11: npm i -g @altimateai/altimate-code')
+  expect(drawn.filter(Boolean).join('\n')).toContain('altimate-code is not installed; this plugin needs ≥ 0.12.12: npm i -g @altimateai/altimate-code')
 })
 
 test('with no `altimate` on PATH the version of `altimate-code` is the one checked and named', async ($, on) => {
   const { drawn, runs } = await startWithVersion($, on, argv => (argv[0] === 'altimate' ? 'missing' : versionOnly('0.12.8')(argv)))
-  expect(drawn.filter(Boolean).join('\n')).toContain('altimate-code 0.12.8 found at /opt/bin/altimate-code; this plugin needs ≥ 0.12.11')
+  expect(drawn.filter(Boolean).join('\n')).toContain('altimate-code 0.12.8 found at /opt/bin/altimate-code; this plugin needs ≥ 0.12.12')
   expect(runs.filter(argv => argv[1] === '--version')).toEqual([['altimate', '--version'], ['altimate-code', '--version']])
 })
 
@@ -721,12 +727,12 @@ test('with nobody at the prompt the version is not checked', async ($, on) => {
 
 test('the version is read from stdout: a runtime note on stderr does not hide an old altimate-code', async ($, on) => {
   const { drawn } = await startWithVersion($, on, argv => (argv[1] === '--version' ? { exitCode: 0, stdout: '0.12.8\n', stderr: 'Using node v22.1.0\n' } : versionOnly('0.12.8')(argv)))
-  expect(drawn.filter(Boolean).join('\n')).toContain('altimate 0.12.8 found at /opt/bin/altimate; this plugin needs ≥ 0.12.11')
+  expect(drawn.filter(Boolean).join('\n')).toContain('altimate 0.12.8 found at /opt/bin/altimate; this plugin needs ≥ 0.12.12')
 })
 
 test('a version printed only on stderr is still read', async ($, on) => {
   const { drawn } = await startWithVersion($, on, argv => (argv[1] === '--version' ? { exitCode: 0, stdout: '', stderr: '0.12.8\n' } : versionOnly('0.12.8')(argv)))
-  expect(drawn.filter(Boolean).join('\n')).toContain('altimate 0.12.8 found at /opt/bin/altimate; this plugin needs ≥ 0.12.11')
+  expect(drawn.filter(Boolean).join('\n')).toContain('altimate 0.12.8 found at /opt/bin/altimate; this plugin needs ≥ 0.12.12')
 })
 
 test('a preview build of altimate-code leaves the status line alone', async ($, on) => {

@@ -2,14 +2,17 @@
 import type { EngineInterface } from 'claude-code'
 
 /**
- * The oldest altimate-code release the plugin is made for: the first whose column answer reports what
- * may carry the value, with a reason for each model (`may_carry`). Stated in README.md and CHANGELOG.md too.
+ * The oldest altimate-code release the plugin is made for: the first with the dbt Power User tools the
+ * cost check, health, comments, runs, CTE timing, SQL graph, to-model, defer and docs
+ * coverage features call (`dbt_cost_estimate`, `dbt_health`, `dbt_run_results`, `dbt_cte_profile`,
+ * `dbt_sql_graph`, `dbt_map_relations`, `dbt_defer_state`, `docs_share_comments`, `dbt_docs_coverage`), on top of the column answer 0.12.11 added.
+ * Stated in README.md and CHANGELOG.md too.
  */
-export const MIN_ALTIMATE_CODE = '0.12.11'
+export const MIN_ALTIMATE_CODE = '0.12.12'
 
 // `altimate` is the name the standalone installer and npm v0.7.1+ put on PATH;
 // older npm installs only have `altimate-code`.
-const CLI_NAMES = ['altimate', 'altimate-code'] as const
+export const CLI_NAMES = ['altimate', 'altimate-code'] as const
 
 /** A binary that is not there at all. */
 export const NOT_FOUND = /ENOENT|not found|no such file/i
