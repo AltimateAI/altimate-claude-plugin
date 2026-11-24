@@ -9,7 +9,7 @@ export const MIN_ALTIMATE_CODE = '0.12.11'
 
 // `altimate` is the name the standalone installer and npm v0.7.1+ put on PATH;
 // older npm installs only have `altimate-code`.
-const CLI_NAMES = ['altimate', 'altimate-code'] as const
+export const CLI_NAMES = ['altimate', 'altimate-code'] as const
 
 /** A binary that is not there at all. */
 export const NOT_FOUND = /ENOENT|not found|no such file/i

@@ -124,6 +124,8 @@ export function redactionForms(value: string): string[] {
     const repr = part.replace(/\\/g, '\\\\').replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t')
     forms.add(repr)
     forms.add(repr.replace(/'/g, "\\'"))
+    // A single-quoted YAML scalar doubles its apostrophes.
+    forms.add(part.replace(/'/g, "''"))
   }
   return [...forms].filter(one => one.length > 0)
 }

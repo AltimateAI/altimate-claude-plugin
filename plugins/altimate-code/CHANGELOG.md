@@ -37,6 +37,9 @@ All notable changes to this plugin will be documented in this file.
 - Claude's `dbt show` text table and **Re-run** show numbers the same way: a column of numbers in dbt's text table (`21,109.09`, `20,476.10`) is read as numbers, as dbt's JSON output gives them (`21109.09`, `20476.1`). A number with more digits than a double holds keeps its digits as text. Only a column dbt draws right-aligned (as it draws numbers) is read as numbers: a text column (versions such as `1.10`), one whose cells give no alignment, and one holding leading-zero codes (`00501`) stay text.
 - `/profile-ctes`: a CTE whose count took less than the CTEs it reads took on their own (the warehouse shares their work inside the count) shows "≈0 ms (the CTEs it reads cost less inside this query)" instead of "+0 ms".
 
+### Added
+- `/altimate-feedback <what happened>` drafts a GitHub issue for this plugin's repository from your words and a few facts the plugin knows (plugin, altimate-code and Claude Code versions, the altimate-code binary name, OS, dbt-core, adapter and Python versions when the dbt doctor has run, and the plugin's on/off settings), shows the exact title and body, and creates it only after `--confirm`: with `gh issue create` (labelled `feedback` when the repository has that label) when `gh` is installed and signed in, otherwise as a prefilled new-issue link. `--with-error` also attaches the kind of the last plugin error (its type and code only, none of its message); `--cancel` discards the draft.
+
 ## [1.8.3] — 2026-11-19
 
 ### Fixed
