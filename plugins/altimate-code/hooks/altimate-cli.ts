@@ -190,8 +190,9 @@ export type RunToolOptions = {
   /**
    * The tool needs write permission (it starts the dbt adapter, or changes something): the call goes
    * through the CLI with `--allow-write`, since the plugin's MCP server runs read-only. runTool asks
-   * nobody: a caller sets it only once the user has said yes to this write (README, "How it works",
-   * item 4), as the skill does before it adds `--allow-write`.
+   * nobody: a caller sets it either for a tool the plugin runs on its own (README, "How it works",
+   * item 4, lists them) or once the user has pressed or typed the command that does it; the skill asks
+   * before it adds `--allow-write` itself.
    */
   write?: boolean
   /** Variables set for the CLI process (CLI route only, so a call that sets them never goes over MCP). */

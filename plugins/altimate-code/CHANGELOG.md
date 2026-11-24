@@ -43,6 +43,9 @@ All notable changes to this plugin will be documented in this file.
 ### Added
 - `/altimate-feedback <what happened>` drafts a GitHub issue for this plugin's repository from your words and a few facts the plugin knows (plugin, altimate-code and Claude Code versions, the altimate-code binary name, OS, dbt-core, adapter and Python versions when the dbt doctor has run, and the plugin's on/off settings), shows the exact title and body, and creates it only after `--confirm`: with `gh issue create` (labelled `feedback` when the repository has that label) when `gh` is installed and signed in, otherwise as a prefilled new-issue link. `--with-error` also attaches the kind of the last plugin error (its type and code only, none of its message); `--cancel` discards the draft.
 
+### Privacy
+- PRIVACY.md has a section on the dbt Power User features: what team comments, the model context note, the dbt run history, the cost check, project health, the SQL graph, CTE timing, `/to-model`, defer, docs coverage and the lineage pane read and send, what the run history keeps and where, and which tools run with `--allow-write` without asking. The README's note on write permission lists them too.
+
 ## [1.8.3] — 2026-11-19
 
 ### Fixed
