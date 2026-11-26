@@ -576,7 +576,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
       .catch(() => null)
       .then(() => {
         followUp.delete(base)
-        return startCheck($, root, file, mineGeneration, base, `${key}\u0000forced`)
+        return startCheck($, root, file, mineGeneration, base, key)
       })
     followUp.set(base, next)
     return next
@@ -2084,6 +2084,10 @@ async function checkModel($: EngineInterface, path: string, asked: number, agent
   return []
 }
 
+// What a shell task has already shown the person and queued for each agent, by check: tasks that joined one check say it once.
+const announced = new WeakSet<Checked>()
+const queued = new WeakMap<Checked, Set<string | null>>()
+
 /**
  * After a shell command that may have written models, in the background: each model file it changed (three at most)
  * is checked as an edit of it is, its note kept for the agent's next tool result, and then the checked model is
@@ -2100,8 +2104,16 @@ async function bashChecks($: EngineInterface, start: { asked: number; startedAt:
           if (!root) return
           const done = await compileAndValidate($, root, path, start.asked)
           if (!done.current()) return
-          announceCheck($, done)
-          if (done.note) pendingNotes.push({ note: done.note, agentId, current: done.current })
+          if (!announced.has(done)) {
+            announced.add(done)
+            announceCheck($, done)
+          }
+          const told = queued.get(done) ?? new Set<string | null>()
+          queued.set(done, told)
+          if (done.note && !told.has(agentId)) {
+            told.add(agentId)
+            pendingNotes.push({ note: done.note, agentId, current: done.current })
+          }
         } catch {
         }
       }),

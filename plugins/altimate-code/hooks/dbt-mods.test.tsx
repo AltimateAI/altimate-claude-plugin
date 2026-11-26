@@ -3332,6 +3332,46 @@ test("a schema edit that arrives while a shell edit's check is under way is chec
   expect(shows(runs).length).toBe(3)
 })
 
+test("a shell task that arrives while a schema edit's follow-up check runs joins it, one compile", async ($, on) => {
+  let releaseFirst!: () => void
+  let releaseFollowUp!: () => void
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (releaseFollowUp = go)), holdShowAfter: 2 }
+  const { clock, runs, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  expect(shows(runs).length).toBe(1)
+  // The shell edit's check is held before it shows as running, so the schema edit queues one follow-up behind it.
+  options.holdManifest = new Promise<void>(go => (releaseFirst = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  options.holdManifest = undefined
+  releaseFirst()
+  await clock.settle()
+  // The follow-up is now running, held at its dbt show.
+  expect(shows(runs).length).toBe(3)
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  releaseFollowUp()
+  await nextNotes($, clock, setBash)
+  await clock.settle()
+  // The edit's, the shell edit's and the follow-up's, which the second shell task joined: not four.
+  expect(shows(runs).length).toBe(3)
+})
+
+test('two shell tasks that join one compile give one note on the next result and one toast', async ($, on) => {
+  let release!: () => void
+  const { clock, runs, toasts, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (release = go)) })
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  release()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+  expect(toasts.filter(one => one === '✓ orders · compiled and validated against the warehouse').length).toBe(1)
+})
+
 test('a file that changed again while its check was under way is checked again, not answered with the old check', async ($, on) => {
   const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] }
   const { clock, runs, mtimes, setBash } = await start($, on, options)
