@@ -554,6 +554,11 @@ const checking = new Map<string, Promise<Checked>>()
 // The latest check of each file in each conversation that has not finished, and the one follow-up waiting behind it.
 const latestCheck = new Map<string, Promise<Checked>>()
 const followUp = new Map<string, Promise<Checked>>()
+// The order checks started in, and for each file the order at which the follow-up last took on an edit to read: a check
+// that began before that is not what the follow-up was promised, and cannot stand in for it.
+let startOrder = 0
+const startedOrder = new WeakMap<Promise<Checked>, number>()
+const absorbedAt = new Map<string, number>()
 
 /**
  * Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. Asked again
@@ -572,6 +577,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
   if (mode === 'forced' && running) {
     const waiting = followUp.get(base)
     if (waiting) return waiting
+    absorbedAt.set(base, ++startOrder)
     const next: Promise<Checked> = running
       .catch(() => null)
       .then(async () => {
@@ -580,7 +586,10 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
         followUp.delete(base)
         const waitedKey = `${base}\u0000${waited}`
         // A check of that version may have started during the wait: this follow-up is that check, not a second one.
-        return checking.get(waitedKey) ?? startCheck($, root, file, mineGeneration, base, waitedKey)
+        const there = checking.get(waitedKey)
+        const joinable = there && (startedOrder.get(there) ?? 0) > (absorbedAt.get(base) ?? 0)
+        absorbedAt.delete(base)
+        return joinable ? there : startCheck($, root, file, mineGeneration, base, waitedKey)
       })
     followUp.set(base, next)
     return next
@@ -592,6 +601,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
 
 function startCheck($: EngineInterface, root: string, file: string, mineGeneration: number, base: string, key: string): Promise<Checked> {
   const run = compileAndValidateOnce($, root, file, mineGeneration)
+  startedOrder.set(run, ++startOrder)
   checking.set(key, run)
   latestCheck.set(base, run)
   const done = () => {
@@ -858,7 +868,12 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   if (check.status === 'running' || rechecking) {
     // Only an edit that concerns this check waits for it; an unrelated one never replaces it.
     // One already waiting behind a check of the file has not started: it will read this edit too.
-    if (edited && editConcerns(check, edited) && !followUp.has(`${generation}\u0000${normalize(`${check.root}/${check.file}`)}`)) forcedWhileBusy = edited
+    if (edited && editConcerns(check, edited)) {
+      const base = `${generation}\u0000${normalize(`${check.root}/${check.file}`)}`
+      if (!followUp.has(base)) forcedWhileBusy = edited
+      // The follow-up will read this edit too, so a check that began before it is not enough.
+      else absorbedAt.set(base, ++startOrder)
+    }
     return
   }
   const files = [check.file, ...(check.schema ? [check.schema] : [])]

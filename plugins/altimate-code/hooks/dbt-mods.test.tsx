@@ -3463,6 +3463,32 @@ test("a follow-up that fires while a check of the file's new version is already 
   expect(shows(runs).length).toBe(2)
 })
 
+test("a follow-up that took on a schema edit after the new version's check began runs again rather than joining it", async ($, on) => {
+  let release!: () => void
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] }
+  const { clock, runs, mtimes, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  options.holdManifest = new Promise<void>(go => (release = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  const schema = { tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'a', new_string: 'b' }
+  await $.tool.call(schema)
+  await clock.settle()
+  mtimes['models/orders.sql'] = 100_000
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  // Another schema edit while the follow-up still waits: the check of the new version began before it.
+  await $.tool.call(schema)
+  await clock.settle()
+  options.holdManifest = undefined
+  release()
+  await nextNotes($, clock, setBash)
+  await clock.settle()
+  // The edit's, the new version's, and the follow-up's own, which reads the second schema edit.
+  expect(shows(runs).length).toBe(3)
+})
+
 test('a file that changed again while its check was under way is checked again, not answered with the old check', async ($, on) => {
   const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] }
   const { clock, runs, mtimes, setBash } = await start($, on, options)
