@@ -2,7 +2,10 @@
 
 All notable changes to this plugin will be documented in this file.
 
-## [Unreleased]
+## [1.8.4] — 2026-11-26
+
+### Changed
+- The scan-cost check (`/scan-cost`, `/allow-scan`, `maxScanBytes`) estimates BigQuery only. A dbt command on any other warehouse, Snowflake and Databricks included, is never estimated or held, even when an altimate-code answers a planner (`EXPLAIN`) estimate for it: the answer is ignored and the first one says scans are estimated on BigQuery only. The "plan estimate" label and the "needs a newer altimate-code" message for those warehouses are gone.
 
 ### Fixed
 - After `/clear`, the new conversation loads the team comments again (the band, and the threads Claude gets when it reads a commented model) instead of waiting for `/comments` or the next poll, and project health keeps its baseline, the changes not yet checked and the issues found (`/health` no longer says the session has no project; a check the `/clear` cut short runs again). The status line keeps the integrations and altimate-code parts; health draws its own again.

@@ -158,12 +158,12 @@ When Claude mentions `altimate-dbt`, it is the dbt command line that comes with 
 
 ## Settings
 
-The plugin has seven settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). All are optional: Claude Code may report them as "not set", and each then takes the default below. `dbt_mods` is used by the dbt helpers, `maxScanBytes` by the scan check (BigQuery, Snowflake, Databricks), `healthBlocksPush` and `healthConfigPath` by the project health check, the two comments settings by team comments, and `show_edit_impact` by the per-edit impact note.
+The plugin has seven settings, shown when you enable it (`userConfig` in `.claude-plugin/plugin.json`). All are optional: Claude Code may report them as "not set", and each then takes the default below. `dbt_mods` is used by the dbt helpers, `maxScanBytes` by the scan check (BigQuery only), `healthBlocksPush` and `healthConfigPath` by the project health check, the two comments settings by team comments, and `show_edit_impact` by the per-edit impact note.
 
 | Setting | Default | What it controls |
 | --- | --- | --- |
 | `dbt_mods` | on | Turns all of the dbt helpers (above) off when false. |
-| `maxScanBytes` | 10737418240 (10 GiB) | A dbt run, build or show estimated to scan more bytes than this is held until you approve it with `/allow-scan` (0 never holds; at least 0). On BigQuery the estimate is a dry run; on Snowflake and Databricks it is the query planner's (`EXPLAIN`): Snowflake's bytes after pruning, an upper bound, and Databricks' table sizes, which a run usually reads less of. A query with no estimate (a Databricks table without statistics) runs, with a note saying why; other warehouses are never held. |
+| `maxScanBytes` | 10737418240 (10 GiB) | A dbt run, build or show estimated to scan more bytes than this is held until you approve it with `/allow-scan` (0 never holds; at least 0). Scans are estimated on BigQuery only, by its dry run. A query with no estimate runs, with a note saying why; other warehouses (Snowflake and Databricks among them) are never estimated or held. |
 | `healthBlocksPush` | off | When on, `git push` is refused while the project health check finds new issues in the models you changed, and while the check cannot run (altimate-code missing, or without `dbt_health`) or has not finished. Off, the issues are only shown. If the first check of a session lands after you changed a model, that model's existing issues count as new (the baseline then lacks them). The reverse also holds: a model you drop from a schema file before that first check lands has its new issues taken as existing, so a push is not held for them. |
 | `healthConfigPath` | empty | The DataPilot health check config file, relative to the dbt project. Empty uses the default checks. |
 | `commentsPollSeconds` | 900 | How often, in seconds, the team's comments on shared docs are fetched again in an interactive session (30 to 86400). |
