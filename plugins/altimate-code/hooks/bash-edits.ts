@@ -2,19 +2,11 @@
 // reading its words. Both halves of the plugin (the lineage note and the compile & validate check) use it.
 import type { EngineInterface } from 'claude-code'
 import { projectLayout } from './lineage-graph'
+import { normalize } from './package-runner'
+
+export { normalize }
 
 const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
-
-/** `a/./b/../c` → `a/c`, so two spellings of one manifest are one focus and one cache entry. */
-export function normalize(path: string): string {
-  const out: string[] = []
-  for (const part of path.replace(/\\/g, '/').split('/')) {
-    if (part === '.' || (part === '' && out.length > 0)) continue
-    if (part === '..' && out.length > 0 && out[out.length - 1] !== '..') out.pop()
-    else out.push(part)
-  }
-  return out.join('/') || '/'
-}
 
 /** The dbt project above a file or folder: the closest folder holding dbt_project.yml. */
 export async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {

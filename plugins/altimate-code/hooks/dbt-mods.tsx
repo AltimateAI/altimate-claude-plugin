@@ -7,7 +7,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later, runTool } from './altimate-cli'
 import { openTracked } from './usage'
-import { bashChanged, MTIME_SLACK_MS, WRITES } from './bash-edits'
+import { bashChanged, MTIME_SLACK_MS, projectRoot, WRITES } from './bash-edits'
 import { doctorFacts, noteProblem, type DoctorFacts } from './last-problem'
 import { normalize, projectName, runnerOf } from './package-runner'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
@@ -127,7 +127,6 @@ const MAX_SLICES = 16
 // The last manifest read whole, by path and revision.
 let parsed: { path: string; mtimeMs: number; manifest: any } | null = null
 
-const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const basename = (path: string) => path.split(/[\\/]/).pop() ?? path
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
 const quoteName = (name: string) => JSON.stringify(name)
@@ -145,18 +144,6 @@ function within<T>($: EngineInterface, ms: number, work: Promise<T>): Promise<T 
   })
 }
 
-
-/** The closest folder above a file or folder that holds dbt_project.yml, spelled one way. */
-async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {
-  let dir = normalize(isFile ? dirname(start) : start)
-  for (let i = 0; i < 40; i++) {
-    if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) return dir
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
-  }
-  return null
-}
 
 /** The session's dbt project: the session folder's own, else one a level or two below it. */
 async function sessionProject($: EngineInterface): Promise<string | null> {
@@ -574,9 +561,11 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
     if (waiting) return waiting
     const next: Promise<Checked> = running
       .catch(() => null)
-      .then(() => {
+      .then(async () => {
+        // The file's time now, after the wait: an edit that landed meanwhile is the version this follow-up compiles.
+        const waited = (await $.fs.stat(path).catch(() => null))?.mtimeMs ?? ''
         followUp.delete(base)
-        return startCheck($, root, file, mineGeneration, base, key)
+        return startCheck($, root, file, mineGeneration, base, `${base}\u0000${waited}`)
       })
     followUp.set(base, next)
     return next
@@ -868,10 +857,11 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   if (!force && !stats.some(stat => !!stat && stat.mtimeMs > check.at)) return
   rechecking = true
   try {
-    const { view, current, newest } = await compileAndValidate($, check.root, `${check.root}/${check.file}`, asked, force ? 'forced' : 'shared')
+    const done = await compileAndValidate($, check.root, `${check.root}/${check.file}`, asked, force ? 'forced' : 'shared')
+    const { view, current, newest } = done
     if (!current()) return
-    // The toast points at the band: only the check the band shows may say so.
-    if (view.status !== 'running' && newest()) {
+    // The toast points at the band: only the check the band shows may say so, and only once however many asked for it.
+    if (view.status !== 'running' && newest() && claimAnnouncement(done)) {
       const text = `${STATUS_ICON[view.status]} ${view.model} changed · checked again against the warehouse`
       if (view.status === 'error') $.ui.toast(text, { timeoutMs: 6000 })
       else infoToast($, text, 6000)
@@ -2049,6 +2039,27 @@ async function modelRoot($: EngineInterface, path: string): Promise<string | nul
   return root && inModels ? root : null
 }
 
+// What has been shown to the person and handed to each agent, by check: whoever shares one check (an edit, a shell
+// task, a recheck) says it, and tells each agent, once.
+const announced = new WeakSet<Checked>()
+const delivered = new WeakMap<Checked, Set<string | null>>()
+
+/** True the first time it is asked of a check: the one that may toast it. */
+function claimAnnouncement(done: Checked): boolean {
+  if (announced.has(done)) return false
+  announced.add(done)
+  return true
+}
+
+/** True the first time it is asked of a check and an agent: the one that may hand that agent the note. */
+function claimDelivery(done: Checked, agentId: string | null): boolean {
+  const told = delivered.get(done) ?? new Set<string | null>()
+  delivered.set(done, told)
+  if (told.has(agentId)) return false
+  told.add(agentId)
+  return true
+}
+
 /** The toast of a check that landed, when it is still the newest one: the band it points at shows the same check. */
 function announceCheck($: EngineInterface, landed: { view: CheckView; newest: () => boolean }) {
   if (!landed.newest()) return
@@ -2076,17 +2087,14 @@ async function checkModel($: EngineInterface, path: string, asked: number, agent
   // Landed, and still the newest check of this file in this conversation.
   if (landed && landed.current()) {
     // The toast points at the band, so only the check the band shows may say so.
-    announceCheck($, landed)
-    return landed.note ? [landed.note] : []
+    if (claimAnnouncement(landed)) announceCheck($, landed)
+    return landed.note && claimDelivery(landed, agentId) ? [landed.note] : []
   }
   // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
-  if (!landed) check.then(done => void (done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
+  if (!landed) check.then(done => void (done.current() && done.note && claimDelivery(done, agentId) && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
   return []
 }
 
-// What a shell task has already shown the person and queued for each agent, by check: tasks that joined one check say it once.
-const announced = new WeakSet<Checked>()
-const queued = new WeakMap<Checked, Set<string | null>>()
 
 /**
  * After a shell command that may have written models, in the background: each model file it changed (three at most)
@@ -2104,16 +2112,8 @@ async function bashChecks($: EngineInterface, start: { asked: number; startedAt:
           if (!root) return
           const done = await compileAndValidate($, root, path, start.asked)
           if (!done.current()) return
-          if (!announced.has(done)) {
-            announced.add(done)
-            announceCheck($, done)
-          }
-          const told = queued.get(done) ?? new Set<string | null>()
-          queued.set(done, told)
-          if (done.note && !told.has(agentId)) {
-            told.add(agentId)
-            pendingNotes.push({ note: done.note, agentId, current: done.current })
-          }
+          if (claimAnnouncement(done)) announceCheck($, done)
+          if (done.note && claimDelivery(done, agentId)) pendingNotes.push({ note: done.note, agentId, current: done.current })
         } catch {
         }
       }),
