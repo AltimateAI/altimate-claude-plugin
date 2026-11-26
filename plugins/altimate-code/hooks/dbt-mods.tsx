@@ -398,7 +398,7 @@ async function runPlaceOf($: EngineInterface, root: string): Promise<string> {
  * Whether the manifest in `root`'s artifact folder is the project's own: one dbt wrote there, from a parse of the
  * project itself. Not when that file is the one of the project below that installs the package (a `target` linked to
  * `integration_tests/target`): it is read as the root's, but it is that project's, and the root's packages are not
- * what it needs. Compile and validate, the doctor's packages check and its parse all ask this one question.
+ * what it needs. The doctor's place and its freshness check ask this question.
  */
 async function ownManifestOf($: EngineInterface, root: string): Promise<boolean> {
   const own = `${await targetOf($, root)}/manifest.json`
@@ -411,15 +411,13 @@ async function ownManifestOf($: EngineInterface, root: string): Promise<boolean>
 }
 
 /**
- * Where the doctor looks at the project: the project itself when it has a manifest of its own, the project below
- * that installs it when the package repo borrows that one, else where compile and validate runs dbt. Every check of
- * the doctor, and its parse and deps, are made there.
+ * Where the doctor looks at the project: the project itself when it has a manifest of its own, else where compile
+ * and validate runs dbt. The doctor's dbt, Python, adapter, packages and connection checks, its parse and its deps
+ * are made there.
  */
 async function doctorPlaceOf($: EngineInterface, root: string): Promise<string> {
   const runs = await runPlaceOf($, root)
-  if (await ownManifestOf($, root)) return root
-  if ((await manifestTarget($, root)) !== (await targetOf($, root))) return (await runnerOf($, root).catch(() => null)) ?? root
-  return runs
+  return (await ownManifestOf($, root)) ? root : runs
 }
 
 /** The project's artifact folder (`target-path` in dbt_project.yml): absolute, or under the project. */
@@ -1564,7 +1562,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   if (version.exitCode !== 0 && !info.core) {
     checks.push({ id: 'dbt', label: 'dbt', status: 'fail', detail: `could not run ${dbt}: ${dbtTail(version, 1)}`.slice(0, 300), fix: 'install dbt-core and your adapter (pip install dbt-core dbt-<adapter>), or create the project\'s .venv' })
   } else {
-    checks.push({ id: 'dbt', label: 'dbt', status: 'ok', detail: `dbt-core ${info.core ?? 'unknown'} (${dbt === 'dbt' ? 'on PATH' : relative(place, dbt) || dbt})`, fix: null })
+    checks.push({ id: 'dbt', label: 'dbt', status: 'ok', detail: `dbt-core ${info.core ?? 'unknown'} (${dbt === 'dbt' ? 'on PATH' : relative(root, dbt) || dbt})`, fix: null })
   }
 
   // Python: the interpreter dbt's own launcher names.
@@ -1612,10 +1610,10 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   // has them: dbt is run from there. Not when the package has a manifest of its own: Run dbt parse refreshes that
   // one in the package itself, which needs the package's own packages.
   const packages = await packagesOf($, root)
-  if (packages) {
-    const theirs = place === root ? null : await packagesOf($, place)
-    const has = place === root ? packages.installed : !theirs || theirs.installed
-    const detail = place === root ? (has ? `${packages.installPath} installed` : `${packages.file} is not installed`) : has ? `installed in ${relative(root, place)}, where dbt runs for this package` : `${relative(root, place)}/${theirs!.file} is not installed`
+  const theirs = place === root ? null : await packagesOf($, place)
+  if (packages || theirs) {
+    const has = place === root ? packages!.installed : !theirs || theirs.installed
+    const detail = place === root ? (has ? `${packages!.installPath} installed` : `${packages!.file} is not installed`) : has ? `installed in ${relative(root, place)}, where dbt runs for this package` : `${relative(root, place)}/${theirs!.file} is not installed`
     checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail, fix: has ? null : 'dbt deps' })
   }
 
@@ -1633,7 +1631,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
         ? { id: 'connection', label: 'Connection', status: 'ok', detail: `${parsed.adapterType ?? (typeof type === 'string' ? type : null) ?? 'warehouse'} connection test passed`, fix: null }
         : { id: 'connection', label: 'Connection', status: 'fail', detail: (profilesError(`${debug.stdout}\n${debug.stderr}`) ? PROFILES_UNREADABLE : scrubDbt(parsed.detail ?? stripAnsi(debug.stdout || debug.stderr).trim().split('\n').slice(-3).join(' '))).slice(0, 300), fix: 'check profiles.yml credentials; run dbt debug' },
     )
-  } else if (previous?.root === root) {
+  } else if (previous?.root === root && (previous.place ?? root) === place) {
     const kept = previous.checks.find(one => one.id === 'connection')
     if (kept) checks.push(kept)
   }
@@ -1796,7 +1794,7 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
           <Box>
             {deps ? <Button key="dbt-doctor-deps" label="Run dbt deps" onPress={() => later($, async () => {
               await update($, doctorAtom, view => (view ? { ...view, busy: 'Running dbt deps…' } : view))
-              const deps = await runDbt($, doctor.place, ['deps', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+              const deps = await runDbt($, doctor.place ?? doctor.root, ['deps', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
               // Parsing without the packages would only fail again: say what deps said and stop.
               if (deps === SKIPPED || deps.exitCode !== 0) {
                 await update($, doctorAtom, view => (view ? { ...view, busy: null } : view))
@@ -2322,7 +2320,7 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
         <Box flexDirection="column">
           <Text bold>dbt environment</Text>
           <Text dimColor>{doctor.root}</Text>
-          {doctor.place !== doctor.root ? <Text dimColor>dbt runs in {relative(doctor.root, doctor.place)}</Text> : null}
+          {doctor.place && doctor.place !== doctor.root ? <Text dimColor>dbt runs in {relative(doctor.root, doctor.place)}</Text> : null}
           {doctor.busy ? <Text color="suggestion">{doctor.busy}</Text> : null}
         </Box>
         <Box flexDirection="column">
