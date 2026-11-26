@@ -3356,7 +3356,7 @@ test("a shell task that arrives while a schema edit's follow-up check runs joins
   await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
   await clock.settle()
   releaseFollowUp()
-  await nextNotes($, clock, setBash)
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
   await clock.settle()
   // The edit's, the shell edit's and the follow-up's, which the second shell task joined: not four.
   expect(shows(runs).length).toBe(3)
@@ -3435,9 +3435,32 @@ test("a follow-up check is filed under the version of the file it compiles, so a
   await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
   await clock.settle()
   releaseFollowUp()
-  await nextNotes($, clock, setBash)
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
   await clock.settle()
   expect(shows(runs).length).toBe(3)
+})
+
+test("a follow-up that fires while a check of the file's new version is already running is that check: one compile, and Claude gets its note once", async ($, on) => {
+  let release!: () => void
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] }
+  const { clock, runs, mtimes, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  options.holdManifest = new Promise<void>(go => (release = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  // The model is written again and a second shell edit's check of that version starts while the first still runs.
+  mtimes['models/orders.sql'] = 100_000
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  options.holdManifest = undefined
+  release()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  await clock.settle()
+  // The edit's, and one for the new version, which the follow-up joined; the first shell edit's check was superseded before it ran.
+  expect(shows(runs).length).toBe(2)
 })
 
 test('a file that changed again while its check was under way is checked again, not answered with the old check', async ($, on) => {

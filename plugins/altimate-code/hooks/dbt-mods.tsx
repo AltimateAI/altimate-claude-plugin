@@ -578,7 +578,9 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
         // The file's time now, after the wait: an edit that landed meanwhile is the version this follow-up compiles.
         const waited = (await $.fs.stat(path).catch(() => null))?.mtimeMs ?? ''
         followUp.delete(base)
-        return startCheck($, root, file, mineGeneration, base, `${base}\u0000${waited}`)
+        const waitedKey = `${base}\u0000${waited}`
+        // A check of that version may have started during the wait: this follow-up is that check, not a second one.
+        return checking.get(waitedKey) ?? startCheck($, root, file, mineGeneration, base, waitedKey)
       })
     followUp.set(base, next)
     return next
