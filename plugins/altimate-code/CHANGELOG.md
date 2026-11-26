@@ -4,6 +4,8 @@ All notable changes to this plugin will be documented in this file.
 
 ## [Unreleased]
 
+## [1.8.4] — 2026-11-26
+
 ### Changed
 - The plugin needs altimate-code 0.12.12 or later, the release with the dbt Power User tools the cost check, project health, team comments, `/runs`, `/profile-ctes`, `/sql-graph`, `/to-model` and `/defer` call, and the documentation coverage after a model edit (`dbt_docs_coverage`). The session-start notice (status line) now names a 0.12.11 install, which it used to leave alone, and the "update altimate-code" lines in the task band and report name 0.12.12.
 
