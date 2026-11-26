@@ -1123,7 +1123,7 @@ const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const ROOT_CONFIGS = new Set(['dbt_project.yml', 'packages.yml', 'profiles.yml', 'selectors.yml', 'package-lock.yml', 'dependencies.yml'])
 
 /** The project's files changed after its manifest was written, newest first. */
-async function changedSince($: EngineInterface, root: string, mtimeMs: number): Promise<{ files: string[]; complete: boolean }> {
+async function changedSince($: EngineInterface, root: string, mtimeMs: number, named?: string | null): Promise<{ files: string[]; complete: boolean }> {
   const changed: { path: string; mtimeMs: number }[] = []
   let scanned = 0
   // A folder that exists but could not be read leaves the answer unknown, never "current".
@@ -1141,7 +1141,7 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
     // The project's name from the manifest, else dbt_project.yml's (older manifests do not record it).
     // A package repo's manifest is the project's below it: the package's own files are the ones named by its name.
     const borrowed = !(await ownManifestOf($, root))
-    const project = borrowed ? await projectName($, root) : (manifest.manifest.metadata?.project_name ?? (await projectName($, root)))
+    const project = borrowed || named ? (named ?? (await projectName($, root))) : (manifest.manifest.metadata?.project_name ?? (await projectName($, root)))
     const own = (one: any) => !project || !one?.package_name || one.package_name === project
     const files = (group: any) => Object.values<any>(group ?? {}).filter(own)
     const disabled = Object.values<any>(manifest.manifest.disabled ?? {}).flat().filter(own)
@@ -1497,12 +1497,18 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
 
 /** The doctor's manifest line: whether the manifest is missing, current, or older than files of the project. */
 async function manifestCheck($: EngineInterface, root: string): Promise<{ check: DoctorCheck; staleFiles: string[] }> {
-  const target = await manifestTarget($, root)
-  const stat = await $.fs.stat(`${target}/manifest.json`).catch(() => null)
+  const place = await doctorPlaceOf($, root)
+  const found = await manifestTarget($, root)
+  const stat = await $.fs.stat(`${found}/manifest.json`).catch(() => null)
+  // Missing: the file a parse in the doctor's place writes.
+  const target = stat || place === root ? found : await targetOf($, place)
   const shown = target.startsWith(`${root}/`) ? relative(root, target) : target
   if (!stat) return { check: { id: 'manifest', label: 'Manifest', status: 'warn', detail: `${shown}/manifest.json is missing: lineage, model context and docs need it`, fix: 'dbt parse' }, staleFiles: [] }
   const scan = await changedSince($, root, stat.mtimeMs)
-  const staleFiles = scan.files
+  // Run in another project, the parse reads that project's own files too.
+  const there = place === root ? null : await changedSince($, place, stat.mtimeMs, await projectName($, place))
+  const staleFiles = [...scan.files, ...(there?.files ?? []).map(one => `${relative(root, place)}/${one}`)]
+  scan.complete = scan.complete && (there?.complete ?? true)
   const age = Math.round(((await $.clock.now()) - stat.mtimeMs) / 60_000)
   const ageText = age < 60 ? `${age} min` : age < 2880 ? `${Math.round(age / 60)} h` : `${Math.round(age / 1440)} days`
   const check: DoctorCheck = staleFiles.length
@@ -1652,8 +1658,7 @@ async function parseNow($: EngineInterface, root: string) {
   const asked = generation
   const current = await read($, doctorAtom)
   if (current) await update($, doctorAtom, () => ({ ...current, busy: 'Running dbt parse…' }))
-  // Where the manifest the doctor and lineage read is written: the project's own when it has one, integration_tests' when
-  // a package repo borrows that one, else where compile and validate runs dbt (which also notes the runner's package).
+  // The project's own when it has a manifest of its own, else where compile and validate runs dbt.
   const place = await doctorPlaceOf($, root)
   const run = await runDbt($, place, ['parse', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   if (run.exitCode !== 0) {

@@ -795,6 +795,7 @@ test('a package repo with no manifest of its own: the doctor and model context r
     target: 'integration_tests/target',
     files: {
       'target/manifest.json': JSON.stringify(borrowed),
+      'integration_tests/models/only_in_tests.sql': 'select 1',
       'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
       'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
       'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
@@ -817,6 +818,7 @@ test('a package repo whose manifest comes from integration_tests: the doctor\'s 
     target: 'integration_tests/target',
     mtimes: { 'models/orders.sql': 5_000 },
     files: {
+      'target/manifest.json': JSON.stringify(PACKAGE_MANIFEST),
       'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
       'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
       'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
@@ -927,14 +929,17 @@ test('a plain project with no package below it: its manifest is its own, the doc
   await doctor.unmount()
 })
 
+// What dbt writes in the project that installs a package: its own name, and the package's models under the package's.
+const PACKAGE_MANIFEST = { ...MANIFEST, metadata: { project_name: 'shop_tests' }, nodes: Object.fromEntries(Object.entries(MANIFEST.nodes).map(([id, node]) => [id, { ...node, package_name: 'shop' }])) }
+
 const LINKED_REPO = {
   'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
   'integration_tests/dbt_project.yml': "name: 'shop_tests'\nprofile: tests\n",
   'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
   'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
   'integration_tests/profiles.yml': 'tests:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n',
-  'target/manifest.json': JSON.stringify(MANIFEST),
-  'integration_tests/target/manifest.json': JSON.stringify(MANIFEST),
+  'target/manifest.json': JSON.stringify(PACKAGE_MANIFEST),
+  'integration_tests/target/manifest.json': JSON.stringify(PACKAGE_MANIFEST),
 }
 
 test('a package repo whose target is linked to the one of the project that installs it: every check of the doctor, its header and what Claude is told are of that project', async ($, on) => {
@@ -1040,6 +1045,55 @@ test('a package repo with its own packages installed, and a manifest only in the
   await clock.settle()
   expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(ROOT)
   await band.unmount()
+})
+
+test('a package repo and the project that installs it that each have a manifest of their own: the doctor stays in the package, its packages are missing there, and Run dbt parse runs in it', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    files: { ...LINKED_REPO },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
+  expect(await doctor.find({ type: 'Text', text: /dbt runs in/ })).toBeUndefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(ROOT)
+  await band.unmount()
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: a file changed in that project after the manifest was written makes the manifest stale', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'integration_tests/dbt_project.yml': 5_000 },
+    links: { target: 'integration_tests/target' },
+    files: LINKED_REPO,
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /stale: 1 file changed .*\(integration_tests\/dbt_project\.yml\)/ })).toBeDefined()
+  await doctor.unmount()
+})
+
+test('no manifest anywhere, dbt run in the project that installs the package: the doctor names the manifest a parse there writes', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    files: {
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /integration_tests\/target\/manifest\.json is missing/ })).toBeDefined()
+  await doctor.unmount()
 })
 
 test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {
