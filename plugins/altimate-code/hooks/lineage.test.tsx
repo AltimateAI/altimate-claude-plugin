@@ -62,7 +62,7 @@ const REACH = {
   },
 }
 
-type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean; cliId?: (model: string) => string; cliModels?: string[]; present?: string[]; listed?: string[]; missing?: (path: string) => boolean; holdRead?: (path: string) => Promise<void> | undefined }
+type Options = { duringTool?: () => Promise<void>; fileText?: (path: string) => string | undefined; shell?: (argv: readonly string[]) => { exitCode: number; stdout: string } | undefined; mcp?: boolean; warehouse?: boolean; structured?: boolean; size?: number; mtime?: () => number; reach?: Record<string, unknown>; capped?: boolean; lineageText?: string; toolResult?: (e: { tool: string }) => unknown; failColumn?: string; holdFirstManifestRead?: Promise<void>; holdReach?: { column: string; until: Promise<void> }; modelLineage?: Record<string, unknown>; cliTooLarge?: boolean; cliCutOff?: (tool?: string) => boolean; cliCutOffExit?: number; cliStdout?: string; cliFailure?: boolean; sqlFiles?: Record<string, string>; holdFirstSqlRead?: Promise<void>; holdManifestStat?: { at: number; until: Promise<void> }; noRootProject?: boolean; mcpHang?: string; narrow?: string; fileMtime?: (path: string) => number | undefined; manifest?: unknown; cliLineage?: Record<string, unknown>; persisted?: { readable: boolean }; holdCliLineage?: Promise<void>; cliGraph?: (graph: any) => any; packageRepo?: boolean; runnerManifestGone?: () => boolean; cliId?: (model: string) => string; cliModels?: string[]; present?: string[]; listed?: string[]; missing?: (path: string) => boolean; holdRead?: (path: string) => Promise<void> | undefined; holdExists?: (path: string) => Promise<void> | undefined }
 
 /**
  * A dbt project at /repo, the plugin's MCP server (or the CLI when it is not connected), and the
@@ -118,9 +118,12 @@ async function start($: any, on: any, options: Options = {}) {
   const RUNNER = `${ROOT}/integration_tests`
   const runnerFiles: Record<string, string> = options.packageRepo ? { [`${RUNNER}/dbt_project.yml`]: "name: 'shop_tests'\n", [`${RUNNER}/packages.yml`]: 'packages:\n  - local: ../\n' } : {}
   const MANIFEST_AT = options.packageRepo ? `${RUNNER}/target/manifest.json` : MANIFEST_PATH
-  on('fs.exists', (_: unknown, e: { path: string }) => ({
+  on('fs.exists', async (_: unknown, e: { path: string }) => {
+    await options.holdExists?.(e.path)
+    return {
     value: (e.path === `${ROOT}/dbt_project.yml` && !options.noRootProject) || (hasManifest && e.path === MANIFEST_AT && !options.runnerManifestGone?.()) || e.path in runnerFiles || !!options.present?.includes(e.path) || (!!sql && e.path.slice(ROOT.length + 1) in sql),
-  }))
+  }
+  })
   on('fs.stat', async (_: unknown, e: { path: string }) => {
     if (e.path === MANIFEST_PATH && options.holdManifestStat && ++manifestStats === options.holdManifestStat.at) await options.holdManifestStat.until
     if (!hasManifest && e.path.endsWith('/target/manifest.json')) throw new Error('ENOENT')
@@ -257,7 +260,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
   await clock.settle()
-  return { clock, calls, toasts, notes, logs, debug, lists, opens, kept }
+  return { clock, calls, toasts, notes, logs, debug, lists, opens, kept, stats: () => manifestStats }
 }
 
 test('the lineage pane keeps its default size and Min / Default / Max resize it', async ($, on) => {
@@ -1170,6 +1173,205 @@ test('a rewritten manifest without the shown model keeps the graph, says the mod
   expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeDefined()
   expect(readsAfterRewrite).toBe(1)
   await ui.unmount()
+})
+
+// A pane showing fct_orders whose manifest dbt then rewrites; `hold` pauses the next read of the manifest until released.
+async function rewrittenPane($: any, on: any, extra: Options = {}) {
+  let manifestMtime = 1
+  let hold: Promise<void> | undefined
+  const run = await start($, on, {
+    mtime: () => manifestMtime,
+    fileText: path => (path === MANIFEST_PATH && manifestMtime > 1 ? JSON.stringify(RECOMPILED) : undefined),
+    holdRead: path => {
+      if (path !== MANIFEST_PATH || !hold) return undefined
+      const held = hold
+      hold = undefined
+      return held
+    },
+    ...extra,
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await run.clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await run.clock.settle()
+  const rewrite = (mtime: number) => (manifestMtime = mtime)
+  let releaseHeld = () => {}
+  const holdNextRead = () => {
+    hold = new Promise<void>(resolve => (releaseHeld = resolve))
+  }
+  return { ...run, ui, rewrite, holdNextRead, release: () => releaseHeld(), setMtime: rewrite }
+}
+
+test('a reload that finds a follow in flight yields: the follow lands, the manifest is not reloaded over it', async ($, on) => {
+  const OTHER = `${ROOT}/models/stg_customers.sql`
+  const gate = { at: Infinity, until: new Promise<void>(() => {}) }
+  let release!: () => void
+  gate.until = new Promise<void>(resolve => (release = resolve))
+  const { clock, ui, rewrite, logs, stats } = await rewrittenPane($, on, { present: [OTHER], holdManifestStat: gate })
+  // Claude's read of stg_customers is still looking at the manifest when dbt rewrites it and the next tool call checks.
+  gate.at = stats() + 2
+  await $.tool.call({ tool: 'Read', file_path: OTHER })
+  await clock.settle()
+  rewrite(10)
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  release()
+  await clock.advance(200)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · stg_customers/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeUndefined()
+  // The first read, and the follow's: no reload beside them.
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  await ui.unmount()
+})
+
+test("a reload that finds the answer's own follow in flight yields: the answer's model lands", async ($, on) => {
+  const gate = { at: Infinity, until: new Promise<void>(() => {}) }
+  let release!: () => void
+  gate.until = new Promise<void>(resolve => (release = resolve))
+  const { clock, ui, rewrite, stats } = await rewrittenPane($, on, { holdManifestStat: gate })
+  await $.turn.start({ text: 'q', turnId: 't21' } as any)
+  gate.at = stats() + 2
+  await $.turn.complete({ answer: 'See `int_orders`.', durationMs: 5, isAborted: false, reason: 'answer', turnId: 't21' } as any)
+  await clock.advance(1000)
+  rewrite(10)
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  release()
+  await clock.advance(200)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · int_orders/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test('a reload overtaken by a follow that lands nothing is dropped, and the next call reloads again', async ($, on) => {
+  const GHOST = `${ROOT}/models/ghost.sql`
+  const { clock, ui, rewrite, holdNextRead, release, logs } = await rewrittenPane($, on, { present: [GHOST] })
+  rewrite(10)
+  holdNextRead()
+  // The reload is reading the rewritten manifest.
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  // A follow starts meanwhile and finds no model for that file.
+  await $.tool.call({ tool: 'Read', file_path: GHOST })
+  await clock.settle()
+  release()
+  await clock.advance(200)
+  await clock.settle()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(1)
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeUndefined()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('a /clear while a reload is still reading does not stop the next conversation\'s reloads', async ($, on) => {
+  const { clock, ui, rewrite, holdNextRead, logs } = await rewrittenPane($, on)
+  rewrite(10)
+  // The reload never gets its read back.
+  holdNextRead()
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: true })
+  await clock.settle()
+  const before = MANIFEST_LOADS(logs).length
+  // The new conversation follows the model again, then dbt rewrites the manifest once more.
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  rewrite(20)
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(MANIFEST_LOADS(logs).length).toBeGreaterThanOrEqual(before + 2)
+  await ui.unmount()
+})
+
+test('a pane that was shown and closed is not opened again by a rewritten manifest', async ($, on) => {
+  let manifestMtime = 1
+  const { clock, opens, logs } = await start($, on, { mtime: () => manifestMtime })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  await ui.unmount()
+  const opened = opens.length
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  expect(opens).toHaveLength(opened)
+})
+
+test('a manifest that is gone when the reload reads it leaves the graph shown, says it is gone, and draws no SQL files over it', async ($, on) => {
+  let manifestMtime = 1
+  let gone = false
+  let stats = 0
+  const { clock, logs } = await start($, on, {
+    mtime: () => manifestMtime,
+    // The check that the manifest changed sees it; the reload's own read of it finds it removed.
+    missing: path => path === MANIFEST_PATH && gone && ++stats > 1,
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  gone = true
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt clean' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
+  expect(logs.filter(line => line.includes('from the SQL files'))).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /No dbt manifest at that path/ })).toBeDefined()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(1)
+  await ui.unmount()
+})
+
+test("a shell command that rewrites the manifest and reads another model's file still moves the pane to that model", async ($, on) => {
+  const OTHER = `${ROOT}/models/stg_customers.sql`
+  let armed = false
+  let releaseFile!: () => void
+  const fileHeld = new Promise<void>(resolve => (releaseFile = resolve))
+  let releaseReload!: () => void
+  const gate = { at: Infinity, until: new Promise<void>(resolve => (releaseReload = resolve)) }
+  const { clock, ui, rewrite, stats } = await rewrittenPane($, on, {
+    present: [OTHER],
+    holdManifestStat: gate,
+    // The command's own follow waits to find its file while the same call's manifest check, started late, begins its reload.
+    holdExists: path => {
+      if (!armed || path !== OTHER) return undefined
+      armed = false
+      return fileHeld
+    },
+  })
+  rewrite(10)
+  armed = true
+  gate.at = stats() + 1
+  await $.tool.call({ tool: 'Bash', command: `dbt compile --select ${OTHER}` } as any)
+  await clock.settle()
+  releaseReload()
+  await clock.settle()
+  releaseFile()
+  await clock.advance(200)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: /lineage · stg_customers/ })).toBeDefined()
+  await ui.unmount()
+})
+
+test("a rewritten manifest does not send the model's table to the warehouse server: the reload is no ask", async ($, on) => {
+  let manifestMtime = 1
+  const { clock, calls } = await start($, on, { warehouse: true, mtime: () => manifestMtime })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(calls).not.toContain('mcp:table_lineage')
 })
 
 test('a pane that was shown and closed is not opened again by a rewritten manifest', async ($, on) => {
