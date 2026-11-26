@@ -1871,8 +1871,8 @@ async function ensureForRuns($: EngineInterface, base: string, runs: DbtCommand[
 }
 
 /** Whether a shell command may write model files. A subagent's is left out, as the lineage notes leave it out. */
-// The dbt verbs that compile or run the models they name: a shell edit followed by one is checked by it.
-const BUILD_VERBS = new Set([...RUN_VERBS, 'compile', 'show'])
+// The dbt verbs that compile the models they select: a shell edit followed by one is checked by it, whichever models it selects.
+const BUILD_VERBS = new Set(['run', 'build', 'compile', 'show'])
 const writesModels = (e: { agentId?: string }, command: string) => !e.agentId && WRITES.test(command)
 
 /** Before a call runs: the conversation it is in; for a dbt command also the folder, the time and the run artifact as they are now. */
@@ -1997,16 +1997,18 @@ function pendingLines(agentId: string | null): string[] {
 /**
  * Compiles a model file and runs it against the warehouse, then checks its columns. Null when the file is not a
  * model dbt can show (outside a project, or outside its model-paths); the lines otherwise, none when the check was
- * too slow for this result (held no longer than `holdMs`) and its answer rides on the agent's next one.
+ * too slow for this result (held until the time `until` when one is given, else CHECK_HOLD_MS) and its answer rides on
+ * the agent's next one.
  */
-async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null, holdMs = CHECK_HOLD_MS): Promise<string[] | null> {
+async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null, until: number | null = null): Promise<string[] | null> {
   const root = await projectRoot($, path, true)
   // Only a file under the project's model-paths is a model dbt can show.
   const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
   const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
   if (!root || !inModels) return null
   const check = compileAndValidate($, root, path, asked)
-  // With no time to wait, nothing is held: the answer rides on the next result.
+  // The time left is read after the reads above, which count against it. With none left, nothing is held: the answer rides on the next result.
+  const holdMs = until === null ? CHECK_HOLD_MS : Math.max(0, until - (await $.clock.now()))
   const landed = holdMs > 0 ? await within($, holdMs, check) : null
   // Landed, and still the newest check of this file in this conversation.
   if (landed && landed.current()) {
@@ -2044,20 +2046,17 @@ async function bashEdited($: EngineInterface, start: { asked: number; startedAt:
     const until = (await $.clock.now()) + BASH_HOLD_MS
     const found = bashChanged($, { command, startedAt: start.startedAt - MTIME_SLACK_MS }).catch(() => [])
     const changed = await within($, BASH_HOLD_MS, found)
-    const check = (files: { file: string }[], holdMs: number) => Promise.all(files.map(one => checkModel($, normalize(one.file), start.asked, agentId, holdMs).catch(() => null)))
-    // The search was too slow for this result: the checks it leads to ride on the next one.
+    const check = (files: { file: string }[], by: number) => Promise.all(files.map(one => checkModel($, normalize(one.file), start.asked, agentId, by).catch(() => null)))
+    // The search was too slow for this result: the checks it leads to ride on the next one, and the look again waits for them to start.
     if (!changed) {
       late = true
       found
-        .then(files => {
-          const checks = check(files, 0)
-          again()
-          return checks
-        })
+        .then(files => check(files, 0))
+        .then(again)
         .catch(() => {})
       return []
     }
-    const checked = await check(changed, Math.max(0, until - (await $.clock.now())))
+    const checked = await check(changed, until)
     return checked.flatMap(lines => lines ?? [])
   } catch {
     return []

@@ -3210,13 +3210,15 @@ test('a shell command that is both a write and a dbt command is not compiled a s
   expect(shows(runs).length).toBe(0)
 })
 
-test('a shell command that writes and runs only dbt parse still gets its model compiled and validated', async ($, on) => {
-  const { clock, runs } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
-  const result: any = await $.tool.call({ tool: 'Bash', command: `${SED} && dbt parse` })
-  await clock.settle()
-  expect(checkNotes(result)).toEqual([BASH_NOTE])
-  expect(shows(runs).length).toBe(1)
-})
+for (const verb of ['parse', 'test', 'seed']) {
+  test(`a shell command that writes and runs only dbt ${verb} still gets its model compiled and validated`, async ($, on) => {
+    const { clock, runs } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+    const result: any = await $.tool.call({ tool: 'Bash', command: `${SED} && dbt ${verb}` })
+    await clock.settle()
+    expect(checkNotes(result)).toEqual([BASH_NOTE])
+    expect(shows(runs).length).toBe(1)
+  })
+}
 
 test("a shell edit's check that outlasts the result's hold goes to Claude's next result, not into the one already sent", async ($, on) => {
   let release!: () => void
@@ -3237,7 +3239,11 @@ test("a shell edit's check that outlasts the result's hold goes to Claude's next
 
 test("a shell edit found only after the result's hold goes to Claude's next result, and the band's model is run once", async ($, on) => {
   let release!: () => void
-  const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdFind: new Promise<void>(go => (release = go)) })
+  const { clock, runs, mtimes, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 50_000 }, changed: ['models/orders.sql'], holdFind: new Promise<void>(go => (release = go)) })
+  await editOrders($)
+  await clock.settle()
+  await clock.advance(5_000)
+  mtimes['models/orders.sql'] = 104_500
   const edit = $.tool.call({ tool: 'Bash', command: SED })
   await clock.settle()
   await clock.advance(2_500)
@@ -3249,7 +3255,7 @@ test("a shell edit found only after the result's hold goes to Claude's next resu
   await clock.advance(100)
   const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
   expect(checkNotes(next)).toEqual([BASH_NOTE])
-  expect(shows(runs).length).toBe(1)
+  expect(shows(runs).length).toBe(2)
 })
 
 test('a shell edit of the model the band shows is run against the warehouse once', async ($, on) => {
