@@ -162,6 +162,10 @@ type Options = {
   env?: Record<string, string>
   /** No project .venv: dbt is the one on PATH, its launcher naming this interpreter. */
   pathDbtPython?: string
+  /** Further dbt launchers that answer as the project's own does. */
+  launchers?: string[]
+  /** Further interpreters that answer as the project's own does. */
+  pythons?: string[]
   /** run_results.json's size: over 4 MiB $.fs.read refuses it and its failures come through the project's Python. */
   runResultsSize?: number
   /** What the project's Python prints for the run_results script. */
@@ -399,23 +403,24 @@ async function start($: any, on: any, options: Options = {}) {
       const value = { HOME: '/home/me', ...options.env }[verb as string]
       return { value: { exitCode: value ? 0 : 1, stdout: value ? `${value}\n` : '', stderr: '' } }
     }
+    const isPython = bin === python || options.pythons?.includes(bin as string) === true
     // The project's Python: its version, or the slice of a manifest too big to read here.
-    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_TYPE) {
+    if (isPython && verb === '-c' && e.argv[2] === PROFILE_TYPE) {
       // The script itself is checked below; here the interpreter answers what it would print.
       return { value: { ...(options.profileAnswer ?? { exitCode: 0, stdout: '{"status":"ok","profile":"shop","target":"dev","type":"duckdb"}' }), stderr: '' } }
     }
-    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_REDACT) return { value: { exitCode: 0, stdout: JSON.stringify({ redact: options.redactFrom?.(JSON.parse(e.init?.stdin ?? '{}').env ?? {}) ?? options.redactBy?.[e.argv[4] as string] ?? options.redact ?? [] }), stderr: '' } }
-    if (bin === python && verb === '-c' && e.argv[2] === RUN_FAILURES) return { value: { ...(options.runFailures ?? { exitCode: 0, stdout: JSON.stringify({ results: [] }) }), stderr: '' } }
-    if (bin === python && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
-    if (bin === python && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
+    if (isPython && verb === '-c' && e.argv[2] === PROFILE_REDACT) return { value: { exitCode: 0, stdout: JSON.stringify({ redact: options.redactFrom?.(JSON.parse(e.init?.stdin ?? '{}').env ?? {}) ?? options.redactBy?.[e.argv[4] as string] ?? options.redact ?? [] }), stderr: '' } }
+    if (isPython && verb === '-c' && e.argv[2] === RUN_FAILURES) return { value: { ...(options.runFailures ?? { exitCode: 0, stdout: JSON.stringify({ results: [] }) }), stderr: '' } }
+    if (isPython && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
+    if (isPython && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
     if (bin && verb === '--version' && options.pythonVersions?.[bin]) return { value: { exitCode: 0, stdout: `Python ${options.pythonVersions[bin]}\n`, stderr: '' } }
-    if (bin === python) return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
+    if (isPython) return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
     if (e.argv.includes('dbt_map_relations')) {
       if (!options.mapRelations) return { value: { exitCode: 1, stdout: '', stderr: 'unknown tool: dbt_map_relations' } }
       mapAsked.push(JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1])))
       return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, mappings: options.mapRelations } }), stderr: '' } }
     }
-    if (bin !== (options.pathDbtPython ? 'dbt' : DBT)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    if (bin !== (options.pathDbtPython ? 'dbt' : DBT) && !options.launchers?.includes(bin as string)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
     if (verb === 'debug') {
       if (options.holdDebug) await options.holdDebug
@@ -938,6 +943,9 @@ test('a plain project with no package below it: its manifest is its own, the doc
 // What dbt writes in the project that installs a package: its own name, and the package's models under the package's.
 const PACKAGE_MANIFEST = { ...MANIFEST, metadata: { project_name: 'shop_tests' }, nodes: Object.fromEntries(Object.entries(MANIFEST.nodes).map(([id, node]) => [id, { ...node, package_name: 'shop' }])) }
 
+const RUNNER_PYTHON = `${ROOT}/integration_tests/.venv/bin/python`
+const RUNNER_DBT = `${ROOT}/integration_tests/.venv/bin/dbt`
+
 const LINKED_REPO = {
   'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
   'integration_tests/dbt_project.yml': "name: 'shop_tests'\nprofile: tests\n",
@@ -955,7 +963,10 @@ test('a package repo whose target is linked to the one of the project that insta
     mtimes: { 'models/orders.sql': 5_000 },
     version: 'Core:\n  - installed: 1.11.6\nPlugins:\n  - duckdb: 1.9.0\n',
     links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
-    files: { ...LINKED_REPO, 'integration_tests/.venv/bin/dbt': '' },
+    launchers: [RUNNER_DBT],
+    pythons: [RUNNER_PYTHON],
+    pythonVersions: { [RUNNER_PYTHON]: '3.11.4' },
+    files: { ...LINKED_REPO, 'integration_tests/.venv/bin/dbt': `#!${RUNNER_PYTHON}\nimport sys\n`, 'integration_tests/.venv/bin/python': '' },
     profileAnswer: said({ status: 'ok', profile: 'tests', target: 'dev', type: 'duckdb' }),
   })
   await clock.settle()
@@ -963,6 +974,15 @@ test('a package repo whose target is linked to the one of the project that insta
   expect(await doctor.find({ type: 'Text', text: `dbt runs in integration_tests` })).toBeDefined()
   await doctor.press({ key: 'doctor-connection' })
   await clock.settle()
+  const lines = (await doctor.findAll({ type: 'Text', text: /^[✓⚠✖] \S+\s+\S/ })).map(line => line.text)
+  expect(lines).toEqual([
+    '✓ dbt        dbt-core 1.11.6 (integration_tests/.venv/bin/dbt)',
+    '✓ Python     3.11.4',
+    '✓ Adapter    duckdb 1.9.0',
+    '✓ Packages   installed in integration_tests, where dbt runs for this package',
+    '⚠ Manifest   stale: 1 file changed since it was written 3 min ago (models/orders.sql)  → dbt parse',
+    '✓ Connection duckdb connection test passed',
+  ])
   expect(cwds[runs.findIndex(argv => argv[1] === '--version')]).toBe(`${ROOT}/integration_tests`)
   expect(runs.find(argv => argv[1] === '--version')?.[0]).toBe(`${ROOT}/integration_tests/.venv/bin/dbt`)
   expect(cwds[runs.findIndex(argv => argv[1] === 'debug')]).toBe(`${ROOT}/integration_tests`)
@@ -1103,7 +1123,6 @@ test('no manifest anywhere, dbt run in the project that installs the package: th
   await doctor.unmount()
 })
 
-const RUNNER_PYTHON = `${ROOT}/integration_tests/.venv/bin/python`
 
 test('a package repo whose target is linked to the one of the project that installs it: the doctor reports the Python of that project\'s dbt, not the repo\'s', async ($, on) => {
   const { clock, runs } = await start($, on, {
@@ -1156,6 +1175,24 @@ test('the doctor in the project that installs a package puts a newer file of tha
   await clock.settle()
   const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect((await doctor.find({ type: 'Text', text: /^stale: / }))?.text).toEqual('stale: 2 files changed since it was written 3 min ago (integration_tests/models/b.sql, models/a.sql)')
+  await doctor.unmount()
+})
+
+test('a package repo with no manifest of its own, whose own packages are the ones installed: the manifest read is the installing project\'s, so its changed files make it stale', async ($, on) => {
+  const { 'target/manifest.json': _, 'integration_tests/dbt_packages/shop/dbt_project.yml': __, ...rest } = LINKED_REPO
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    mtimes: { 'integration_tests/target/manifest.json': 1_000, 'integration_tests/models/x.sql': 5_000 },
+    files: { ...rest, 'dbt_packages/dbt_utils/dbt_project.yml': "name: 'dbt_utils'\n", 'integration_tests/models/x.sql': 'select 1' },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  // dbt runs in the package (its own packages are installed), but the manifest is the installing project's.
+  expect(await doctor.find({ type: 'Text', text: 'dbt runs in integration_tests' })).toBeUndefined()
+  expect((await doctor.find({ type: 'Text', text: /^✓ Packages / }))?.text).toEqual('✓ Packages   dbt_packages installed')
+  expect((await doctor.find({ type: 'Text', text: /^stale: / }))?.text).toEqual('stale: 1 file changed since it was written 3 min ago (integration_tests/models/x.sql)')
   await doctor.unmount()
 })
 

@@ -1123,7 +1123,7 @@ const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const ROOT_CONFIGS = new Set(['dbt_project.yml', 'packages.yml', 'profiles.yml', 'selectors.yml', 'package-lock.yml', 'dependencies.yml'])
 
 /** The project's files changed after its manifest was written, newest first. */
-async function changedSince($: EngineInterface, root: string, mtimeMs: number, named?: string | null): Promise<{ files: string[]; entries: { path: string; mtimeMs: number }[]; complete: boolean }> {
+async function changedSince($: EngineInterface, root: string, mtimeMs: number, named?: string | null): Promise<{ entries: { path: string; mtimeMs: number }[]; complete: boolean }> {
   const changed: { path: string; mtimeMs: number }[] = []
   let scanned = 0
   // A folder that exists but could not be read leaves the answer unknown, never "current".
@@ -1199,7 +1199,7 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number, n
     if (!(await $.fs.exists(`${root}/${path}`).catch(() => true))) changed.push({ path: `${path} (deleted)`, mtimeMs: Number.MAX_SAFE_INTEGER })
   }
   const entries = changed.sort((a, b) => b.mtimeMs - a.mtimeMs)
-  return { files: entries.map(one => one.path), entries, complete: complete && scanned <= MAX_SCANNED }
+  return { entries, complete: complete && scanned <= MAX_SCANNED }
 }
 
 /** Why the selected output's adapter could not be read. */
@@ -1506,11 +1506,13 @@ async function manifestCheck($: EngineInterface, root: string): Promise<{ check:
   const shown = target.startsWith(`${root}/`) ? relative(root, target) : target
   if (!stat) return { check: { id: 'manifest', label: 'Manifest', status: 'warn', detail: `${shown}/manifest.json is missing: lineage, model context and docs need it`, fix: 'dbt parse' }, staleFiles: [] }
   const scan = await changedSince($, root, stat.mtimeMs)
-  // Run in another project, the parse reads that project's own files too.
-  const there = place === root ? null : await changedSince($, place, stat.mtimeMs, await projectName($, place))
+  // The manifest read is the one of the project below when the root has none of its own: its files are what a
+  // parse of it reads, wherever the doctor runs dbt.
+  const owner = (await ownManifestOf($, root)) ? null : await runnerOf($, root).catch(() => null)
+  const there = owner ? await changedSince($, owner, stat.mtimeMs, await projectName($, owner)) : null
   // A project folder walked from the root holds the other project's files: each counts once, newest first.
   const merged = new Map<string, number>()
-  for (const one of [...scan.entries, ...(there?.entries ?? []).map(one => ({ ...one, path: `${relative(root, place)}/${one.path}` }))]) merged.set(one.path, Math.max(one.mtimeMs, merged.get(one.path) ?? 0))
+  for (const one of [...scan.entries, ...(there?.entries ?? []).map(one => ({ ...one, path: `${relative(root, owner!)}/${one.path}` }))]) merged.set(one.path, Math.max(one.mtimeMs, merged.get(one.path) ?? 0))
   const staleFiles = [...merged].sort((a, b) => b[1] - a[1]).map(([path]) => path)
   scan.complete = scan.complete && (there?.complete ?? true)
   const age = Math.round(((await $.clock.now()) - stat.mtimeMs) / 60_000)
