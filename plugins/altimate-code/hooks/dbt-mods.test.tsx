@@ -3308,6 +3308,29 @@ test("a shell edit whose check is still setting up is not replaced by the band's
   expect(shows(runs).length).toBe(2)
 })
 
+test("a check of the last conversation still setting up at /clear does not hold back the new conversation's recheck", async ($, on) => {
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 50_000 } }
+  const { clock, runs, mtimes, setBash } = await start($, on, options)
+  let release!: () => void
+  options.holdManifest = new Promise<void>(go => (release = go))
+  const old = $.tool.call({ tool: 'Edit', file_path: ORDERS, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  options.holdManifest = undefined
+  await editOrders($)
+  await clock.settle()
+  expect(shows(runs).length).toBe(1)
+  await clock.advance(5_000)
+  mtimes['models/orders.sql'] = 104_500
+  setBash({ stdout: 'ok' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
+  expect(shows(runs).length).toBe(2)
+  release()
+  await clock.advance(31_000)
+  await old
+})
+
 test('a shell edit of the model the band shows is run against the warehouse once', async ($, on) => {
   let release!: () => void
   const { clock, runs, mtimes } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 50_000 }, changed: ['models/orders.sql'], holdFind: new Promise<void>(go => (release = go)) })

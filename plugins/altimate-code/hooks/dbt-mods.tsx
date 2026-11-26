@@ -547,13 +547,13 @@ async function hardcodedReads($: EngineInterface, manifest: string, sql: string,
   return out
 }
 
-// The checks of each file that have started and not finished: the band shows one only once its setup is done, and a
+// The checks of each file in each conversation that have started and not finished: the band shows one only once its setup is done, and a
 // recheck in that time would run the same file again and replace it.
 const inFlight = new Map<string, number>()
 
 /** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
 async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
-  const key = `${root}\u0000${relative(root, file)}`
+  const key = `${mineGeneration}\u0000${root}\u0000${relative(root, file)}`
   inFlight.set(key, (inFlight.get(key) ?? 0) + 1)
   try {
     return await compileAndValidateOnce($, root, file, mineGeneration)
@@ -817,7 +817,7 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   const check = await read($, checkAtom)
   if (!check) return
   // Busy (a check or recheck running): a forced recheck waits for it, so a schema.yml written meanwhile is not missed.
-  if (check.status === 'running' || rechecking || inFlight.has(`${check.root}\u0000${check.file}`)) {
+  if (check.status === 'running' || rechecking || inFlight.has(`${generation}\u0000${check.root}\u0000${check.file}`)) {
     // Only an edit that concerns this check waits for it; an unrelated one never replaces it.
     if (edited && editConcerns(check, edited)) forcedWhileBusy = edited
     return
