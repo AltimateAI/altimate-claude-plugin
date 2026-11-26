@@ -1209,6 +1209,7 @@ test('a manifest that is gone when the reload reads it leaves the graph shown in
   await clock.settle()
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
   expect(logs.filter(line => line.includes('from the SQL files'))).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
   expect(MANIFEST_LOADS(logs)).toHaveLength(1)
   await ui.unmount()
 })
