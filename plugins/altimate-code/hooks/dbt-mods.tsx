@@ -7,7 +7,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later, runTool } from './altimate-cli'
 import { openTracked } from './usage'
-import { bashChanged, MTIME_SLACK_MS, projectRoot, WRITES } from './bash-edits'
+import { bashChanged, MTIME_SLACK_MS, WRITES } from './bash-edits'
 import { doctorFacts, noteProblem, type DoctorFacts } from './last-problem'
 import { normalize, projectName, runnerOf } from './package-runner'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
@@ -127,6 +127,7 @@ const MAX_SLICES = 16
 // The last manifest read whole, by path and revision.
 let parsed: { path: string; mtimeMs: number; manifest: any } | null = null
 
+const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const basename = (path: string) => path.split(/[\\/]/).pop() ?? path
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
 const quoteName = (name: string) => JSON.stringify(name)
@@ -144,6 +145,18 @@ function within<T>($: EngineInterface, ms: number, work: Promise<T>): Promise<T 
   })
 }
 
+
+/** The closest folder above a file or folder that holds dbt_project.yml, spelled one way. */
+async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {
+  let dir = normalize(isFile ? dirname(start) : start)
+  for (let i = 0; i < 40; i++) {
+    if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) return dir
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
+  return null
+}
 
 /** The session's dbt project: the session folder's own, else one a level or two below it. */
 async function sessionProject($: EngineInterface): Promise<string | null> {
