@@ -186,6 +186,8 @@ type Options = {
   profileAnswer?: { exitCode: number; stdout: string }
   /** What the plugin's store held from an earlier session. */
   stored?: Record<string, unknown>
+  /** Project-relative paths that are links to another project-relative path (the engine's `realPath` for them). */
+  links?: Record<string, string>
   /** Extra project files, by project-relative path. */
   files?: Record<string, string>
   /** No manifest until dbt show writes this one. */
@@ -338,7 +340,8 @@ async function start($: any, on: any, options: Options = {}) {
     const isDir = !(rel in files)
     const mtimeMs = rel === 'target/run_results.json' ? (options.runResultsAt ?? 5_000) : (mtimes[rel] ?? 500)
     const size = /(^|\/)manifest\.json$/.test(rel) && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
-    return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: false } }
+    const linked = options.links?.[rel]
+    return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: !!linked, ...(linked ? { realPath: `${ROOT}/${linked}` } : {}) } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
@@ -853,6 +856,73 @@ test('a package repo with a manifest of its own: the doctor\'s Run dbt parse ref
   const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
   expect(await doctor.find({ type: 'Text', text: /where dbt runs for this package/ })).toBeUndefined()
+  await doctor.unmount()
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: the doctor says its packages are installed there, not missing', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+      'target/manifest.json': JSON.stringify(MANIFEST),
+      'integration_tests/target/manifest.json': JSON.stringify(MANIFEST),
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: 'installed in integration_tests, where dbt runs for this package' })).toBeDefined()
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeUndefined()
+  await doctor.unmount()
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: the doctor\'s Run dbt parse runs in that project', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+      'target/manifest.json': JSON.stringify(MANIFEST),
+      'integration_tests/target/manifest.json': JSON.stringify(MANIFEST),
+    },
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  const at = runs.findIndex(argv => argv[1] === 'parse')
+  expect(cwds[at]).toBe(`${ROOT}/integration_tests`)
+  await band.unmount()
+})
+
+test('a plain project with no package below it: its manifest is its own, the doctor\'s Run dbt parse runs in it', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'target/manifest.json': JSON.stringify(MANIFEST),
+    },
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(ROOT)
+  await band.unmount()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
   await doctor.unmount()
 })
 

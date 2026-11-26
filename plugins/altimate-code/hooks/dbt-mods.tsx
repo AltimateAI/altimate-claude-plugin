@@ -394,6 +394,22 @@ async function runPlaceOf($: EngineInterface, root: string): Promise<string> {
   return own && own.installed ? root : runner
 }
 
+/**
+ * Whether the manifest in `root`'s artifact folder is the project's own: one dbt wrote there, from a parse of the
+ * project itself. Not when that file is the one of the project below that installs the package (a `target` linked to
+ * `integration_tests/target`): it is read as the root's, but it is that project's, and the root's packages are not
+ * what it needs. Compile and validate, the doctor's packages check and its parse all ask this one question.
+ */
+async function ownManifestOf($: EngineInterface, root: string): Promise<boolean> {
+  const own = `${await targetOf($, root)}/manifest.json`
+  if (!(await $.fs.exists(own).catch(() => false))) return false
+  const runner = await runnerOf($, root).catch(() => null)
+  if (!runner) return true
+  const theirs = `${await targetOf($, runner)}/manifest.json`
+  const real = (path: string) => $.fs.stat(path).then(one => one.realPath ?? path).catch(() => path)
+  return (await real(own)) !== (await real(theirs))
+}
+
 /** The project's artifact folder (`target-path` in dbt_project.yml): absolute, or under the project. */
 async function targetOf($: EngineInterface, root: string): Promise<string> {
   const path = targetPath(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
@@ -1584,8 +1600,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   // one in the package itself, which needs the package's own packages.
   const packages = await packagesOf($, root)
   if (packages) {
-    const ownManifest = await $.fs.exists(`${await targetOf($, root)}/manifest.json`).catch(() => false)
-    const runner = packages.installed || ownManifest ? null : await runnerOf($, root)
+    const runner = packages.installed || (await ownManifestOf($, root)) ? null : await runnerOf($, root)
     const theirs = runner ? await packagesOf($, runner) : null
     const has = packages.installed || (!!runner && (!theirs || theirs.installed))
     const detail = packages.installed ? `${packages.installPath} installed` : has ? `installed in ${relative(root, runner!)}, where dbt runs for this package` : `${packages.file} is not installed`
@@ -1632,7 +1647,7 @@ async function parseNow($: EngineInterface, root: string) {
   const runs = await runPlaceOf($, root)
   const own = await targetOf($, root)
   const target = await manifestTarget($, root)
-  const place = target !== own ? ((await runnerOf($, root).catch(() => null)) ?? root) : (await $.fs.exists(`${own}/manifest.json`).catch(() => false)) ? root : runs
+  const place = target !== own ? ((await runnerOf($, root).catch(() => null)) ?? root) : (await ownManifestOf($, root)) ? root : runs
   const run = await runDbt($, place, ['parse', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   if (run.exitCode !== 0) {
     const reason = dbtTail({ stdout: run.stdout || run.stderr, stderr: '' }, 3, true, ' ').slice(0, 200)
