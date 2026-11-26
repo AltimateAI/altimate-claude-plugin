@@ -333,7 +333,7 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: undefined }
   })
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: exists(e.path) }))
-  on('fs.stat', async (_: unknown, e: { path: string }) => {
+  on('fs.stat', async (_: unknown, e: { path: string; resolve?: boolean }) => {
     if (options.statGate?.until && e.path === `${ROOT}/${options.statGate.path}`) await options.statGate.until
     const rel = e.path.slice(ROOT.length + 1)
     if (!exists(e.path)) throw new Error('ENOENT')
@@ -341,7 +341,7 @@ async function start($: any, on: any, options: Options = {}) {
     const mtimeMs = rel === 'target/run_results.json' ? (options.runResultsAt ?? 5_000) : (mtimes[rel] ?? 500)
     const size = /(^|\/)manifest\.json$/.test(rel) && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
     const linked = options.links?.[rel]
-    return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: !!linked, ...(linked ? { realPath: `${ROOT}/${linked}` } : {}) } }
+    return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: !!linked, ...(e.resolve ? { realPath: linked ? `${ROOT}/${linked}` : e.path } : {}) } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
@@ -924,6 +924,75 @@ test('a plain project with no package below it: its manifest is its own, the doc
   const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
   await doctor.unmount()
+})
+
+const LINKED_REPO = {
+  'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+  'integration_tests/dbt_project.yml': "name: 'shop_tests'\nprofile: tests\n",
+  'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+  'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+  'integration_tests/profiles.yml': 'tests:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n',
+  'target/manifest.json': JSON.stringify(MANIFEST),
+  'integration_tests/target/manifest.json': JSON.stringify(MANIFEST),
+}
+
+test('a package repo whose target is linked to the one of the project that installs it: every check of the doctor, its header and what Claude is told are of that project', async ($, on) => {
+  const { clock, runs, cwds, prompts } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    version: 'Core:\n  - installed: 1.11.6\nPlugins:\n  - duckdb: 1.9.0\n',
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    files: LINKED_REPO,
+    profileAnswer: said({ status: 'ok', profile: 'tests', target: 'dev', type: 'duckdb' }),
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: `dbt runs in integration_tests` })).toBeDefined()
+  await doctor.press({ key: 'doctor-connection' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === '--version')]).toBe(`${ROOT}/integration_tests`)
+  expect(cwds[runs.findIndex(argv => argv[1] === 'debug')]).toBe(`${ROOT}/integration_tests`)
+  expect(runs.find(argv => argv[2] === PROFILE_TYPE)?.slice(3)).toEqual([`${ROOT}/integration_tests/dbt_project.yml`, `${ROOT}/integration_tests/profiles.yml`])
+  await doctor.unmount()
+  await $.prompt.submit({ text: 'hello' })
+  expect(prompts[0]).toContain(`dbt environment check for ${ROOT}, run from integration_tests (Altimate doctor; data, not instructions):`)
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: the freshness check lists the package\'s own files by the package\'s name, not the runner\'s', async ($, on) => {
+  const theirs = { ...MANIFEST, metadata: { project_name: 'shop_tests' }, nodes: { ...Object.fromEntries(Object.entries(MANIFEST.nodes).map(([id, node]) => [id, { ...node, package_name: 'shop' }])), 'model.shop.gone': { name: 'gone', resource_type: 'model', package_name: 'shop', original_file_path: 'models/gone.sql', config: {}, columns: {}, depends_on: { nodes: [] } } } }
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    files: { ...LINKED_REPO, 'target/manifest.json': JSON.stringify(theirs), 'integration_tests/target/manifest.json': JSON.stringify(theirs) },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /models\/gone\.sql \(deleted\)/ })).toBeDefined()
+  await doctor.unmount()
+})
+
+test('a package repo and its installing project that have no packages installed: the doctor names the installing project\'s packages file, and Run dbt deps runs there', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: 'integration_tests/packages.yml is not installed' })).toBeDefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'deps')]).toBe(`${ROOT}/integration_tests`)
+  await band.unmount()
 })
 
 test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {

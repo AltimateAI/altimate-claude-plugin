@@ -118,7 +118,7 @@ let seq = 0
 let generation = 0
 /** Gives Claude the doctor's note with its next prompt, unless the conversation that asked for it has ended. */
 function noteDoctor(root: string, view: DoctorView, asked: number) {
-  if (generation === asked) doctorNoteDue = doctorNote(root, view.checks)
+  if (generation === asked) doctorNoteDue = doctorNote(root, view.checks, view.place === root ? null : relative(root, view.place))
 }
 // Slices of manifests too big to read here, by manifest path, file and revision.
 const slices = new Map<string, Promise<any>>()
@@ -406,8 +406,20 @@ async function ownManifestOf($: EngineInterface, root: string): Promise<boolean>
   const runner = await runnerOf($, root).catch(() => null)
   if (!runner) return true
   const theirs = `${await targetOf($, runner)}/manifest.json`
-  const real = (path: string) => $.fs.stat(path).then(one => one.realPath ?? path).catch(() => path)
+  const real = (path: string) => $.fs.stat(path, { resolve: true }).then(one => one.realPath ?? path).catch(() => path)
   return (await real(own)) !== (await real(theirs))
+}
+
+/**
+ * Where the doctor looks at the project: the project itself when it has a manifest of its own, the project below
+ * that installs it when the package repo borrows that one, else where compile and validate runs dbt. Every check of
+ * the doctor, and its parse and deps, are made there.
+ */
+async function doctorPlaceOf($: EngineInterface, root: string): Promise<string> {
+  const runs = await runPlaceOf($, root)
+  if (await ownManifestOf($, root)) return root
+  if ((await manifestTarget($, root)) !== (await targetOf($, root))) return (await runnerOf($, root).catch(() => null)) ?? root
+  return runs
 }
 
 /** The project's artifact folder (`target-path` in dbt_project.yml): absolute, or under the project. */
@@ -1130,7 +1142,7 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number): 
   if (manifest) {
     // The project's name from the manifest, else dbt_project.yml's (older manifests do not record it).
     // A package repo's manifest is the project's below it: the package's own files are the ones named by its name.
-    const borrowed = (await manifestTarget($, root)) !== (await targetOf($, root))
+    const borrowed = !(await ownManifestOf($, root))
     const project = borrowed ? await projectName($, root) : (manifest.manifest.metadata?.project_name ?? (await projectName($, root)))
     const own = (one: any) => !project || !one?.package_name || one.package_name === project
     const files = (group: any) => Object.values<any>(group ?? {}).filter(own)
@@ -1543,15 +1555,16 @@ async function doctorNow($: EngineInterface): Promise<DoctorView | null> {
 
 async function runDoctor($: EngineInterface, root: string, connection = false): Promise<DoctorView> {
   const previous = await read($, doctorAtom)
-  await update($, doctorAtom, () => ({ root, checks: previous?.root === root ? previous.checks : [], at: previous?.at ?? 0, staleFiles: previous?.staleFiles ?? [], busy: connection ? 'Testing the connection…' : 'Checking the dbt environment…' }))
+  await update($, doctorAtom, () => ({ root, place: previous?.root === root ? (previous.place ?? root) : root, checks: previous?.root === root ? previous.checks : [], at: previous?.at ?? 0, staleFiles: previous?.staleFiles ?? [], busy: connection ? 'Testing the connection…' : 'Checking the dbt environment…' }))
   const checks: DoctorCheck[] = []
-  const dbt = await dbtBinary($, root)
-  const version = await runDbt($, root, ['--version'], 60_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  const place = await doctorPlaceOf($, root)
+  const dbt = await dbtBinary($, place)
+  const version = await runDbt($, place, ['--version'], 60_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   const info = versionInfo(`${version.stdout}\n${version.stderr}`)
   if (version.exitCode !== 0 && !info.core) {
     checks.push({ id: 'dbt', label: 'dbt', status: 'fail', detail: `could not run ${dbt}: ${dbtTail(version, 1)}`.slice(0, 300), fix: 'install dbt-core and your adapter (pip install dbt-core dbt-<adapter>), or create the project\'s .venv' })
   } else {
-    checks.push({ id: 'dbt', label: 'dbt', status: 'ok', detail: `dbt-core ${info.core ?? 'unknown'} (${dbt === 'dbt' ? 'on PATH' : relative(root, dbt) || dbt})`, fix: null })
+    checks.push({ id: 'dbt', label: 'dbt', status: 'ok', detail: `dbt-core ${info.core ?? 'unknown'} (${dbt === 'dbt' ? 'on PATH' : relative(place, dbt) || dbt})`, fix: null })
   }
 
   // Python: the interpreter dbt's own launcher names.
@@ -1567,7 +1580,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   }
 
   // Adapter: the profile's type, installed beside dbt-core.
-  const type = await profileType($, root)
+  const type = await profileType($, place)
   const installed = info.adapters.map(one => one.name)
   const known = installed.length ? `; installed: ${installed.join(', ')}` : ''
   if (type && typeof type === 'object') {
@@ -1600,10 +1613,9 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   // one in the package itself, which needs the package's own packages.
   const packages = await packagesOf($, root)
   if (packages) {
-    const runner = packages.installed || (await ownManifestOf($, root)) ? null : await runnerOf($, root)
-    const theirs = runner ? await packagesOf($, runner) : null
-    const has = packages.installed || (!!runner && (!theirs || theirs.installed))
-    const detail = packages.installed ? `${packages.installPath} installed` : has ? `installed in ${relative(root, runner!)}, where dbt runs for this package` : `${packages.file} is not installed`
+    const theirs = place === root ? null : await packagesOf($, place)
+    const has = place === root ? packages.installed : !theirs || theirs.installed
+    const detail = place === root ? (has ? `${packages.installPath} installed` : `${packages.file} is not installed`) : has ? `installed in ${relative(root, place)}, where dbt runs for this package` : `${relative(root, place)}/${theirs!.file} is not installed`
     checks.push({ id: 'packages', label: 'Packages', status: has ? 'ok' : 'fail', detail, fix: has ? null : 'dbt deps' })
   }
 
@@ -1614,7 +1626,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
 
   // The connection test opens a warehouse session: only when asked for.
   if (connection) {
-    const debug = await runDbt($, root, ['debug', '--log-format', 'text'], 120_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+    const debug = await runDbt($, place, ['debug', '--log-format', 'text'], 120_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
     const parsed = debugInfo(`${debug.stdout}\n${debug.stderr}`)
     checks.push(
       debug.exitCode === 0 && parsed.connection !== 'failed'
@@ -1631,7 +1643,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     check.detail = redactValues(check.detail)
     if (check.fix) check.fix = redactValues(check.fix)
   }
-  const view: DoctorView = { root, checks, at: await $.clock.now(), staleFiles, busy: null }
+  const view: DoctorView = { root, place, checks, at: await $.clock.now(), staleFiles, busy: null }
   // What the pane shows next is read from the files again, not from before this run.
   manifestRead = null
   await update($, doctorAtom, () => view)
@@ -1644,10 +1656,7 @@ async function parseNow($: EngineInterface, root: string) {
   if (current) await update($, doctorAtom, () => ({ ...current, busy: 'Running dbt parse…' }))
   // Where the manifest the doctor and lineage read is written: the project's own when it has one, integration_tests' when
   // a package repo borrows that one, else where compile and validate runs dbt (which also notes the runner's package).
-  const runs = await runPlaceOf($, root)
-  const own = await targetOf($, root)
-  const target = await manifestTarget($, root)
-  const place = target !== own ? ((await runnerOf($, root).catch(() => null)) ?? root) : (await ownManifestOf($, root)) ? root : runs
+  const place = await doctorPlaceOf($, root)
   const run = await runDbt($, place, ['parse', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   if (run.exitCode !== 0) {
     const reason = dbtTail({ stdout: run.stdout || run.stderr, stderr: '' }, 3, true, ' ').slice(0, 200)
@@ -1787,7 +1796,7 @@ export async function dbtModsBand($: EngineInterface, ui: { Box: any; Button: an
           <Box>
             {deps ? <Button key="dbt-doctor-deps" label="Run dbt deps" onPress={() => later($, async () => {
               await update($, doctorAtom, view => (view ? { ...view, busy: 'Running dbt deps…' } : view))
-              const deps = await runDbt($, doctor.root, ['deps', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+              const deps = await runDbt($, doctor.place, ['deps', '--log-format', 'text'], 300_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
               // Parsing without the packages would only fail again: say what deps said and stop.
               if (deps === SKIPPED || deps.exitCode !== 0) {
                 await update($, doctorAtom, view => (view ? { ...view, busy: null } : view))
@@ -2313,6 +2322,7 @@ export function registerDbtMods(on: On, context: { options: PluginOptions }) {
         <Box flexDirection="column">
           <Text bold>dbt environment</Text>
           <Text dimColor>{doctor.root}</Text>
+          {doctor.place !== doctor.root ? <Text dimColor>dbt runs in {relative(doctor.root, doctor.place)}</Text> : null}
           {doctor.busy ? <Text color="suggestion">{doctor.busy}</Text> : null}
         </Box>
         <Box flexDirection="column">
