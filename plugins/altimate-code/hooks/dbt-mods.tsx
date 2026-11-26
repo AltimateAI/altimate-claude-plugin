@@ -1860,7 +1860,7 @@ const editedFile = (e: { tool: string }): string | null => {
   const path = (e as { file_path?: unknown }).file_path
   return EDIT_TOOLS.has(e.tool) && typeof path === 'string' ? normalize(path) : null
 }
-// One per key, the latest: an edit that failed leaves one behind that the next call of the same key replaces. A Bash call a gate refuses is let go by dbtModsBashDropped.
+// One per key, the latest: an edit that failed leaves one behind that the next call of the same key replaces. A Bash call whose result is a refusal is let go by dbtModsBashDropped.
 const noteStart = (key: string, start: Start) => void starts.set(key, start)
 const takeStart = (key: string): Start | undefined => {
   const start = starts.get(key)
@@ -1886,9 +1886,9 @@ async function ensureForRuns($: EngineInterface, base: string, runs: DbtCommand[
   }
 }
 
-/** Whether a shell command may write model files. A subagent's is left out, as the lineage notes leave it out. */
 // The dbt verbs that compile the models they select: a shell edit in a command that runs one is left to that run, whichever models it selects.
 const BUILD_VERBS = new Set(['run', 'build', 'compile', 'show'])
+/** Whether a shell command may write model files. A subagent's is left out, as the lineage notes leave it out. */
 const writesModels = (e: { agentId?: string }, command: string) => !e.agentId && WRITES.test(command)
 
 /** Before a call runs: the conversation it is in; for a dbt command also the folder, the time and the run artifact as they are now. */

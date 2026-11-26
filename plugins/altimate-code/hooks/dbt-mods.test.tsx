@@ -3275,14 +3275,13 @@ test("with two models changed, the one whose check lands in time goes with the r
   await clock.settle()
   await clock.advance(2_500)
   const sent: any = await edit
-  expect(checkNotes(sent).length).toBe(1)
+  expect(checkNotes(sent)).toEqual([BASH_NOTE])
   release()
   await clock.settle()
   setBash({ stdout: 'ok' })
   await clock.advance(100)
   const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
-  expect(checkNotes(next).length).toBe(1)
-  expect(checkNotes(next)).not.toEqual(checkNotes(sent))
+  expect(checkNotes(next)).toEqual([`${BASH_NOTE.replace('"orders"', '"customers"')}\n- its columns were not compared with schema.yml: the manifest has no entry for this file, so the documented columns could not be read.`])
 })
 
 test("a shell edit whose check is still setting up is not replaced by the band's recheck: the model runs once and Claude gets the note", async ($, on) => {
@@ -3324,6 +3323,29 @@ test('a shell edit of the model the band shows is run against the warehouse once
   await edit
   await clock.settle()
   expect(shows(runs).length).toBe(2)
+})
+
+for (const verb of ['build', 'compile', 'show']) {
+  test(`a shell command that writes and runs dbt ${verb} is left to that run`, async ($, on) => {
+    const { clock, runs } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+    const result: any = await $.tool.call({ tool: 'Bash', command: `${SED} && dbt ${verb} -s orders` })
+    await clock.settle()
+    expect(checkNotes(result)).toEqual([])
+    expect(shows(runs).length).toBe(0)
+  })
+}
+
+test('a shell command that changes four models gets three of them compiled and validated', async ($, on) => {
+  const names = ['a', 'b', 'c', 'd'].map(one => `models/m_${one}.sql`)
+  const { clock, runs } = await start($, on, {
+    now: 100_000,
+    files: Object.fromEntries(names.map(one => [one, 'select 1 as id'])),
+    mtimes: Object.fromEntries(names.map(one => [one, 99_500])),
+    changed: names,
+  })
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  expect(shows(runs).length).toBe(3)
 })
 
 test("a subagent's shell command is not looked at for model changes, as its notes are left out too", async ($, on) => {
