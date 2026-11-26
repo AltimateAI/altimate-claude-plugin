@@ -2,7 +2,7 @@
 
 All notable changes to this plugin will be documented in this file.
 
-## [1.8.4] — 2026-11-26
+## [Unreleased]
 
 ### Changed
 - The scan-cost check (`/scan-cost`, `/allow-scan`, `maxScanBytes`) estimates BigQuery only. A dbt command on any other warehouse, Snowflake and Databricks included, is never estimated or held, even when an altimate-code answers a planner (`EXPLAIN`) estimate for it: the answer is ignored and the first one says scans are estimated on BigQuery only. The "plan estimate" label and the "needs a newer altimate-code" message for those warehouses are gone.
