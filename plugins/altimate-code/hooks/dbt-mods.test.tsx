@@ -3173,10 +3173,10 @@ test('a failed shell command that changed a model first is still compiled and va
   expect(shows(runs).length).toBe(1)
 })
 
-for (const [why, options] of [
+for (const [why, options] of ([
   ['lists nothing as touched', { changed: [] as string[] }],
   ['lists a model older than the command', { changed: ['models/orders.sql'], mtimes: { 'models/orders.sql': 10 } }],
-] as const) {
+] satisfies [string, Options][])) {
   test(`a shell command that changes no model gets no compile and validate: the search ${why}`, async ($, on) => {
     const { clock, runs } = await start($, on, { now: 100_000, ...options })
     const result: any = await $.tool.call({ tool: 'Bash', command: SED })
