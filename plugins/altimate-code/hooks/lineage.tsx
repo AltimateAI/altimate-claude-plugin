@@ -747,6 +747,8 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
   // The person's own follows; Claude's reads and the answer's follow are not asks.
   if (!input.auto && !input.reload && input.fromAnswer === undefined) askedFor = `${id}\u0000${manifest}`
+  // A reload is no ask: the person's earlier ask does not carry over to the rewritten manifest.
+  else if (input.reload) askedFor = null
   // update() may retry its write after a conflict, so each write below re-checks ownership inside
   // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
   const superseded = () => claimedSeq !== seq

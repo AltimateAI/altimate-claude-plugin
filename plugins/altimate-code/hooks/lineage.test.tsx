@@ -1377,6 +1377,19 @@ test("a rewritten manifest does not send the model's table to the warehouse serv
   expect(MANIFEST_LOADS(logs)).toHaveLength(2)
 })
 
+test("a rewritten manifest does not re-send the table of a model the person asked for", async ($, on) => {
+  let manifestMtime = 1
+  const { clock, calls, logs } = await start($, on, { warehouse: true, mtime: () => manifestMtime })
+  await $.command.run({ command: 'lineage', args: 'fct_orders' } as any)
+  await clock.settle()
+  expect(calls.filter(one => one === 'mcp:table_lineage')).toEqual(['mcp:table_lineage'])
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  expect(calls.filter(one => one === 'mcp:table_lineage')).toEqual(['mcp:table_lineage'])
+})
+
 test('a shell command that changes the shown model\'s file brings the warning up, and the edit note says the manifest is older', async ($, on) => {
   let fileMtime = 1
   const { clock, notes } = await start($, on, { fileMtime: path => (path === FILE ? fileMtime : undefined) })
