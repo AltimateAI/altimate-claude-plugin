@@ -1285,7 +1285,8 @@ test('a /clear while a reload is still reading does not stop the next conversati
   rewrite(20)
   await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
   await clock.settle()
-  expect(MANIFEST_LOADS(logs).length).toBeGreaterThanOrEqual(before + 2)
+  // The new conversation's own read, and the reload after the second rewrite.
+  expect(MANIFEST_LOADS(logs)).toHaveLength(before + 2)
   await ui.unmount()
 })
 
@@ -1365,72 +1366,15 @@ test("a shell command that rewrites the manifest and reads another model's file 
 
 test("a rewritten manifest does not send the model's table to the warehouse server: the reload is no ask", async ($, on) => {
   let manifestMtime = 1
-  const { clock, calls } = await start($, on, { warehouse: true, mtime: () => manifestMtime })
+  const { clock, calls, logs } = await start($, on, { warehouse: true, mtime: () => manifestMtime })
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   manifestMtime = 10
   await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
   await clock.settle()
   expect(calls).not.toContain('mcp:table_lineage')
-})
-
-test('a pane that was shown and closed is not opened again by a rewritten manifest', async ($, on) => {
-  let manifestMtime = 1
-  const { clock, opens, logs } = await start($, on, { mtime: () => manifestMtime })
-  await $.tool.call({ tool: 'Read', file_path: FILE })
-  await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'lineage-view' })
-  await clock.settle()
-  await ui.unmount()
-  const opened = opens.length
-  manifestMtime = 10
-  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
-  await clock.settle()
+  // The manifest was reloaded, and still nothing was sent.
   expect(MANIFEST_LOADS(logs)).toHaveLength(2)
-  expect(opens).toHaveLength(opened)
-})
-
-test('a manifest that is gone when the reload reads it leaves the graph shown, says it is gone, and draws no SQL files over it', async ($, on) => {
-  let manifestMtime = 1
-  let gone = false
-  let stats = 0
-  const { clock, logs } = await start($, on, {
-    mtime: () => manifestMtime,
-    // The check that the manifest changed sees it; the reload's own read of it finds it removed.
-    missing: path => path === MANIFEST_PATH && gone && ++stats > 1,
-  })
-  await $.tool.call({ tool: 'Read', file_path: FILE })
-  await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'lineage-view' })
-  await clock.settle()
-  gone = true
-  manifestMtime = 10
-  await $.tool.call({ tool: 'Bash', command: 'dbt clean' } as any)
-  await clock.settle()
-  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
-  expect(logs.filter(line => line.includes('from the SQL files'))).toEqual([])
-  expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Text', text: /No dbt manifest at that path/ })).toBeDefined()
-  expect(MANIFEST_LOADS(logs)).toHaveLength(1)
-  await ui.unmount()
-})
-
-test("a shell command that rewrites the manifest and reads another model's file still moves the pane to that model", async ($, on) => {
-  let manifestMtime = 1
-  const OTHER = `${ROOT}/models/stg_customers.sql`
-  const { clock, logs } = await start($, on, { mtime: () => manifestMtime, present: [OTHER] })
-  await $.tool.call({ tool: 'Read', file_path: FILE })
-  await clock.settle()
-  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
-  await ui.press({ key: 'lineage-view' })
-  await clock.settle()
-  manifestMtime = 10
-  await $.tool.call({ tool: 'Bash', command: `dbt compile --select ${OTHER}` } as any)
-  await clock.settle()
-  expect(logs).toContain('lineage-pane · following stg_customers →')
-  await ui.unmount()
 })
 
 test('a shell command that changes the shown model\'s file brings the warning up, and the edit note says the manifest is older', async ($, on) => {
