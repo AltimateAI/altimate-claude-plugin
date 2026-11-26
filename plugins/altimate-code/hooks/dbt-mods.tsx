@@ -547,23 +547,58 @@ async function hardcodedReads($: EngineInterface, manifest: string, sql: string,
   return out
 }
 
-// The files a shell edit is checking, by conversation, from the moment each is found until its check is done: the band
-// shows a check only once its setup is done, and a recheck in that time would run the same file again.
-const inFlight = new Map<string, number>()
-const flightKey = (conversation: number, file: string) => `${conversation}\u0000${normalize(file)}`
-/** Notes a file as being checked until the returned function is called. */
-function holdFlight(conversation: number, file: string): () => void {
-  const key = flightKey(conversation, file)
-  inFlight.set(key, (inFlight.get(key) ?? 0) + 1)
-  return () => {
-    const left = (inFlight.get(key) ?? 1) - 1
-    if (left > 0) inFlight.set(key, left)
-    else inFlight.delete(key)
+// The checks of each file version in each conversation that have started and not finished. A second asker of the same
+// version gets the first's answer: whichever of an edit, a shell edit and a recheck reaches the compile first, the file is run once.
+type Checked = { view: CheckView; note: string; current: () => boolean; newest: () => boolean }
+const checking = new Map<string, Promise<Checked>>()
+// The latest check of each file in each conversation that has not finished, and the one follow-up waiting behind it.
+const latestCheck = new Map<string, Promise<Checked>>()
+const followUp = new Map<string, Promise<Checked>>()
+
+/**
+ * Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. Asked again
+ * while the same version of the file (by its time) is being checked in the same conversation, it answers with that
+ * check. `forced` (a schema or macro edit changed what the file compiles to, not the file) waits for a check under way
+ * and then runs once more, however many ask meanwhile. `fresh` (an edit made through Claude's edit tools) always runs
+ * a new check, which replaces any older one of the file.
+ */
+async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation, mode: 'shared' | 'forced' | 'fresh' = 'shared'): Promise<Checked> {
+  const path = normalize(file)
+  const mtime = (await $.fs.stat(path).catch(() => null))?.mtimeMs ?? ''
+  const base = `${mineGeneration}\u0000${path}`
+  const key = `${base}\u0000${mtime}`
+  // From here to the registration, nothing awaits: two askers cannot both find the file free.
+  const running = latestCheck.get(base)
+  if (mode === 'forced' && running) {
+    const waiting = followUp.get(base)
+    if (waiting) return waiting
+    const next: Promise<Checked> = running
+      .catch(() => null)
+      .then(() => {
+        followUp.delete(base)
+        return startCheck($, root, file, mineGeneration, base, `${key}\u0000forced`)
+      })
+    followUp.set(base, next)
+    return next
   }
+  const shared = mode === 'shared' ? checking.get(key) : undefined
+  if (shared) return shared
+  return startCheck($, root, file, mineGeneration, base, key)
 }
 
-/** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
-async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
+function startCheck($: EngineInterface, root: string, file: string, mineGeneration: number, base: string, key: string): Promise<Checked> {
+  const run = compileAndValidateOnce($, root, file, mineGeneration)
+  checking.set(key, run)
+  latestCheck.set(base, run)
+  const done = () => {
+    if (checking.get(key) === run) checking.delete(key)
+    if (latestCheck.get(base) === run) latestCheck.delete(base)
+  }
+  run.then(done, done)
+  return run
+}
+
+async function compileAndValidateOnce($: EngineInterface, root: string, file: string, mineGeneration: number): Promise<Checked> {
   const rel = relative(root, file)
   // A check from a conversation that has ended takes no place in the order: it can neither land nor push a
   // current check out. Within this conversation, `current` is the newest check of its file (an older one of the
@@ -816,9 +851,10 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   const check = await read($, checkAtom)
   if (!check) return
   // Busy (a check or recheck running): a forced recheck waits for it, so a schema.yml written meanwhile is not missed.
-  if (check.status === 'running' || rechecking || inFlight.has(flightKey(generation, `${check.root}/${check.file}`))) {
+  if (check.status === 'running' || rechecking) {
     // Only an edit that concerns this check waits for it; an unrelated one never replaces it.
-    if (edited && editConcerns(check, edited)) forcedWhileBusy = edited
+    // One already waiting behind a check of the file has not started: it will read this edit too.
+    if (edited && editConcerns(check, edited) && !followUp.has(`${generation}\u0000${normalize(`${check.root}/${check.file}`)}`)) forcedWhileBusy = edited
     return
   }
   const files = [check.file, ...(check.schema ? [check.schema] : [])]
@@ -832,7 +868,7 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   if (!force && !stats.some(stat => !!stat && stat.mtimeMs > check.at)) return
   rechecking = true
   try {
-    const { view, current, newest } = await compileAndValidate($, check.root, `${check.root}/${check.file}`, asked)
+    const { view, current, newest } = await compileAndValidate($, check.root, `${check.root}/${check.file}`, asked, force ? 'forced' : 'shared')
     if (!current()) return
     // The toast points at the band: only the check the band shows may say so.
     if (view.status !== 'running' && newest()) {
@@ -2035,7 +2071,7 @@ function announceCheck($: EngineInterface, landed: { view: CheckView; newest: ()
 async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null): Promise<string[] | null> {
   const root = await modelRoot($, path)
   if (!root) return null
-  const check = compileAndValidate($, root, path, asked)
+  const check = compileAndValidate($, root, path, asked, 'fresh')
   const landed = await within($, CHECK_HOLD_MS, check)
   // Landed, and still the newest check of this file in this conversation.
   if (landed && landed.current()) {
@@ -2051,8 +2087,7 @@ async function checkModel($: EngineInterface, path: string, asked: number, agent
 /**
  * After a shell command that may have written models, in the background: each model file it changed (three at most)
  * is checked as an edit of it is, its note kept for the agent's next tool result, and then the checked model is
- * looked at again. A command that failed is looked at too, since it may have changed files before it did. Each file
- * counts as being checked from the moment it is found, so a recheck meanwhile does not run it a second time.
+ * looked at again. A command that failed is looked at too, since it may have changed files before it did.
  */
 async function bashChecks($: EngineInterface, start: { asked: number; startedAt: number }, command: string, agentId: string | null): Promise<void> {
   try {
@@ -2060,7 +2095,6 @@ async function bashChecks($: EngineInterface, start: { asked: number; startedAt:
     await Promise.all(
       changed.map(async one => {
         const path = normalize(one.file)
-        const release = holdFlight(start.asked, path)
         try {
           const root = await modelRoot($, path)
           if (!root) return
@@ -2069,13 +2103,11 @@ async function bashChecks($: EngineInterface, start: { asked: number; startedAt:
           announceCheck($, done)
           if (done.note) pendingNotes.push({ note: done.note, agentId, current: done.current })
         } catch {
-        } finally {
-          release()
         }
       }),
     )
   } finally {
-    // After the checks: the band shows a check only once it has started, and a look before that would run its model again.
+    // After the checks, once.
     await recheck($, null).catch(() => {})
   }
 }
