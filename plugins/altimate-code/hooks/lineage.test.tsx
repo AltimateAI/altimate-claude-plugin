@@ -1102,7 +1102,7 @@ test('a manifest is reloaded once: the next tool call with the same modified tim
   expect(MANIFEST_LOADS(logs)).toHaveLength(2)
 })
 
-test('a reload that cannot read the new manifest keeps the graph shown, and the next call tries again', async ($, on) => {
+test('a reload that cannot read the new manifest keeps the graph shown and says so; the file written again is read again', async ($, on) => {
   let manifestMtime = 1
   let written = false
   const { clock, logs } = await start($, on, {
@@ -1122,14 +1122,69 @@ test('a reload that cannot read the new manifest keeps the graph shown, and the 
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: STALE_WARNING })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Could not read target\/manifest\.json: is dbt still writing it\? Press r to retry\./ })).toBeDefined()
   expect(MANIFEST_LOADS(logs)).toHaveLength(1)
-  // dbt finished writing it.
+  // The same file is not read again by every tool call that follows.
   written = true
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(1)
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
+  // dbt finishes writing: the file's time moves on.
+  manifestMtime = 11
   await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
   await clock.settle()
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: STALE_WARNING })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /Could not read/ })).toBeUndefined()
   expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('a rewritten manifest without the shown model keeps the graph, says the model is gone, and is not read again by later calls', async ($, on) => {
+  let manifestMtime = 1
+  let dropped = false
+  const { nodes } = MANIFEST
+  const { 'model.shop.fct_orders': _gone, ...others } = nodes
+  let readsAfterRewrite = 0
+  const { clock } = await start($, on, {
+    mtime: () => manifestMtime,
+    fileText: path => {
+      if (path !== MANIFEST_PATH || !dropped) return undefined
+      readsAfterRewrite++
+      return JSON.stringify({ ...MANIFEST, nodes: others })
+    },
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  dropped = true
+  manifestMtime = 10
+  for (const command of ['dbt compile', 'ls', 'ls']) {
+    await $.tool.call({ tool: 'Bash', command } as any)
+    await clock.settle()
+  }
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeDefined()
+  expect(readsAfterRewrite).toBe(1)
+  await ui.unmount()
+})
+
+test("a shell command that rewrites the manifest and reads another model's file still moves the pane to that model", async ($, on) => {
+  let manifestMtime = 1
+  const OTHER = `${ROOT}/models/stg_customers.sql`
+  const { clock, logs } = await start($, on, { mtime: () => manifestMtime, present: [OTHER] })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: `dbt compile --select ${OTHER}` } as any)
+  await clock.settle()
+  expect(logs).toContain('lineage-pane · following stg_customers →')
   await ui.unmount()
 })
 
