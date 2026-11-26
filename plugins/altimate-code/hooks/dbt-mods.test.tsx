@@ -1006,9 +1006,9 @@ test('a doctor run resolves whose manifest the root\'s is once, not once per che
   const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect(await doctor.find({ type: 'Text', text: /^stale: / })).toBeDefined()
   await doctor.unmount()
-  // One resolution (the root's manifest and the installing project's) per place the doctor decides in: its run,
-  // its manifest check at that run and the one made when it is shown.
-  expect(resolved).toEqual(Array.from({ length: 3 }, () => ['target/manifest.json', 'integration_tests/target/manifest.json']).flat())
+  // One resolution (the root's manifest and the installing project's) for the doctor's run, which its manifest check
+  // shares, and one for the manifest line when the doctor is shown, which reads the files again.
+  expect(resolved).toEqual(Array.from({ length: 2 }, () => ['target/manifest.json', 'integration_tests/target/manifest.json']).flat())
 })
 
 test('the installing project\'s files are filtered by the name in its manifest when its dbt_project.yml names none', async ($, on) => {

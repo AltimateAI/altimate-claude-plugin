@@ -1502,8 +1502,8 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
 }
 
 /** The doctor's manifest line: whether the manifest is missing, current, or older than files of the project. */
-async function manifestCheck($: EngineInterface, root: string): Promise<{ check: DoctorCheck; staleFiles: string[] }> {
-  const { place, own } = await doctorSiteOf($, root)
+async function manifestCheck($: EngineInterface, root: string, site?: { place: string; own: boolean }): Promise<{ check: DoctorCheck; staleFiles: string[] }> {
+  const { place, own } = site ?? (await doctorSiteOf($, root))
   const found = await manifestTarget($, root)
   const stat = await $.fs.stat(`${found}/manifest.json`).catch(() => null)
   // Missing: the file a parse in the doctor's place writes.
@@ -1572,7 +1572,8 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   const previous = await read($, doctorAtom)
   await update($, doctorAtom, () => ({ root, place: previous?.root === root ? (previous.place ?? root) : root, checks: previous?.root === root ? previous.checks : [], at: previous?.at ?? 0, staleFiles: previous?.staleFiles ?? [], busy: connection ? 'Testing the connection…' : 'Checking the dbt environment…' }))
   const checks: DoctorCheck[] = []
-  const place = await doctorPlaceOf($, root)
+  const site = await doctorSiteOf($, root)
+  const place = site.place
   const dbt = await dbtBinary($, place)
   const version = await runDbt($, place, ['--version'], 60_000).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   const info = versionInfo(`${version.stdout}\n${version.stderr}`)
@@ -1635,7 +1636,7 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   }
 
   // Manifest freshness.
-  const manifest = await manifestCheck($, root)
+  const manifest = await manifestCheck($, root, site)
   checks.push(manifest.check)
   const staleFiles = manifest.staleFiles
 
