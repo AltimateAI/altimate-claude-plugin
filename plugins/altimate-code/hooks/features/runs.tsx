@@ -332,9 +332,9 @@ export function utf8Length(text: string): number {
   return bytes
 }
 
-/** `held` cut to MAX_STORE_BYTES: the oldest run of the folder with the most runs goes first. */
-export function fitStore(held: Held): Held {
-  const next: Held = { ...held }
+/** `store` cut to MAX_STORE_BYTES: the oldest run of the folder with the most runs goes first. */
+export function fitStore(store: Held): Held {
+  const next: Held = { ...store }
   while (utf8Length(JSON.stringify(next)) > MAX_STORE_BYTES) {
     const biggest = Object.keys(next).sort((a, b) => next[b]!.length - next[a]!.length)[0]
     if (!biggest) break
@@ -525,7 +525,7 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   }
   // One read for each folder, at the same time: a slow one does not take the others' time, a failed one does not stop them.
   let unreadable = false
-  const read = await Promise.all(
+  const readings = await Promise.all(
     mine.map(folder =>
       readRun($, invocations.filter(one => folderOf(one) === folder), invocations, began.at, ended).catch(() => {
         unreadable = true
@@ -552,7 +552,7 @@ async function record($: EngineInterface, e: BashCall, result?: ToolCallResult):
   // and the file cannot say which it is, so (as for two commands writing one folder) nothing is recorded.
   const latest = new Map<string, { run: RunRecord; order: number }>()
   let aliased = false
-  for (const one of read) {
+  for (const one of readings) {
     if (!one) continue
     if (latest.has(one.run.id)) aliased = true
     if ((latest.get(one.run.id)?.order ?? -1) < one.order) latest.set(one.run.id, one)

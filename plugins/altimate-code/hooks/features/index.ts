@@ -323,16 +323,26 @@ export async function featureBandLines($: EngineInterface, ui: BandUi): Promise<
   const add = (id: string, line: RenderElement | null | void) => {
     if (line) lines.push({ id, line })
   }
-  add('runs', await attempt($, 'runs', 'bandLine', () => runsBandLine($, ui)))
-  add('defer', await attempt($, 'defer', 'bandLine', () => deferBandLine($, ui)))
-  add('toModel', await attempt($, 'toModel', 'bandLine', () => toModelBandLine($, ui)))
-  add('comments', await attempt($, 'comments', 'bandLine', () => commentsBandLine($, ui)))
-  add('cost', await attempt($, 'cost', 'bandLine', () => costBandLine($, ui)))
-  add('health', await attempt($, 'health', 'bandLine', () => healthBandLine($, ui)))
-  add('sqlGraph', await attempt($, 'sqlGraph', 'bandLine', () => sqlGraphBandLine($, ui)))
-  add('docs', await attempt($, 'docs', 'bandLine', () => docsBandLine($, ui)))
-  add('cteProfile', await attempt($, 'cteProfile', 'bandLine', () => cteProfileBandLine($, ui)))
-  add('dbtMods', await attempt($, 'dbtMods', 'bandLine', () => bandDbtMods($, ui)))
+  const runsLine = await attempt($, 'runs', 'bandLine', () => runsBandLine($, ui))
+  add('runs', runsLine)
+  const deferLine = await attempt($, 'defer', 'bandLine', () => deferBandLine($, ui))
+  add('defer', deferLine)
+  const toModelLine = await attempt($, 'toModel', 'bandLine', () => toModelBandLine($, ui))
+  add('toModel', toModelLine)
+  const commentsLine = await attempt($, 'comments', 'bandLine', () => commentsBandLine($, ui))
+  add('comments', commentsLine)
+  const costLine = await attempt($, 'cost', 'bandLine', () => costBandLine($, ui))
+  add('cost', costLine)
+  const healthLine = await attempt($, 'health', 'bandLine', () => healthBandLine($, ui))
+  add('health', healthLine)
+  const sqlGraphLine = await attempt($, 'sqlGraph', 'bandLine', () => sqlGraphBandLine($, ui))
+  add('sqlGraph', sqlGraphLine)
+  const docsLine = await attempt($, 'docs', 'bandLine', () => docsBandLine($, ui))
+  add('docs', docsLine)
+  const cteProfileLine = await attempt($, 'cteProfile', 'bandLine', () => cteProfileBandLine($, ui))
+  add('cteProfile', cteProfileLine)
+  const dbtModsLine = await attempt($, 'dbtMods', 'bandLine', () => bandDbtMods($, ui))
+  add('dbtMods', dbtModsLine)
   return lines
 }
 
@@ -342,15 +352,24 @@ export async function featuresBashRewrite($: EngineInterface, e: BashCall): Prom
   const take = (next: string | null | void) => {
     if (typeof next === 'string' && next.trim() !== '') command = next
   }
-  take(await attempt($, 'runs', 'bashRewrite', () => runsBashRewrite($, { ...e, command })))
-  take(await attempt($, 'defer', 'bashRewrite', () => deferBashRewrite($, { ...e, command })))
-  take(await attempt($, 'toModel', 'bashRewrite', () => toModelBashRewrite($, { ...e, command })))
-  take(await attempt($, 'comments', 'bashRewrite', () => commentsBashRewrite($, { ...e, command })))
-  take(await attempt($, 'cost', 'bashRewrite', () => costBashRewrite($, { ...e, command })))
-  take(await attempt($, 'health', 'bashRewrite', () => healthBashRewrite($, { ...e, command })))
-  take(await attempt($, 'sqlGraph', 'bashRewrite', () => sqlGraphBashRewrite($, { ...e, command })))
-  take(await attempt($, 'docs', 'bashRewrite', () => docsBashRewrite($, { ...e, command })))
-  take(await attempt($, 'cteProfile', 'bashRewrite', () => cteProfileBashRewrite($, { ...e, command })))
+  const runsRewrite = await attempt($, 'runs', 'bashRewrite', () => runsBashRewrite($, { ...e, command }))
+  take(runsRewrite)
+  const deferRewrite = await attempt($, 'defer', 'bashRewrite', () => deferBashRewrite($, { ...e, command }))
+  take(deferRewrite)
+  const toModelRewrite = await attempt($, 'toModel', 'bashRewrite', () => toModelBashRewrite($, { ...e, command }))
+  take(toModelRewrite)
+  const commentsRewrite = await attempt($, 'comments', 'bashRewrite', () => commentsBashRewrite($, { ...e, command }))
+  take(commentsRewrite)
+  const costRewrite = await attempt($, 'cost', 'bashRewrite', () => costBashRewrite($, { ...e, command }))
+  take(costRewrite)
+  const healthRewrite = await attempt($, 'health', 'bashRewrite', () => healthBashRewrite($, { ...e, command }))
+  take(healthRewrite)
+  const sqlGraphRewrite = await attempt($, 'sqlGraph', 'bashRewrite', () => sqlGraphBashRewrite($, { ...e, command }))
+  take(sqlGraphRewrite)
+  const docsRewrite = await attempt($, 'docs', 'bashRewrite', () => docsBashRewrite($, { ...e, command }))
+  take(docsRewrite)
+  const cteProfileRewrite = await attempt($, 'cteProfile', 'bashRewrite', () => cteProfileBashRewrite($, { ...e, command }))
+  take(cteProfileRewrite)
   return command
 }
 
@@ -360,15 +379,42 @@ export async function featuresBashGate($: EngineInterface, e: BashCall): Promise
   const take = (next: { deny: string } | null | void) => {
     if (!gate && next && typeof next.deny === 'string') gate = { deny: next.deny }
   }
-  if (!gate) take(await attempt($, 'runs', 'bashGate', () => runsBashGate($, e)))
-  if (!gate) take(await attempt($, 'defer', 'bashGate', () => deferBashGate($, e)))
-  if (!gate) take(await attempt($, 'toModel', 'bashGate', () => toModelBashGate($, e)))
-  if (!gate) take(await attempt($, 'comments', 'bashGate', () => commentsBashGate($, e)))
-  if (!gate) take(await attempt($, 'cost', 'bashGate', () => costBashGate($, e)))
-  if (!gate) take(await attempt($, 'health', 'bashGate', () => healthBashGate($, e)))
-  if (!gate) take(await attempt($, 'sqlGraph', 'bashGate', () => sqlGraphBashGate($, e)))
-  if (!gate) take(await attempt($, 'docs', 'bashGate', () => docsBashGate($, e)))
-  if (!gate) take(await attempt($, 'cteProfile', 'bashGate', () => cteProfileBashGate($, e)))
+  if (!gate) {
+    const runsGate = await attempt($, 'runs', 'bashGate', () => runsBashGate($, e))
+    take(runsGate)
+  }
+  if (!gate) {
+    const deferGate = await attempt($, 'defer', 'bashGate', () => deferBashGate($, e))
+    take(deferGate)
+  }
+  if (!gate) {
+    const toModelGate = await attempt($, 'toModel', 'bashGate', () => toModelBashGate($, e))
+    take(toModelGate)
+  }
+  if (!gate) {
+    const commentsGate = await attempt($, 'comments', 'bashGate', () => commentsBashGate($, e))
+    take(commentsGate)
+  }
+  if (!gate) {
+    const costGate = await attempt($, 'cost', 'bashGate', () => costBashGate($, e))
+    take(costGate)
+  }
+  if (!gate) {
+    const healthGate = await attempt($, 'health', 'bashGate', () => healthBashGate($, e))
+    take(healthGate)
+  }
+  if (!gate) {
+    const sqlGraphGate = await attempt($, 'sqlGraph', 'bashGate', () => sqlGraphBashGate($, e))
+    take(sqlGraphGate)
+  }
+  if (!gate) {
+    const docsGate = await attempt($, 'docs', 'bashGate', () => docsBashGate($, e))
+    take(docsGate)
+  }
+  if (!gate) {
+    const cteProfileGate = await attempt($, 'cteProfile', 'bashGate', () => cteProfileBashGate($, e))
+    take(cteProfileGate)
+  }
   return gate
 }
 

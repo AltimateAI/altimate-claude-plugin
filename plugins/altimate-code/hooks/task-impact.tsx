@@ -196,7 +196,10 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     const values = columns.length === 0 ? valueCandidates(one.original, current) : []
     const snapshot = state?.snapshot ?? null
     const key = `${one.root}\0${snapshot ?? ''}`
-    if (!projects.has(key)) projects.set(key, projectIds($, one.root, snapshot))
+    if (!projects.has(key)) {
+      const ids = projectIds($, one.root, snapshot)
+      projects.set(key, ids)
+    }
     const id = changeId(await projects.get(key)!, relative(one.root, file), modelName(file))
     changes.push({ model: modelName(file), ...(id ?? {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }
@@ -328,7 +331,8 @@ async function traceFull($: EngineInterface, done: Finished): Promise<ColumnTrac
   const jobs = downs.map(trace => async () => {
     if (!trace.column || trace.unchecked) return trace
     const change = done.changes.find(one => sameModel(trace, one))!
-    return { ...trace, up: answerOf(await ask($, done, change, trace.column, 'upstream')) }
+    const asked = await ask($, done, change, trace.column, 'upstream')
+    return { ...trace, up: answerOf(asked) }
   })
   return pool(jobs, PARALLEL)
 }
@@ -519,11 +523,13 @@ async function buildReport($: EngineInterface, done: Finished): Promise<{ path: 
     done.downs = null
   }
   const frozen = Object.values(done.manifests).every(Boolean)
+  const builtNow = await $.clock.now()
+  const moved = await movedOn($, done)
   const data = reportData(done.changes, traces, {
     finishedAt: stamp(done.finishedAt),
-    builtAt: stamp(await $.clock.now()),
+    builtAt: stamp(builtNow),
     manifest: frozen ? 'the manifest as it was when the task started' : 'target/manifest.json as it is now, as the copy from the task\'s start is gone',
-    movedOn: await movedOn($, done),
+    movedOn: moved,
   })
   const path = reportPathOf(done)
   try {
@@ -754,7 +760,10 @@ export async function taskTurnStart($: EngineInterface) {
   await update($, summaryAtom, () => null)
   await update($, planAtom, () => null)
   const own = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
-  if (own) await within($, 20_000, prepareRoot($, t, own))
+  if (own) {
+    const preparing = prepareRoot($, t, own)
+    await within($, 20_000, preparing)
+  }
 }
 
 /** Before an edit lands: the model file's text as it was, the first time the task touches it. */
@@ -768,7 +777,8 @@ export async function taskBeforeTool($: EngineInterface, e: any) {
   const root = await projectRoot($, file, true).catch(() => null)
   if (!root) return
   // A project first touched mid-task has its manifest copied now, before the edit.
-  await within($, 20_000, prepareRoot($, t, root))
+  const preparing = prepareRoot($, t, root)
+  await within($, 20_000, preparing)
   if (!t.originals.has(file)) t.originals.set(file, { root, text: await $.fs.read(file).catch(() => '') })
 }
 

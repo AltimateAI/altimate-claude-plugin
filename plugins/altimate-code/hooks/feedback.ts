@@ -326,8 +326,8 @@ async function homesOf($: EngineInterface): Promise<string[]> {
 async function altimateFacts($: EngineInterface): Promise<Facts['altimate']> {
   for (const name of CLI_NAMES) {
     try {
-      const answer = await $.process.run([name, '--version'], { timeoutMs: 10_000 })
-      const version = answer.exitCode === 0 ? (parseVersion(answer.stdout ?? '') ?? parseVersion(answer.stderr ?? '')) : null
+      const reply = await $.process.run([name, '--version'], { timeoutMs: 10_000 })
+      const version = reply.exitCode === 0 ? (parseVersion(reply.stdout ?? '') ?? parseVersion(reply.stderr ?? '')) : null
       return version ? { name, version } : null
     } catch (error) {
       if (!MISSING_BINARY.test(String(error))) return null
@@ -340,9 +340,11 @@ export type Ask = { withProblem: boolean }
 
 /** Gathers the facts. A fact that cannot be read is left out or `unknown`, never an error. */
 export async function collectFacts($: EngineInterface, ask: Ask, extra: { doctor: DoctorFacts; settings: PluginOptions }): Promise<Facts> {
+  const pluginPending = pluginVersion($).catch(() => 'unknown')
+  const altimatePending = altimateFacts($).catch(() => null)
   const [plugin, altimate, claudeCode, os] = await Promise.all([
-    pluginVersion($).catch(() => 'unknown'),
-    altimateFacts($).catch(() => null),
+    pluginPending,
+    altimatePending,
     $.session
       .version()
       .then(one => asVersion(one.version) ?? one.version.match(/^\d+(?:\.\d+){0,3}(?:-[\w.]+)?/)?.[0] ?? 'unknown')
@@ -386,7 +388,7 @@ export function buildDraft(facts: Facts, description: string): Draft {
     const parts = [facts.doctor.dbtCore && `dbt-core ${facts.doctor.dbtCore}`, facts.doctor.adapter && `adapter ${facts.doctor.adapter}`, facts.doctor.python && `Python ${facts.doctor.python}`].filter(Boolean)
     lines.push(`- dbt: ${parts.join(', ')}`)
   } else lines.push('- dbt: not checked this session')
-  if (facts.settings.length) lines.push(`- Settings: ${facts.settings.map(([label, on]) => `${label} ${on ? 'on' : 'off'}`).join(', ')}`)
+  if (facts.settings.length) lines.push(`- Settings: ${facts.settings.map(([label, isOn]) => `${label} ${isOn ? 'on' : 'off'}`).join(', ')}`)
   if (facts.problem) lines.push('', `**Last plugin error** (${facts.problem.source}; the error's type and code only, none of its message)`, '', '```text', facts.problem.text, '```')
   return { title: titleOf(description), body: lines.join('\n'), withProblem: !!facts.problem }
 }

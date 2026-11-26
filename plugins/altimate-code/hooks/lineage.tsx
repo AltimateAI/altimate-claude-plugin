@@ -480,7 +480,8 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
     // names a version's (orders.sql, orders_v2.sql), before the other package's model of that name is shown.
     if (!own && !path && root) {
       const file = new RegExp(`(^|/)${model.replace(/[^\w]/g, '\\$&')}(_v\\d+)?\\.sql$`, 'i')
-      const files = Object.values((await sqlGraph($, root).catch(() => null))?.nodes ?? {}).map(one => one.path).filter((one): one is string => !!one && file.test(one))
+      const graph = await sqlGraph($, root).catch(() => null)
+      const files = Object.values(graph?.nodes ?? {}).map(one => one.path).filter((one): one is string => !!one && file.test(one))
       for (const one of files.slice(0, 5)) {
         const at = await graphFromToolsOnce($, manifest, mtimeMs, one, one)
         if (at && packageOf(at.id) === pkg) return at
@@ -1438,7 +1439,8 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
       // The reply says what the lookup found, when it lands in time; a slow one (a manifest read through
       // altimate-code) goes on, and the pane shows its answer. A message left from before is not this one's.
       await update($, messageAtom, () => null)
-      const landed = await within($, COMMAND_WAIT_MS, follow($, { model, dottedColumn: true, open: true }))
+      const following = follow($, { model, dottedColumn: true, open: true })
+      const landed = await within($, COMMAND_WAIT_MS, following)
       // It did not land: the pane's message says why (no such model), else a newer lookup took the pane.
       if (landed === false) return { text: (await read($, messageAtom)) ?? `Altimate lineage did not open ${model}: a newer lookup took the pane.` }
       return { text: landed === null ? `Altimate lineage is looking up ${model}; the pane is ${where}.` : `Altimate lineage for ${model} is open ${where}.` }
@@ -1500,7 +1502,8 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     // The model files the shell command changed: the pane follows the first, and each gets the impact note an Edit gets.
     const bashNotes: ImpactNote[] = []
     if (bash) {
-      const changed = await within($, 3_000, bashChanged($, bash).catch(() => null))
+      const changing = bashChanged($, bash).catch(() => null)
+      const changed = await within($, 3_000, changing)
       if (changed?.length) {
         clearSqlGraphs()
         later($, async () => void (await follow($, { file: changed[0]!.file, auto: true })))

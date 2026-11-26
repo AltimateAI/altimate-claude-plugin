@@ -123,7 +123,11 @@ export async function canonical($: EngineInterface, files: readonly string[]): P
   await Promise.all(
     [...new Set(files.filter(Boolean).map(norm))].map(async file => {
       const slash = file.lastIndexOf('/')
-      real.set(file, slash <= 0 ? file : `${await realFolder($, file.slice(0, slash), seen)}${file.slice(slash)}`)
+      if (slash <= 0) real.set(file, file)
+      else {
+        const parent = await realFolder($, file.slice(0, slash), seen)
+        real.set(file, `${parent}${file.slice(slash)}`)
+      }
     }),
   )
   return p => {
@@ -837,12 +841,16 @@ export async function bashGate($: EngineInterface, e: BashCall): Promise<{ deny:
   if (!enabled) return null
   if (!(options.healthBlocksPush === true || options.healthBlocksPush === 'true') || !isGitPush(e.command)) {
     // Where the shell is before this command runs: its own `cd`s are read from there, and `bashAfter` sees the folder after them.
-    if (CHANGES_FOLDER.test(e.command)) noteFolder(e, await within($, GATE_WAIT_MS, shellFolder($)))
+    if (CHANGES_FOLDER.test(e.command)) {
+      const folderRead = shellFolder($)
+      noteFolder(e, await within($, GATE_WAIT_MS, folderRead))
+    }
     return null
   }
   // The whole decision, folder lookups included, is bounded inside the chain's deadline: past it the gate is given up on and the push runs.
   // Right after a /clear the kept issues may not be back yet: the push waits for them, inside the same deadline.
-  const decided = await within($, GATE_WAIT_MS, clearStart($).then(() => decide($, e)))
+  const deciding = clearStart($).then(() => decide($, e))
+  const decided = await within($, GATE_WAIT_MS, deciding)
   const verdict = decided === null ? hold('the check of the changes could not be read in time.') : decided === 'run' ? null : decided
   featureUsed($, 'health_push_gate', verdict ? 'held' : 'allowed')
   return verdict
@@ -863,7 +871,10 @@ async function decide($: EngineInterface, e: BashCall): Promise<{ deny: string }
   // The wait is what is left of the gate's budget: the work above counts against the chain's deadline too.
   if ((await wantsCheck($, true)) || running?.generation === generation) {
     const left = GATE_WAIT_MS - ((await $.clock.now()) - startedAt)
-    if (left > 0) await within($, left, kick($))
+    if (left > 0) {
+      const kicking = kick($)
+      await within($, left, kicking)
+    }
   }
   const state = await read($, healthAtom)
   // A check that failed or did not finish leaves the changes unchecked: a gate that fails open is no gate.

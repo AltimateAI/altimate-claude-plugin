@@ -123,13 +123,13 @@ async function sessionDir($: EngineInterface, look: Look, fallback: string | nul
   // A lookup that does not answer in time loses the pass: the folder is not known, and the last one is not assumed.
   // One that fails outright (a host with no session folder) is the session's root, as before: the gate goes on with it.
   const failed = async () => ({ dir: (await $.session.root().catch(() => fallback)) as string | null })
-  const read = left > 0 ? await within($, left, $.session.cwd().then(dir => ({ dir: dir as string | null }), failed)) : null
+  const looked = left > 0 ? await within($, left, $.session.cwd().then(dir => ({ dir: dir as string | null }), failed)) : null
   look.spent += Date.now() - began
-  if (!read) {
+  if (!looked) {
     look.lost = true
     return fallback
   }
-  return read.dir
+  return looked.dir
 }
 
 const UNREADABLE_DENY = 'The project folder could not be read in time, so the scan cannot be estimated. Run the same command again.'
@@ -501,7 +501,10 @@ async function startWhenIdle<T>(
     const left = waitUntil - (await $.clock.now())
     if (left <= 0 || !(await within($, left, Promise.all(running).then(() => true)))) return null
   }
-  return reuse() ?? begin(startEstimate($, args, waitUntil + ESTIMATE_BUDGET_MS, dir))
+  const reused = reuse()
+  if (reused !== undefined && reused !== null) return reused
+  const started = startEstimate($, args, waitUntil + ESTIMATE_BUDGET_MS, dir)
+  return begin(started)
 }
 
 /**

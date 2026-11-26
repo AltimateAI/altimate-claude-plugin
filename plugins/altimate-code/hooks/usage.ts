@@ -86,7 +86,9 @@ export async function pluginVersion($: EngineInterface): Promise<string> {
 
 async function send($: EngineInterface, action: 'plugin_session_start' | 'plugin_feature_used', fields: string[]) {
   if (await usageOff($)) return
-  const [version, install] = await Promise.all([pluginVersion($), installId($)])
+  const versionPending = pluginVersion($)
+  const installPending = installId($)
+  const [version, install] = await Promise.all([versionPending, installPending])
   // No session id: these events must not be joinable to anything else the CLI sends about the session.
   const argv = ['tool', 'report-event', action, '--plugin-version', version, '--install-id', install, ...fields]
   // An older CLI answers with an error: it is not this plugin's to show.

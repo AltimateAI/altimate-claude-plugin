@@ -63,13 +63,13 @@ export function withTiers(rows: readonly CteRow[]): CteRow[] {
   const marginals = new Map<number, number>()
   const underReadsAt = new Set<number>()
   if (readsKnown(rows)) {
-    const read = (i: number, seen = new Set<number>()): Set<number> => {
-      for (const at of rows[i]?.reads ?? []) if (at < i && !seen.has(at)) read(at, seen.add(at))
+    const readsOf = (i: number, seen = new Set<number>()): Set<number> => {
+      for (const at of rows[i]?.reads ?? []) if (at < i && !seen.has(at)) readsOf(at, seen.add(at))
       return seen
     }
     rows.forEach((row, i) => {
       if (row.status !== 'done' || row.queryMs === undefined) return
-      const under = [...read(i)]
+      const under = [...readsOf(i)]
       if (under.some(at => !marginals.has(at))) return
       const own = row.queryMs - under.reduce((sum, at) => sum + marginals.get(at)!, 0)
       marginals.set(i, Math.max(0, own))

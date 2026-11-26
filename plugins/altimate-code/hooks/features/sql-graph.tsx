@@ -208,7 +208,8 @@ export function register(on: On, context: FeatureContext) {
       return { text: plain(`Could not open the SQL graph: ${String(error)}`) }
     }
     // One backend call and one warehouse metadata read, per command, never per edit.
-    const landed = await within($, COMMAND_WAIT_MS, load($, model))
+    const loading = load($, model)
+    const landed = await within($, COMMAND_WAIT_MS, loading)
     if (landed === null) return { text: `The SQL graph for ${shownModel} is loading; the pane shows it when it is ready.` }
     if (landed === 'replaced') return { text: `The SQL graph for ${shownModel} was replaced by a newer /sql-graph.` }
     return { text: landed === 'shown' ? `The SQL graph for ${shownModel} is open.` : ((await read($, stateAtom))?.shown?.message ?? `No SQL graph for ${shownModel}.`) }

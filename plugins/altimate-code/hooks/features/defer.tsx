@@ -278,9 +278,9 @@ export function runsInProject(command: string, root: string, projectDir: string,
 /** The flags the state's override and answer lead to: the state dir only while defer is on. */
 export function effective(state: DeferState | null): RewriteOptions {
   if (!state) return {}
-  const on = state.override ?? state.enabled
+  const isOn = state.override ?? state.enabled
   return {
-    stateDir: on ? state.stateDir : null,
+    stateDir: isOn ? state.stateDir : null,
     favorState: state.favorState,
     target: state.target,
     defaultTarget: state.defaultTarget,
@@ -291,10 +291,10 @@ export function effective(state: DeferState | null): RewriteOptions {
 export function statusText(state: DeferState | null): string | null {
   if (!state?.projectDir) return null
   const target = state.target ?? state.defaultTarget
-  const on = state.override ?? state.enabled
+  const isOn = state.override ?? state.enabled
   const parts: string[] = []
   if (target) parts.push(`dbt ${target}`)
-  if (on && state.stateDir) parts.push(`defer ${state.stateDir.split(/[\\/]/).filter(Boolean).pop() ?? 'on'}`)
+  if (isOn && state.stateDir) parts.push(`defer ${state.stateDir.split(/[\\/]/).filter(Boolean).pop() ?? 'on'}`)
   return parts.length ? parts.join(' · ') : null
 }
 
@@ -362,9 +362,9 @@ async function publish($: EngineInterface, state: DeferState) {
 
 function describe(state: DeferState | null): string {
   if (!state?.projectDir) return 'defer: no dbt project found in this folder.'
-  const on = state.override ?? state.enabled
+  const isOn = state.override ?? state.enabled
   const lines = [
-    `defer: ${on && state.stateDir ? 'on' : 'off'}${state.override !== null ? ` (set with /defer ${state.override ? 'on' : 'off'} for this session)` : ''}`,
+    `defer: ${isOn && state.stateDir ? 'on' : 'off'}${state.override !== null ? ` (set with /defer ${state.override ? 'on' : 'off'} for this session)` : ''}`,
     `project: ${state.projectDir}`,
     `mode: ${state.mode}`,
   ]

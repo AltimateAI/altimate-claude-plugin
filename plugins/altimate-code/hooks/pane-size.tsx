@@ -56,12 +56,12 @@ export function paneSizes(spec: PaneSpec): PaneSizes {
 /** Reads the saved sizes into the session. A store read that fails leaves the sizes as they are: it says nothing about what was saved. */
 export async function loadPaneSizes($: EngineInterface) {
   terminalColumns = null
-  const read = await $.store.get(SIZES_KEY).then(
+  const stored = await $.store.get(SIZES_KEY).then(
     saved => ({ saved }),
     () => null,
   )
-  if (!read) return
-  const { saved } = read
+  if (!stored) return
+  const { saved } = stored
   const valid = saved && typeof saved === 'object' ? Object.entries(saved as Record<string, unknown>).filter(([, one]) => SIZE_ORDER.includes(one as PaneSize)) : []
   await update($, sizeAtom, () => Object.fromEntries(valid) as Record<string, PaneSize>)
 }

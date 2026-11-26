@@ -445,7 +445,8 @@ async function schemaEdited($: EngineInterface, file: EditedFile, created: boole
   const until = (await $.clock.now()) + ROUND_MS
   const traced = await Promise.all(
     changed.map(async one => {
-      const result = await runTool($, 'impact_analysis', { manifest_path: project.manifest, model: await modelRef($, project, one.model), column: one.column, change_type: 'modify' }, { until, cliOnly: true }).catch(() => null)
+      const ref = await modelRef($, project, one.model)
+      const result = await runTool($, 'impact_analysis', { manifest_path: project.manifest, model: ref, column: one.column, change_type: 'modify' }, { until, cliOnly: true }).catch(() => null)
       return { one, result }
     }),
   )
@@ -489,7 +490,8 @@ async function schemaEdited($: EngineInterface, file: EditedFile, created: boole
 
 /** The model's documentation coverage as `manifest` has it; a line for Claude when the tool is missing; null when it could not be read. */
 async function coverageOf($: EngineInterface, project: Project, model: string, manifest: string, until: number): Promise<{ view: DocsCoverageView; star: boolean } | { line: string } | null> {
-  const result = await runTool($, 'dbt_docs_coverage', { model: await modelRef($, project, model, true, manifest), manifest_path: manifest }, { until, cliOnly: true }).catch(() => null)
+  const ref = await modelRef($, project, model, true, manifest)
+  const result = await runTool($, 'dbt_docs_coverage', { model: ref, manifest_path: manifest }, { until, cliOnly: true }).catch(() => null)
   if (!result) return null
   const meta = result.metadata
   if (!result.ok || !meta || meta.success !== true) {
@@ -539,10 +541,10 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
     const { landed, cancel } = nextCheckOf(file.path)
     later($, () => coverageAfterCheck($, asked, landed, cancel))
   }
-  const read = await coverageOf($, project, model, project.manifest, (await $.clock.now()) + ROUND_MS)
-  if (!read) return []
-  if ('line' in read) return [read.line]
-  const view = { ...read.view, stale }
+  const covered = await coverageOf($, project, model, project.manifest, (await $.clock.now()) + ROUND_MS)
+  if (!covered) return []
+  if ('line' in covered) return [covered.line]
+  const view = { ...covered.view, stale }
   // A later edit (or its check's coverage) has set the coverage shown since this read began: it is not replaced.
   if (mine === coverageSeq && waiting === asked) {
     await update($, docsAtom, prev => ({ ...(prev ?? empty()), coverage: view }))
@@ -550,7 +552,7 @@ async function sqlEdited($: EngineInterface, file: EditedFile): Promise<string[]
   }
   const gaps = [...(view.hasDescription ? [] : ['the model itself']), ...view.missing]
   // A select list that is not plain column names (a `*`, an unaliased expression, a UNION) is counted by the manifest's columns only.
-  const star = read.star ? " · the model's select list is not plain column names (a `*`, an unaliased expression or a UNION), so only the columns the manifest lists are counted" : ''
+  const star = covered.star ? " · the model's select list is not plain column names (a `*`, an unaliased expression or a UNION), so only the columns the manifest lists are counted" : ''
   if (!gaps.length && !star && !stale) return []
   // Names come from the project and this line goes to Claude, so each is a quoted string.
   const shown = gaps.slice(0, MAX_NAMES).map(one => JSON.stringify(one)).join(', ') + (gaps.length > MAX_NAMES ? `, +${gaps.length - MAX_NAMES} more` : '')
@@ -565,14 +567,14 @@ async function coverageAfterCheck($: EngineInterface, asked: { file: string; mod
   // A wait that ran out leaves nothing behind.
   if (!landed) return cancel()
   if (waiting !== asked) return
-  const read = await coverageOf($, asked.project, asked.model, landed.manifest, (await $.clock.now()) + RECHECK_MS)
+  const covered = await coverageOf($, asked.project, asked.model, landed.manifest, (await $.clock.now()) + RECHECK_MS)
   // The plugin's next dbt run rewrites that manifest: an answer read from another run's is not this edit's.
   const now = await $.fs.stat(landed.manifest).catch(() => null)
   if (now?.mtimeMs !== landed.mtimeMs) return
   // A newer edit asks for its own coverage: this one is no longer shown.
-  if (waiting !== asked || !read || 'line' in read) return
+  if (waiting !== asked || !covered || 'line' in covered) return
   waiting = null
-  await update($, docsAtom, prev => ({ ...(prev ?? empty()), coverage: read.view }))
+  await update($, docsAtom, prev => ({ ...(prev ?? empty()), coverage: covered.view }))
 }
 
 async function showStatus($: EngineInterface) {

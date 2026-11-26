@@ -269,8 +269,8 @@ function cannotRun(run: { exitCode: number; stdout: string; stderr: string }): b
 }
 
 /** Runs the project's dbt in the project, after any dbt this plugin already started there. */
-function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DBT_TIMEOUT_MS, wanted?: () => boolean, scratch = false, read?: () => Promise<Artifact>) {
-  return runQueued($, root, async () => [await dbtBinary($, root), ...args], { timeoutMs, wanted, scratch, read }).then(
+function runDbt($: EngineInterface, root: string, args: string[], timeoutMs = DBT_TIMEOUT_MS, wanted?: () => boolean, scratch = false, readArtifact?: () => Promise<Artifact>) {
+  return runQueued($, root, async () => [await dbtBinary($, root), ...args], { timeoutMs, wanted, scratch, read: readArtifact }).then(
     done => {
       if (done !== SKIPPED) {
         if (cannotRun(done)) unrunnable.add(root)
@@ -598,7 +598,7 @@ async function compileAndValidate($: EngineInterface, root: string, file: string
     return [...(pkg ? [`package:${pkg}`] : []), version !== undefined && version !== null && version !== '' ? `${named}.v${version}` : named].join(',')
   }
   const scratch = await scratchOf($, place)
-  const run1 = (args: string[], read?: () => Promise<Artifact>): Promise<ProcessDone> => runDbt($, place, args, DBT_TIMEOUT_MS, current, true, read).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
+  const run1 = (args: string[], readArtifact?: () => Promise<Artifact>): Promise<ProcessDone> => runDbt($, place, args, DBT_TIMEOUT_MS, current, true, readArtifact).catch(error => ({ exitCode: -1, stdout: '', stderr: String(error) }))
   // The manifest the show wrote is read while the plugin's dbt queue is still held, so no other run of it replaces it first.
   const show = (select: string) => run1(['show', '--select', select, '--indirect-selection', 'empty', '--limit', '1', '--output', 'json', '--log-format', 'json'], () => readManifest($, place, rel, scratch, pkg))
   // A newer edit replaced this check before its turn: nothing ran, nothing to report.
@@ -893,7 +893,8 @@ async function seenInvocation($: EngineInterface, root: string): Promise<string 
 async function readRunResults($: EngineInterface, root: string, path: string, size: number): Promise<unknown> {
   if (size <= MAX_MANIFEST_BYTES) return $.fs.read(path).then(JSON.parse).catch(() => null)
   try {
-    const run = await $.process.run([await pythonFor($, root), '-c', RUN_FAILURES, path], { cwd: root, timeoutMs: 60_000, stdin: JSON.stringify(redactionValues()) })
+    const python = await pythonFor($, root)
+    const run = await $.process.run([python, '-c', RUN_FAILURES, path], { cwd: root, timeoutMs: 60_000, stdin: JSON.stringify(redactionValues()) })
     return run.exitCode === 0 && !run.isStdoutTruncated ? JSON.parse(run.stdout) : null
   } catch {
     return null
@@ -1069,18 +1070,18 @@ async function rerun($: EngineInterface, query: QueryResult, asked = generation)
 async function modelNote($: EngineInterface, file: string, agentId?: string): Promise<{ note: string; toast: string } | null> {
   const root = await projectRoot($, file, true)
   if (!root) return null
-  const read = await readManifest($, root, relative(root, file))
-  if (!read) return null
-  const found = nodeForFile(read.manifest, relative(root, file), await projectName($, root))
+  const loaded = await readManifest($, root, relative(root, file))
+  if (!loaded) return null
+  const found = nodeForFile(loaded.manifest, relative(root, file), await projectName($, root))
   if (!found || found.node.resource_type !== 'model') return null
   // Per project (two checkouts share node ids), manifest revision, and agent (a subagent's context is its own).
-  const key = JSON.stringify([root, found.id, read.mtimeMs, agentId ?? null])
+  const key = JSON.stringify([root, found.id, loaded.mtimeMs, agentId ?? null])
   if (contextGiven.has(key)) return null
-  const context = modelContext(read.manifest, found.id)
+  const context = modelContext(loaded.manifest, found.id)
   if (!context) return null
   contextGiven.add(key)
   const sqlStat = await $.fs.stat(file).catch(() => null)
-  const stale = !!sqlStat && sqlStat.mtimeMs > read.mtimeMs
+  const stale = !!sqlStat && sqlStat.mtimeMs > loaded.mtimeMs
   const tests = context.tests.length + context.columns.reduce((sum, one) => sum + one.tests.length, 0)
   return {
     note: modelContextNote(context, stale),
@@ -1439,7 +1440,8 @@ async function ensureRedactions($: EngineInterface, root: string, from?: Profile
         continue
       }
       const done = (async () => {
-        const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path, ...(from?.profile ? [from.profile] : [])], { cwd: root, timeoutMs: 30_000, stdin: JSON.stringify({ env }) })
+        const python = await pythonFor($, root)
+        const run = await $.process.run([python, '-c', PROFILE_REDACT, `${root}/dbt_project.yml`, path, ...(from?.profile ? [from.profile] : [])], { cwd: root, timeoutMs: 30_000, stdin: JSON.stringify({ env }) })
         if (run.exitCode !== 0) return
         const answer = JSON.parse(run.stdout) as { redact?: unknown }
         if (Array.isArray(answer.redact)) setRedactions(key, answer.redact.filter((one): one is string => typeof one === 'string'))
@@ -1457,7 +1459,8 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
   // Whatever stops the parser (no interpreter, no PyYAML, a file it cannot read) is "could not tell", never a guess.
   const unread: ProfileProblem = { problem: 'error', profile: '', target: '' }
   try {
-    const run = await $.process.run([await pythonFor($, root), '-c', PROFILE_TYPE, `${root}/dbt_project.yml`, path], { cwd: root, timeoutMs: 30_000 })
+    const python = await pythonFor($, root)
+    const run = await $.process.run([python, '-c', PROFILE_TYPE, `${root}/dbt_project.yml`, path], { cwd: root, timeoutMs: 30_000 })
     if (run.exitCode !== 0) return unread
     const answer = JSON.parse(run.stdout) as { status: string; profile?: string; target?: string; type?: string; field?: 'target' | 'type' }
     if (answer.status === 'ok' && answer.type) return answer.type
@@ -1509,11 +1512,11 @@ async function manifestNow($: EngineInterface, root: string): Promise<{ check: D
   const stat = await $.fs.stat(`${target}/manifest.json`).catch(() => null)
   const key = `${root}\u0000${stat?.mtimeMs ?? 'none'}\u0000${fileChanges}`
   if (manifestRead?.key === key) return manifestRead
-  const read = await manifestCheck($, root)
-  read.check.detail = redactValues(read.check.detail)
-  if (read.check.fix) read.check.fix = redactValues(read.check.fix)
-  manifestRead = { key, ...read }
-  return read
+  const checked = await manifestCheck($, root)
+  checked.check.detail = redactValues(checked.check.detail)
+  if (checked.check.fix) checked.check.fix = redactValues(checked.check.fix)
+  manifestRead = { key, ...checked }
+  return checked
 }
 
 /** The doctor as shown: its last run, with the manifest line as the files are now. */
@@ -1584,7 +1587,8 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
   // one in the package itself, which needs the package's own packages.
   const packages = await packagesOf($, root)
   if (packages) {
-    const ownManifest = await $.fs.exists(`${await targetOf($, root)}/manifest.json`).catch(() => false)
+    const target = await targetOf($, root)
+    const ownManifest = await $.fs.exists(`${target}/manifest.json`).catch(() => false)
     const runner = packages.installed || ownManifest ? null : await runnerOf($, root)
     const theirs = runner ? await packagesOf($, runner) : null
     const has = packages.installed || (!!runner && (!theirs || theirs.installed))
