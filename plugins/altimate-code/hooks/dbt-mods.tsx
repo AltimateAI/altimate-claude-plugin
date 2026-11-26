@@ -1072,7 +1072,8 @@ async function modelNote($: EngineInterface, file: string, agentId?: string): Pr
   if (!root) return null
   const loaded = await readManifest($, root, relative(root, file))
   if (!loaded) return null
-  const found = nodeForFile(loaded.manifest, relative(root, file), await projectName($, root))
+  const project = await projectName($, root)
+  const found = nodeForFile(loaded.manifest, relative(root, file), project)
   if (!found || found.node.resource_type !== 'model') return null
   // Per project (two checkouts share node ids), manifest revision, and agent (a subagent's context is its own).
   const key = JSON.stringify([root, found.id, loaded.mtimeMs, agentId ?? null])
@@ -1424,7 +1425,8 @@ function forgetRedactions() {
  */
 async function ensureRedactions($: EngineInterface, root: string, from?: ProfilesFrom): Promise<void> {
   try {
-    const paths = new Set<string>(await profileCandidates($, root))
+    const candidates = await profileCandidates($, root)
+    const paths = new Set<string>(candidates)
     if (from) for (const path of await profileCandidates($, root, from)) paths.add(path)
     for (const path of paths) {
       // The assignments set for the command change what the profile renders to: another load for them. The key stays in memory.

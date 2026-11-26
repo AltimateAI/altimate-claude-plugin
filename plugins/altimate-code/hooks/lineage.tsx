@@ -757,7 +757,8 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // While the pane waits on a narrow terminal each follow asks again: it may have been widened.
   if (input.open || (!paneOpened && input.auto) || (input.auto && (await read($, narrowAtom)))) {
     paneOpened = true
-    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...(await paneRequest($, PANE, PANE_SIZES)), ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
+    const paneSize = await paneRequest($, PANE, PANE_SIZES)
+    const opened = await $.ui.open({ id: PANE, title: PANE_TITLE, ...paneSize, ...(input.open ? { focus: true as const } : {}), closeOnEscape: true }).catch(() => null)
     if (opened && opened.isPlaced === false && !input.open) await narrowHint($, opened.reason)
     else if (opened) await update($, narrowAtom, () => null)
   }

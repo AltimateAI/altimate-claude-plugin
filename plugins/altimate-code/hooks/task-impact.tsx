@@ -511,7 +511,10 @@ async function buildReport($: EngineInterface, done: Finished): Promise<{ path: 
       done.downs = null
       done.full = null
     }
-    if (!done.manifests[root] && !(await $.fs.exists(await manifestFile($, root)).catch(() => false))) missing.push(root)
+    if (!done.manifests[root]) {
+      const current = await manifestFile($, root)
+      if (!(await $.fs.exists(current).catch(() => false))) missing.push(root)
+    }
   }
   if (missing.length > 0) return { error: `The manifest this task was read from is gone. Run \`dbt compile\` and ask again.` }
   const traces = await (done.full ??= traceFull($, done))
