@@ -2001,13 +2001,14 @@ function pendingLines(agentId: string | null): string[] {
  * the agent's next one. `gate` says whether the result it is held for is still waiting: once it is not, the note is
  * kept for the next one.
  */
-async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null, until: number | null = null, gate: { open: boolean } | null = null): Promise<string[] | null> {
+async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null, until: number | null = null, gate: { open: boolean; running: Promise<unknown>[] } | null = null): Promise<string[] | null> {
   const root = await projectRoot($, path, true)
   // Only a file under the project's model-paths is a model dbt can show.
   const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
   const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
   if (!root || !inModels) return null
   const check = compileAndValidate($, root, path, asked)
+  gate?.running.push(check.catch(() => {}))
   // The time left is read after the reads above, which count against it. With none left, nothing is held: the answer rides on the next result.
   const holdMs = until === null ? CHECK_HOLD_MS : Math.max(0, until - (await $.clock.now()))
   const landed = holdMs > 0 ? await within($, holdMs, check) : null
@@ -2046,11 +2047,13 @@ const BASH_HOLD_MS = 2_000
  * looked at too, since it may have changed files before it did.
  */
 async function bashEdited($: EngineInterface, start: { asked: number; startedAt: number }, command: string, agentId: string | null, by: number): Promise<string[]> {
-  const again = () => later($, () => recheck($, null))
-  // Set when the search outlasts the result's hold: the look again waits for the checks it starts.
+  // Whether the result is still waiting for the checks, and the checks that have started.
+  const gate = { open: true, running: [] as Promise<unknown>[] }
+  // Looked at again once every check of this command has finished: until then the band does not show them, and a look now would run the same model a second time.
+  const again = (batch: Promise<unknown>) => void batch.then(() => Promise.all(gate.running)).catch(() => {}).then(() => later($, () => recheck($, null)))
+  let batch: Promise<unknown> = Promise.resolve()
+  // Set when the search outlasts the result's hold: the look again waits for the checks it starts to finish.
   let late = false
-  // Whether the result is still waiting for the checks.
-  const gate = { open: true }
   try {
     // No later than `by`, the time the features' share of the phase runs out.
     const now = await $.clock.now()
@@ -2060,25 +2063,29 @@ async function bashEdited($: EngineInterface, start: { asked: number; startedAt:
     const lines: string[] = []
     const check = (files: { file: string }[], until: number) =>
       Promise.all(files.map(one => checkModel($, normalize(one.file), start.asked, agentId, until, gate).then(found => void lines.push(...(found ?? [])), () => {})))
-    // The search was too slow for this result: the checks it leads to ride on the next one, and the look again waits for them to start.
+    // The search was too slow for this result: the checks it leads to ride on the next one.
     if (!changed) {
       late = true
       gate.open = false
       found
-        .then(files => check(files, 0))
-        .then(again)
+        .then(files => {
+          const started = check(files, 0)
+          again(started)
+          return started
+        })
         .catch(() => {})
       return []
     }
     // The notes in hand when the time is up: a check still going keeps its own for the next result.
-    await within($, Math.max(0, until - (await $.clock.now())), check(changed, until))
+    batch = check(changed, until)
+    await within($, Math.max(0, until - (await $.clock.now())), batch)
     gate.open = false
     return lines
   } catch {
     gate.open = false
     return []
   } finally {
-    if (!late) again()
+    if (!late) again(batch)
   }
 }
 
