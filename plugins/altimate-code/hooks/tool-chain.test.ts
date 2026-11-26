@@ -1,11 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { FEATURE_IDS } from './features'
-import { register } from './integrations'
-import { STATUS_ORDER, statusLineOf } from './status-line'
-import { within } from './altimate-cli'
+import { FEATURE_IDS, register, STATUS_ORDER, statusLineOf, within, afterCall, beforeCall, PHASES, type ChainSteps } from './integrations'
 import { nothingToReport } from './inert-features'
-import { afterCall, beforeCall, PHASES, type ChainSteps } from './tool-chain'
 
 /** Steps that record each phase they run, in order. */
 function recording(overrides: Partial<ChainSteps> = {}) {

@@ -1,5 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
-import { MAX_NAME, MAX_REASON, POLL_MS, checkOnce, decisionText, toastFor, type ReviewDecision } from './review-notices'
+import { MAX_NAME, MAX_REASON, POLL_MS, checkOnce, decisionText, toastFor, type ReviewDecision } from './integrations'
 
 const decision = (over: Partial<ReviewDecision> = {}): ReviewDecision => ({
   kind: 'skill',

@@ -4,7 +4,7 @@ import { expect, mock, test as kitTest } from 'claude-code/testing'
 // off here and tested in dbt-mods.test.tsx.
 const test = (name: string, body: Parameters<typeof kitTest>[1]) => kitTest(name, { options: { dbt_mods: false } }, body as any)
 
-import { commandDir } from './lineage'
+import { commandDir } from './integrations'
 import { buildGraph, subgraph } from './lineage-graph'
 import { MANIFEST } from './lineage-graph.test'
 import { nothingToReport } from './inert-features'
@@ -724,7 +724,7 @@ test('an edit naming a column is held until its reach is known, then the reach g
   // Nothing per edit reaches the transcript: the person's one line is the end-of-task summary.
   expect(logs.filter(line => line.includes('impact-first'))).toEqual([])
 
-  // The band waits for the end of the task (task-impact.tsx): nothing per edit.
+  // The band waits for the end of the task (the task impact section of integrations.tsx): nothing per edit.
   const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
   expect(await band.find({ type: 'Text', text: /fct_orders\.revenue/ })).toBeUndefined()
   await band.unmount()

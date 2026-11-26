@@ -37,7 +37,7 @@ import {
   textTable,
   versionInfo,
 } from './dbt-mods-core'
-import { CHECK_HOLD_MS, MANIFEST_SLICE, PROFILE_REDACT, PROFILE_TYPE, RUN_FAILURES } from './dbt-mods'
+import { CHECK_HOLD_MS, MANIFEST_SLICE, PROFILE_REDACT, PROFILE_TYPE, RUN_FAILURES } from './integrations'
 
 // The dbt helpers on; the lineage half reads no manifest in these tests that it would draw.
 // The kit's `$` and `on`, loosely typed: the tests drive engine events with only the fields the helpers read.
@@ -283,7 +283,7 @@ async function start($: any, on: any, options: Options = {}) {
   // Where Claude's shell is: the session folder unless a test moved it.
   let cwdCalls = 0
   on('session.cwd', async () => {
-    // The first read is the defer feature's gate (features/defer.tsx), before the call starts; the hold is on
+    // The first read is the defer feature's gate (the defer section of integrations.tsx), before the call starts; the hold is on
     // the dbt helpers' own read of the folder, the second.
     if (options.holdCwd && ++cwdCalls === 8) await options.holdCwd
     return { value: options.cwd ?? ROOT }

@@ -4,8 +4,7 @@ import { expect, mock, test as kitTest } from 'claude-code/testing'
 // and tested in dbt-mods.test.tsx.
 const test = (name: string, body: Parameters<typeof kitTest>[1]) => kitTest(name, { options: { dbt_mods: false } }, body as any)
 
-import { PHASE_TIMEOUT_MS } from '../tool-chain'
-import { ROUND_MS, applyPrompt, candidatesFrom, changedDescriptions, columnDescriptions, modelPaths, sentGroups } from './docs'
+import { PHASE_TIMEOUT_MS, ROUND_MS, applyPrompt, candidatesFrom, changedDescriptions, columnDescriptions, docsModelPaths as modelPaths, sentGroups } from '../integrations'
 import { nothingToReport } from '../inert-features'
 import { playsClear } from '../clear-state.testkit'
 

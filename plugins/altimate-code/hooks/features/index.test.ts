@@ -1,20 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { nothingToReport } from '../inert-features'
-import {
-  registerFeatures,
-  attempt,
-  featureBandLines,
-  featuresBashAfter,
-  featuresBashGate,
-  featuresBashRewrite,
-  featuresEditAfter,
-  featuresReadOrEditAfter,
-  featuresSessionEnd,
-  featuresSessionStart,
-  featuresTurnComplete,
-  featuresTurnStart,
-} from './index'
+import { registerFeatures, featuresAttempt as attempt, featureBandLines, featuresBashAfter, featuresBashGate, featuresBashRewrite, featuresEditAfter, featuresReadOrEditAfter, featuresSessionEnd, featuresSessionStart, featuresTurnComplete, featuresTurnStart } from '../integrations'
 
 const engine = () => {
   const logs: string[] = []

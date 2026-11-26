@@ -2,7 +2,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 import { nothingToReport } from './inert-features'
 import { setRedactions, clearRedactions } from './dbt-mods-core'
-import { MAX_URL, buildDraft, cleanDescription, collectFacts, issueUrl, redactSecrets, titleOf, withoutHome, type Facts } from './feedback'
+import { MAX_URL, buildDraft, cleanDescription, collectFacts, issueUrl, redactSecrets, feedbackTitleOf as titleOf, withoutHome, type Facts } from './integrations'
 import { doctorFacts, errorKinds } from './last-problem'
 
 const HOME = '/Users/alice'

@@ -1,5 +1,5 @@
 // The end-of-task column impact: altimate-code's column answers read into a short summary for the band
-// and a self-contained HTML report. Pure functions only; the hooks live in task-impact.tsx.
+// and a self-contained HTML report. Pure functions only; the hooks live in the hooks module.
 
 import type { PlanImpactView, Reach, TaskSummaryView } from '../types'
 import { GRAPH_CSS, GRAPH_VIEW_JS, graphLayout, graphView, pressIsClick } from './report-graph'

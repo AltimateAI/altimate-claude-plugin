@@ -2,10 +2,10 @@
 # Runs the three Python scripts the dbt helpers embed (PROFILE_TYPE, MANIFEST_SLICE, RUN_FAILURES) for
 # real, with python3 and PyYAML, against fixture profiles, manifests and run_results files that hold a
 # secret in odd places. No secret may appear in what a script prints. DBT_MODS_SRC points at another copy
-# of dbt-mods.tsx to run these checks against.
+# of integrations.tsx to run these checks against.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-SRC="${DBT_MODS_SRC:-$ROOT/plugins/altimate-code/hooks/dbt-mods.tsx}"
+SRC="${DBT_MODS_SRC:-$ROOT/plugins/altimate-code/hooks/integrations.tsx}"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 FAILURES=0
 fail() { echo "FAIL: $1"; FAILURES=$((FAILURES + 1)); }

@@ -1,8 +1,7 @@
 import { expect, mock, test as engineTest } from 'claude-code/testing'
 
 import { playsClear } from './clear-state.testkit'
-import { PHASE_TIMEOUT_MS } from './tool-chain'
-import { GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './features/health'
+import { PHASE_TIMEOUT_MS, HEALTH_GATE_WAIT_MS as GATE_WAIT_MS, bandText, canonical, configPathProblem, filesWrittenBy, isGitPush, modelsOfFiles, newIssues, pairKey, pushRefusal, reportText, simpleCommands, toolArgs } from './integrations'
 
 // These tests are about the health check's own lines: the dbt helpers (their doctor and compile lines) are left off.
 const test = ((name: string, ...rest: any[]) => {

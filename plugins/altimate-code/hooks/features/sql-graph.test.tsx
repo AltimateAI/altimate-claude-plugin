@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { nothingToReport } from '../inert-features'
-import { cteCount, inputsOf, orderNodes } from './sql-graph'
+import { cteCount, inputsOf, orderNodes } from '../integrations'
 
 const ROOT = '/repo'
 const FILE = `${ROOT}/models/fct_orders.sql`
