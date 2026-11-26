@@ -949,7 +949,7 @@ test('a package repo whose target is linked to the one of the project that insta
     mtimes: { 'models/orders.sql': 5_000 },
     version: 'Core:\n  - installed: 1.11.6\nPlugins:\n  - duckdb: 1.9.0\n',
     links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
-    files: LINKED_REPO,
+    files: { ...LINKED_REPO, 'integration_tests/.venv/bin/dbt': '' },
     profileAnswer: said({ status: 'ok', profile: 'tests', target: 'dev', type: 'duckdb' }),
   })
   await clock.settle()
@@ -958,6 +958,7 @@ test('a package repo whose target is linked to the one of the project that insta
   await doctor.press({ key: 'doctor-connection' })
   await clock.settle()
   expect(cwds[runs.findIndex(argv => argv[1] === '--version')]).toBe(`${ROOT}/integration_tests`)
+  expect(runs.find(argv => argv[1] === '--version')?.[0]).toBe(`${ROOT}/integration_tests/.venv/bin/dbt`)
   expect(cwds[runs.findIndex(argv => argv[1] === 'debug')]).toBe(`${ROOT}/integration_tests`)
   expect(runs.find(argv => argv[2] === PROFILE_TYPE)?.slice(3)).toEqual([`${ROOT}/integration_tests/dbt_project.yml`, `${ROOT}/integration_tests/profiles.yml`])
   await doctor.unmount()

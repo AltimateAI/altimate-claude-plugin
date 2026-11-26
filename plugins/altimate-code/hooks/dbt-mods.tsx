@@ -1123,7 +1123,7 @@ const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const ROOT_CONFIGS = new Set(['dbt_project.yml', 'packages.yml', 'profiles.yml', 'selectors.yml', 'package-lock.yml', 'dependencies.yml'])
 
 /** The project's files changed after its manifest was written, newest first. */
-async function changedSince($: EngineInterface, root: string, mtimeMs: number, named?: string | null): Promise<{ files: string[]; complete: boolean }> {
+async function changedSince($: EngineInterface, root: string, mtimeMs: number, named?: string | null): Promise<{ files: string[]; entries: { path: string; mtimeMs: number }[]; complete: boolean }> {
   const changed: { path: string; mtimeMs: number }[] = []
   let scanned = 0
   // A folder that exists but could not be read leaves the answer unknown, never "current".
@@ -1198,7 +1198,8 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number, n
   for (const path of [...new Set(listed)].slice(0, MAX_SCANNED)) {
     if (!(await $.fs.exists(`${root}/${path}`).catch(() => true))) changed.push({ path: `${path} (deleted)`, mtimeMs: Number.MAX_SAFE_INTEGER })
   }
-  return { files: changed.sort((a, b) => b.mtimeMs - a.mtimeMs).map(one => one.path), complete: complete && scanned <= MAX_SCANNED }
+  const entries = changed.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  return { files: entries.map(one => one.path), entries, complete: complete && scanned <= MAX_SCANNED }
 }
 
 /** Why the selected output's adapter could not be read. */
@@ -1507,7 +1508,10 @@ async function manifestCheck($: EngineInterface, root: string): Promise<{ check:
   const scan = await changedSince($, root, stat.mtimeMs)
   // Run in another project, the parse reads that project's own files too.
   const there = place === root ? null : await changedSince($, place, stat.mtimeMs, await projectName($, place))
-  const staleFiles = [...scan.files, ...(there?.files ?? []).map(one => `${relative(root, place)}/${one}`)]
+  // A project folder walked from the root holds the other project's files: each counts once, newest first.
+  const merged = new Map<string, number>()
+  for (const one of [...scan.entries, ...(there?.entries ?? []).map(one => ({ ...one, path: `${relative(root, place)}/${one.path}` }))]) merged.set(one.path, Math.max(one.mtimeMs, merged.get(one.path) ?? 0))
+  const staleFiles = [...merged].sort((a, b) => b[1] - a[1]).map(([path]) => path)
   scan.complete = scan.complete && (there?.complete ?? true)
   const age = Math.round(((await $.clock.now()) - stat.mtimeMs) / 60_000)
   const ageText = age < 60 ? `${age} min` : age < 2880 ? `${Math.round(age / 60)} h` : `${Math.round(age / 1440)} days`
