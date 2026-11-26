@@ -200,6 +200,8 @@ type Options = {
   holdCwd?: Promise<void>
   /** The first dbt show waits for this. */
   holdShow?: Promise<void>
+  /** Once set, a read of the manifest waits for it. */
+  holdManifest?: Promise<void>
   /** The search for files a shell command changed waits for this. */
   holdFind?: Promise<void>
   /** The dbt shows that run before the held one. */
@@ -348,6 +350,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
     const rel = e.path.slice(ROOT.length + 1)
     if (rel.endsWith('manifest.json')) order.push(`read ${rel}`)
+    if (rel.endsWith('manifest.json') && options.holdManifest) return options.holdManifest.then(() => ({ value: files[rel] }))
     if (!(rel in files)) throw new Error('ENOENT')
     if (rel === 'target/run_results.json' && (options.runResultsSize ?? 0) > 4 * 1024 * 1024) throw new Error('file is larger than 4 MiB')
     return { value: files[rel] }
@@ -3280,6 +3283,30 @@ test("with two models changed, the one whose check lands in time goes with the r
   const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
   expect(checkNotes(next).length).toBe(1)
   expect(checkNotes(next)).not.toEqual(checkNotes(sent))
+})
+
+test("a shell edit whose check is still setting up is not replaced by the band's recheck: the model runs once and Claude gets the note", async ($, on) => {
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 50_000 }, changed: ['models/orders.sql'] }
+  const { clock, runs, mtimes, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  await clock.advance(5_000)
+  mtimes['models/orders.sql'] = 104_500
+  let release!: () => void
+  options.holdManifest = new Promise<void>(go => (release = go))
+  const edit = $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await clock.advance(2_500)
+  const sent: any = await edit
+  expect(checkNotes(sent)).toEqual([])
+  options.holdManifest = undefined
+  release()
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  await clock.advance(100)
+  const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(checkNotes(next)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(2)
 })
 
 test('a shell edit of the model the band shows is run against the warehouse once', async ($, on) => {
