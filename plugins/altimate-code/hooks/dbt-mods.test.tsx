@@ -1011,6 +1011,21 @@ test('a doctor run resolves whose manifest the root\'s is once, not once per che
   expect(resolved).toEqual(Array.from({ length: 3 }, () => ['target/manifest.json', 'integration_tests/target/manifest.json']).flat())
 })
 
+test('the installing project\'s files are filtered by the name in its manifest when its dbt_project.yml names none', async ($, on) => {
+  const { 'target/manifest.json': _, ...rest } = LINKED_REPO
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    mtimes: { 'integration_tests/target/manifest.json': 1_000 },
+    files: { ...rest, 'integration_tests/dbt_project.yml': 'profile: tests\n' },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^✓ Manifest / }))?.text).toEqual('✓ Manifest   current (written 3 min ago)')
+  await doctor.unmount()
+})
+
 test('a package repo whose target is linked to the one of the project that installs it: the freshness check lists the package\'s own files by the package\'s name, not the runner\'s', async ($, on) => {
   const theirs = { ...MANIFEST, metadata: { project_name: 'shop_tests' }, nodes: { ...Object.fromEntries(Object.entries(MANIFEST.nodes).map(([id, node]) => [id, { ...node, package_name: 'shop' }])), 'model.shop.gone': { name: 'gone', resource_type: 'model', package_name: 'shop', original_file_path: 'models/gone.sql', config: {}, columns: {}, depends_on: { nodes: [] } } } }
   const { clock } = await start($, on, {

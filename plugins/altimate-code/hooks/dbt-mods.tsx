@@ -1514,7 +1514,7 @@ async function manifestCheck($: EngineInterface, root: string): Promise<{ check:
   // The manifest read is the one of the project below when the root has none of its own: its files are what a
   // parse of it reads, wherever the doctor runs dbt.
   const owner = own ? null : await runnerOf($, root).catch(() => null)
-  const there = owner ? await changedSince($, owner, stat.mtimeMs, true, await projectName($, owner)) : null
+  const there = owner ? await changedSince($, owner, stat.mtimeMs, false, await projectName($, owner)) : null
   // A project folder walked from the root holds the other project's files: each counts once, newest first.
   const merged = new Map<string, number>()
   for (const one of [...scan.entries, ...(there?.entries ?? []).map(one => ({ ...one, path: `${relative(root, owner!)}/${one.path}` }))]) merged.set(one.path, Math.max(one.mtimeMs, merged.get(one.path) ?? 0))
