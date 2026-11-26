@@ -1172,6 +1172,47 @@ test('a rewritten manifest without the shown model keeps the graph, says the mod
   await ui.unmount()
 })
 
+test('a pane that was shown and closed is not opened again by a rewritten manifest', async ($, on) => {
+  let manifestMtime = 1
+  const { clock, opens, logs } = await start($, on, { mtime: () => manifestMtime })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  await ui.unmount()
+  const opened = opens.length
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  expect(opens).toHaveLength(opened)
+})
+
+test('a manifest that is gone when the reload reads it leaves the graph shown instead of drawing the SQL files over it', async ($, on) => {
+  let manifestMtime = 1
+  let gone = false
+  let stats = 0
+  const { clock, logs } = await start($, on, {
+    mtime: () => manifestMtime,
+    // The check that the manifest changed sees it; the reload's own read of it finds it removed.
+    missing: path => path === MANIFEST_PATH && gone && ++stats > 1,
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  gone = true
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt clean' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
+  expect(logs.filter(line => line.includes('from the SQL files'))).toEqual([])
+  expect(MANIFEST_LOADS(logs)).toHaveLength(1)
+  await ui.unmount()
+})
+
 test("a shell command that rewrites the manifest and reads another model's file still moves the pane to that model", async ($, on) => {
   let manifestMtime = 1
   const OTHER = `${ROOT}/models/stg_customers.sql`

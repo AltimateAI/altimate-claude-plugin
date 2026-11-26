@@ -112,6 +112,8 @@ let reloadsStarted = 0
 const readsStarted = () => startedSeq - reloadsStarted
 // The manifest revision a reload last tried, whether it landed or not: each is tried once, the next one when dbt writes the file again.
 let reloadAttempted: string | null = null
+// A reload is reading: another is not started beside it, and its own check afterwards picks up a newer rewrite.
+let reloadRunning = false
 // The focus that owns the pane (model, manifest, revision), set when a follow claims it. Detail
 // answers are written only while it is still the focus they were asked for; a re-follow of the same
 // model keeps it, so its in-flight answers still land.
@@ -658,6 +660,8 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   const fallback = await manifestFile($, root)
   const manifest = named ?? fallback
   const stat = await $.fs.stat(manifest).catch(() => null)
+  // A manifest that went away since the reload was due is not a reason to draw the SQL files over the graph shown.
+  if (input.reload && !stat) return false
   // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
   // A default manifest that went away (dbt clean) also falls back to the SQL files.
   const fromSql = !stat && (!named || named === fallback || named === `${root}/target/manifest.json` || named === (await runnerManifest($, root)))
@@ -735,11 +739,9 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // An answer's follow whose turn is over leaves the pane to the newer turn. Checked here, before any
   // write: once a follow claims the pane it writes all of its state or a newer follow replaces it.
   if (claimedSeq > seq || (input.fromAnswer !== undefined && input.fromAnswer !== turnCount)) return false
-  // A reload gives way to every other follow, one that started after it as much as one that claims first.
+  // A reload gives way to a follow that started after it: the next tool call looks at the manifest again.
   if (input.reload && startedSeq !== seq) {
     reloadAttempted = null
-    // The follow it gave way to may not land (a file that is no model): the manifest is looked at again.
-    later($, () => recheckStale($))
     return false
   }
   claimedSeq = seq
@@ -940,9 +942,14 @@ async function reloadIfRewritten($: EngineInterface, focus: LineageFocus): Promi
   if (reloadAttempted === revision) return false
   // Checked after the last await before the follow numbers itself, so no other follow slips in between:
   // the focus is still the one shown and nothing is moving the pane to another model.
-  if (!sameFocus(await read($, focusAtom), focus) || followsInFlight > 0 || answersInFlight > 0 || reloadAttempted === revision) return false
+  if (!sameFocus(await read($, focusAtom), focus) || followsInFlight > 0 || answersInFlight > 0 || reloadAttempted === revision || reloadRunning) return false
   reloadAttempted = revision
-  return await followOnce($, { model: focus.model, refresh: true, reload: true })
+  reloadRunning = true
+  try {
+    return await followOnce($, { model: focus.model, refresh: true, reload: true })
+  } finally {
+    reloadRunning = false
+  }
 }
 
 /** The shown model's file or manifest may have changed since the pane read them (an edit, a dbt command): checked again. */
