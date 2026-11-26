@@ -200,6 +200,8 @@ type Options = {
   holdCwd?: Promise<void>
   /** The first dbt show waits for this. */
   holdShow?: Promise<void>
+  /** The nth read of dbt_project.yml (counted from the first search for changed files when `afterFind`, else from the start) waits for `until`. */
+  holdProjectRead?: { n: number; until: Promise<void>; afterFind?: boolean }
   /** Once set, a read of the manifest waits for it. */
   holdManifest?: Promise<void>
   /** The search for files a shell command changed waits for this. */
@@ -351,6 +353,7 @@ async function start($: any, on: any, options: Options = {}) {
     const rel = e.path.slice(ROOT.length + 1)
     if (rel.endsWith('manifest.json')) order.push(`read ${rel}`)
     if (rel.endsWith('manifest.json') && options.holdManifest) return options.holdManifest.then(() => ({ value: files[rel] }))
+    if (rel === 'dbt_project.yml' && options.holdProjectRead && (!options.holdProjectRead.afterFind || findSeen) && ++projectReads === options.holdProjectRead.n) return options.holdProjectRead.until.then(() => ({ value: files[rel] }))
     if (!(rel in files)) throw new Error('ENOENT')
     if (rel === 'target/run_results.json' && (options.runResultsSize ?? 0) > 4 * 1024 * 1024) throw new Error('file is larger than 4 MiB')
     return { value: files[rel] }
@@ -368,6 +371,8 @@ async function start($: any, on: any, options: Options = {}) {
   })
   let held = false
   let findHeld = false
+  let findSeen = false
+  let projectReads = 0
   let shows = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string; env?: Record<string, string> } }) => {
     runs.push([...e.argv])
@@ -401,6 +406,7 @@ async function start($: any, on: any, options: Options = {}) {
     }
     // Only what is under the folders the search was given.
     if (bin === 'find' && options.changed) {
+      findSeen = true
       const roots = e.argv.slice(1, e.argv.indexOf('-name'))
       return { value: { exitCode: 0, stdout: options.changed.map(one => `${ROOT}/${one}`).filter(path => roots.some(root => path.startsWith(`${root}/`))).join('\n'), stderr: '' } }
     }
@@ -3242,6 +3248,45 @@ test("a shell edit's check that outlasts the result's hold goes to Claude's next
   const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
   expect(checkNotes(next)).toEqual([BASH_NOTE])
   expect(shows(runs).length).toBe(1)
+})
+
+test("with two models changed, a project read of the second held past the hold: the first note is in this result, the second on the next", async ($, on) => {
+  let release!: () => void
+  const { clock, setBash } = await start($, on, {
+    now: 100_000,
+    files: { 'models/customers.sql': 'select 1 as customer_id' },
+    mtimes: { 'models/orders.sql': 99_500, 'models/customers.sql': 99_500 },
+    changed: ['models/orders.sql', 'models/customers.sql'],
+    holdProjectRead: { n: 2, afterFind: true, until: new Promise<void>(go => (release = go)) },
+  })
+  const edit = $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await clock.advance(2_500)
+  const sent: any = await edit
+  expect(checkNotes(sent).length).toBe(1)
+  release()
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  await clock.advance(100)
+  const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(checkNotes(next).length).toBe(1)
+  const both = [...checkNotes(sent), ...checkNotes(next)]
+  expect(both.filter(one => one.includes('"orders"')).length).toBe(1)
+  expect(both.filter(one => one.includes('"customers"')).length).toBe(1)
+})
+
+test('a file that is no model, whose project read is held past the hold, gets no note now or later', async ($, on) => {
+  let release!: () => void
+  const { clock, setBash } = await start($, on, { files: { 'macros/m.sql': 'select 1' }, holdProjectRead: { n: 2, until: new Promise<void>(go => (release = go)) } })
+  const edit = $.tool.call({ tool: 'Edit', file_path: `${ROOT}/macros/m.sql`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  await clock.advance(31_000)
+  expect(checkNotes(await edit)).toEqual([])
+  release()
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  await clock.advance(100)
+  expect(checkNotes(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toEqual([])
 })
 
 test("a shell edit's check that lands inside the hold is in that result once, and not again on the next", async ($, on) => {

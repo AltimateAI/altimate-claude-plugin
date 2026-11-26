@@ -2017,15 +2017,21 @@ function pendingLines(agentId: string | null): string[] {
  * the agent's next one.
  */
 async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null, until: number | null = null): Promise<string[] | null> {
-  const root = await projectRoot($, path, true)
-  // Only a file under the project's model-paths is a model dbt can show.
-  const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
-  const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
-  if (!root || !inModels) return null
-  const check = compileAndValidate($, root, path, asked)
-  // The time left is read after the reads above, which count against it. With none left, nothing is held: the answer rides on the next result.
+  // One deadline for everything below: the lookups of the project, the check of the model's place in it, and the check itself.
   const holdMs = until === null ? CHECK_HOLD_MS : Math.max(0, until - (await $.clock.now()))
-  const landed = holdMs > 0 ? await within($, holdMs, check) : null
+  const work = (async () => {
+    const root = await projectRoot($, path, true)
+    // Only a file under the project's model-paths is a model dbt can show.
+    const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
+    const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
+    if (!root || !inModels) return null
+    return compileAndValidate($, root, path, asked)
+  })()
+  // With no time to wait, nothing is held: the answer rides on the next result.
+  const settled = holdMs > 0 ? await within($, holdMs, work.then(done => ({ done }))) : null
+  // Known in time to be no model: nothing to check, and nothing to say.
+  if (settled && !settled.done) return null
+  const landed = settled?.done ?? null
   // Landed, and still the newest check of this file in this conversation.
   if (landed && landed.current()) {
     // The toast points at the band, so only the check the band shows may say so.
@@ -2041,7 +2047,7 @@ async function checkModel($: EngineInterface, path: string, asked: number, agent
     return landed.note ? [landed.note] : []
   }
   // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
-  if (!landed) check.then(done => void (done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
+  if (!landed) work.then(done => void (done && done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
   return []
 }
 
