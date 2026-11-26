@@ -1,11 +1,13 @@
 import { expect, test } from 'claude-code/testing'
 
 import { nothingToReport } from '../inert-features'
+import { PHASE_TIMEOUT_MS } from '../tool-chain'
 import {
   registerFeatures,
   attempt,
   featureBandLines,
   featuresBashAfter,
+  BASH_AFTER_BUDGET_MS,
   featuresBashGate,
   featuresBashRewrite,
   featuresEditAfter,
@@ -105,4 +107,8 @@ test('a feature whose register throws never reaches the caller, so the tool hook
   }) as any
   expect(() => registerFeatures(on, { options: {} } as any)).not.toThrow()
   expect(calls).toBeGreaterThan(0)
+})
+
+test("the time the features' Bash after-steps may use together ends inside the phase that bounds them", () => {
+  expect(BASH_AFTER_BUDGET_MS).toBeLessThan(PHASE_TIMEOUT_MS)
 })

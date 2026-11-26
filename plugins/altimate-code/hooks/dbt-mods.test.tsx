@@ -3258,6 +3258,30 @@ test("a shell edit found only after the result's hold goes to Claude's next resu
   expect(shows(runs).length).toBe(2)
 })
 
+test("with two models changed, the one whose check lands in time goes with the result and the slower one with the next", async ($, on) => {
+  let release!: () => void
+  const { clock, setBash } = await start($, on, {
+    now: 100_000,
+    files: { 'models/customers.sql': 'select 1 as customer_id' },
+    mtimes: { 'models/orders.sql': 99_500, 'models/customers.sql': 99_500 },
+    changed: ['models/orders.sql', 'models/customers.sql'],
+    holdShow: new Promise<void>(go => (release = go)),
+    holdShowAfter: 1,
+  })
+  const edit = $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await clock.advance(2_500)
+  const sent: any = await edit
+  expect(checkNotes(sent).length).toBe(1)
+  release()
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  await clock.advance(100)
+  const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(checkNotes(next).length).toBe(1)
+  expect(checkNotes(next)).not.toEqual(checkNotes(sent))
+})
+
 test('a shell edit of the model the band shows is run against the warehouse once', async ($, on) => {
   let release!: () => void
   const { clock, runs, mtimes } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 50_000 }, changed: ['models/orders.sql'], holdFind: new Promise<void>(go => (release = go)) })

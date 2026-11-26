@@ -1871,7 +1871,7 @@ async function ensureForRuns($: EngineInterface, base: string, runs: DbtCommand[
 }
 
 /** Whether a shell command may write model files. A subagent's is left out, as the lineage notes leave it out. */
-// The dbt verbs that compile the models they select: a shell edit followed by one is checked by it, whichever models it selects.
+// The dbt verbs that compile the models they select: a shell edit in a command that runs one is left to that run, whichever models it selects.
 const BUILD_VERBS = new Set(['run', 'build', 'compile', 'show'])
 const writesModels = (e: { agentId?: string }, command: string) => !e.agentId && WRITES.test(command)
 
@@ -1911,7 +1911,7 @@ export async function dbtModsCallStart($: EngineInterface, e: { tool: string; ag
 }
 
 /** After a Bash call: re-check the checked model, record a dbt run's result, open a `dbt show`'s rows. */
-export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; command: string; agentId?: string }, result: ToolCallResult): Promise<string[]> {
+export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; command: string; agentId?: string }, result: ToolCallResult, by = Infinity): Promise<string[]> {
   if (!enabled) return []
   const agentId = agentOf(e)
   const command = e.command
@@ -1924,7 +1924,7 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
   await filesChanged($)
   if (invocations.length === 0) {
     if (!edits) return pendingLines(agentId)
-    return [...(await bashEdited($, edits, command, agentId)), ...pendingLines(agentId)]
+    return [...(await bashEdited($, edits, command, agentId, by)), ...pendingLines(agentId)]
   }
   const asked = start?.asked ?? generation
   const startedAt = start?.startedAt ?? (await $.clock.now())
@@ -1979,7 +1979,7 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
     ).catch(() => null)
   }
   if (edits) {
-    return [...(await bashEdited($, edits, command, agentId)), ...pendingLines(agentId)]
+    return [...(await bashEdited($, edits, command, agentId, by)), ...pendingLines(agentId)]
   }
   return pendingLines(agentId)
 }
@@ -1998,9 +1998,10 @@ function pendingLines(agentId: string | null): string[] {
  * Compiles a model file and runs it against the warehouse, then checks its columns. Null when the file is not a
  * model dbt can show (outside a project, or outside its model-paths); the lines otherwise, none when the check was
  * too slow for this result (held until the time `until` when one is given, else CHECK_HOLD_MS) and its answer rides on
- * the agent's next one.
+ * the agent's next one. `gate` says whether the result it is held for is still waiting: once it is not, the note is
+ * kept for the next one.
  */
-async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null, until: number | null = null): Promise<string[] | null> {
+async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null, until: number | null = null, gate: { open: boolean } | null = null): Promise<string[] | null> {
   const root = await projectRoot($, path, true)
   // Only a file under the project's model-paths is a model dbt can show.
   const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
@@ -2022,7 +2023,13 @@ async function checkModel($: EngineInterface, path: string, asked: number, agent
           : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
         6000,
       )
-    return landed.note ? [landed.note] : []
+    if (!landed.note) return []
+    // The result it was held for has gone: the note rides on the next one.
+    if (gate && !gate.open) {
+      pendingNotes.push({ note: landed.note, agentId, current: landed.current })
+      return []
+    }
+    return [landed.note]
   }
   // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
   if (!landed) check.then(done => void (done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
@@ -2038,27 +2045,37 @@ const BASH_HOLD_MS = 2_000
  * then the checked model is looked at again (after, so a model both are about is run once). A command that failed is
  * looked at too, since it may have changed files before it did.
  */
-async function bashEdited($: EngineInterface, start: { asked: number; startedAt: number }, command: string, agentId: string | null): Promise<string[]> {
+async function bashEdited($: EngineInterface, start: { asked: number; startedAt: number }, command: string, agentId: string | null, by: number): Promise<string[]> {
   const again = () => later($, () => recheck($, null))
   // Set when the search outlasts the result's hold: the look again waits for the checks it starts.
   let late = false
+  // Whether the result is still waiting for the checks.
+  const gate = { open: true }
   try {
-    const until = (await $.clock.now()) + BASH_HOLD_MS
+    // No later than `by`, the time the features' share of the phase runs out.
+    const now = await $.clock.now()
+    const until = Math.min(now + BASH_HOLD_MS, by)
     const found = bashChanged($, { command, startedAt: start.startedAt - MTIME_SLACK_MS }).catch(() => [])
-    const changed = await within($, BASH_HOLD_MS, found)
-    const check = (files: { file: string }[], by: number) => Promise.all(files.map(one => checkModel($, normalize(one.file), start.asked, agentId, by).catch(() => null)))
+    const changed = await within($, Math.max(0, until - now), found)
+    const lines: string[] = []
+    const check = (files: { file: string }[], until: number) =>
+      Promise.all(files.map(one => checkModel($, normalize(one.file), start.asked, agentId, until, gate).then(found => void lines.push(...(found ?? [])), () => {})))
     // The search was too slow for this result: the checks it leads to ride on the next one, and the look again waits for them to start.
     if (!changed) {
       late = true
+      gate.open = false
       found
         .then(files => check(files, 0))
         .then(again)
         .catch(() => {})
       return []
     }
-    const checked = await check(changed, until)
-    return checked.flatMap(lines => lines ?? [])
+    // The notes in hand when the time is up: a check still going keeps its own for the next result.
+    await within($, Math.max(0, until - (await $.clock.now())), check(changed, until))
+    gate.open = false
+    return lines
   } catch {
+    gate.open = false
     return []
   } finally {
     if (!late) again()

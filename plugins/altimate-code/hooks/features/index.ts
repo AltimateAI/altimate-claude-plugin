@@ -388,9 +388,17 @@ export async function featuresBashDropped($: EngineInterface, e: BashCall): Prom
   await attempt($, 'dbtMods', 'bashDropped', async () => dbtModsBashDropped(e))
 }
 
+/**
+ * How long the features' after-steps of a Bash call may use together, inside the phase's deadline (5 s): the dbt
+ * helpers hold a shell edit's result for its check only until then, so their note is never handed to a phase that
+ * has given up.
+ */
+export const BASH_AFTER_BUDGET_MS = 4_000
+
 /** The context lines every feature adds after a Bash call ran. */
 export async function featuresBashAfter($: EngineInterface, e: BashCall, result: ToolCallResult): Promise<string[]> {
   const lines: string[] = []
+  const by = (await $.clock.now()) + BASH_AFTER_BUDGET_MS
   addLines(lines, await attempt($, 'runs', 'bashAfter', () => runsBashAfter($, e, result)))
   addLines(lines, await attempt($, 'defer', 'bashAfter', () => deferBashAfter($, e, result)))
   addLines(lines, await attempt($, 'toModel', 'bashAfter', () => toModelBashAfter($, e, result)))
@@ -400,7 +408,7 @@ export async function featuresBashAfter($: EngineInterface, e: BashCall, result:
   addLines(lines, await attempt($, 'sqlGraph', 'bashAfter', () => sqlGraphBashAfter($, e, result)))
   addLines(lines, await attempt($, 'docs', 'bashAfter', () => docsBashAfter($, e, result)))
   addLines(lines, await attempt($, 'cteProfile', 'bashAfter', () => cteProfileBashAfter($, e, result)))
-  addLines(lines, await attempt($, 'dbtMods', 'bashAfter', () => dbtModsBashAfter($, e, result)))
+  addLines(lines, await attempt($, 'dbtMods', 'bashAfter', () => dbtModsBashAfter($, e, result, by)))
   return lines
 }
 
