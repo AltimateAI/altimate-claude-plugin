@@ -41,6 +41,10 @@ let saidOldCoverage = false
 // writing is not offered again (once each, and only that text: a different description written to the same
 // column later is a new one; whatever Apply's turn does not write stays until the session starts again).
 const applied = new Map<string, string>()
+// How many downstream columns this session's Apply presses asked Claude to copy a description to.
+let copiedThisSession = 0
+// The conversation an Apply was pressed in: a /clear starts another, whose count starts at 0.
+let conversation = 0
 // An Apply whose request is still being sent; a second press is ignored.
 let applying = false
 /** Whether this feature has put a part in the status line, so a session start clears it only then. */
@@ -595,7 +599,12 @@ export function register(on: On, context: FeatureContext) {
       return { text: `Could not open Altimate docs: ${String(error)}` }
     }
     const state = await read($, docsAtom)
-    return { text: state?.groups.length ? 'Descriptions to copy are in the side pane.' : 'No column description has been written yet; the pane shows each one Claude writes, with the downstream columns that can take it.' }
+    const text = state?.groups.length
+      ? 'Descriptions to copy are in the side pane.'
+      : copiedThisSession > 0
+        ? `Nothing left to copy: Apply sent ${plural(copiedThisSession, 'downstream column')} to Claude this session. The pane shows each new description Claude writes, with the downstream columns that can take it.`
+        : 'No column description has been written yet; the pane shows each one Claude writes, with the downstream columns that can take it.'
+    return { text }
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -643,15 +652,17 @@ export function register(on: On, context: FeatureContext) {
             <Button
               key="docs-apply"
               label={`Apply to ${plural(picked, 'column')}`}
-              onPress={() =>
-                later($, async () => {
+              onPress={() => {
+                // The conversation the press was made in: a /clear while the offers are read starts another.
+                const pressedIn = conversation
+                return later($, async () => {
                   if (applying) return
                   // What is ticked now, not what was drawn: a tick or a withdrawn offer may have landed since the render.
                   const state = (await read($, docsAtom)) ?? empty()
                   // An offer that arrived after the draw waits for the next Apply: it was never shown.
                   const groups = state.groups.filter(group => group.candidates.length > 0 && drawn.has(offerKey(group)))
                   const prompt = applyPrompt(groups, state.skipped)
-                  if (!prompt || applying) return
+                  if (!prompt || applying || pressedIn !== conversation) return
                   applying = true
                   const marks: string[] = []
                   const sent = new Set(sentGroups(groups, state.skipped).map(group => offerKey(group)))
@@ -676,6 +687,7 @@ export function register(on: On, context: FeatureContext) {
                       for (const key of marks) applied.delete(key)
                       throw error
                     }
+                    if (pressedIn === conversation) copiedThisSession += marks.length
                     // Only what was sent is cleared: an offer that arrived meanwhile stays.
                     await update($, docsAtom, prev => {
                       const left = (prev?.groups ?? []).filter(group => !sent.has(offerKey(group)))
@@ -686,7 +698,7 @@ export function register(on: On, context: FeatureContext) {
                     applying = false
                   }
                 })
-              }
+              }}
             />
             <Button
               key="docs-dismiss"
@@ -711,6 +723,8 @@ export async function sessionStart($: EngineInterface, e: Args<'session.start'>)
   saidOldReach = false
   saidOldCoverage = false
   applied.clear()
+  copiedThisSession = 0
+  conversation++
   applying = false
   await update($, docsAtom, () => null)
   if (statusShown) await setStatusPart($, 'docs', null)
@@ -725,6 +739,8 @@ export async function turnStart($: EngineInterface, e: Args<'turn.start'>) {}
 export async function turnComplete($: EngineInterface, e: Args<'turn.complete'>, out: EventResult<'turn.complete'>) {}
 
 export async function sessionEnd($: EngineInterface, e: Args<'session.end'>) {
+  copiedThisSession = 0
+  conversation++
   // A coverage read still running belongs to the conversation that ended (a /clear has no session start).
   waiting = null
   coverageSeq++

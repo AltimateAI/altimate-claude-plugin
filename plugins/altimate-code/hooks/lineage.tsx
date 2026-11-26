@@ -13,16 +13,19 @@ import type {
 } from '../types'
 import { later, parseJson, runTool, textOf, within } from './altimate-cli'
 import { openTracked } from './usage'
+import { localPackages, manifestFile, projectName, runnerManifest } from './package-runner'
 import { featuresSessionEnd, featuresTurnComplete, featuresTurnStart } from './features'
 import { forgetPaneSizes, loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
 import { columnOf, drawingSize, drawLayered, drawStack, endsView, foldersView, graphView, sliceRows, type Layered, type ViewKind } from './lineage-layout'
 import {
   FOLLOWABLE,
+  packageOf,
   buildGraph,
   columnsFromMetadata,
   countText,
   describeGraph,
   downstreamArt,
+  downstreamOf,
   findModel,
   findModelOrColumn,
   graphFromSql,
@@ -76,6 +79,8 @@ const warehouseAtom = atom({ plugin: 'altimate-code', key: 'lineageWarehouse' } 
 const expandedAtom = atom({ plugin: 'altimate-code', key: 'lineageExpanded' } as const, { up: false, down: false })
 // How the pane draws the graph: boxes and arrows, only its ends, folders, or the text lists.
 const viewAtom = atom({ plugin: 'altimate-code', key: 'lineageView' } as const, 'graph' as ViewKind | 'list')
+// Whether the person picked the view (v): until then a graph wider than the pane is shown as its ends, which fit.
+const viewChosenAtom = atom({ plugin: 'altimate-code', key: 'isLineageViewChosen' } as const, false)
 // A model the pane should scroll down to once its graph is drawn: the canvas can be taller than the pane.
 let revealFor: string | null = null
 // The dbt models Claude's last answer names, in the order it names them.
@@ -176,7 +181,8 @@ const relative = (root: string, path: string) => path.slice(root.length).replace
 
 /** The dbt project above a file or folder: the closest folder holding dbt_project.yml. */
 export async function projectRoot($: EngineInterface, start: string, isFile: boolean): Promise<string | null> {
-  let dir = isFile ? dirname(start) : start
+  // Spelled one way (`integration_tests/../models` is `models`), so a project is one root whichever path reached it.
+  let dir = normalize(isFile ? dirname(start) : start)
   for (let i = 0; i < 40; i++) {
     if (await $.fs.exists(`${dir}/dbt_project.yml`).catch(() => false)) return dir
     const parent = dirname(dir)
@@ -235,7 +241,7 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
   const roots = await projectsBelow($, start)
   for (const root of prefer && roots.includes(prefer) ? [prefer, ...roots.filter(one => one !== prefer)] : roots) {
     // Limit: a manifest over 4 MiB is looked up through its SQL files; the names are the same.
-    const graph = (await readGraph($, `${root}/target/manifest.json`).catch(() => null)) ?? (await sqlGraph($, root))
+    const graph = (await readGraph($, await manifestFile($, root)).catch(() => null)) ?? (await sqlGraph($, root))
     if (findModelOrColumn(graph, model)) return root
   }
   return null
@@ -247,21 +253,64 @@ async function projectWith($: EngineInterface, start: string, model: string, pre
  * session's.
  */
 export async function modelsNamed($: EngineInterface, text: string, root: string, shownManifest?: string): Promise<AnswerModel[]> {
-  const manifest = shownManifest ?? `${root}/target/manifest.json`
+  const manifest = shownManifest ?? (await manifestFile($, root))
   const fromManifest = await readGraph($, manifest).catch(() => null)
   // The manifest an entry keeps: the shown graph's (read here, or through altimate-code when over
   // 4 MiB), else the default one when it was read; none when the names came from the SQL files.
   const kept = shownManifest ?? (fromManifest ? manifest : undefined)
   const graph = fromManifest ?? (await sqlGraph($, root))
+  const pkg = await projectName($, root)
   const byName = new Map<string, string>()
-  for (const node of Object.values(graph.nodes)) if (FOLLOWABLE.has(node.type) && node.path) byName.set(node.name.toLowerCase(), node.id)
+  // The project's own node wins a name two packages share (a package repo reading integration_tests' manifest).
+  for (const node of Object.values(graph.nodes)) {
+    if (!FOLLOWABLE.has(node.type) || !node.path) continue
+    const name = node.name.toLowerCase()
+    if (!byName.has(name) || packageOf(node.id) === pkg) byName.set(name, node.id)
+  }
+  // A node of the project whose manifest a package repo borrows (integration_tests' own model) is that project's. Where the
+  // manifest is counts, whether or not it could be read (over 4 MiB, the names come from the SQL files).
+  const sessionRoot = await $.session.root().catch(() => root)
+  const rootOf = (id: string) => nodeOwner($, id, manifest, root, sessionRoot)
   // A backticked name or path (`models/marts/orders.sql`): its file name counts.
-  const ticked = new Set([...text.matchAll(/`([\w./-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split('/').pop()!))
-  const found = new Map<string, AnswerModel>()
+  const ticked = new Set([...text.matchAll(/`([\w./\\-]+)`/g)].map(match => match[1]!.toLowerCase().replace(/\.sql$/, '').split(/[\\/]/).pop()!))
+  // A path written out names the model of the project it is in, and only that: the project is found from the path itself
+  // (integration_tests/…, ../models/…, an absolute path), its node is the one of that project's package at the path. A
+  // path no node of its project has names nothing, so another project's model of that file name is never taken for it.
+  const mentions: { at: number; end: number; id: string | null; name: string; root: string }[] = []
+  // A relative path is the session's, whatever project the pane shows.
+  const base = await $.session.root().catch(() => root)
+  // Either separator: a Windows path (integration_tests\models\orders.sql) is the same file.
+  for (const match of text.matchAll(/[\w./\\-]+\.sql\b/g)) {
+    const written = match[0].replace(/\\/g, '/')
+    const abs = normalize(written.startsWith('/') ? written : `${base}/${written}`)
+    const owner = (await projectRoot($, abs, true).catch(() => null)) ?? root
+    const want = owner === root ? pkg : await projectName($, owner)
+    const path = relative(owner, abs)
+    const mine = (one: { id: string; type: string }) => FOLLOWABLE.has(one.type) && (!want || packageOf(one.id) === want)
+    // The node at that path, else (for the project's own files, a path written from a subfolder) one whose path ends with
+    // it, else its model of that file name.
+    const node = Object.values(graph.nodes).find(one => mine(one) && one.path === path) ?? (owner === root ? Object.values(graph.nodes).find(one => mine(one) && !!one.path?.endsWith(`/${path}`)) : undefined)
+    const byFile = !node && owner === root ? byName.get(path.split('/').pop()!.replace(/\.sql$/i, '').toLowerCase()) : undefined
+    const id = node?.id ?? (byFile && (!pkg || packageOf(byFile) === pkg) ? byFile : null)
+    mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: id ? (graph.nodes[id]?.name ?? '') : '', root: owner })
+  }
+  // A unique_id written out (model.shop_tests.orders) is that node.
+  for (const match of text.matchAll(/\b(?:model|snapshot)\.[A-Za-z_][\w]*\.[A-Za-z_][\w]*(?:\.v\d+)?\b/g)) {
+    if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue
+    // Kept as written when the graph read here lacks it (the SQL files' graph, for a manifest over 4 MiB): its name alone
+    // could be another project's model.
+    const node = graph.nodes[match[0]]
+    if (!node || FOLLOWABLE.has(node.type)) mentions.push({ at: match.index!, end: match.index! + match[0].length, id: match[0], name: node?.name ?? match[0].split('.')[2]!, root: await rootOf(match[0]) })
+  }
   for (const match of text.matchAll(/[A-Za-z_][\w]*/g)) {
+    if (mentions.some(one => match.index! >= one.at && match.index! < one.end)) continue
     const word = match[0].toLowerCase()
     const id = byName.get(word)
-    if (id && !found.has(id) && (word.includes('_') || ticked.has(word))) found.set(id, { id, name: match[0], root, ...(kept && { manifest: kept }) })
+    if (id && (word.includes('_') || ticked.has(word))) mentions.push({ at: match.index!, end: match.index! + match[0].length, id, name: match[0], root: await rootOf(id) })
+  }
+  const found = new Map<string, AnswerModel>()
+  for (const one of mentions.sort((x, y) => x.at - y.at)) {
+    if (one.id && !found.has(one.id)) found.set(one.id, { id: one.id, name: one.name, root: one.root, ...(kept && { manifest: kept }) })
   }
   return [...found.values()].slice(0, 12)
 }
@@ -329,6 +378,8 @@ let drawnCache: { key: string; drawn: Drawn | null } | null = null
 let sliceCache: { key: string; rows: Segment[][] } | null = null
 // Graph drawings too big for a pane, by drawing and width: shown as folders without drawing them again.
 const tooBigCache = new Map<string, { elements: number; chars: number }>()
+// Graph drawings wider than their pane, by drawing and width, with that width: drawn as their ends without drawing the whole graph again.
+const tooWideCache = new Map<string, number>()
 // What a pane may hold, under Claude Code's limits (20,000 elements, 100,000 characters) with room for the rest of it.
 // drawingSize undercounts Claude Code's elements (a 600-box graph it counted past 20,000 sizes at about 12,000 here).
 const MAX_DRAWN_ELEMENTS = 8_000
@@ -397,7 +448,7 @@ async function sqlGraph($: EngineInterface, root: string): Promise<LineageGraph>
 }
 
 /** The manifest's graph, read from the file once per change; null when the file is too big to read. */
-async function readGraph($: EngineInterface, manifest: string): Promise<LineageGraph | null> {
+export async function readGraph($: EngineInterface, manifest: string): Promise<LineageGraph | null> {
   const stat = await $.fs.stat(manifest)
   if (manifestCache?.path === manifest && manifestCache.mtimeMs === stat.mtimeMs) return manifestCache.graph
   if (stat.size > MAX_MANIFEST_BYTES) return null
@@ -412,9 +463,37 @@ async function readGraph($: EngineInterface, manifest: string): Promise<LineageG
  * nodes, marked `truncated`). Run through the CLI, whose --json carries the whole metadata (the MCP
  * server leaves big structured results out). Cached per manifest revision and model.
  */
-async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string) {
+async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string, pkg?: string | null, root?: string): Promise<{ graph: LineageGraph; id: string; columns: any } | null> {
+  const found = await graphFromToolsOnce($, manifest, mtimeMs, path ?? model, path)
+  // The path or name matched another package's node (integration_tests' model of the same path or name): the project's
+  // own, by its unique_id. A file must be the project's own; a name keeps the other package's model when the project has none.
+  if (found && pkg && packageOf(found.id) !== pkg && (path || !model.includes('.'))) {
+    // The project's own model, else its snapshot, of that name. (A versioned model's id holds its version, which the file
+    // name does not give: it is not found this way.)
+    let own: Awaited<ReturnType<typeof graphFromToolsOnce>> = null
+    for (const id of [`model.${pkg}.${model}`, `snapshot.${pkg}.${model}`]) {
+      // A failed lookup is a failure, not an absence: the other package's node is never shown in its place.
+      own = await graphFromToolsOnce($, manifest, mtimeMs, id)
+      if (own) break
+    }
+    // A name: a versioned model of the project's own (model.<package>.orders.v2) is found by its file, named as dbt
+    // names a version's (orders.sql, orders_v2.sql), before the other package's model of that name is shown.
+    if (!own && !path && root) {
+      const file = new RegExp(`(^|/)${model.replace(/[^\w]/g, '\\$&')}(_v\\d+)?\\.sql$`, 'i')
+      const files = Object.values((await sqlGraph($, root).catch(() => null))?.nodes ?? {}).map(one => one.path).filter((one): one is string => !!one && file.test(one))
+      for (const one of files.slice(0, 5)) {
+        const at = await graphFromToolsOnce($, manifest, mtimeMs, one, one)
+        if (at && packageOf(at.id) === pkg) return at
+      }
+    }
+    return path ? checkPath(own, path, pkg) : (own ?? found)
+  }
+  return checkPath(found, path, pkg)
+}
+
+/** One dbt_lineage lookup by name, path or unique_id, cached per manifest revision; the node whatever its path. */
+async function graphFromToolsOnce($: EngineInterface, manifest: string, mtimeMs: number, model: string, path?: string) {
   // A file is looked up by its path: snapshots and versioned models do not go by the file's name.
-  model = path ?? model
   const key = `${manifest}\u0000${mtimeMs}\u0000${model}`
   if (toolsCache.has(key)) return checkPath(toolsCache.get(key)!, path)
   const result = await shared(`graph\u0000${key}`, () => runTool($, 'dbt_lineage', { manifest_path: manifest, model, include_graph: true }, { cliOnly: true }))
@@ -432,9 +511,39 @@ async function graphFromTools($: EngineInterface, manifest: string, mtimeMs: num
   return checkPath(built, path)
 }
 
-/** A file is that model only when its path is the model's: a macro or analysis of the same name is not. */
-function checkPath<T extends { graph: LineageGraph; id: string } | null>(built: T, path?: string): T | null {
-  return built && (!path || built.graph.nodes[built.id]?.path === path) ? built : null
+/**
+ * The project a node of a manifest belongs to: `root` when the node is of its package, else, in a manifest two local
+ * projects share, the one whose name is the node's package: the manifest's own project, a package it installs by a local
+ * path, or the session's project. `root` when none is.
+ */
+async function nodeOwner($: EngineInterface, id: string, manifest: string, root: string, sessionRoot: string): Promise<string> {
+  const pkg = packageOf(id)
+  if (!pkg || pkg === (await projectName($, root))) return root
+  const theirs = dirname(dirname(manifest))
+  const candidates = [theirs, ...(await localPackages($, theirs)), await projectRoot($, sessionRoot, false).catch(() => null)]
+  for (const one of candidates) if (one && (await projectName($, one)) === pkg) return one
+  return root
+}
+
+/**
+ * The project a model followed in a given manifest belongs to: the manifest's own project, unless the model is a unique_id
+ * of the session's project, whose package repo borrows that manifest (integration_tests'), when it is the session's.
+ */
+async function ownerOf($: EngineInterface, manifest: string, model: string | undefined, sessionRoot: string): Promise<string> {
+  const theirs = dirname(dirname(manifest))
+  if (!model || model.split('.').length < 3) return theirs
+  const pkg = packageOf(model)
+  if (pkg === (await projectName($, theirs))) return theirs
+  const session = await projectRoot($, sessionRoot, false).catch(() => null)
+  return session && (await projectName($, session)) === pkg ? session : theirs
+}
+
+/**
+ * A file is that model only when its path is the model's (a macro or analysis of the same name is not) and, with `pkg`,
+ * the model is the project's own: in a manifest holding another project's `models/orders.sql`, that one is not the file's.
+ */
+function checkPath<T extends { graph: LineageGraph; id: string } | null>(built: T, path?: string, pkg?: string | null): T | null {
+  return built && (!path || (built.graph.nodes[built.id]?.path === path && (!pkg || packageOf(built.id) === pkg))) ? built : null
 }
 
 type FollowInput = {
@@ -462,7 +571,9 @@ type FollowInput = {
 }
 
 /** A follow; one Claude or the person started counts for the turn it started in, once it lands. */
-async function follow($: EngineInterface, input: FollowInput): Promise<boolean> {
+async function follow($: EngineInterface, given: FollowInput): Promise<boolean> {
+  // A file spelled through `..` (a shell read from integration_tests) is the file it names.
+  const input = given.file ? { ...given, file: normalize(given.file) } : given
   if (input.fromAnswer !== undefined) return followOnce($, input)
   // Claude's reads and the person's own presses alike: in flight, the answer waits for them; landed,
   // the answer leaves the pane where they put it.
@@ -494,10 +605,18 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // session's folder, or below it in a monorepo, the shown one first.
   const shown = !given && !input.file && !input.root && current && input.model ? await read($, graphAtom) : null
   const inShown = !!shown && !!input.model && !!findModelOrColumn(shown, input.model)
+  // A model asked for by its path (/lineage models/orders.sql[.column]): the session's path, in the project it lies in,
+  // whatever project the pane shows.
+  const pathArg = !input.file && !given && !input.root && input.model ? /^(.+?\.sql)(?:\.([A-Za-z_]\w*))?$/i.exec(input.model) : null
+  const argFile = pathArg ? normalize(pathArg[1]!.startsWith('/') ? pathArg[1]! : `${sessionRoot}/${pathArg[1]}`) : null
+  const argRoot = argFile ? await projectRoot($, argFile, true).catch(() => null) : null
+  // A manifest a package repo borrows (integration_tests') names its own project, not the package: the root given stands.
   const root = given
-    ? dirname(dirname(given))
+    ? ((input.root ? await projectRoot($, input.root, false) : null) ?? (await ownerOf($, given, input.model, sessionRoot)))
     : input.file
       ? await projectRoot($, input.file, true)
+      : argRoot
+        ? argRoot
       : inShown
         ? current!.root
         : ((input.root ? await projectRoot($, input.root, false) : null) ??
@@ -514,11 +633,12 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     return false
   }
   if (seq > conversationSeq) projectSeen = true
-  const manifest = named ?? `${root}/target/manifest.json`
+  const fallback = await manifestFile($, root)
+  const manifest = named ?? fallback
   const stat = await $.fs.stat(manifest).catch(() => null)
   // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
   // A default manifest that went away (dbt clean) also falls back to the SQL files.
-  const fromSql = !stat && (!named || named === `${root}/target/manifest.json`)
+  const fromSql = !stat && (!named || named === fallback || named === `${root}/target/manifest.json` || named === (await runnerManifest($, root)))
   if (!stat && !fromSql) {
     await say('No dbt manifest at that path: run `dbt parse` or `dbt compile` to see lineage.', true)
     return false
@@ -530,7 +650,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     manifestCache = null
     for (const key of toolsCache.keys()) if (key.startsWith(`${manifest}\u0000`)) toolsCache.delete(key)
   }
-  let wanted = input.file ? relative(root, input.file) : input.model!
+  let wanted = input.file ? relative(root, input.file) : argFile && argRoot ? `${relative(root, argFile)}${pathArg![2] ? `.${pathArg![2]}` : ''}` : input.model!
   // /lineage <model> with no column clears the selected one.
   let column = input.column ?? (input.dottedColumn ? null : undefined)
   // The text before the last dot, when that is a model and the whole is not.
@@ -546,26 +666,31 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     await say(`Could not read ${relative(root, manifest) || manifest}: is dbt still writing it? Press r to retry.`, true)
     return false
   }
-  let id = graph ? findModel(graph, wanted) : null
+  const pkg = await projectName($, root)
+  // A file, or a model asked for by its path (/lineage models/orders.sql): the project's own node or none.
+  const asPath = !!input.file || /[\\/]|\.sql$/i.test(wanted)
+  let id = graph ? findModel(graph, wanted, pkg, asPath) : null
   if (graph && !id) {
     const split = withoutColumn()
-    const model = split ? findModel(graph, split.model) : null
+    const model = split ? findModel(graph, split.model, pkg, /[\\/]|\.sql$/i.test(split.model)) : null
     if (split && model) [id, wanted, column] = [model, split.model, split.column]
   }
   let via: LineageFocus['via'] = fromSql ? 'sql' : 'manifest'
   let columns = input.columns ?? null
   if (!graph) {
-    const name = input.file ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
+    const name = asPath ? (wanted.split('/').pop() ?? wanted).replace(/\.sql$/, '') : wanted
     let failure: string | null = null
-    const lookUp = (model: string) =>
-      graphFromTools($, manifest, mtimeMs, model, input.file ? wanted : undefined).catch(error => {
+    const lookUp = (model: string, path?: string) =>
+      graphFromTools($, manifest, mtimeMs, model, path, pkg, root).catch(error => {
         failure = String(error?.message ?? error)
         return null
       })
-    let built = await lookUp(name)
+    let built = await lookUp(name, asPath ? wanted : undefined)
     const split = withoutColumn()
     if (!built && !failure && split) {
-      built = await lookUp(split.model)
+      // models/orders.sql.amount: the file is models/orders.sql.
+      const splitPath = /[\\/]|\.sql$/i.test(split.model)
+      built = await lookUp(splitPath ? (split.model.split('/').pop() ?? split.model).replace(/\.sql$/, '') : split.model, splitPath ? split.model : undefined)
       if (built) [wanted, column] = [split.model, split.column]
     }
     if (failure) {
@@ -582,6 +707,9 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     return false
   }
   const readMs = Math.round((await $.clock.now()) - began)
+  // The node's own project (a package's model reached from integration_tests' graph, or the other way): its files are
+  // the ones the pane's out-of-date check reads. Found before the claim, so no await falls between the check and it.
+  const owner = via === 'sql' ? root : await nodeOwner($, id, manifest, root, sessionRoot)
   // An answer's follow whose turn is over leaves the pane to the newer turn. Checked here, before any
   // write: once a follow claims the pane it writes all of its state or a newer follow replaces it.
   if (claimedSeq > seq || (input.fromAnswer !== undefined && input.fromAnswer !== turnCount)) return false
@@ -602,7 +730,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // The graph lands before the focus, so a redraw between the two never pairs the new focus with the old graph.
   await update($, graphAtom, prev => (superseded() ? prev : (via === 'tools' ? graph! : subgraph(graph!, id!))))
   if (superseded()) return false
-  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root, manifest, via, readMs, mtimeMs, stamp: began })))
+  await update($, focusAtom, prev => (superseded() ? prev : ({ model: id!, root: owner, manifest, via, readMs, mtimeMs, stamp: began })))
   if (superseded()) return false
   await update($, messageAtom, prev => (superseded() ? prev : fromSql ? `No target/manifest.json: lineage from the SQL files' ref() and source()${graph!.partial ? ', the first 5000 files only' : ''}. Run \`dbt parse\` for columns and dashboards.` : null))
   if (isNew) {
@@ -632,7 +760,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
     if (opened && opened.isPlaced === false && !input.open) await narrowHint($, opened.reason)
     else if (opened) await update($, narrowAtom, () => null)
   }
-  const focus: LineageFocus = { model: id, root, manifest, via, readMs, mtimeMs, stamp: began }
+  const focus: LineageFocus = { model: id, root: owner, manifest, via, readMs, mtimeMs, stamp: began }
   // Columns handed in by a tool call may be another project's model of the same name: keep them only
   // for this model (by unique_id when the answer gives one, else by name).
   const preload = columns && (columns.id ? columns.id === id : columns.model === node.name) ? columns : null
@@ -707,7 +835,7 @@ async function loadReach($: EngineInterface) {
   const reach = result?.ok ? reachFromMetadata(result.metadata, node.name, column) : null
   await update($, reachAtom, prev => (mine() ? reach : prev))
   if (!result?.ok) await update($, messageAtom, prev => (mine() ? `impact_analysis failed: ${firstLine(result?.text) ?? 'altimate-code did not answer'}` : prev))
-  else if (reach) $.ui.log(`lineage-pane · column ${column} · impact_analysis(${node.name}, column: ${column}) · read by ${reach.models.length} models`)
+  else if (reach) $.ui.log(`lineage-pane · column ${column} · impact_analysis(${node.name}, column: ${column}) · read by ${reach.models.length} model${reach.models.length === 1 ? '' : 's'}`)
   else if (result.metadata?.column_reach_error) await update($, messageAtom, prev => (mine() ? `Column reach failed: ${firstLine(String(result.metadata.column_reach_error))}` : prev))
   else if (result.metadata && result.metadata.severity === undefined) await update($, messageAtom, prev => (mine() ? `impact_analysis: ${firstLine(result.text) ?? 'no answer'}` : prev))
   else await update($, messageAtom, prev => (mine() ? 'Column reach needs an altimate-code build whose impact_analysis reports column_reach.' : prev))
@@ -749,14 +877,24 @@ async function loadWarehouse($: EngineInterface) {
 }
 
 /**
- * Whether the model's SQL file changed after the manifest was written (one stat): the pane's columns and
- * reach come from the manifest's compiled SQL, so they may be out of date until the next `dbt compile`.
+ * Whether the model's SQL file, or the schema.yml that describes it, changed after the manifest was written: the
+ * pane's columns and reach come from the manifest's compiled SQL, its tests from the yml, so they may be out of date.
  */
 async function staleSql($: EngineInterface, root: string, node: GraphNode | undefined, manifestMtimeMs: number): Promise<string | null> {
   if (!node?.path || !manifestMtimeMs) return null
-  const stat = await $.fs.stat(`${root}/${node.path}`).catch(() => null)
-  if (!stat || stat.mtimeMs <= manifestMtimeMs) return null
-  return `${node.path.split(/[\\/]/).pop()} changed after the manifest was written: run \`dbt compile\`, then r`
+  const newer = async (path: string) => {
+    const stat = await $.fs.stat(`${root}/${path}`).catch(() => null)
+    return !!stat && stat.mtimeMs > manifestMtimeMs
+  }
+  // Gone: no stat and no file. A file that exists but cannot be stat'ed (permissions) is not gone.
+  const gone = (path: string) => $.fs.stat(path).then(() => false, async () => (await $.fs.exists(path).catch(() => true)) === false)
+  const base = (path: string) => path.split(/[\\/]/).pop()
+  if (await newer(node.path)) return `${base(node.path)} changed after the manifest was written: run \`dbt compile\`, then press r`
+  // Its schema.yml: the tests and documented columns the pane counts come from there. One deleted since leaves them
+  // all out of date too; one that cannot be read is not said to be either.
+  if (node.yml && (await newer(node.yml))) return `${base(node.yml)} changed after the manifest was written: run \`dbt parse\`, then press r`
+  if (node.yml && (await gone(`${root}/${node.yml}`))) return `${base(node.yml)} was removed after the manifest was written: run \`dbt parse\`, then press r`
+  return null
 }
 
 /** The shown model's file may have changed since the pane read it (an edit, a shell command): checked again. */
@@ -867,20 +1005,23 @@ function cut(text: string, max: number): string {
  * columns, which downstream models and dashboards read that column. Logged, then added to
  * Claude's context with the edit's result.
  */
-async function impactFirst($: EngineInterface, e: any, file: string, deadline: number, progress: { project: boolean; failed?: boolean }): Promise<ImpactNote | null> {
+async function impactFirst($: EngineInterface, e: any, edited: string, deadline: number, progress: { project: boolean; failed?: boolean }, changedAt?: number | null): Promise<ImpactNote | null> {
+  // `integration_tests/../models/x.sql` is `models/x.sql`.
+  const file = normalize(edited)
   const root = await projectRoot($, file, true)
   if (!root) return null
   projectSeen = true
-  const manifest = `${root}/target/manifest.json`
+  const manifest = await manifestFile($, root)
   const stat = await $.fs.stat(manifest).catch(() => null)
   // A dbt project with a manifest: from here, running out of time is worth telling.
   progress.project = !!stat
   if (!stat) return null
   let graph = await readGraph($, manifest).catch(() => null)
-  let id = graph ? findModel(graph, relative(root, file)) : null
+  const pkg = await projectName($, root)
+  let id = graph ? findModel(graph, relative(root, file), pkg, true) : null
   if (!graph) {
     const name = (file.split(/[\\/]/).pop() ?? file).replace(/\.sql$/i, '')
-    const built = await graphFromTools($, manifest, stat.mtimeMs, name, relative(root, file)).catch(() => {
+    const built = await graphFromTools($, manifest, stat.mtimeMs, name, relative(root, file), pkg).catch(() => {
       progress.failed = true
       return null
     })
@@ -890,8 +1031,9 @@ async function impactFirst($: EngineInterface, e: any, file: string, deadline: n
   if (!graph || !id) return null
   const node = graph.nodes[id]!
   // The file already changed after the last compile: the manifest describes an older version of it.
-  const fileStat = await $.fs.stat(file).catch(() => null)
-  const stale = !!fileStat && fileStat.mtimeMs > stat.mtimeMs
+  // A file a shell command just changed is judged by its time before the command (unknown: not said).
+  const fileStat = changedAt === undefined ? await $.fs.stat(file).catch(() => null) : null
+  const stale = changedAt === undefined ? !!fileStat && fileStat.mtimeMs > stat.mtimeMs : changedAt !== null && changedAt > stat.mtimeMs
   const counts = impactOf(graph, id)
   const downstream = counts.direct + counts.transitive
   if (downstream === 0 && counts.exposures.length === 0) return null
@@ -1150,6 +1292,59 @@ function drawRow(ui: Ui, $: EngineInterface, graph: LineageGraph, segments: Segm
   )
 }
 
+// A shell command that may write the SQL files it names (`sed -i`, a redirect, `tee`, a script).
+const WRITES = /\bsed\b[^|;&]*\s-i|\bperl\b[^|;&]*\s-\w*i|>>?\s*['"]?[^\s'"|;&]*\.sql\b|\btee\b|\b(?:python3?|node|ruby|bun|deno)\b|\b(?:mv|cp|patch|truncate)\b|\bgit\s+(?:apply|checkout|restore)\b/
+// The most model files one shell command's note is about, and the most projects below the session folder looked in.
+const MAX_BASH_MODELS = 3
+const MAX_BASH_PROJECTS = 5
+// A file's time can trail the clock read as the command started by this much.
+const MTIME_SLACK_MS = 1_000
+
+/** A shell command that may write, as it started: where it runs and when, to find the model files it changed after. */
+type BashStart = { command: string; startedAt: number }
+
+/** The project's model files a shell command changed: modified since it started, with their text from the last commit. */
+async function bashChanged($: EngineInterface, start: BashStart): Promise<{ file: string; before: string }[]> {
+  // From the session's folder, as the task summary reads it: Claude's shell folder can be slow to read, and this
+  // holds the command's result. With no project there, the projects below it (a monorepo, a shell in a subfolder).
+  const base = await $.session.root().catch(() => '.')
+  const own = await projectRoot($, commandDir(start.command, base), false).catch(() => null)
+  // And the projects below it (a project inside another, a monorepo): the walk is bounded (2000 folders) and kept for the session.
+  // projectsBelow stops at a project: below one, its sub-folders are walked (a few levels) for the projects inside it.
+  const children = own ? (await $.fs.list(own).catch(() => [])).filter(entry => entry.kind === 'dir' && !entry.name.startsWith('.') && !SKIP_DIRS.has(entry.name)).map(entry => `${own}/${entry.name}`) : [base]
+  const below = (await Promise.all(children.slice(0, 50).map(dir => projectsBelow($, dir, own ? 2 : 4).catch(() => [] as string[])))).flat().filter(one => one !== own)
+  const roots = [...(own ? [own] : []), ...below].slice(0, MAX_BASH_PROJECTS)
+  // Files touched since the command started, in whole minutes rounded up, then each one's own time against its start.
+  const minutes = Math.max(1, Math.ceil(((await $.clock.now()) - start.startedAt) / 60_000))
+  const files: { file: string; before: string }[] = []
+  for (const root of roots) {
+    const models = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')).models.map(one => one.replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean)
+    const dirs = models.map(one => (one === '.' ? root : `${root}/${one}`))
+    if (!dirs.length) continue
+    const listed = await $.process.run(['find', ...dirs, '-name', '*.sql', '-type', 'f', '-mmin', `-${minutes}`], { timeoutMs: 10_000 }).catch(() => null)
+    const found = (listed?.stdout ?? '').split('\n').map(one => one.trim()).filter(Boolean)
+    // Nothing touched: no git call either.
+    if (!found.length) continue
+    const top = (await $.process.run(['git', '-C', root, 'rev-parse', '--show-toplevel'], { timeoutMs: 5_000 }).catch(() => null))?.stdout.trim() ?? ''
+    for (const file of found) {
+      if (files.length >= MAX_BASH_MODELS) return files
+      if (/[\\/](?:target|dbt_packages|dbt_modules)[\\/]/.test(file.slice(root.length)) || !isModelPath(root, models, file)) continue
+      const stat = await $.fs.stat(file).catch(() => null)
+      if (!stat || stat.mtimeMs < start.startedAt) continue
+      // Its text before: the last commit's (an untracked file had none).
+      const head = top && file.startsWith(`${top}/`) ? await $.process.run(['git', '-C', top, 'show', `HEAD:${file.slice(top.length + 1)}`], { timeoutMs: 5_000 }).catch(() => null) : null
+      files.push({ file, before: head?.exitCode === 0 ? head.stdout : '' })
+    }
+  }
+  return files
+}
+
+/** Whether a file is under one of the project's model folders. */
+function isModelPath(root: string, models: string[], file: string): boolean {
+  const rel = file.slice(root.length + 1)
+  return file.startsWith(`${root}/`) && /\.sql$/i.test(rel) && models.some(one => one === '.' || rel.startsWith(`${one}/`))
+}
+
 /** The lineage hooks whose events no other part of the plugin hooks. */
 export function registerLineage(on: On, options: Record<string, unknown> = {}) {
   showEditImpact = options.show_edit_impact === true || options.show_edit_impact === 'true'
@@ -1266,6 +1461,19 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     let lookup: Promise<ImpactNote | null> | null = null
     let finished = false
     const progress: { project: boolean; failed?: boolean } = { project: false }
+    // The pane moves to the model being edited as the edit starts, not once it has landed.
+    if (isEdit) later($, async () => void (await follow($, { file: file!, auto: true })))
+    // A shell command that may write (`python3 …`, `sed -i`): its start, so a model it rewrites gets the same note as
+    // an Edit. Nothing is read or run before it: a slow lookup never holds the command or the gates after this hook.
+    const bash: BashStart | null = e.tool === 'Bash' && 'command' in e && !(e as { agentId?: string }).agentId && WRITES.test(String(e.command)) ? { command: String(e.command), startedAt: (await $.clock.now()) - MTIME_SLACK_MS } : null
+    // The model file it names: the pane moves to it as the command starts, in the background.
+    if (bash && /\.sql\b/i.test(bash.command)) {
+      later($, async () => {
+        const base = (await $.session.cwd().catch(() => null)) ?? (await $.session.root().catch(() => '.'))
+        const first = sqlFilesIn(bash.command, commandDir(bash.command, base))[0]
+        if (first && (await $.fs.exists(first).catch(() => false))) await follow($, { file: first, auto: true })
+      })
+    }
     if (isEdit) {
       // The columns stop half a second before the hold ends, leaving time to write the note.
       lookup = impactFirst($, e, file!, (await $.clock.now()) + HOLD_TOTAL_MS - 500, progress)
@@ -1287,7 +1495,39 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     const result = await next(e)
     // Any tool may have changed the shown model's file (Edit, a shell command): one stat says so.
     later($, () => recheckStale($))
-    if (result.deny || result.isError) return result
+    // A shell command that failed may still have changed models first (`python3 rewrite.py && dbt test`): looked at too.
+    if (result.deny || (result.isError && !bash)) return result
+    // The model files the shell command changed: the pane follows the first, and each gets the impact note an Edit gets.
+    const bashNotes: ImpactNote[] = []
+    if (bash) {
+      const changed = await within($, 3_000, bashChanged($, bash).catch(() => null))
+      if (changed?.length) {
+        clearSqlGraphs()
+        later($, async () => void (await follow($, { file: changed[0]!.file, auto: true })))
+        const deadline = (await $.clock.now()) + HOLD_TOTAL_MS - 500
+        const notes = await within(
+          $,
+          HOLD_TOTAL_MS,
+          Promise.all(changed.map(async one => impactFirst($, { tool: 'Edit', file_path: one.file, old_string: one.before, new_string: await $.fs.read(one.file).catch(() => '') }, one.file, deadline, { project: false }, null).catch(() => null))),
+        )
+        for (const note of notes ?? []) {
+          if (!note) continue
+          bashNotes.push(note)
+          $.ui.log(note.toast, { to: 'debug' })
+          if (showEditImpact) $.ui.log(note.toast)
+        }
+      }
+    }
+    // The notes for the models the shell command changed, each once a turn: with its result, failed or not.
+    const withBashNotes = (out: typeof result) => {
+      const fresh = bashNotes.filter(one => !contextGiven.has(one.key))
+      for (const one of fresh) {
+        contextGiven.add(one.key)
+        $.ui.log(`impact-first · added to Claude's context: lineage for ${one.view.column ? `${one.view.model}.${one.view.column}` : one.view.model} (changed by a shell command)`, { to: 'debug' })
+      }
+      return fresh.length ? ({ ...out, context: [...(out.context ?? []), ...fresh.map(one => one.context)] } as typeof result) : null
+    }
+    if (result.isError) return withBashNotes(result) ?? result
     // After the edit lands: a .sql file or dbt_project.yml changed, so the SQL-file graphs are stale.
     if (file && EDIT_TOOLS.has(e.tool) && /(\.sql|\.py|dbt_project\.yml)$/i.test(file)) clearSqlGraphs()
     // Projects are found by their dbt_project.yml alone.
@@ -1300,7 +1540,14 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
       const trace = modelLineageOf(output) ?? modelLineageOf(parseJson(textOf(output)))
       const columns = (e as any).column || trace?.focus?.column ? null : lineageFromOutput(output)
       const manifest = typeof (e as any).manifest_path === 'string' ? String((e as any).manifest_path) : undefined
-      later($, async () => void (await follow($, { model: String((e as any).model), columns, auto: true, manifest })))
+      // The node the call answered for, by its unique_id: in a manifest two projects share, its bare name may be either's.
+      const parsed = parseJson(textOf(output)) as any
+      // A text report (or one cut for size, `{report, truncated}`) names it on its `ID:` line.
+      const reported = /^\s*ID:\s*((?:model|snapshot)\.[^\s]+)\s*$/m.exec([textOf(output), typeof parsed?.report === 'string' ? parsed.report : ''].join('\n'))?.[1]
+      const answered = [trace?.focus?.uniqueId, (output as any)?.model_unique_id, (output as any)?.structuredContent?.model_unique_id, parsed?.model_unique_id, parsed?.structuredContent?.model_unique_id, reported].find(one => typeof one === 'string')
+      // Only for a call that named its manifest (one a package repo may share with integration_tests); otherwise the name
+      // is followed in the project shown, as before.
+      later($, async () => void (await follow($, { model: manifest && typeof answered === 'string' ? answered : String((e as any).model), columns, auto: true, manifest })))
     }
     if (isSql) later($, async () => void (await follow($, { file: file!, auto: true })))
     else if (e.tool === 'Bash' && 'command' in e) {
@@ -1320,8 +1567,12 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
           // a newer follow (another read) has started, this command's candidates stop.
           const start = startedSeq
           let own = 0
+          // A named file of a project that its manifest does not have as the project's own model is not followed by
+          // its name either (that name may be another package's model).
+          let projectFile = false
           for (const file of named) {
             if (!(await $.fs.exists(file).catch(() => false))) continue
+            if (await projectRoot($, file, true).catch(() => null)) projectFile = true
             // A read that started while this check waited owns the pane now.
             if (startedSeq - start > own) return
             own++
@@ -1330,7 +1581,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
           }
           // Only a name (find -name x.sql): the model of that name in the command's project, unless a
           // newer follow has started since this command's own ones.
-          if (startedSeq - start > own) return
+          if (startedSeq - start > own || projectFile) return
           await follow($, { model: named[0]!.split('/').pop()!.replace(/\.sql$/i, ''), root: dir, auto: true })
         })
       }
@@ -1342,6 +1593,8 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
         return { ...result, context: [...(result.context ?? []), note.context] } as typeof result
       }
     }
+    const noted = withBashNotes(result)
+    if (noted) return noted
     if (lookupFailed) {
       const name = (file!.split(/[\\/]/).pop() ?? file!).replace(/\.sql$/i, '')
       $.ui.log(`impact-first · added to Claude's context: the lineage lookup failed for ${name}`)
@@ -1408,6 +1661,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     const stale = await read($, staleAtom)
     const loading = await read($, loadingAtom)
     const chosenView = await read($, viewAtom)
+    const viewChosen = await read($, viewChosenAtom)
     const pan = await read($, panAtom)
     const answer = await read($, answerAtom)
     const node = focus && graph ? graph.nodes[focus.model] : null
@@ -1446,6 +1700,9 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
     // A graph already found too big for this pane is not drawn again: the pane shows folders.
     const graphWindowKey = `${keyOf('graph')}\u0000${width}`
     let tooBig = view === 'graph' ? (tooBigCache.get(graphWindowKey) ?? null) : null
+    // Already found wider than this pane (and the person has not picked a view): straight to its ends.
+    const knownWide = !viewChosen && view === 'graph' && !tooBig ? tooWideCache.get(graphWindowKey) : undefined
+    if (knownWide !== undefined) view = 'ends'
     if (tooBig) view = 'folders'
     const draw = () => {
       const drawKey = keyOf(view)
@@ -1499,6 +1756,21 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
         ;({ drawn, room, maxPan, from, shownRows } = draw())
       }
     }
+    // The whole graph is wider than the pane and the person has not picked a view: its ends, which fit, with the
+    // dashboards at the end, rather than a window with edges running off the right.
+    const fitting = !viewChosen && view === 'graph' && !!drawn && drawn.canvas > room
+    const fitted = fitting || knownWide !== undefined
+    const wide = fitting ? drawn!.canvas : (knownWide ?? 0)
+    if (fitting) {
+      if (tooWideCache.size >= 8) tooWideCache.delete(tooWideCache.keys().next().value!)
+      tooWideCache.set(graphWindowKey, drawn!.canvas)
+      view = 'ends'
+      ;({ drawn, room, maxPan, from, shownRows } = draw())
+    }
+    // Dashboards downstream that the drawing leaves out (past the pane, or folded): named under it.
+    const drawnIds = new Set(shownRows.flatMap(row => row.map(one => one.node).filter(Boolean)))
+    const dashboards = view === 'list' ? [] : downstreamOf(graph, focus.model).rows.filter(row => row.node.type === 'exposure')
+    const unseenDashboards = dashboards.filter(row => !drawnIds.has(row.node.id))
     // From what is shown: a stored pan past the edge (a narrower pane, a right-clamped start) is not the start.
     const panBy = (step: number) => update($, panAtom, () => Math.min(maxPan, Math.max(0, from + step)))
     // Once a new model's graph is drawn, scroll the pane to it: the canvas can be taller than the pane.
@@ -1578,6 +1850,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
               {graph.upTruncated || graph.truncated ? ` · ${[graph.upTruncated && 'upstream', graph.truncated && 'downstream'].filter(Boolean).join(' and ')} cut at 500 nodes` : ''}
             </Text>
             {tooBig && <Text color="warning">⚠ the whole graph is more than Claude Code can draw in a pane, so it is shown as folders · v: ends only, list</Text>}
+            {fitted && <Text dimColor>the whole graph is {wide} columns wide, wider than the pane: ends only · v for the whole graph</Text>}
             {view === 'graph' && (
               <Box flexDirection="row" gap={2}>
                 {drawn.canvas > room && <Button key="lineage-pan-left" plain hotkey="h" label="◀ pan" onPress={() => panBy(-Math.max(8, Math.floor(room / 2)))} />}
@@ -1596,6 +1869,12 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
               </Box>
             )}
             {shownRows.map((row, i) => drawRow(ui, $, graph, row.some(one => one.text) ? row : [{ text: ' ' }], `graph-${i}`))}
+            {unseenDashboards.length > 0 && (
+              <Text key="lineage-dashboards" color="warning">
+                ◆ {plural(dashboards.length, 'dashboard')} downstream{unseenDashboards.length < dashboards.length ? ` (${unseenDashboards.length} not drawn)` : ''}: {unseenDashboards.slice(0, 6).map(row => row.node.label ?? row.node.name).join(' · ')}
+                {unseenDashboards.length > 6 ? ` · +${unseenDashboards.length - 6} more` : ''}
+              </Text>
+            )}
           </Box>
         )}
         {view !== 'list' && foldedList('down')}
@@ -1717,7 +1996,8 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
           </Box>
         )}
 
-        <Box flexDirection="row" gap={2}>
+        {/* The keys wrap to a second line in a narrow pane rather than squeezing the last ones a letter a line. */}
+        <Box key="lineage-keys" flexDirection="row" flexWrap="wrap" columnGap={2}>
           {/* Only the ends and list views fold; the graph and folders draw everything. */}
           {(view === 'ends' || view === 'list') && <Button key="lineage-up" plain hotkey="u" label="upstream" onPress={() => update($, expandedAtom, current => ({ ...current, up: !current.up }))} />}
           {(view === 'ends' || view === 'list') && <Button key="lineage-down" plain hotkey="d" label="downstream" onPress={() => update($, expandedAtom, current => ({ ...current, down: !current.down }))} />}
@@ -1728,7 +2008,11 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
               plain
               hotkey="v"
               label={VIEW_TITLE[view].toLowerCase()}
-              onPress={() => update($, viewAtom, current => VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length]!)}
+              onPress={async () => {
+                // Shown as its ends only because it did not fit: v shows the whole graph.
+                if (!fitted) await update($, viewAtom, current => VIEWS[(VIEWS.indexOf(current) + 1) % VIEWS.length]!)
+                await update($, viewChosenAtom, () => true)
+              }}
             />
           )}
           <Button

@@ -33,6 +33,8 @@ export function nodeOf(id: string, node: any): GraphNode {
     label: type === 'exposure' ? node?.label || node?.name || id : null,
     type,
     path: node?.original_file_path ?? null,
+    // The schema.yml that describes it (dbt writes `<package>://<path>`): its tests and columns come from there.
+    ...(typeof node?.patch_path === 'string' ? { yml: node.patch_path.replace(/^[^:/]+:\/\//, '') } : {}),
     materialized: node?.config?.materialized ?? null,
     relation: relationOf(node),
     columns,
@@ -235,15 +237,27 @@ export function findModelOrColumn(graph: LineageGraph, wanted: string): string |
   return findModel(graph, wanted) ?? (at > 0 ? findModel(graph, wanted.slice(0, at)) : null)
 }
 
-/** The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. */
-export function findModel(graph: LineageGraph, wanted: string): string | null {
+/** The package a node's unique_id names (`model.<package>.<name>[.v<N>]`). */
+export const packageOf = (id: string) => id.split('.')[1]
+
+/**
+ * The model or snapshot a file path (project-relative, forward slashes), a name or a unique_id names. With `pkg` (the
+ * project's own name), a node of that package wins over another's at the same path or name: a manifest holding
+ * several projects' nodes (a package repo reading integration_tests') can have two `models/orders.sql`. With `ownOnly`
+ * (a file of the project), another package's node is never taken.
+ */
+export function findModel(graph: LineageGraph, wanted: string, pkg?: string | null, ownOnly = false): string | null {
   if (FOLLOWABLE.has(graph.nodes[wanted]?.type ?? '')) return wanted
   const lowered = wanted.toLowerCase()
+  let other: string | null = null
   for (const node of Object.values(graph.nodes)) {
     if (!FOLLOWABLE.has(node.type)) continue
-    if (node.path === wanted || node.name.toLowerCase() === lowered) return node.id
+    if (node.path !== wanted && node.name.toLowerCase() !== lowered) continue
+    if (!pkg || packageOf(node.id) === pkg) return node.id
+    other ??= node.id
   }
-  return null
+  // A file of the project is one of its own nodes or none: another package's node at its path is not it.
+  return ownOnly && pkg ? null : other
 }
 
 /** dbt's data tests and unit tests: counted downstream, never drawn. */
@@ -324,7 +338,7 @@ export function testsOnColumn(graph: LineageGraph, id: string, column: string): 
   return tests.filter(([test, node]) => {
     // dbt and warehouses fold unquoted names: REVENUE typed is the yml's revenue, and "amount" is amount.
     if (bareName(node?.testColumn) !== bareName(column)) return false
-    if (node.testOn) return node.testOn === id
+    if (node?.testOn) return node.testOn === id
     const parents = graph.parents[test] ?? []
     return parents.length > 0 && parents.every(parent => parent === id)
   }).length

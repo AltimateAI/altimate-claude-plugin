@@ -4,17 +4,20 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, On, RenderElement } from 'claude-code'
 
-import type { PlanImpactView, TaskSummaryView } from '../types'
+import type { LineageGraph, PlanImpactView, TaskSummaryView } from '../types'
 import { later, runAltimate, runTool, within } from './altimate-cli'
 import { usageOff } from './usage'
+import { manifestFile, projectName, sharesManifest } from './package-runner'
 import {
   answerOf,
-  changedColumns,
+  changedColumnsAll,
   columnReportData,
   type ColumnAnswer,
   type ColumnTrace,
+  sameModel,
   consumersOf,
   fingerprint,
+  MAX_TASK_COLUMNS,
   type ModelChange,
   modelLevelOf,
   openersFor,
@@ -24,19 +27,26 @@ import {
   reportHtml,
   summaryLines,
   summaryOf,
+  reachOf,
   unknownReach,
+  valueCandidates,
   WINDOWS_EXPLORER,
 } from './impact-report'
-import { projectLayout } from './lineage-graph'
-import { modelsNamed, openPane, projectRoot } from './lineage'
+import { findModel, projectLayout } from './lineage-graph'
+import { modelsNamed, openPane, projectRoot, readGraph } from './lineage'
 
 export const REPORT_COMMAND = 'lineage-report'
 // Under the project's target/, which dbt already keeps out of git.
 const LINEAGE_DIR = 'target/.altimate-lineage'
 // A task's copy of the manifest while it runs, and the last finished task's, kept for its report. Each
 // session has its own, so two sessions in one project never read each other's; a day on, they go.
-export const runningManifest = (tag: string) => `manifest-before.${tag}.json`
-export const taskManifest = (tag: string) => `task-manifest.${tag}.json`
+export const runningManifest = (tag: string) => `.altimate-manifest-before.${tag}.json`
+export const taskManifest = (tag: string) => `.altimate-task-manifest.${tag}.json`
+// The copies sit in target/ itself, beside the manifest, not in LINEAGE_DIR: altimate-code takes the folder above
+// a manifest's folder as the project (to read a seed's CSV header, which a `select *` from a seed needs), so a
+// copy one folder deeper traced nothing through a `select *` and read as a reach of 0.
+const COPY_DIR = 'target'
+const COPY_GLOB = '.altimate-*manifest*.json'
 const MANIFEST_COPIES_KEPT_MINUTES = '+1440'
 /** This session's id as a file-name part. */
 export async function sessionTag($: EngineInterface): Promise<string> {
@@ -64,7 +74,8 @@ const hiddenAtom = atom({ plugin: 'altimate-code', key: 'isLineageSummaryHidden'
 type Layout = { models: string[] }
 type GitStart = { top: string; dirty: Map<string, string | null> }
 type RootState = { snapshot: string | null; layout: Layout; git: GitStart | null }
-type Task = { roots: Map<string, Promise<RootState>>; originals: Map<string, { root: string; text: string }> }
+// copies: the task's one copy per manifest, which a package and the project below it that installs it share.
+type Task = { roots: Map<string, Promise<RootState>>; originals: Map<string, { root: string; text: string }>; copies: Map<string, Promise<string | null>> }
 
 /** The last task that changed a model: all a report needs, frozen as the task ended. */
 type Finished = {
@@ -84,8 +95,9 @@ let finished: Finished | null = null
 let finishSeq = 0
 let planSeq = 0
 
-const newTask = (): Task => ({ roots: new Map(), originals: new Map() })
+const newTask = (): Task => ({ roots: new Map(), originals: new Map(), copies: new Map() })
 const relative = (root: string, path: string) => path.slice(root.length).replace(/^[\\/]+/, '').replace(/\\/g, '/')
+const dirname = (path: string) => path.replace(/[\\/][^\\/]*$/, '') || path
 const modelName = (file: string) => (file.split(/[\\/]/).pop() ?? file).replace(/\.sql$/i, '')
 
 /** Whether a project-relative path is a model's SQL. */
@@ -122,16 +134,21 @@ function prepareRoot($: EngineInterface, t: Task, root: string): Promise<RootSta
     const layout = projectLayout(await $.fs.read(`${root}/dbt_project.yml`).catch(() => ''))
     // Models only: impact_analysis does not take a snapshot as the column's model.
     const models = { models: layout.models }
-    let snapshot: string | null = null
-    const manifest = `${root}/target/manifest.json`
-    if (await $.fs.exists(manifest).catch(() => false)) {
-      // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read.
-      const dir = `${root}/${LINEAGE_DIR}`
-      const made = await $.process.run(['mkdir', '-p', dir], { timeoutMs: 5_000 }).catch(() => null)
-      const copy = `${dir}/${runningManifest(await sessionTag($))}`
-      const copied = made?.exitCode === 0 ? await $.process.run(['cp', manifest, copy], { timeoutMs: 20_000 }).catch(() => null) : null
-      if (copied?.exitCode === 0) snapshot = copy
+    const manifest = await manifestFile($, root)
+    // Copied once a task per manifest: a package and integration_tests read the same one, from the task's start.
+    let copying = t.copies.get(manifest)
+    if (!copying) {
+      copying = (async () => {
+        if (!(await $.fs.exists(manifest).catch(() => false))) return null
+        // The manifest can be far over the 4 MiB a plugin reads, so it is copied, never read; beside it, so a package's
+        // copy of integration_tests/target/manifest.json is read from that project too.
+        const copy = `${dirname(manifest)}/${runningManifest(await sessionTag($))}`
+        const copied = await $.process.run(['cp', manifest, copy], { timeoutMs: 20_000 }).catch(() => null)
+        return copied?.exitCode === 0 ? copy : null
+      })()
+      t.copies.set(manifest, copying)
     }
+    const snapshot = await copying
     const top = (await git($, ['-C', root, 'rev-parse', '--show-toplevel']))?.trim()
     let gitStart: GitStart | null = null
     if (top) {
@@ -165,15 +182,51 @@ async function collectChanges($: EngineInterface, t: Task): Promise<ModelChange[
     }
   }
   const changes: ModelChange[] = []
+  // What a change's unique_id is judged by, read once per project and copy of its manifest, not once per changed file.
+  const projects = new Map<string, Promise<ProjectIds>>()
   for (const [file, one] of files) {
     const state = await t.roots.get(one.root)?.catch(() => null)
     if (state && !isModelFile(state.layout, relative(one.root, file))) continue
     const current = await $.fs.read(file).catch(() => '')
     if (current === one.original) continue
-    changes.push({ model: modelName(file), file: relative(one.root, file), root: one.root, columns: changedColumns(one.original, current), ended: fingerprint(current) })
+    const all = changedColumnsAll(one.original, current)
+    const columns = all.slice(0, MAX_TASK_COLUMNS)
+    // No select item changed (a value computed in a Jinja block the select reads, say): the names the change rewrote
+    // are asked of the manifest, and the ones it has are traced as columns whose values change.
+    const values = columns.length === 0 ? valueCandidates(one.original, current) : []
+    const snapshot = state?.snapshot ?? null
+    const key = `${one.root}\0${snapshot ?? ''}`
+    if (!projects.has(key)) projects.set(key, projectIds($, one.root, snapshot))
+    const id = changeId(await projects.get(key)!, relative(one.root, file), modelName(file))
+    changes.push({ model: modelName(file), ...(id ?? {}), file: relative(one.root, file), root: one.root, columns, ...(all.length > columns.length ? { more: all.length - columns.length } : {}), ...(values.length ? { values } : {}), ended: fingerprint(current) })
   }
   if (changes.length > MAX_MODELS) $.ui.log(`lineage-summary · ${changes.length} models changed; tracing the first ${MAX_MODELS}`)
   return changes.slice(0, MAX_MODELS)
+}
+
+type ProjectIds = { pkg: string | null; graph: LineageGraph | null; shared: boolean }
+
+/** A project's name, its manifest's graph and whether that manifest is shared: from the task's copy when it has one. */
+async function projectIds($: EngineInterface, root: string, snapshot: string | null): Promise<ProjectIds> {
+  const pkg = await projectName($, root)
+  const manifest = snapshot ?? (await manifestFile($, root))
+  const graph = await readGraph($, manifest).catch(() => null)
+  // Judged by the copy the task reads (taken at its start), else by the manifest as it is now.
+  const shared = await sharesManifest($, root, snapshot ? `${dirname(snapshot)}/manifest.json` : manifest)
+  return { pkg, graph, shared }
+}
+
+/**
+ * The unique_id a changed model is asked for by, so a manifest holding another local project's model of the same name
+ * (a package repo and integration_tests share one) never answers for it. From the task's copy of the manifest when it
+ * is small enough to read: the project's own node at the file's path (versions included). In a shared manifest, a
+ * model it lacks (new) or one it is too large to read for is `model.<package>.<name>`, never the bare name another
+ * project's model may answer to. Undefined otherwise: the model goes by its name, as before.
+ */
+function changeId(project: ProjectIds, rel: string, name: string): { id: string; guessed?: boolean } | undefined {
+  const own = project.graph ? findModel(project.graph, rel, project.pkg, true) : null
+  if (own) return { id: own }
+  return project.shared && project.pkg ? { id: `model.${project.pkg}.${name}`, guessed: true } : undefined
 }
 
 /** Runs the work items at most `limit` at a time, keeping their order. */
@@ -192,17 +245,31 @@ async function pool<T>(items: (() => Promise<T>)[], limit: number): Promise<T[]>
 }
 
 /** The copy of the manifest a project's answers read: the task's own, else the project's as it is now. */
-const manifestOf = (done: Finished, root: string) => done.manifests[root] ?? `${root}/target/manifest.json`
+async function manifestOf($: EngineInterface, done: Finished, root: string): Promise<string> {
+  return done.manifests[root] ?? (await manifestFile($, root))
+}
 
 /** One impact_analysis call for a change; null when it failed. */
 async function ask($: EngineInterface, done: Finished, change: ModelChange, column: string | null, direction: 'downstream' | 'upstream') {
   // Known limit: the model goes by its file name, which misses a versioned model (x_v2.sql) or a file
   // named apart from its model.
-  const args = { manifest_path: manifestOf(done, change.root), model: change.model, ...(column && { column }), change_type: 'modify', direction }
-  // Through the CLI: nobody asked for these calls by name, and a call over MCP can raise a permission dialog.
-  const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
-  return result?.ok ? result.metadata : null
+  const call = async (model: string) => {
+    const args = { manifest_path: await manifestOf($, done, change.root), model, ...(column && { column }), change_type: 'modify', direction }
+    // Through the CLI: nobody asked for these calls by name, and a call over MCP can raise a permission dialog.
+    const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
+    return result?.ok ? result.metadata : null
+  }
+  if (!change.guessed || byName.has(change)) return call(byName.has(change) ? change.model : (change.id ?? change.model))
+  // An id made from the file name, which the manifest lacks (a versioned model: model.<package>.orders.v1): asked by its
+  // name instead, as /lineage-report does, from then on for every column of that change.
+  const meta = await call(change.id!)
+  if ((meta as any)?.success !== false) return meta
+  byName.add(change)
+  return call(change.model)
 }
+
+/** Changes whose made-up unique_id the manifest did not have: asked for by name. */
+const byName = new WeakSet<ModelChange>()
 
 const unknownOf = (answer: ColumnAnswer | null) => {
   const unknown = unknownReach(answer)
@@ -211,13 +278,25 @@ const unknownOf = (answer: ColumnAnswer | null) => {
 
 /** What the band needs: each changed column's downstream answer, and the model-level count for a model with none. */
 async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrace[]> {
-  const jobs: (() => Promise<ColumnTrace>)[] = []
+  const jobs: (() => Promise<ColumnTrace | null>)[] = []
   for (const change of done.changes) {
     if (change.columns.length === 0) {
       jobs.push(async () => {
         const meta = await ask($, done, change, null, 'downstream')
-        return { model: change.model, column: null, down: null, up: null, modelLevel: modelLevelOf(meta), failed: meta === null, consumers: consumersOf(meta) }
+        return { model: change.model, ...(change.id ? { id: change.id } : {}), column: null, down: null, up: null, modelLevel: modelLevelOf(meta), failed: meta === null, consumers: consumersOf(meta) }
       })
+      // Names the change rewrote: only those the manifest has as the model's columns are kept (null drops the rest).
+      for (const name of change.values ?? []) {
+        jobs.push(async () => {
+          const meta = await ask($, done, change, name, 'downstream')
+          const answer = answerOf(meta)
+          if (!answer || !answer.columns.some(one => one.hop === 0)) return null
+          // A name the change rewrote that reaches nothing is no evidence (an operand, not the output that changed):
+          // left out, so the band never reads as a value change reaching 0.
+          if (!unknownReach(answer) && reachOf(answer).columns === 0) return null
+          return { model: change.model, ...(change.id ? { id: change.id } : {}), column: name, down: answer, up: null, modelLevel: modelLevelOf(meta), failed: false, value: true, ...unknownOf(answer), consumers: consumersOf(meta) }
+        })
+      }
     }
     for (const col of change.columns) {
       jobs.push(async () => {
@@ -235,11 +314,12 @@ async function traceDown($: EngineInterface, done: Finished): Promise<ColumnTrac
         const unchecked = col.before === null && !!meta && lacks
         // An altimate-code from before the column answer gives neither the answer nor its error.
         const stale = !noModel && !answer && !!meta && (meta as any).column_answer === undefined && (meta as any).column_answer_error === undefined
-        return { model: change.model, column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
+        return { model: change.model, ...(change.id ? { id: change.id } : {}), column: col.name, down, up: null, modelLevel: modelLevelOf(meta), failed: !down && !stale, stale, unchecked, ...unknownOf(down), consumers: consumersOf(meta) }
       })
     }
   }
-  return pool(jobs, PARALLEL)
+  // Every column whose value changes is kept for the report; the band shows the first few (summaryOf).
+  return (await pool(jobs, PARALLEL)).filter((one): one is ColumnTrace => one !== null)
 }
 
 /** What a report adds: where each changed column comes from. */
@@ -247,7 +327,7 @@ async function traceFull($: EngineInterface, done: Finished): Promise<ColumnTrac
   const downs = await (done.downs ??= traceDown($, done))
   const jobs = downs.map(trace => async () => {
     if (!trace.column || trace.unchecked) return trace
-    const change = done.changes.find(one => one.model === trace.model)!
+    const change = done.changes.find(one => sameModel(trace, one))!
     return { ...trace, up: answerOf(await ask($, done, change, trace.column, 'upstream')) }
   })
   return pool(jobs, PARALLEL)
@@ -259,19 +339,32 @@ const stamp = (ms: number) => new Date(ms).toISOString().slice(0, 16).replace('T
 async function freezeManifests($: EngineInterface, t: Task, changes: ModelChange[]): Promise<Record<string, string | null>> {
   const out: Record<string, string | null> = {}
   const tag = await sessionTag($)
+  // A copy two projects share is moved once; both read the frozen one.
+  const frozenCopies = new Map<string, string>()
   for (const root of new Set(changes.map(one => one.root))) {
-    const dir = `${root}/${LINEAGE_DIR}`
-    await $.process
-      .run(['find', dir, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
-      .catch(() => null)
     const state = await t.roots.get(root)?.catch(() => null)
+    // The copies sit beside the manifest they were taken from: the project's target/, or the one below that installs it.
+    const dir = state?.snapshot ? dirname(state.snapshot) : `${root}/${COPY_DIR}`
+    await $.process
+      .run(['find', dir, '-maxdepth', '1', '-name', COPY_GLOB, '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
+      .catch(() => null)
+    // Copies an older version kept in LINEAGE_DIR.
+    await $.process
+      .run(['find', `${root}/${LINEAGE_DIR}`, '-maxdepth', '1', '-name', '*manifest*.json', '-mmin', MANIFEST_COPIES_KEPT_MINUTES, '-delete'], { timeoutMs: 5_000 })
+      .catch(() => null)
     if (!state?.snapshot) {
       out[root] = null
+      continue
+    }
+    const shared = frozenCopies.get(state.snapshot)
+    if (shared) {
+      out[root] = shared
       continue
     }
     const frozen = `${dir}/${taskManifest(tag)}`
     const moved = await $.process.run(['mv', '-f', state.snapshot, frozen], { timeoutMs: 5_000 }).catch(() => null)
     out[root] = moved?.exitCode === 0 ? frozen : state.snapshot
+    frozenCopies.set(state.snapshot, out[root]!)
   }
   return out
 }
@@ -285,7 +378,7 @@ async function finishTask($: EngineInterface, t: Task) {
   if (changes.length === 0) return
   const tracing: TaskSummaryView = {
     state: 'tracing',
-    models: changes.map(one => ({ name: one.model, modelLevel: null, columns: one.columns.map(col => ({ name: col.name, reach: null, failed: false })) })),
+    models: changes.map(one => ({ name: one.model, modelLevel: null, columns: one.columns.map(col => ({ name: col.name, reach: null, failed: false })), ...(one.more ? { more: one.more } : {}) })),
     unresolved: 0,
     truncated: false,
     report: null,
@@ -340,6 +433,7 @@ type SavedTask = {
 }
 
 async function saveTask($: EngineInterface, root: string, saved: SavedTask) {
+  await $.process.run(['mkdir', '-p', `${root}/${LINEAGE_DIR}`], { timeoutMs: 5_000 }).catch(() => null)
   await $.fs
     .write(`${root}/${LINEAGE_DIR}/${TASK_FILE}`, JSON.stringify(saved))
     .catch(error => $.ui.log(`lineage-summary · the task could not be saved: ${String(error)}`, { to: 'debug' }))
@@ -413,7 +507,7 @@ async function buildReport($: EngineInterface, done: Finished): Promise<{ path: 
       done.downs = null
       done.full = null
     }
-    if (!done.manifests[root] && !(await $.fs.exists(`${root}/target/manifest.json`).catch(() => false))) missing.push(root)
+    if (!done.manifests[root] && !(await $.fs.exists(await manifestFile($, root)).catch(() => false))) missing.push(root)
   }
   if (missing.length > 0) return { error: `The manifest this task was read from is gone. Run \`dbt compile\` and ask again.` }
   const traces = await (done.full ??= traceFull($, done))
@@ -456,9 +550,10 @@ async function planReady($: EngineInterface, e: { plan?: unknown; planFilePath?:
   const tracing: PlanImpactView = { state: 'tracing', models, more }
   await update($, planAtom, () => tracing)
   await update($, hiddenAtom, () => false)
+  const manifest = await manifestFile($, root)
   const looked = await pool(
     shown.map(one => async () => {
-      const args = { manifest_path: `${root}/target/manifest.json`, model: one.id, change_type: 'modify', direction: 'downstream' }
+      const args = { manifest_path: manifest, model: one.id, change_type: 'modify', direction: 'downstream' }
       // Through the CLI: over MCP this could raise a permission dialog on top of the plan's.
       const result = await runTool($, 'impact_analysis', args, { cliOnly: true }).catch(() => null)
       const meta = result?.ok ? (result.metadata as any) : null
@@ -540,11 +635,24 @@ export function reportRequest(args: string): { kind: 'task' } | { kind: 'column'
 async function buildColumnReport($: EngineInterface, model: string, column: string): Promise<{ path: string; name: string } | { error: string }> {
   const root = await projectRoot($, await $.session.root().catch(() => '.'), false).catch(() => null)
   if (!root) return { error: 'No dbt project here: /lineage-report <model>.<column> reads the target/manifest.json of the dbt project this session runs in.' }
-  const manifest = `${root}/target/manifest.json`
+  const manifest = await manifestFile($, root)
   if (!(await $.fs.exists(manifest).catch(() => false))) return { error: 'This project has no target/manifest.json yet. Run `dbt parse` or `dbt compile`, then ask again.' }
-  const args = { manifest_path: manifest, model, column, change_type: 'modify' }
   // Through the CLI, as for a task: nobody asked for these calls by name.
-  const [down, up] = await Promise.all((['downstream', 'upstream'] as const).map(direction => runTool($, 'impact_analysis', { ...args, direction }, { cliOnly: true }).catch(() => null)))
+  const traceAs = (asked: string) =>
+    Promise.all((['downstream', 'upstream'] as const).map(direction => runTool($, 'impact_analysis', { manifest_path: manifest, model: asked, column, change_type: 'modify', direction }, { cliOnly: true }).catch(() => null)))
+  // integration_tests' manifest, which a package repo borrows, holds its own models too: a bare name is asked for as the
+  // package's model first, then, when the package has none of that name, as it is.
+  const own = await projectName($, root)
+  // A manifest small enough to read says which node the name is: the project's own (any version) before another's.
+  const graph = !model.includes('.') ? await readGraph($, manifest).catch(() => null) : null
+  const known = graph ? findModel(graph, model, own) : null
+  const pkg = !graph && !model.includes('.') && (await sharesManifest($, root, manifest)) ? own : null
+  let [down, up] = await traceAs(known ?? (pkg ? `model.${pkg}.${model}` : model))
+  let asOwn = !!known || !!pkg
+  if (!known && pkg && (down?.metadata as any)?.success === false) {
+    ;[down, up] = await traceAs(model)
+    asOwn = false
+  }
   for (const result of [down, up]) {
     const meta = result?.metadata as any
     // The model isn't in the manifest: the CLI's own words, which name some that are.
@@ -557,7 +665,7 @@ async function buildColumnReport($: EngineInterface, model: string, column: stri
   if (!downAnswer && !upAnswer) return { error: 'This altimate-code traces no single column. Update it to use /lineage-report <model>.<column>.' }
   // An answer that never reached the column traced nothing: no report says it reaches 0.
   if (downAnswer && !downAnswer.columns.some(one => one.hop === 0)) return { error: `${model} has no column ${column} in target/manifest.json. Run \`dbt parse\` or \`dbt compile\` if it was just added, then ask again.` }
-  const name = typeof (down.metadata as any)?.model === 'string' ? String((down.metadata as any).model) : model
+  const name = !asOwn && typeof (down.metadata as any)?.model === 'string' ? String((down.metadata as any).model) : model
   const trace: ColumnTrace = { model: name, column, down: downAnswer, up: upAnswer, modelLevel: modelLevelOf(down.metadata), failed: false, ...unknownOf(downAnswer), consumers: consumersOf(down.metadata) }
   const data = columnReportData(name, column, trace, { builtAt: stamp(await $.clock.now()), manifest: 'target/manifest.json as it is now' })
   const path = `${root}/${LINEAGE_DIR}/${COLUMN_REPORT}`
