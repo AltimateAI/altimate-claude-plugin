@@ -1860,7 +1860,7 @@ const editedFile = (e: { tool: string }): string | null => {
   const path = (e as { file_path?: unknown }).file_path
   return EDIT_TOOLS.has(e.tool) && typeof path === 'string' ? normalize(path) : null
 }
-// One per key, the latest: a call refused after it started, or an edit that failed, leaves one behind that the next call of the same key replaces.
+// One per key, the latest: an edit that failed leaves one behind that the next call of the same key replaces. A Bash call a gate refuses is let go by dbtModsBashDropped.
 const noteStart = (key: string, start: Start) => void starts.set(key, start)
 const takeStart = (key: string): Start | undefined => {
   const start = starts.get(key)
@@ -2058,8 +2058,9 @@ async function bashEdited($: EngineInterface, start: { asked: number; startedAt:
   const again = () => later($, () => recheck($, null))
   const lines: string[] = []
   // A look at the checked model comes after every check of this command has been handed over: a check shows on the band only after its setup.
+  let all: Promise<unknown> = Promise.resolve()
   const check = (files: { file: string }[], until: number) =>
-    Promise.all(files.map(one => checkModel($, normalize(one.file), start.asked, agentId, until).then(found => void lines.push(...(found ?? [])), () => {})))
+    (all = Promise.all(files.map(one => checkModel($, normalize(one.file), start.asked, agentId, until).then(found => void lines.push(...(found ?? [])), () => {}))))
   let late = false
   try {
     // No later than `by`, the time the features' share of the phase runs out.
@@ -2078,7 +2079,7 @@ async function bashEdited($: EngineInterface, start: { asked: number; startedAt:
   } catch {
     return []
   } finally {
-    if (!late) again()
+    if (!late) void all.then(again)
   }
 }
 
