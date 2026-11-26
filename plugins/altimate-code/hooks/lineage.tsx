@@ -564,6 +564,8 @@ type FollowInput = {
   auto?: boolean
   /** Re-read the manifest (and, unless a large manifest's cached columns stand, the column lineage) even when the model is unchanged. */
   refresh?: boolean
+  /** The manifest changed under the pane: a refresh nobody asked for, so it counts as no ask, opens nothing and says nothing unless it fails. */
+  reload?: boolean
   /** `model` may end in `.column`: read so only when the whole text is not itself a model (a unique_id or path has dots). */
   dottedColumn?: boolean
   /** The manifest a tool call named (Claude's own dbt_lineage call): its project is the one to follow. */
@@ -594,7 +596,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // What Claude's own reads run into outside a project (a package's SQL, a stray .sql) is not news.
   const isPackage = !!input.file && /[\\/]dbt_(?:packages|modules)[\\/]/.test(input.file)
   const say = async (text: string, always = false) => {
-    if (!input.auto || (always && !isPackage)) await update($, messageAtom, () => text)
+    if ((!input.auto && !input.reload) || (always && !isPackage)) await update($, messageAtom, () => text)
   }
   const seq = ++startedSeq
   const current = await read($, focusAtom)
@@ -716,7 +718,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   claimedSeq = seq
   ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
   // The person's own follows; Claude's reads and the answer's follow are not asks.
-  if (!input.auto && input.fromAnswer === undefined) askedFor = `${id}\u0000${manifest}`
+  if (!input.auto && !input.reload && input.fromAnswer === undefined) askedFor = `${id}\u0000${manifest}`
   // update() may retry its write after a conflict, so each write below re-checks ownership inside
   // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
   const superseded = () => claimedSeq !== seq
@@ -897,11 +899,38 @@ async function staleSql($: EngineInterface, root: string, node: GraphNode | unde
   return null
 }
 
+// The manifest revision a reload is already reading, so overlapping tool calls reload it once.
+let reloading: string | null = null
+
+/**
+ * A dbt command (Claude's, or the person's in another terminal) rewrote the manifest the pane shows: the pane
+ * reads it again, as r does, so the lineage and the out-of-date warning follow the compile without a press.
+ * A reload that fails (dbt still writing the file) leaves the graph shown and is tried again by the next call.
+ * Whether the pane now shows the new manifest.
+ */
+async function reloadIfRewritten($: EngineInterface, focus: LineageFocus): Promise<boolean> {
+  const stat = await $.fs.stat(focus.manifest).catch(() => null)
+  if (!stat || stat.mtimeMs <= focus.mtimeMs) return false
+  const revision = `${focus.model}\u0000${focus.manifest}\u0000${stat.mtimeMs}`
+  // A follow in flight is moving the pane to another model: a reload of this one would take it back.
+  if (reloading === revision || followsInFlight > 0) return false
+  reloading = revision
+  try {
+    if (!sameFocus(await read($, focusAtom), focus)) return false
+    return await followOnce($, { model: focus.model, refresh: true, reload: true })
+  } finally {
+    if (reloading === revision) reloading = null
+  }
+}
+
 /** The shown model's file may have changed since the pane read it (an edit, a shell command): checked again. */
 async function recheckStale($: EngineInterface) {
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
-  if (!focus || !graph || focus.via === 'sql') return
+  if (!focus || !graph) return
+  // The reload ends with its own check, against the manifest it read.
+  if (await reloadIfRewritten($, focus)) return
+  if (focus.via === 'sql') return
   const stale = await staleSql($, focus.root, graph.nodes[focus.model], focus.mtimeMs)
   if (sameFocus(await read($, focusAtom), focus)) await update($, staleAtom, prev => (prev === stale ? prev : stale))
 }

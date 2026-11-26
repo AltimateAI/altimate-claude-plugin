@@ -1026,6 +1026,113 @@ test('a model whose SQL changed after the manifest was written says so; r keeps 
   await ui.unmount()
 })
 
+// fct_orders after Claude swapped its ref('int_orders') for a hardcoded table, compiled.
+const RECOMPILED = {
+  ...MANIFEST,
+  nodes: {
+    ...MANIFEST.nodes,
+    'model.shop.fct_orders': { ...MANIFEST.nodes['model.shop.fct_orders'], depends_on: { nodes: ['model.shop.stg_customers'] } },
+  },
+}
+const STALE_WARNING = /⚠ fct_orders\.sql changed after the manifest was written: run `dbt compile`, then press r$/
+const MANIFEST_LOADS = (logs: string[]) => logs.filter(line => line.startsWith('lineage-pane · target/manifest.json · '))
+
+test('a dbt compile that rewrites the manifest reloads the pane by itself and clears the out-of-date warning', async ($, on) => {
+  let manifestMtime = 1
+  let compiled = false
+  const { clock, logs } = await start($, on, {
+    mtime: () => manifestMtime,
+    fileMtime: path => (path === FILE ? 5 : undefined),
+    fileText: path => (path === MANIFEST_PATH && compiled ? JSON.stringify(RECOMPILED) : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: STALE_WARNING })).toBeDefined()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(1)
+  // Claude's `dbt compile` rewrites the manifest.
+  compiled = true
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: STALE_WARNING })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeUndefined()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  await ui.unmount()
+})
+
+test('a tool call that leaves the manifest as it was keeps the out-of-date warning and reloads nothing', async ($, on) => {
+  const { clock, logs } = await start($, on, { fileMtime: path => (path === FILE ? 5 : undefined) })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Text', text: STALE_WARNING })).toBeDefined()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(1)
+  await ui.unmount()
+})
+
+test('a rewritten manifest opens no pane when none was ever shown', async ($, on) => {
+  let manifestMtime = 1
+  const { clock, opens, logs } = await start($, on, { mtime: () => manifestMtime })
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(opens).toEqual([])
+  expect(MANIFEST_LOADS(logs)).toEqual([])
+})
+
+test('a manifest is reloaded once: the next tool call with the same modified time does not read it again', async ($, on) => {
+  let manifestMtime = 1
+  const { clock, logs } = await start($, on, { mtime: () => manifestMtime })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+})
+
+test('a reload that cannot read the new manifest keeps the graph shown, and the next call tries again', async ($, on) => {
+  let manifestMtime = 1
+  let written = false
+  const { clock, logs } = await start($, on, {
+    mtime: () => manifestMtime,
+    fileMtime: path => (path === FILE ? 5 : undefined),
+    // dbt is still writing it: half a file.
+    fileText: path => (path === MANIFEST_PATH && manifestMtime > 1 ? (written ? JSON.stringify(RECOMPILED) : '{"nodes": {"model.shop.fct_or') : undefined),
+  })
+  await $.tool.call({ tool: 'Read', file_path: FILE })
+  await clock.settle()
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'lineage-view' })
+  await clock.settle()
+  manifestMtime = 10
+  await $.tool.call({ tool: 'Bash', command: 'dbt compile' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /lineage · fct_orders/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: STALE_WARNING })).toBeDefined()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(1)
+  // dbt finished writing it.
+  written = true
+  await $.tool.call({ tool: 'Bash', command: 'ls' } as any)
+  await clock.settle()
+  expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: STALE_WARNING })).toBeUndefined()
+  expect(MANIFEST_LOADS(logs)).toHaveLength(2)
+  await ui.unmount()
+})
+
 test('a shell command that changes the shown model\'s file brings the warning up, and the edit note says the manifest is older', async ($, on) => {
   let fileMtime = 1
   const { clock, notes } = await start($, on, { fileMtime: path => (path === FILE ? fileMtime : undefined) })
@@ -1897,8 +2004,8 @@ test("the person's press still loading when the answer ends wins over the answer
 
 test("a newer turn arriving while the answer's own model lookup runs keeps the answer out", async ($, on) => {
   let release!: () => void
-  // Stats 1-2 are the read's own follow; stat 3 is the answer's model lookup, held until the next turn has started.
-  const { clock } = await start($, on, { holdManifestStat: { at: 3, until: new Promise<void>(resolve => (release = resolve)) } })
+  // Stats 1-3 are the read's own follow and the check that it did not rewrite the manifest; stat 4 is the answer's model lookup, held until the next turn has started.
+  const { clock } = await start($, on, { holdManifestStat: { at: 4, until: new Promise<void>(resolve => (release = resolve)) } })
   await $.tool.call({ tool: 'Read', file_path: FILE })
   await clock.settle()
   await $.turn.start({ text: 'q', turnId: 't11' } as any)
