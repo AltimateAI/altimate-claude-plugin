@@ -298,7 +298,7 @@ export type DoctorCheck = {
 export type DoctorView = {
   root: string
   /** The project dbt is run in for the checks, a parse and deps: the root, or the project below it that installs it. */
-  place: string
+  place?: string
   checks: DoctorCheck[]
   at: number
   /** Files changed after the manifest was written, newest first, when it is stale. */

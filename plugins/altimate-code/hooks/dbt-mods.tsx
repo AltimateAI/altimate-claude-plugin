@@ -118,7 +118,7 @@ let seq = 0
 let generation = 0
 /** Gives Claude the doctor's note with its next prompt, unless the conversation that asked for it has ended. */
 function noteDoctor(root: string, view: DoctorView, asked: number) {
-  if (generation === asked) doctorNoteDue = doctorNote(root, view.checks, view.place === root ? null : relative(root, view.place))
+  if (generation === asked) doctorNoteDue = doctorNote(root, view.checks, !view.place || view.place === root ? null : relative(root, view.place))
 }
 // Slices of manifests too big to read here, by manifest path, file and revision.
 const slices = new Map<string, Promise<any>>()
@@ -1615,10 +1615,10 @@ async function runDoctor($: EngineInterface, root: string, connection = false): 
     checks.push({ id: 'adapter', label: 'Adapter', status: 'ok', detail: `${type}${adapter ? ` ${adapter.version}` : ''}`, fix: null })
   }
 
-  // Packages: packages.yml with nothing installed (at packages-install-path) fails every parse. A package repo
-  // whose own packages are not installed is fine when the project below it that installs it (integration_tests)
-  // has them: dbt is run from there. Not when the package has a manifest of its own: Run dbt parse refreshes that
-  // one in the package itself, which needs the package's own packages.
+  // Packages: packages.yml with nothing installed (at packages-install-path) fails every parse. The packages that
+  // count are those of the doctor's place: a package repo is fine when the project below it that installs it
+  // (integration_tests) has them, as dbt is run from there, unless the package has a manifest of its own, which
+  // Run dbt parse refreshes in the package itself.
   const packages = await packagesOf($, root)
   const theirs = place === root ? null : await packagesOf($, place)
   if (packages || theirs) {
