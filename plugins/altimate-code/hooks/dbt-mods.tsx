@@ -416,8 +416,14 @@ async function ownManifestOf($: EngineInterface, root: string): Promise<boolean>
  * are made there.
  */
 async function doctorPlaceOf($: EngineInterface, root: string): Promise<string> {
+  return (await doctorSiteOf($, root)).place
+}
+
+/** The doctor's place, with whether the root's manifest is its own, resolved once for a caller that needs both. */
+async function doctorSiteOf($: EngineInterface, root: string): Promise<{ place: string; own: boolean }> {
+  const own = await ownManifestOf($, root)
   const runs = await runPlaceOf($, root)
-  return (await ownManifestOf($, root)) ? root : runs
+  return { place: own ? root : runs, own }
 }
 
 /** The project's artifact folder (`target-path` in dbt_project.yml): absolute, or under the project. */
@@ -1123,7 +1129,7 @@ const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 const ROOT_CONFIGS = new Set(['dbt_project.yml', 'packages.yml', 'profiles.yml', 'selectors.yml', 'package-lock.yml', 'dependencies.yml'])
 
 /** The project's files changed after its manifest was written, newest first. */
-async function changedSince($: EngineInterface, root: string, mtimeMs: number, named?: string | null): Promise<{ entries: { path: string; mtimeMs: number }[]; complete: boolean }> {
+async function changedSince($: EngineInterface, root: string, mtimeMs: number, borrowed: boolean, named?: string | null): Promise<{ entries: { path: string; mtimeMs: number }[]; complete: boolean }> {
   const changed: { path: string; mtimeMs: number }[] = []
   let scanned = 0
   // A folder that exists but could not be read leaves the answer unknown, never "current".
@@ -1140,7 +1146,6 @@ async function changedSince($: EngineInterface, root: string, mtimeMs: number, n
   if (manifest) {
     // The project's name from the manifest, else dbt_project.yml's (older manifests do not record it).
     // A package repo's manifest is the project's below it: the package's own files are the ones named by its name.
-    const borrowed = !(await ownManifestOf($, root))
     const project = borrowed || named ? (named ?? (await projectName($, root))) : (manifest.manifest.metadata?.project_name ?? (await projectName($, root)))
     const own = (one: any) => !project || !one?.package_name || one.package_name === project
     const files = (group: any) => Object.values<any>(group ?? {}).filter(own)
@@ -1498,18 +1503,18 @@ async function profileType($: EngineInterface, root: string): Promise<string | n
 
 /** The doctor's manifest line: whether the manifest is missing, current, or older than files of the project. */
 async function manifestCheck($: EngineInterface, root: string): Promise<{ check: DoctorCheck; staleFiles: string[] }> {
-  const place = await doctorPlaceOf($, root)
+  const { place, own } = await doctorSiteOf($, root)
   const found = await manifestTarget($, root)
   const stat = await $.fs.stat(`${found}/manifest.json`).catch(() => null)
   // Missing: the file a parse in the doctor's place writes.
   const target = stat || place === root ? found : await targetOf($, place)
   const shown = target.startsWith(`${root}/`) ? relative(root, target) : target
   if (!stat) return { check: { id: 'manifest', label: 'Manifest', status: 'warn', detail: `${shown}/manifest.json is missing: lineage, model context and docs need it`, fix: 'dbt parse' }, staleFiles: [] }
-  const scan = await changedSince($, root, stat.mtimeMs)
+  const scan = await changedSince($, root, stat.mtimeMs, !own)
   // The manifest read is the one of the project below when the root has none of its own: its files are what a
   // parse of it reads, wherever the doctor runs dbt.
-  const owner = (await ownManifestOf($, root)) ? null : await runnerOf($, root).catch(() => null)
-  const there = owner ? await changedSince($, owner, stat.mtimeMs, await projectName($, owner)) : null
+  const owner = own ? null : await runnerOf($, root).catch(() => null)
+  const there = owner ? await changedSince($, owner, stat.mtimeMs, true, await projectName($, owner)) : null
   // A project folder walked from the root holds the other project's files: each counts once, newest first.
   const merged = new Map<string, number>()
   for (const one of [...scan.entries, ...(there?.entries ?? []).map(one => ({ ...one, path: `${relative(root, owner!)}/${one.path}` }))]) merged.set(one.path, Math.max(one.mtimeMs, merged.get(one.path) ?? 0))

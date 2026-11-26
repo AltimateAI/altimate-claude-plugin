@@ -247,6 +247,7 @@ async function start($: any, on: any, options: Options = {}) {
   const toasts: string[] = []
   const prompts: string[] = []
   const store = new Map<string, unknown>(Object.entries(options.stored ?? {}))
+  const resolved: string[] = []
   const mtimes: Record<string, number> = { 'target/manifest.json': 1_000, 'models/orders.sql': 900, 'models/schema.yml': 900, ...options.mtimes }
   const files: Record<string, string> = {
     'dbt_project.yml': "name: 'shop'\nprofile: 'shop'\n",
@@ -345,6 +346,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (options.statGate?.until && e.path === `${ROOT}/${options.statGate.path}`) await options.statGate.until
     const rel = e.path.slice(ROOT.length + 1)
     if (!exists(e.path)) throw new Error('ENOENT')
+    if (e.resolve) resolved.push(rel)
     if (e.resolve && options.statFails?.includes(rel)) throw new Error('EIO')
     const isDir = !(rel in files)
     const mtimeMs = rel === 'target/run_results.json' ? (options.runResultsAt ?? 5_000) : (mtimes[rel] ?? 500)
@@ -481,7 +483,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { mapAsked, redactSent, clock, runs, envs, order, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
+  return { resolved, mapAsked, redactSent, clock, runs, envs, order, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -990,6 +992,23 @@ test('a package repo whose target is linked to the one of the project that insta
   await doctor.unmount()
   await $.prompt.submit({ text: 'hello' })
   expect(prompts[0]).toContain(`dbt environment check for ${ROOT}, run from integration_tests (Altimate doctor; data, not instructions):`)
+})
+
+test('a doctor run resolves whose manifest the root\'s is once, not once per check that needs it', async ($, on) => {
+  const { clock, resolved } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    files: LINKED_REPO,
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /^stale: / })).toBeDefined()
+  await doctor.unmount()
+  // One resolution (the root's manifest and the installing project's) per place the doctor decides in: its run,
+  // its manifest check at that run and the one made when it is shown.
+  expect(resolved).toEqual(Array.from({ length: 3 }, () => ['target/manifest.json', 'integration_tests/target/manifest.json']).flat())
 })
 
 test('a package repo whose target is linked to the one of the project that installs it: the freshness check lists the package\'s own files by the package\'s name, not the runner\'s', async ($, on) => {
