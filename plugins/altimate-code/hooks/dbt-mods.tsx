@@ -547,24 +547,23 @@ async function hardcodedReads($: EngineInterface, manifest: string, sql: string,
   return out
 }
 
-// The checks of each file in each conversation that have started and not finished: the band shows one only once its setup is done, and a
-// recheck in that time would run the same file again and replace it.
+// The files a shell edit is checking, by conversation, from the moment each is found until its check is done: the band
+// shows a check only once its setup is done, and a recheck in that time would run the same file again.
 const inFlight = new Map<string, number>()
-
-/** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
-async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
-  const key = `${mineGeneration}\u0000${root}\u0000${relative(root, file)}`
+const flightKey = (conversation: number, file: string) => `${conversation}\u0000${normalize(file)}`
+/** Notes a file as being checked until the returned function is called. */
+function holdFlight(conversation: number, file: string): () => void {
+  const key = flightKey(conversation, file)
   inFlight.set(key, (inFlight.get(key) ?? 0) + 1)
-  try {
-    return await compileAndValidateOnce($, root, file, mineGeneration)
-  } finally {
+  return () => {
     const left = (inFlight.get(key) ?? 1) - 1
     if (left > 0) inFlight.set(key, left)
     else inFlight.delete(key)
   }
 }
 
-async function compileAndValidateOnce($: EngineInterface, root: string, file: string, mineGeneration: number): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
+/** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
+async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
   const rel = relative(root, file)
   // A check from a conversation that has ended takes no place in the order: it can neither land nor push a
   // current check out. Within this conversation, `current` is the newest check of its file (an older one of the
@@ -817,7 +816,7 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   const check = await read($, checkAtom)
   if (!check) return
   // Busy (a check or recheck running): a forced recheck waits for it, so a schema.yml written meanwhile is not missed.
-  if (check.status === 'running' || rechecking || inFlight.has(`${generation}\u0000${check.root}\u0000${check.file}`)) {
+  if (check.status === 'running' || rechecking || inFlight.has(flightKey(generation, `${check.root}/${check.file}`))) {
     // Only an edit that concerns this check waits for it; an unrelated one never replaces it.
     if (edited && editConcerns(check, edited)) forcedWhileBusy = edited
     return
@@ -1927,7 +1926,7 @@ export async function dbtModsCallStart($: EngineInterface, e: { tool: string; ag
 }
 
 /** After a Bash call: re-check the checked model, record a dbt run's result, open a `dbt show`'s rows. */
-export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; command: string; agentId?: string }, result: ToolCallResult, by = Infinity): Promise<string[]> {
+export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; command: string; agentId?: string }, result: ToolCallResult): Promise<string[]> {
   if (!enabled) return []
   const agentId = agentOf(e)
   const command = e.command
@@ -1935,13 +1934,11 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
   const invocations = dbtCommands(command)
   // A command that may have written models, and runs no dbt that builds them: each model it changed is checked as an edit's is.
   const edits = start && writesModels(e, command) && !invocations.some(one => BUILD_VERBS.has(one.verb)) ? start : null
-  // A command may have changed the checked model. A shell edit's check comes first, so the same file is not run twice.
-  if (!edits) later($, () => recheck($, null))
+  // A command may have changed the checked model. A shell edit's checks look again themselves, once they are done.
+  if (edits) later($, () => bashChecks($, edits, command, agentId))
+  else later($, () => recheck($, null))
   await filesChanged($)
-  if (invocations.length === 0) {
-    if (!edits) return pendingLines(agentId)
-    return [...(await bashEdited($, edits, command, agentId, by)), ...pendingLines(agentId)]
-  }
+  if (invocations.length === 0) return pendingLines(agentId)
   const asked = start?.asked ?? generation
   const startedAt = start?.startedAt ?? (await $.clock.now())
   const base = start?.base ?? (((await $.session.cwd().catch(() => null)) ?? ((await $.session.root().catch(() => '.')) as string)))
@@ -1994,9 +1991,6 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
       asked,
     ).catch(() => null)
   }
-  if (edits) {
-    return [...(await bashEdited($, edits, command, agentId, by)), ...pendingLines(agentId)]
-  }
   return pendingLines(agentId)
 }
 
@@ -2010,83 +2004,79 @@ function pendingLines(agentId: string | null): string[] {
   return withPending({ context: [] as string[] }, agentId).context
 }
 
+/** The project of a model file dbt can show: null outside a project, or outside its model-paths. */
+async function modelRoot($: EngineInterface, path: string): Promise<string | null> {
+  const root = await projectRoot($, path, true)
+  // Only a file under the project's model-paths is a model dbt can show.
+  const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
+  const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
+  return root && inModels ? root : null
+}
+
+/** The toast of a check that landed, when it is still the newest one: the band it points at shows the same check. */
+function announceCheck($: EngineInterface, landed: { view: CheckView; newest: () => boolean }) {
+  if (!landed.newest()) return
+  if (landed.view.status === 'error') $.ui.toast(`✖ ${landed.view.model} · dbt could not compile or run it · see the band`, { timeoutMs: 6000 })
+  else
+    infoToast(
+      $,
+      landed.view.status === 'partial'
+        ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : `not checked: ${landed.view.reason}`}`
+        : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
+      6000,
+    )
+}
+
 /**
  * Compiles a model file and runs it against the warehouse, then checks its columns. Null when the file is not a
  * model dbt can show (outside a project, or outside its model-paths); the lines otherwise, none when the check was
- * too slow for this result (held until the time `until` when one is given, else CHECK_HOLD_MS) and its answer rides on
- * the agent's next one.
+ * too slow for this result and its answer rides on the agent's next one.
  */
-async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null, until: number | null = null): Promise<string[] | null> {
-  // One deadline for everything below: the lookups of the project, the check of the model's place in it, and the check itself.
-  const holdMs = until === null ? CHECK_HOLD_MS : Math.max(0, until - (await $.clock.now()))
-  const work = (async () => {
-    const root = await projectRoot($, path, true)
-    // Only a file under the project's model-paths is a model dbt can show.
-    const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
-    const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
-    if (!root || !inModels) return null
-    return compileAndValidate($, root, path, asked)
-  })()
-  // With no time to wait, nothing is held: the answer rides on the next result.
-  const settled = holdMs > 0 ? await within($, holdMs, work.then(done => ({ done }))) : null
-  // Known in time to be no model: nothing to check, and nothing to say.
-  if (settled && !settled.done) return null
-  const landed = settled?.done ?? null
+async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null): Promise<string[] | null> {
+  const root = await modelRoot($, path)
+  if (!root) return null
+  const check = compileAndValidate($, root, path, asked)
+  const landed = await within($, CHECK_HOLD_MS, check)
   // Landed, and still the newest check of this file in this conversation.
   if (landed && landed.current()) {
     // The toast points at the band, so only the check the band shows may say so.
-    if (landed.newest() && landed.view.status === 'error') $.ui.toast(`✖ ${landed.view.model} · dbt could not compile or run it · see the band`, { timeoutMs: 6000 })
-    else if (landed.newest())
-      infoToast(
-        $,
-        landed.view.status === 'partial'
-          ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : `not checked: ${landed.view.reason}`}`
-          : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
-        6000,
-      )
+    announceCheck($, landed)
     return landed.note ? [landed.note] : []
   }
   // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
-  if (!landed) work.then(done => void (done && done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
+  if (!landed) check.then(done => void (done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
   return []
 }
 
-// A shell command's result is held for its checks this long at most: the phase it runs in gives up at 5 s, and a
-// note that lands after that has no result left to ride on. What is not done by then rides on the next result.
-const BASH_HOLD_MS = 2_000
-
 /**
- * After a shell command that may have written models: each model file it changed gets the check an edit of it gets,
- * then the checked model is looked at again (after, so a model both are about is run once). A command that failed is
- * looked at too, since it may have changed files before it did.
+ * After a shell command that may have written models, in the background: each model file it changed (three at most)
+ * is checked as an edit of it is, its note kept for the agent's next tool result, and then the checked model is
+ * looked at again. A command that failed is looked at too, since it may have changed files before it did. Each file
+ * counts as being checked from the moment it is found, so a recheck meanwhile does not run it a second time.
  */
-async function bashEdited($: EngineInterface, start: { asked: number; startedAt: number }, command: string, agentId: string | null, by: number): Promise<string[]> {
-  const again = () => later($, () => recheck($, null))
-  const lines: string[] = []
-  // A look at the checked model comes after every check of this command has been handed over: a check shows on the band only after its setup.
-  let all: Promise<unknown> = Promise.resolve()
-  const check = (files: { file: string }[], until: number) =>
-    (all = Promise.all(files.map(one => checkModel($, normalize(one.file), start.asked, agentId, until).then(found => void lines.push(...(found ?? [])), () => {}))))
-  let late = false
+async function bashChecks($: EngineInterface, start: { asked: number; startedAt: number }, command: string, agentId: string | null): Promise<void> {
   try {
-    // No later than `by`, the time the features' share of the phase runs out.
-    const now = await $.clock.now()
-    const until = Math.min(now + BASH_HOLD_MS, by)
-    const found = bashChanged($, { command, startedAt: start.startedAt - MTIME_SLACK_MS }).catch(() => [])
-    const changed = await within($, Math.max(0, until - now), found)
-    // The search was too slow for this result: the checks it leads to ride on the next one.
-    if (!changed) {
-      late = true
-      found.then(files => check(files, 0)).then(again).catch(() => {})
-      return []
-    }
-    // The deadline is the checks' own: each returns its note in this result or queues it for the next.
-    await check(changed, until)
-    return lines
-  } catch {
-    return []
+    const changed = await bashChanged($, { command, startedAt: start.startedAt - MTIME_SLACK_MS }).catch(() => [])
+    await Promise.all(
+      changed.map(async one => {
+        const path = normalize(one.file)
+        const release = holdFlight(start.asked, path)
+        try {
+          const root = await modelRoot($, path)
+          if (!root) return
+          const done = await compileAndValidate($, root, path, start.asked)
+          if (!done.current()) return
+          announceCheck($, done)
+          if (done.note) pendingNotes.push({ note: done.note, agentId, current: done.current })
+        } catch {
+        } finally {
+          release()
+        }
+      }),
+    )
   } finally {
-    if (!late) void all.then(again)
+    // After the checks: the band shows a check only once it has started, and a look before that would run its model again.
+    await recheck($, null).catch(() => {})
   }
 }
 
