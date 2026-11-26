@@ -188,6 +188,8 @@ type Options = {
   stored?: Record<string, unknown>
   /** Project-relative paths (files or folders) that are links to another project-relative path (the engine's `realPath` for them). */
   links?: Record<string, string>
+  /** Project-relative paths whose canonical path cannot be resolved: `stat` with `resolve` fails for them. */
+  statFails?: string[]
   /** What `--version` answers for an interpreter, by its path (others answer 3.13.13). */
   pythonVersions?: Record<string, string>
   /** Extra project files, by project-relative path. */
@@ -339,6 +341,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (options.statGate?.until && e.path === `${ROOT}/${options.statGate.path}`) await options.statGate.until
     const rel = e.path.slice(ROOT.length + 1)
     if (!exists(e.path)) throw new Error('ENOENT')
+    if (e.resolve && options.statFails?.includes(rel)) throw new Error('EIO')
     const isDir = !(rel in files)
     const mtimeMs = rel === 'target/run_results.json' ? (options.runResultsAt ?? 5_000) : (mtimes[rel] ?? 500)
     const size = /(^|\/)manifest\.json$/.test(rel) && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
@@ -1154,6 +1157,73 @@ test('the doctor in the project that installs a package puts a newer file of tha
   const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
   expect((await doctor.find({ type: 'Text', text: /^stale: / }))?.text).toEqual('stale: 2 files changed since it was written 3 min ago (integration_tests/models/b.sql, models/a.sql)')
   await doctor.unmount()
+})
+
+test('a canonical path that cannot be resolved leaves the root\'s manifest the root\'s own: the doctor stays in the package, as it did before paths were resolved', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { target: 'integration_tests/target' },
+    statFails: ['target/manifest.json'],
+    files: LINKED_REPO,
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /dbt runs in/ })).toBeUndefined()
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(ROOT)
+  await band.unmount()
+})
+
+test('a target-path that is absolute and linked to the project that installs the package: the doctor works in that project', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { 'linked-target': 'integration_tests/target' },
+    files: {
+      ...LINKED_REPO,
+      'dbt_project.yml': `name: 'shop'\nprofile: 'shop'\ntarget-path: '${ROOT}/linked-target'\n`,
+      'linked-target/manifest.json': JSON.stringify(PACKAGE_MANIFEST),
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^dbt runs in / }))?.text).toEqual('dbt runs in integration_tests')
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeUndefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(`${ROOT}/integration_tests`)
+  await band.unmount()
+})
+
+test('a doctor view kept from before it had a place: the pane shows the root alone, and Run dbt deps runs in the root', async ($, on) => {
+  let kept = false
+  const legacy = { root: ROOT, checks: [{ id: 'packages', label: 'Packages', status: 'fail', detail: 'packages.yml is not installed', fix: 'dbt deps' }], at: 1, staleFiles: [], busy: null }
+  on('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<{ value?: { value: unknown; version: number } }>) => {
+    const stored = await next(e)
+    return kept && e.key === 'dbtDoctor' ? { value: { value: legacy, version: stored.value?.version ?? 0 } } : stored
+  })
+  const { clock, runs, cwds } = await start($, on, { interactive: true, now: 200_000 })
+  await clock.settle()
+  kept = true
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^\/proj$/ }))?.text).toEqual(ROOT)
+  expect(await doctor.find({ type: 'Text', text: /dbt runs in/ })).toBeUndefined()
+  expect(await doctor.find({ type: 'Text', text: 'packages.yml is not installed' })).toBeDefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'deps')]).toBe(ROOT)
+  await band.unmount()
 })
 
 test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {
