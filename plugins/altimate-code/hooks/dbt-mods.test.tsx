@@ -200,6 +200,8 @@ type Options = {
   holdCwd?: Promise<void>
   /** The first dbt show waits for this. */
   holdShow?: Promise<void>
+  /** The search for files a shell command changed waits for this. */
+  holdFind?: Promise<void>
   /** The dbt shows that run before the held one. */
   holdShowAfter?: number
   /** Folders that exist but cannot be listed. */
@@ -362,6 +364,7 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: [...names].map(([name, kind]) => ({ name, kind })) }
   })
   let held = false
+  let findHeld = false
   let shows = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string; env?: Record<string, string> } }) => {
     runs.push([...e.argv])
@@ -388,6 +391,11 @@ async function start($: any, on: any, options: Options = {}) {
       return { value: { exitCode: 127, stdout: '', stderr: 'zsh: command not found: dbt' } }
     }
     if (options.pathDbtPython && bin === 'which') return { value: { exitCode: 0, stdout: '/x/bin/dbt\n', stderr: '' } }
+    // The first search for changed files waits until the test lets it go.
+    if (bin === 'find' && !findHeld) {
+      findHeld = true
+      await options.holdFind
+    }
     if (bin === 'find' && options.changed) return { value: { exitCode: 0, stdout: options.changed.map(one => `${ROOT}/${one}`).join('\n'), stderr: '' } }
     if (bin === 'printenv') {
       const value = { HOME: '/home/me', ...options.env }[verb as string]
@@ -3200,6 +3208,65 @@ test('a shell command that is both a write and a dbt command is not compiled a s
   await clock.settle()
   expect(checkNotes(result)).toEqual([])
   expect(shows(runs).length).toBe(0)
+})
+
+test('a shell command that writes and runs only dbt parse still gets its model compiled and validated', async ($, on) => {
+  const { clock, runs } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  const result: any = await $.tool.call({ tool: 'Bash', command: `${SED} && dbt parse` })
+  await clock.settle()
+  expect(checkNotes(result)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+})
+
+test("a shell edit's check that outlasts the result's hold goes to Claude's next result, not into the one already sent", async ($, on) => {
+  let release!: () => void
+  const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (release = go)) })
+  const edit = $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await clock.advance(2_500)
+  const sent: any = await edit
+  expect(checkNotes(sent)).toEqual([])
+  // The check lands after the result went back, but inside the time the result could have waited.
+  release()
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(checkNotes(next)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+})
+
+test("a shell edit found only after the result's hold goes to Claude's next result, and the band's model is run once", async ($, on) => {
+  let release!: () => void
+  const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdFind: new Promise<void>(go => (release = go)) })
+  const edit = $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await clock.advance(2_500)
+  const sent: any = await edit
+  expect(checkNotes(sent)).toEqual([])
+  release()
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  await clock.advance(100)
+  const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(checkNotes(next)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+})
+
+test('a shell edit of the model the band shows is run against the warehouse once', async ($, on) => {
+  let release!: () => void
+  const { clock, runs, mtimes } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 50_000 }, changed: ['models/orders.sql'], holdFind: new Promise<void>(go => (release = go)) })
+  await editOrders($)
+  await clock.settle()
+  expect(shows(runs).length).toBe(1)
+  // The shell rewrites it after that check landed: the band's recheck and the shell edit's check are one run.
+  await clock.advance(5_000)
+  mtimes['models/orders.sql'] = 104_500
+  const edit = $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  release()
+  await edit
+  await clock.settle()
+  expect(shows(runs).length).toBe(2)
 })
 
 test("a subagent's shell command is not looked at for model changes, as its notes are left out too", async ($, on) => {
