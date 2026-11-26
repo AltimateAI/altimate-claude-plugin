@@ -370,7 +370,7 @@ export type PlanImpactView = {
 
 // ---------------------------------------------------------------------------------------------------
 // Runs (/runs): the dbt commands Claude ran and their results.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 export type RunRow = {
   uniqueId: string
@@ -419,7 +419,7 @@ export interface RunsState {
 
 // ---------------------------------------------------------------------------------------------------
 // Defer and target: the target and defer state dbt commands run with.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 export interface DeferState {
   /** The dbt project the session works in; null when there is none (nothing is rewritten). */
@@ -445,7 +445,7 @@ export interface DeferState {
 
 // ---------------------------------------------------------------------------------------------------
 // Raw SQL to model: the SQL being turned into a dbt model.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 /** How a table of the SQL matched a model or source: every part the same, the same but for case, fewer parts written, or none. */
 export type RelationMatch = 'exact' | 'case_insensitive' | 'partial' | 'none'
@@ -472,7 +472,7 @@ export interface ToModelState {
 
 // ---------------------------------------------------------------------------------------------------
 // Team comments: the shared docs' comments on the project's models.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 /** One open comment thread on a shared docs page, as the docs_share_comments tool lists it. */
 export interface CommentsThread {
@@ -514,7 +514,7 @@ export interface CommentsState {
 
 // ---------------------------------------------------------------------------------------------------
 // Cost check: the last scan estimate and any scan allowed once.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 export interface CostState {
   /** The warehouse with no estimate (not BigQuery, Snowflake or Databricks, or an altimate-code too old for it), once the tool said so: nothing is estimated after that. */
@@ -529,7 +529,7 @@ export interface CostState {
 
 // ---------------------------------------------------------------------------------------------------
 // Project health: the health check issues on the changed models.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 /** One DataPilot insight on a model, as altimate-code's dbt_health returns it. */
 export interface HealthInsight {
@@ -560,7 +560,7 @@ export interface HealthState {
 
 // ---------------------------------------------------------------------------------------------------
 // SQL graph: the edited model's SQL graph.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 export interface SqlGraphState {
   /** The model Claude last read or edited, which /sql-graph shows when it is given no name. */
@@ -577,7 +577,7 @@ export interface SqlGraphView {
 
 // ---------------------------------------------------------------------------------------------------
 // Docs coverage and propagation: what the project documents.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 /** A downstream column that can take a description: the traced column reaches it unchanged (Original) or only renamed (Alias). */
 export interface DocsCandidate {
@@ -622,7 +622,7 @@ export interface DocsState {
 
 // ---------------------------------------------------------------------------------------------------
 // Profile CTEs: each CTE's row count and timing.
-// Filled in by that feature alone (hooks/features/); the other features never read or write it.
+// Filled in by that feature alone (its section of hooks/integrations.tsx); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 export type CteTier = 'hot' | 'warm' | 'cool'
 
@@ -716,25 +716,25 @@ declare module 'claude-code' {
       isLineageSummaryHidden: boolean
       /** The status line's parts by owner, `integrations` and each feature's id (hooks/integrations.tsx). */
       statusParts: Record<string, string>
-      /** hooks/features/: RunsState. */
+      /** hooks/integrations.tsx, its feature's section: RunsState. */
       runs: Shaped<RunsState | null>
-      /** hooks/features/: DeferState. */
+      /** hooks/integrations.tsx, its feature's section: DeferState. */
       defer: DeferState | null
-      /** hooks/features/: the flags /defer and /target added to Claude's last dbt command, until the next prompt; null with none. */
+      /** hooks/integrations.tsx, its feature's section: the flags /defer and /target added to Claude's last dbt command, until the next prompt; null with none. */
       deferRan: string | null
-      /** hooks/features/: ToModelState. */
+      /** hooks/integrations.tsx, its feature's section: ToModelState. */
       toModel: ToModelState | null
-      /** hooks/features/: CommentsState. */
+      /** hooks/integrations.tsx, its feature's section: CommentsState. */
       comments: Shaped<CommentsState | null>
-      /** hooks/features/: CostState. */
+      /** hooks/integrations.tsx, its feature's section: CostState. */
       cost: CostState | null
-      /** hooks/features/: HealthState. */
+      /** hooks/integrations.tsx, its feature's section: HealthState. */
       health: HealthState | null
-      /** hooks/features/: SqlGraphState. */
+      /** hooks/integrations.tsx, its feature's section: SqlGraphState. */
       sqlGraph: Shaped<SqlGraphState | null>
-      /** hooks/features/: DocsState. */
+      /** hooks/integrations.tsx, its feature's section: DocsState. */
       docs: DocsState | null
-      /** hooks/features/: CteProfileState. */
+      /** hooks/integrations.tsx, its feature's section: CteProfileState. */
       cteProfile: CteProfileState | null
     }
   }

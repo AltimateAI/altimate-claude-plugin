@@ -11610,13 +11610,13 @@ export function withTiers(rows: readonly CteRow[]): CteRow[] {
   const marginals = new Map<number, number>()
   const underReadsAt = new Set<number>()
   if (readsKnown(rows)) {
-    const readsOf = (i: number, seen = new Set<number>()): Set<number> => {
-      for (const at of rows[i]?.reads ?? []) if (at < i && !seen.has(at)) readsOf(at, seen.add(at))
+    const readsUnder = (i: number, seen = new Set<number>()): Set<number> => {
+      for (const at of rows[i]?.reads ?? []) if (at < i && !seen.has(at)) readsUnder(at, seen.add(at))
       return seen
     }
     rows.forEach((row, i) => {
       if (row.status !== 'done' || row.queryMs === undefined) return
-      const under = [...readsOf(i)]
+      const under = [...readsUnder(i)]
       if (under.some(at => !marginals.has(at))) return
       const own = row.queryMs - under.reduce((sum, at) => sum + marginals.get(at)!, 0)
       marginals.set(i, Math.max(0, own))
@@ -12002,14 +12002,14 @@ export const cteProfileEditReadsBefore = false
 // features
 // ---------------------------------------------------------------------------
 
-// The dbt Power User features, each in its own file here, and the one place that calls them, in a
+// The dbt Power User features, each in its own section of this file above, and the one place that calls them, in a
 // fixed order: runs, defer, toModel, comments, cost, health, sqlGraph, docs, cteProfile. The dbt helpers
 // (dbt mods section: compile and validate, Explain and Fix, the Query results pane, model context, the
 // doctor) are called last, in the same phases and band; they have no status-line part.
 //
 // A plugin hooks each shared event once (a second hook on an event without a matcher is refused), and
 // the engine refuses `$` handed to anything but a function it can name, so this file calls every
-// feature's functions by name instead of looping over a list. A feature fills in its own file only.
+// feature's functions by name instead of looping over a list. A feature fills in its own section only.
 // A function that throws, at once or as a rejection, is logged and skipped: one feature's failure never stops another or the call. A `register` failure is silent (`$` is not available at load).
 
 
