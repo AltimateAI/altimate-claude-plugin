@@ -399,7 +399,11 @@ async function start($: any, on: any, options: Options = {}) {
       findHeld = true
       await options.holdFind
     }
-    if (bin === 'find' && options.changed) return { value: { exitCode: 0, stdout: options.changed.map(one => `${ROOT}/${one}`).join('\n'), stderr: '' } }
+    // Only what is under the folders the search was given.
+    if (bin === 'find' && options.changed) {
+      const roots = e.argv.slice(1, e.argv.indexOf('-name'))
+      return { value: { exitCode: 0, stdout: options.changed.map(one => `${ROOT}/${one}`).filter(path => roots.some(root => path.startsWith(`${root}/`))).join('\n'), stderr: '' } }
+    }
     if (bin === 'printenv') {
       const value = { HOME: '/home/me', ...options.env }[verb as string]
       return { value: { exitCode: value ? 0 : 1, stdout: value ? `${value}\n` : '', stderr: '' } }
@@ -3238,6 +3242,21 @@ test("a shell edit's check that outlasts the result's hold goes to Claude's next
   const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
   expect(checkNotes(next)).toEqual([BASH_NOTE])
   expect(shows(runs).length).toBe(1)
+})
+
+test("a shell edit's check that lands inside the hold is in that result once, and not again on the next", async ($, on) => {
+  let release!: () => void
+  const { clock, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (release = go)) })
+  const edit = $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await clock.advance(1_000)
+  release()
+  const sent: any = await edit
+  expect(checkNotes(sent)).toEqual([BASH_NOTE])
+  await clock.advance(5_000)
+  setBash({ stdout: 'ok' })
+  const next: any = await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(checkNotes(next)).toEqual([])
 })
 
 test("a shell edit found only after the result's hold goes to Claude's next result, and the band's model is run once", async ($, on) => {

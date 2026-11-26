@@ -2074,8 +2074,9 @@ async function bashEdited($: EngineInterface, start: { asked: number; startedAt:
       found.then(files => check(files, 0)).then(again).catch(() => {})
       return []
     }
-    await within($, Math.max(0, until - (await $.clock.now())), check(changed, until))
-    return lines.splice(0)
+    // The deadline is the checks' own: each returns its note in this result or queues it for the next.
+    await check(changed, until)
+    return lines
   } catch {
     return []
   } finally {
