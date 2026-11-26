@@ -188,6 +188,8 @@ type Options = {
   stored?: Record<string, unknown>
   /** Project-relative paths (files or folders) that are links to another project-relative path (the engine's `realPath` for them). */
   links?: Record<string, string>
+  /** What `--version` answers for an interpreter, by its path (others answer 3.13.13). */
+  pythonVersions?: Record<string, string>
   /** Extra project files, by project-relative path. */
   files?: Record<string, string>
   /** No manifest until dbt show writes this one. */
@@ -403,6 +405,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (bin === python && verb === '-c' && e.argv[2] === RUN_FAILURES) return { value: { ...(options.runFailures ?? { exitCode: 0, stdout: JSON.stringify({ results: [] }) }), stderr: '' } }
     if (bin === python && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
     if (bin === python && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
+    if (bin && verb === '--version' && options.pythonVersions?.[bin]) return { value: { exitCode: 0, stdout: `Python ${options.pythonVersions[bin]}\n`, stderr: '' } }
     if (bin === python) return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
     if (e.argv.includes('dbt_map_relations')) {
       if (!options.mapRelations) return { value: { exitCode: 1, stdout: '', stderr: 'unknown tool: dbt_map_relations' } }
@@ -1093,7 +1096,63 @@ test('no manifest anywhere, dbt run in the project that installs the package: th
   })
   await clock.settle()
   const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
-  expect(await doctor.find({ type: 'Text', text: /integration_tests\/target\/manifest\.json is missing/ })).toBeDefined()
+  expect((await doctor.find({ type: 'Text', text: /^integration_tests.*is missing/ }))?.text).toEqual('integration_tests/target/manifest.json is missing: lineage, model context and docs need it')
+  await doctor.unmount()
+})
+
+const RUNNER_PYTHON = `${ROOT}/integration_tests/.venv/bin/python`
+
+test('a package repo whose target is linked to the one of the project that installs it: the doctor reports the Python of that project\'s dbt, not the repo\'s', async ($, on) => {
+  const { clock, runs } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    links: { target: 'integration_tests/target' },
+    pythonVersions: { [RUNNER_PYTHON]: '3.11.4' },
+    files: { ...LINKED_REPO, 'integration_tests/.venv/bin/dbt': `#!${RUNNER_PYTHON}\nimport sys\n`, 'integration_tests/.venv/bin/python': '' },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^✓ Python /u }))?.text).toEqual('✓ Python     3.11.4')
+  expect(runs.filter(argv => argv[1] === '--version' && argv[0].endsWith('/python')).map(argv => argv[0])).toEqual([RUNNER_PYTHON])
+  await doctor.unmount()
+})
+
+test('a plain project: the doctor reports the Python of the project\'s own dbt', async ($, on) => {
+  const { clock } = await start($, on, { interactive: true, now: 200_000, pythonVersions: { [`${ROOT}/.venv/bin/python`]: '3.12.1' } })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^✓ Python /u }))?.text).toEqual('✓ Python     3.12.1')
+  await doctor.unmount()
+})
+
+// The doctor in a project other than the repo's: its stale files are those of both, each once, newest first.
+const STALE_PROJECT = { ...LINKED_REPO, 'dbt_project.yml': "name: 'shop'\nmodel-paths: ['.']\n", 'models/a.sql': 'select 1', 'integration_tests/models/b.sql': 'select 1', 'integration_tests/models/c.sql': 'select 1' }
+
+test('the doctor in the project that installs a package lists the stale files of both projects once each, newest first', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    links: { target: 'integration_tests/target' },
+    mtimes: { 'models/a.sql': 3_000, 'integration_tests/models/b.sql': 4_000, 'integration_tests/models/c.sql': 2_000 },
+    files: STALE_PROJECT,
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^stale: / }))?.text).toEqual('stale: 3 files changed since it was written 3 min ago (integration_tests/models/b.sql, models/a.sql, integration_tests/models/c.sql)')
+  await doctor.unmount()
+})
+
+test('the doctor in the project that installs a package puts a newer file of that project before an older one of the package', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    links: { target: 'integration_tests/target' },
+    mtimes: { 'models/a.sql': 3_000, 'integration_tests/models/b.sql': 4_000 },
+    files: { ...LINKED_REPO, 'models/a.sql': 'select 1', 'integration_tests/models/b.sql': 'select 1' },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^stale: / }))?.text).toEqual('stale: 2 files changed since it was written 3 min ago (integration_tests/models/b.sql, models/a.sql)')
   await doctor.unmount()
 })
 
