@@ -1,6 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
-import { compareVersions, isPreviewBuild, parseVersion, runTool, within } from './altimate-cli'
+import { compareVersions, isPreviewBuild, parseVersion } from './altimate-cli'
+import { runTool, within } from './integrations'
 
 /** A stand-in for `$` whose CLI answers every call and whose MCP connection attempts go through `connect`. */
 function standIn(connect: () => unknown, now = 0) {

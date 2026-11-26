@@ -714,7 +714,7 @@ declare module 'claude-code' {
       lineageTaskSummary: Shaped<TaskSummaryView | null>
       lineagePlanImpact: Shaped<PlanImpactView | null>
       isLineageSummaryHidden: boolean
-      /** The status line's parts by owner, `integrations` and each feature's id (hooks/status-line.ts). */
+      /** The status line's parts by owner, `integrations` and each feature's id (hooks/integrations.tsx). */
       statusParts: Record<string, string>
       /** hooks/features/: RunsState. */
       runs: Shaped<RunsState | null>

@@ -4,8 +4,7 @@ import { expect, mock, test as kitTest } from 'claude-code/testing'
 // off here and tested in dbt-mods.test.tsx.
 const test = (name: string, body: Parameters<typeof kitTest>[1]) => kitTest(name, { options: { dbt_mods: false } }, body as any)
 
-import { register } from './integrations'
-import { STATUS_ORDER } from './status-line'
+import { register, STATUS_ORDER } from './integrations'
 
 const PANE = {
   plugin: 'altimate-code',

@@ -4,7 +4,7 @@ import { expect, mock, test as kitTest } from 'claude-code/testing'
 // off here and tested in dbt-mods.test.tsx.
 const test = (name: string, body: Parameters<typeof kitTest>[1]) => kitTest(name, { options: { dbt_mods: false } }, body as any)
 
-import { commandDir } from './lineage'
+import { commandDir } from './integrations'
 import { buildGraph, subgraph } from './lineage-graph'
 import { MANIFEST } from './lineage-graph.test'
 import { nothingToReport } from './inert-features'

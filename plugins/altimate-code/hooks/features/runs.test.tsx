@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { RunRecord } from '../../types'
-import { fitStore, MAX_MESSAGE, MAX_ROWS, MAX_RUNS, MAX_STORE_BYTES, resultsInvocations, summaryLine, toRecord, utf8Length, withRun, writer } from './runs'
+import { fitStore, MAX_MESSAGE, MAX_ROWS, MAX_RUNS, MAX_STORE_BYTES, resultsInvocations, summaryLine, toRecord, utf8Length, withRun, writer } from '../integrations'
 
 const ROOT = '/repo'
 const T0 = Date.parse('2026-11-13T10:00:00.000Z')

@@ -42,11 +42,9 @@ altimate-claude-plugin/
 │       │   └── analyst.md       # read-only data analyst for the MCP tools
 │       ├── hooks/
 │       │   ├── hooks.json       # SessionStart, UserPromptSubmit, Stop and PreToolUse hook config
-│       │   ├── integrations.tsx # one-click integrations band and /integrations pane (mod)
-│       │   ├── integrations.test.tsx # its tests (claude plugin test .)
-│       │   ├── dbt-mods.tsx     # dbt helpers: compile and validate, Explain/Fix, results pane, model context, doctor
-│       │   ├── dbt-mods-core.ts # what they read from dbt's output and files
-│       │   └── dbt-mods.test.tsx # their tests
+│       │   ├── integrations.tsx # the hooks module: integrations, lineage, dbt helpers and features; every function that receives `$`
+│       │   ├── dbt-mods-core.ts # pure helpers it imports (dbt output and files, lineage, impact report)
+│       │   └── *.test.ts(x)     # their tests (claude plugin test .)
 │       ├── types/
 │       │   └── index.d.ts       # types for the mod
 │       ├── hooks-handlers/

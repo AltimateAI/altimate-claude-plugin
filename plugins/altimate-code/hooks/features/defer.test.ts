@@ -1,7 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { PHASE_TIMEOUT_MS } from '../tool-chain'
-import { effective, rewriteDefer, rewriteDeferCommand, runsHere, runsInProject, statusText } from './defer'
+import { PHASE_TIMEOUT_MS, effective, rewriteDefer, rewriteDeferCommand, runsHere, runsInProject, statusText } from '../integrations'
 
 const on = { stateDir: '/work/prod-state' }
 

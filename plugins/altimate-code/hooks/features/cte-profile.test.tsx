@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import type { CteRow } from '../../types'
-import { classifyTiers, slowestFirst, summaryOf, withTiers } from './cte-profile'
+import { classifyTiers, slowestFirst, cteProfileSummaryOf as summaryOf, withTiers } from '../integrations'
 
 const PANE = {
   plugin: 'altimate-code',

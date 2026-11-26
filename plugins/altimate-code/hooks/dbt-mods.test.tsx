@@ -37,7 +37,7 @@ import {
   textTable,
   versionInfo,
 } from './dbt-mods-core'
-import { CHECK_HOLD_MS, MANIFEST_SLICE, PROFILE_REDACT, PROFILE_TYPE, RUN_FAILURES } from './dbt-mods'
+import { CHECK_HOLD_MS, MANIFEST_SLICE, PROFILE_REDACT, PROFILE_TYPE, RUN_FAILURES } from './integrations'
 
 // The dbt helpers on; the lineage half reads no manifest in these tests that it would draw.
 // The kit's `$` and `on`, loosely typed: the tests drive engine events with only the fields the helpers read.

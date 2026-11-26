@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'claude-code/testing'
 
-import { formatBytes, inlineSql } from './cost'
+import { formatBytes, inlineSql } from '../integrations'
 
 const ROOT = '/repo'
 const GIB = 1024 ** 3

@@ -1,8 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 
 import { playsClear } from './clear-state.testkit'
-import { PHASE_TIMEOUT_MS } from './tool-chain'
-import { FIRST_READ_WAIT_MS, contextBlock, groupByModel, placeThread, projectName, readOptions, sameText, relativePath, threadsOnFile, toThread } from './features/comments'
+import { PHASE_TIMEOUT_MS, FIRST_READ_WAIT_MS, contextBlock, groupByModel, placeThread, commentsProjectName as projectName, readOptions, sameText, relativePath, threadsOnFile, toThread } from './integrations'
 
 const ROOT = '/repo'
 const FILE = `${ROOT}/models/orders.sql`
