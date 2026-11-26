@@ -1189,7 +1189,7 @@ test('a pane that was shown and closed is not opened again by a rewritten manife
   expect(opens).toHaveLength(opened)
 })
 
-test('a manifest that is gone when the reload reads it leaves the graph shown instead of drawing the SQL files over it', async ($, on) => {
+test('a manifest that is gone when the reload reads it leaves the graph shown, says it is gone, and draws no SQL files over it', async ($, on) => {
   let manifestMtime = 1
   let gone = false
   let stats = 0
@@ -1210,6 +1210,7 @@ test('a manifest that is gone when the reload reads it leaves the graph shown in
   expect(await ui.find({ type: 'Button', text: /int_orders/ })).toBeDefined()
   expect(logs.filter(line => line.includes('from the SQL files'))).toEqual([])
   expect(await ui.find({ type: 'Text', text: /No dbt model matches/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /No dbt manifest at that path/ })).toBeDefined()
   expect(MANIFEST_LOADS(logs)).toHaveLength(1)
   await ui.unmount()
 })

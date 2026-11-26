@@ -112,8 +112,8 @@ let reloadsStarted = 0
 const readsStarted = () => startedSeq - reloadsStarted
 // The manifest revision a reload last tried, whether it landed or not: each is tried once, the next one when dbt writes the file again.
 let reloadAttempted: string | null = null
-// A reload is reading: another is not started beside it, and its own check afterwards picks up a newer rewrite.
-let reloadRunning = false
+// The conversation a reload is reading in: another is not started beside it, and one that lands checks for a newer rewrite itself.
+let reloadSession: number | null = null
 // The focus that owns the pane (model, manifest, revision), set when a follow claims it. Detail
 // answers are written only while it is still the focus they were asked for; a re-follow of the same
 // model keeps it, so its in-flight answers still land.
@@ -617,7 +617,7 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   const say = async (text: string, always = false) => {
     // A reload that another follow has overtaken leaves that follow's pane and message alone.
     if (input.reload && startedSeq !== seq) return
-    if (!input.auto || (always && !isPackage)) await update($, messageAtom, () => text)
+    if (!input.auto || (always && !isPackage)) await update($, messageAtom, prev => (input.reload && startedSeq !== seq ? prev : text))
   }
   const seq = ++startedSeq
   if (input.reload) reloadsStarted++
@@ -660,12 +660,11 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   const fallback = await manifestFile($, root)
   const manifest = named ?? fallback
   const stat = await $.fs.stat(manifest).catch(() => null)
-  // A manifest that went away since the reload was due is not a reason to draw the SQL files over the graph shown.
-  if (input.reload && !stat) return false
   // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
   // A default manifest that went away (dbt clean) also falls back to the SQL files.
   const fromSql = !stat && (!named || named === fallback || named === `${root}/target/manifest.json` || named === (await runnerManifest($, root)))
-  if (!stat && !fromSql) {
+  // A reload does not draw the SQL files over the graph shown when its manifest went away since it was due.
+  if (!stat && (!fromSql || input.reload)) {
     await say('No dbt manifest at that path: run `dbt parse` or `dbt compile` to see lineage.', true)
     return false
   }
@@ -942,13 +941,14 @@ async function reloadIfRewritten($: EngineInterface, focus: LineageFocus): Promi
   if (reloadAttempted === revision) return false
   // Checked after the last await before the follow numbers itself, so no other follow slips in between:
   // the focus is still the one shown and nothing is moving the pane to another model.
-  if (!sameFocus(await read($, focusAtom), focus) || followsInFlight > 0 || answersInFlight > 0 || reloadAttempted === revision || reloadRunning) return false
+  if (!sameFocus(await read($, focusAtom), focus) || followsInFlight > 0 || answersInFlight > 0 || reloadAttempted === revision || reloadSession === followSession) return false
   reloadAttempted = revision
-  reloadRunning = true
+  const session = followSession
+  reloadSession = session
   try {
     return await followOnce($, { model: focus.model, refresh: true, reload: true })
   } finally {
-    reloadRunning = false
+    if (reloadSession === session) reloadSession = null
   }
 }
 
@@ -957,7 +957,7 @@ async function recheckStale($: EngineInterface) {
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
   if (!focus || !graph) return
-  // The reload ends with its own check, against the manifest it read.
+  // A reload that lands ends with its own check, against the manifest it read.
   if (await reloadIfRewritten($, focus)) return
   if (focus.via === 'sql') return
   const stale = await staleSql($, focus.root, graph.nodes[focus.model], focus.mtimeMs)
