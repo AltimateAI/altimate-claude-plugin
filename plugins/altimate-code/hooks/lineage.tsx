@@ -930,7 +930,7 @@ async function staleSql($: EngineInterface, root: string, node: GraphNode | unde
 /**
  * A dbt command (Claude's, or the person's in another terminal) rewrote the manifest the pane shows: the pane
  * reads it again, as r does, so the lineage and the out-of-date warning follow the compile without a press.
- * Each rewrite is tried once, whether the read lands or not; one that failed (dbt still writing the file)
+ * Each rewrite is tried once, whether the read lands or not (one that gave way to another follow is tried again at the next call); one that failed (dbt still writing the file)
  * is tried again when the file changes again, and r reads it at once.
  * Whether the pane now shows the new manifest.
  */
