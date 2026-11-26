@@ -1123,7 +1123,6 @@ test('no manifest anywhere, dbt run in the project that installs the package: th
   await doctor.unmount()
 })
 
-
 test('a package repo whose target is linked to the one of the project that installs it: the doctor reports the Python of that project\'s dbt, not the repo\'s', async ($, on) => {
   const { clock, runs } = await start($, on, {
     interactive: true,
