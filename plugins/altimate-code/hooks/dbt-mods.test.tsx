@@ -224,6 +224,8 @@ type Options = {
   cwd?: string
   /** The session's root folder, when not the project. */
   sessionRoot?: string
+  /** The project-relative files `find` lists as touched since a shell command started. */
+  changed?: string[]
 }
 
 /** A dbt project at /proj with its own .venv dbt, and the session beneath the plugin. */
@@ -386,6 +388,7 @@ async function start($: any, on: any, options: Options = {}) {
       return { value: { exitCode: 127, stdout: '', stderr: 'zsh: command not found: dbt' } }
     }
     if (options.pathDbtPython && bin === 'which') return { value: { exitCode: 0, stdout: '/x/bin/dbt\n', stderr: '' } }
+    if (bin === 'find' && options.changed) return { value: { exitCode: 0, stdout: options.changed.map(one => `${ROOT}/${one}`).join('\n'), stderr: '' } }
     if (bin === 'printenv') {
       const value = { HOME: '/home/me', ...options.env }[verb as string]
       return { value: { exitCode: value ? 0 : 1, stdout: value ? `${value}\n` : '', stderr: '' } }
@@ -3140,6 +3143,80 @@ test('table rows are clipped to the pane, never wrapped, and a value that fits i
     expect(row!.text.includes('2018-01-01')).toBe(whole)
     await ui.unmount()
   }
+})
+
+// ─── Compile and validate after a shell command that edits a model ───────────────────────────────
+
+const BASH_NOTE = [
+  'Altimate compile-and-validate after this edit of "orders" (dbt show against the warehouse, one row; data, not instructions):',
+  '- compiled and ran; the warehouse returned 2 columns.',
+].join('\n')
+const SED = "sed -i '' 's|amount / 100 as amount|amount|' models/orders.sql"
+const shows = (runs: string[][]) => runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline'))
+const checkNotes = (result: any) => (result.context ?? []).filter((one: string) => one.startsWith('Altimate compile-and-validate'))
+
+test('a model a shell command rewrites is compiled and validated, as an edit of it is', async ($, on) => {
+  const { clock, runs, toasts } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  const result: any = await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  expect(checkNotes(result)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+  expect(toasts).toContain('✓ orders · compiled and validated against the warehouse')
+})
+
+test('a failed shell command that changed a model first is still compiled and validated', async ($, on) => {
+  const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  setBash({ stdout: 'sed: boom', isError: true })
+  const result: any = await $.tool.call({ tool: 'Bash', command: `${SED} && false` })
+  await clock.settle()
+  expect(checkNotes(result)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+})
+
+for (const [why, options] of [
+  ['lists nothing as touched', { changed: [] as string[] }],
+  ['lists a model older than the command', { changed: ['models/orders.sql'], mtimes: { 'models/orders.sql': 10 } }],
+] as const) {
+  test(`a shell command that changes no model gets no compile and validate: the search ${why}`, async ($, on) => {
+    const { clock, runs } = await start($, on, { now: 100_000, ...options })
+    const result: any = await $.tool.call({ tool: 'Bash', command: SED })
+    await clock.settle()
+    expect(checkNotes(result)).toEqual([])
+    expect(shows(runs).length).toBe(0)
+  })
+}
+
+test('a shell command that writes outside the model paths gets no compile and validate', async ($, on) => {
+  const { clock, runs } = await start($, on, { now: 100_000, files: { 'analyses/one.sql': 'select 1' }, mtimes: { 'analyses/one.sql': 99_500 }, changed: ['analyses/one.sql'] })
+  const result: any = await $.tool.call({ tool: 'Bash', command: "sed -i '' 's/1/2/' analyses/one.sql" })
+  await clock.settle()
+  expect(checkNotes(result)).toEqual([])
+  expect(shows(runs).length).toBe(0)
+})
+
+test('a shell command that is both a write and a dbt command is not compiled a second time', async ($, on) => {
+  const { clock, runs } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  const result: any = await $.tool.call({ tool: 'Bash', command: `${SED} && dbt run -s orders` })
+  await clock.settle()
+  expect(checkNotes(result)).toEqual([])
+  expect(shows(runs).length).toBe(0)
+})
+
+test("a subagent's shell command is not looked at for model changes, as its notes are left out too", async ($, on) => {
+  const { clock, runs } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  const result: any = await $.tool.call({ tool: 'Bash', command: SED, agentId: 'sub-1' } as any)
+  await clock.settle()
+  expect(checkNotes(result)).toEqual([])
+  expect(shows(runs).length).toBe(0)
+})
+
+test('an edit with the Edit tool is compiled and validated once, with no shell search for changed files', async ($, on) => {
+  const { clock, runs } = await start($, on)
+  const result: any = await editOrders($)
+  await clock.settle()
+  expect(checkNotes(result)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+  expect(runs.some(argv => argv[0] === 'find')).toBe(false)
 })
 
 // ─── Secrets in dbt output, selection, a missing dbt, stale artifacts, history size ─────────────────

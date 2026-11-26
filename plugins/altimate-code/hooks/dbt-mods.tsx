@@ -7,6 +7,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later, runTool } from './altimate-cli'
 import { openTracked } from './usage'
+import { bashChanged, MTIME_SLACK_MS, WRITES } from './bash-edits'
 import { doctorFacts, noteProblem, type DoctorFacts } from './last-problem'
 import { normalize, projectName, runnerOf } from './package-runner'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
@@ -1869,6 +1870,9 @@ async function ensureForRuns($: EngineInterface, base: string, runs: DbtCommand[
   }
 }
 
+/** Whether a shell command may write model files. A subagent's is left out, as the lineage notes leave it out. */
+const writesModels = (e: { agentId?: string }, command: string) => !e.agentId && WRITES.test(command)
+
 /** Before a call runs: the conversation it is in; for a dbt command also the folder, the time and the run artifact as they are now. */
 export async function dbtModsCallStart($: EngineInterface, e: { tool: string; agentId?: string }): Promise<void> {
   if (!enabled) return
@@ -1878,7 +1882,13 @@ export async function dbtModsCallStart($: EngineInterface, e: { tool: string; ag
   if (file) return noteStart(startKey(e, file), { asked, startedAt: 0, base: '', ready: Promise.resolve(null) })
   const bash = bashOf(e)
   const invocations = bash ? dbtCommands(bash.command) : []
-  if (!bash || invocations.length === 0) return
+  if (!bash) return
+  // A shell command that may write a model (`sed -i`, a script): when it started, to find the models it changed
+  // after. Not for a dbt command: its own run compiles what it names, and this would run the model a second time.
+  if (invocations.length === 0) {
+    if (writesModels(e, bash.command)) noteStart(startKey(e, bash.command), { asked, startedAt: (await $.clock.now()) - MTIME_SLACK_MS, base: '', ready: Promise.resolve(null) })
+    return
+  }
   const runs = invocations.filter(one => RUN_VERBS.includes(one.verb))
   const cwd = await $.session.cwd().catch(() => null)
   const base = cwd ?? ((await $.session.root().catch(() => '.')) as string)
@@ -1908,7 +1918,7 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
   later($, () => recheck($, null))
   await filesChanged($)
   const invocations = dbtCommands(command)
-  if (invocations.length === 0) return pendingLines(agentId)
+  if (invocations.length === 0) return start && writesModels(e, command) ? [...(await bashEdited($, start, command, agentId)), ...pendingLines(agentId)] : pendingLines(agentId)
   const asked = start?.asked ?? generation
   const startedAt = start?.startedAt ?? (await $.clock.now())
   const base = start?.base ?? (((await $.session.cwd().catch(() => null)) ?? ((await $.session.root().catch(() => '.')) as string)))
@@ -1969,6 +1979,49 @@ function pendingLines(agentId: string | null): string[] {
   return withPending({ context: [] as string[] }, agentId).context
 }
 
+/**
+ * Compiles a model file and runs it against the warehouse, then checks its columns. Null when the file is not a
+ * model dbt can show (outside a project, or outside its model-paths); the lines otherwise, none when the check was
+ * too slow for this result and its answer rides on the agent's next one.
+ */
+async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null): Promise<string[] | null> {
+  const root = await projectRoot($, path, true)
+  // Only a file under the project's model-paths is a model dbt can show.
+  const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
+  const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
+  if (!root || !inModels) return null
+  const check = compileAndValidate($, root, path, asked)
+  const landed = await within($, CHECK_HOLD_MS, check)
+  // Landed, and still the newest check of this file in this conversation.
+  if (landed && landed.current()) {
+    // The toast points at the band, so only the check the band shows may say so.
+    if (landed.newest() && landed.view.status === 'error') $.ui.toast(`✖ ${landed.view.model} · dbt could not compile or run it · see the band`, { timeoutMs: 6000 })
+    else if (landed.newest())
+      infoToast(
+        $,
+        landed.view.status === 'partial'
+          ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : `not checked: ${landed.view.reason}`}`
+          : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
+        6000,
+      )
+    return landed.note ? [landed.note] : []
+  }
+  // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
+  if (!landed) check.then(done => void (done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
+  return []
+}
+
+/**
+ * After a shell command that may have written models: each model file it changed gets the check an edit of it gets.
+ * A command that failed is looked at too, since it may have changed files before it did.
+ */
+async function bashEdited($: EngineInterface, start: { asked: number; startedAt: number }, command: string, agentId: string | null): Promise<string[]> {
+  const changed = await within($, 3_000, bashChanged($, { command, startedAt: start.startedAt }).catch(() => null))
+  if (!changed?.length) return []
+  const checked = await Promise.all(changed.map(one => checkModel($, normalize(one.file), start.asked, agentId).catch(() => null)))
+  return checked.flatMap(lines => lines ?? [])
+}
+
 /** After a model Claude edited: compile it and run it against the warehouse, then check its columns. */
 export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; agentId?: string }, result: ToolCallResult, file: { path: string }): Promise<string[]> {
   if (!enabled || !EDIT_TOOLS.has(e.tool)) return []
@@ -1978,31 +2031,8 @@ export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; ag
   const asked = takeStart(startKey(e, path))?.asked ?? generation
   const agentId = agentOf(e)
   if (/\.sql$/i.test(path)) {
-    const root = await projectRoot($, path, true)
-    // Only a file under the project's model-paths is a model dbt can show.
-    const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
-    const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
-    if (root && inModels) {
-      const check = compileAndValidate($, root, path, asked)
-      const landed = await within($, CHECK_HOLD_MS, check)
-      // Landed, and still the newest check of this file in this conversation.
-      if (landed && landed.current()) {
-        // The toast points at the band, so only the check the band shows may say so.
-        if (landed.newest() && landed.view.status === 'error') $.ui.toast(`✖ ${landed.view.model} · dbt could not compile or run it · see the band`, { timeoutMs: 6000 })
-        else if (landed.newest())
-          infoToast(
-            $,
-            landed.view.status === 'partial'
-              ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : `not checked: ${landed.view.reason}`}`
-              : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
-            6000,
-          )
-        return landed.note ? [landed.note] : []
-      }
-      // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
-      if (!landed) check.then(done => void (done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
-      return []
-    }
+    const lines = await checkModel($, path, asked, agentId)
+    if (lines) return lines
   }
   // An edit of a .yml (a schema file documenting the model for the first time) or of another .sql (a macro
   // the model calls) can change its answer though neither watched file did: check it again regardless.
