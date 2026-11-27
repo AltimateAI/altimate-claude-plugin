@@ -428,7 +428,7 @@ test('another warehouse is told once, never held, and not asked again', async ($
   await clock.settle()
 
   expect(first.deny).toBeUndefined()
-  expect(first.context).toEqual(['cost · no estimate on duckdb: scans are estimated on BigQuery, Snowflake and Databricks only'])
+  expect(first.context).toEqual(['cost · no estimate on duckdb: scans are estimated on BigQuery only'])
   expect(second.deny).toBeUndefined()
   expect(estimates).toEqual(['orders'])
   expect(ran).toEqual(['dbt run -s orders', 'dbt run -s customers'])
@@ -517,7 +517,7 @@ test('a warehouse found to have no dry run ends a hold from before, and its allo
   const { clock, ran, statuses } = await start($, on, { answers })
   expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toBeDefined()
   await $.command.run({ command: 'allow-scan', args: '' } as any)
-  answers.orders = { success: true, supported: false, adapter: 'snowflake' }
+  answers.orders = { success: true, supported: false, adapter: 'duckdb' }
   await $.tool.call(bash('dbt run -s orders'))
   await clock.settle()
   expect(ran).toEqual(['dbt run -s orders'])
@@ -1538,105 +1538,48 @@ test('a parallel call whose estimate fails is held by the hold another call reco
   expect(ran).toEqual([])
 })
 
-// Snowflake and Databricks: dbt_cost_estimate answers the planner's EXPLAIN estimate (`source: "explain"`), with no rounding bound.
-const planned = (adapter: string, bytes: number, display: string, bound = adapter === 'snowflake' ? 'upper' : 'estimate') => ({
-  success: true,
-  supported: true,
-  adapter,
-  source: 'explain',
-  bound,
-  bytes,
-  display,
-})
+// An altimate-code that answers a warehouse planner's estimate (`source: "explain"`) for a warehouse other than BigQuery:
+// the answer is ignored, as for any other adapter with no dry run.
+const planned = (adapter: string, bytes: number, display: string) => ({ success: true, supported: true, adapter, source: 'explain', bound: 'upper', bytes, display })
 
-for (const [adapter, name] of [
-  ['snowflake', 'Snowflake'],
-  ['databricks', 'Databricks'],
-] as const) {
-  test(`on ${adapter}, a model whose plan estimate is over the limit is held, with the estimate and where it came from`, async ($, on) => {
-    const { clock, estimates, ran } = await start($, on, { answers: { orders: planned(adapter, 20 * GIB, '20.0 GiB') } })
-    const result: any = await $.tool.call(bash('dbt run -s orders'))
-    await clock.settle()
-
-    expect(estimates).toEqual(['orders'])
-    expect(ran).toEqual([])
-    expect(result.deny).toBe(`≈ 20.0 GiB would be scanned (${name} plan estimate), over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.`)
-  })
-
-  test(`on ${adapter}, a model whose plan estimate is under the limit runs without a hold, saying where the estimate came from`, async ($, on) => {
-    const { clock, ran } = await start($, on, { answers: { orders: planned(adapter, 2 * GIB, '2.0 GiB') } })
-    const result: any = await $.tool.call(bash('dbt run -s orders'))
-    await clock.settle()
-
-    expect(result.deny).toBeUndefined()
-    expect(ran).toEqual(['dbt run -s orders'])
-    expect(result.context).toEqual([`cost · orders would scan 2.0 GiB (${name} plan estimate)`])
-  })
-
-  test(`on ${adapter}, an altimate-code that estimates BigQuery only says a newer one is needed, and holds nothing`, async ($, on) => {
-    const { clock, ran } = await start($, on, { fallback: { success: true, supported: false, adapter } })
-    const result: any = await $.tool.call(bash('dbt run -s orders'))
-    await clock.settle()
-
-    expect(result.deny).toBeUndefined()
-    expect(ran).toEqual(['dbt run -s orders'])
-    expect(result.context).toEqual([`cost · no estimate on ${adapter}: this altimate-code estimates BigQuery only; ${name} needs a newer altimate-code (the release with Snowflake and Databricks estimates)`])
-  })
-}
-
-test('on Snowflake, a held command is allowed once by /allow-scan, and its note says the estimate is the plan\'s', async ($, on) => {
-  const { clock, ran } = await start($, on, { answers: { orders: planned('snowflake', 20 * GIB, '20.0 GiB') } })
-  expect(((await $.tool.call(bash('dbt build -s orders'))) as any).deny).toBeDefined()
-  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('orders (≈ 20.0 GiB, Snowflake plan estimate)')
-  const allowed: any = await $.tool.call(bash('dbt build -s orders'))
-  await clock.settle()
-
-  expect(ran).toEqual(['dbt build -s orders'])
-  expect(allowed.context).toEqual(['cost · orders would scan 20.0 GiB (Snowflake plan estimate), over the 10.0 GiB limit: allowed once'])
-})
-
-test('on Databricks, a table without statistics gives no estimate: the command runs, with the reason', async ($, on) => {
-  const reason = "Databricks' planner has no size for a table this query reads (it shows Spark's default for a table without statistics). ANALYZE TABLE <table> COMPUTE STATISTICS gives it one."
-  const { clock, ran } = await start($, on, { answers: { orders: { success: false, adapter: 'databricks', source: 'explain', error: reason } } })
-  const result: any = await $.tool.call(bash('dbt run -s orders'))
-  await clock.settle()
-
-  expect(result.deny).toBeUndefined()
-  expect(ran).toEqual(['dbt run -s orders'])
-  expect(result.context).toEqual([`cost · no estimate for orders: ${reason}`])
-})
-
-test('on Databricks, a model with no estimate is asked about again on the next command: one table without statistics does not stop the check', async ($, on) => {
-  const { clock, estimates, ran } = await start($, on, {
-    answers: { orders: { success: false, adapter: 'databricks', source: 'explain', error: 'no size' }, customers: planned('databricks', 20 * GIB, '20.0 GiB') },
-  })
-  await $.tool.call(bash('dbt run -s orders'))
+test('a Snowflake planner answer over the limit is neither held nor shown as an estimate', async ($, on) => {
+  const { clock, estimates, ran, statuses } = await start($, on, { answers: { orders: planned('snowflake', 20 * GIB, '20.0 GiB'), customers: planned('snowflake', 20 * GIB, '20.0 GiB') } })
+  const first: any = await $.tool.call(bash('dbt run -s orders'))
   const second: any = await $.tool.call(bash('dbt run -s customers'))
   await clock.settle()
 
-  expect(estimates).toEqual(['orders', 'customers'])
+  expect(first.deny).toBeUndefined()
+  expect(first.context).toEqual(['cost · no estimate on snowflake: scans are estimated on BigQuery only'])
+  expect(second.deny).toBeUndefined()
+  expect(ran).toEqual(['dbt run -s orders', 'dbt run -s customers'])
+  // Found out once: nothing is asked again.
+  expect(estimates).toEqual(['orders'])
+  expect(statuses.join(' ')).not.toContain('scan')
+  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('Nothing is held')
+  expect((await $.command.run({ command: 'scan-cost', args: '' } as any)).text).toBe('Run /scan-cost <model> to estimate the scan of a model.')
+})
+
+test('a planner answer with no adapter named is ignored too', async ($, on) => {
+  const { clock, ran } = await start($, on, { answers: { orders: { success: true, supported: true, source: 'explain', bytes: 20 * GIB, display: '20.0 GiB' } } })
+  const result: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(result.deny).toBeUndefined()
   expect(ran).toEqual(['dbt run -s orders'])
-  expect(second.deny).toContain('(Databricks plan estimate)')
+  expect(result.context).toEqual(['cost · no estimate on this warehouse: scans are estimated on BigQuery only'])
 })
 
-test('/scan-cost on Snowflake names the plan estimate and the verdict', async ($, on) => {
+test('a failed planner answer is ignored too: it is no reason of its own', async ($, on) => {
+  const { clock, ran } = await start($, on, { answers: { orders: { success: false, adapter: 'databricks', source: 'explain', error: 'no size' } } })
+  const result: any = await $.tool.call(bash('dbt run -s orders'))
+  await clock.settle()
+  expect(ran).toEqual(['dbt run -s orders'])
+  expect(result.context).toEqual(['cost · no estimate on databricks: scans are estimated on BigQuery only'])
+})
+
+test('/scan-cost over a planner answer gives no estimate', async ($, on) => {
   await start($, on, { answers: { orders: planned('snowflake', 20 * GIB, '20.0 GiB') } })
-  expect((await $.command.run({ command: 'scan-cost', args: 'orders' } as any)).text).toBe(
-    'orders would scan 20.0 GiB (Snowflake plan estimate), over the 10.0 GiB limit: a dbt run of it is held until /allow-scan.',
-  )
-})
-
-test('/scan-cost with no model keeps the plan estimate label of the last estimate', async ($, on) => {
-  await start($, on, { answers: { orders: planned('snowflake', 20 * GIB, '20.0 GiB') } })
-  await $.command.run({ command: 'scan-cost', args: 'orders' } as any)
-  expect((await $.command.run({ command: 'scan-cost', args: '' } as any)).text).toBe('Last estimate: orders would scan 20.0 GiB (Snowflake plan estimate). Run /scan-cost <model> for another.')
-})
-
-test('/scan-cost on an older altimate-code over Databricks says a newer one is needed', async ($, on) => {
-  await start($, on, { fallback: { success: true, supported: false, adapter: 'databricks' } })
-  expect((await $.command.run({ command: 'scan-cost', args: 'orders' } as any)).text).toBe(
-    'No estimate: this altimate-code estimates BigQuery only; Databricks needs a newer altimate-code (the release with Snowflake and Databricks estimates).',
-  )
+  expect((await $.command.run({ command: 'scan-cost', args: 'orders' } as any)).text).toBe('No estimate: scans are estimated on BigQuery only.')
+  expect((await $.command.run({ command: 'scan-cost', args: '' } as any)).text).toBe('Run /scan-cost <model> to estimate the scan of a model.')
 })
 
 test('a BigQuery dry run is shown as before, with no estimate source', async ($, on) => {
@@ -1644,19 +1587,6 @@ test('a BigQuery dry run is shown as before, with no estimate source', async ($,
   const result: any = await $.tool.call(bash('dbt run -s orders'))
   await clock.settle()
   expect(result.context).toEqual(['cost · orders would scan 2.0 GiB'])
-})
-
-test('on Snowflake, a hold kept while the estimate fails on the retry still names the plan estimate, and so does /allow-scan', async ($, on) => {
-  const { clock, ran } = await start($, on, {
-    sequence: { orders: [planned('snowflake', 20 * GIB, '20.0 GiB'), { success: false, adapter: 'snowflake', source: 'explain', error: 'EXPLAIN failed' }] },
-  })
-  expect(((await $.tool.call(bash('dbt run -s orders'))) as any).deny).toContain('(Snowflake plan estimate)')
-  const retry: any = await $.tool.call(bash('dbt run -s orders'))
-  await clock.settle()
-
-  expect(ran).toEqual([])
-  expect(retry.deny).toBe('≈ 20.0 GiB would be scanned (Snowflake plan estimate), over the 10.0 GiB limit. Narrow the query, or ask the user to run /allow-scan and then run the same command again.')
-  expect((await $.command.run({ command: 'allow-scan', args: '' } as any)).text).toContain('orders (≈ 20.0 GiB, Snowflake plan estimate)')
 })
 
 /** The band above the prompt, as health's tests mount it. */
@@ -1672,21 +1602,6 @@ async function bandShows($: any, text: string): Promise<boolean> {
   const found = await band.find({ type: 'Text', text })
   await band.unmount()
   return found !== undefined && found !== null
-}
-
-for (const [adapter, name] of [
-  ['snowflake', 'Snowflake'],
-  ['databricks', 'Databricks'],
-] as const) {
-  test(`on ${adapter}, the band's held line names the plan estimate, and still does once the retry's estimate fails`, async ($, on) => {
-    const { clock } = await start($, on, { sequence: { orders: [planned(adapter, 20 * GIB, '20.0 GiB'), { success: false, adapter, source: 'explain', error: 'EXPLAIN failed' }] } })
-    await $.tool.call(bash('dbt run -s orders'))
-    await clock.settle()
-    expect(await bandShows($, `⛔ held: orders would scan 20.0 GiB (${name} plan estimate) (limit 10.0 GiB) · /allow-scan`)).toBe(true)
-    await $.tool.call(bash('dbt run -s orders'))
-    await clock.settle()
-    expect(await bandShows($, `⛔ held: orders would scan 20.0 GiB (${name} plan estimate) (limit 10.0 GiB) · /allow-scan`)).toBe(true)
-  })
 }
 
 test("on BigQuery, the band's held line is as before", async ($, on) => {

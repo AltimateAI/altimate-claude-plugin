@@ -517,12 +517,12 @@ export interface CommentsState {
 // Filled in by that feature alone (hooks/features/); the other features never read or write it.
 // ---------------------------------------------------------------------------------------------------
 export interface CostState {
-  /** The warehouse with no estimate (not BigQuery, Snowflake or Databricks, or an altimate-code too old for it), once the tool said so: nothing is estimated after that. */
+  /** The warehouse with no estimate (not BigQuery), once the tool said so: nothing is estimated after that. */
   unsupportedAdapter: string | null
-  /** The newest estimate: what was estimated, in bytes, as the dry run or the planner gave it. */
-  lastEstimate: { target: string; bytes: number; display: string; planner?: string } | null
-  /** The command held for being over the limit, until it is allowed or a later dbt command is estimated under the limit; `bytes` is its scan's upper bound, `planner` the warehouse whose planner made the estimate (none for a dry run). */
-  held: { command: string; target: string; bytes: number; display: string; planner?: string } | null
+  /** The newest estimate: what was estimated, in bytes, as BigQuery's dry run gave it. */
+  lastEstimate: { target: string; bytes: number; display: string } | null
+  /** The command held for being over the limit, until it is allowed or a later dbt command is estimated under the limit; `bytes` is its scan's upper bound. */
+  held: { command: string; target: string; bytes: number; display: string } | null
   /** /allow-scan was given for the held command: that same command runs once. */
   allowOnce: boolean
 }
