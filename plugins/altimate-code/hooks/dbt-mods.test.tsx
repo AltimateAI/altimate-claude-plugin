@@ -162,6 +162,10 @@ type Options = {
   env?: Record<string, string>
   /** No project .venv: dbt is the one on PATH, its launcher naming this interpreter. */
   pathDbtPython?: string
+  /** Further dbt launchers that answer as the project's own does. */
+  launchers?: string[]
+  /** Further interpreters that answer as the project's own does. */
+  pythons?: string[]
   /** run_results.json's size: over 4 MiB $.fs.read refuses it and its failures come through the project's Python. */
   runResultsSize?: number
   /** What the project's Python prints for the run_results script. */
@@ -186,6 +190,12 @@ type Options = {
   profileAnswer?: { exitCode: number; stdout: string }
   /** What the plugin's store held from an earlier session. */
   stored?: Record<string, unknown>
+  /** Project-relative paths (files or folders) that are links to another project-relative path (the engine's `realPath` for them). */
+  links?: Record<string, string>
+  /** Project-relative paths whose canonical path cannot be resolved: `stat` with `resolve` fails for them. */
+  statFails?: string[]
+  /** What `--version` answers for an interpreter, by its path (others answer 3.13.13). */
+  pythonVersions?: Record<string, string>
   /** Extra project files, by project-relative path. */
   files?: Record<string, string>
   /** No manifest until dbt show writes this one. */
@@ -243,6 +253,7 @@ async function start($: any, on: any, options: Options = {}) {
   const toasts: string[] = []
   const prompts: string[] = []
   const store = new Map<string, unknown>(Object.entries(options.stored ?? {}))
+  const resolved: string[] = []
   const mtimes: Record<string, number> = { 'target/manifest.json': 1_000, 'models/orders.sql': 900, 'models/schema.yml': 900, ...options.mtimes }
   const files: Record<string, string> = {
     'dbt_project.yml': "name: 'shop'\nprofile: 'shop'\n",
@@ -337,14 +348,18 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: undefined }
   })
   on('fs.exists', (_: unknown, e: { path: string }) => ({ value: exists(e.path) }))
-  on('fs.stat', async (_: unknown, e: { path: string }) => {
+  on('fs.stat', async (_: unknown, e: { path: string; resolve?: boolean }) => {
     if (options.statGate?.until && e.path === `${ROOT}/${options.statGate.path}`) await options.statGate.until
     const rel = e.path.slice(ROOT.length + 1)
     if (!exists(e.path)) throw new Error('ENOENT')
+    if (e.resolve) resolved.push(rel)
+    if (e.resolve && options.statFails?.includes(rel)) throw new Error('EIO')
     const isDir = !(rel in files)
     const mtimeMs = rel === 'target/run_results.json' ? (options.runResultsAt ?? 5_000) : (mtimes[rel] ?? 500)
     const size = /(^|\/)manifest\.json$/.test(rel) && options.manifestSize ? options.manifestSize : rel === 'target/run_results.json' && options.runResultsSize ? options.runResultsSize : (files[rel]?.length ?? 0)
-    return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: false } }
+    const linkKey = Object.keys(options.links ?? {}).find(key => rel === key || rel.startsWith(`${key}/`))
+    const linked = linkKey ? `${options.links![linkKey]}${rel.slice(linkKey.length)}` : undefined
+    return { value: { kind: isDir ? 'dir' : 'file', size, mtimeMs, isLink: !!linked, ...(e.resolve ? { realPath: linked ? `${ROOT}/${linked}` : e.path } : {}) } }
   })
   on('fs.read', (_: unknown, e: { path: string }) => {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
@@ -405,22 +420,24 @@ async function start($: any, on: any, options: Options = {}) {
       const value = { HOME: '/home/me', ...options.env }[verb as string]
       return { value: { exitCode: value ? 0 : 1, stdout: value ? `${value}\n` : '', stderr: '' } }
     }
+    const isPython = bin === python || options.pythons?.includes(bin as string) === true
     // The project's Python: its version, or the slice of a manifest too big to read here.
-    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_TYPE) {
+    if (isPython && verb === '-c' && e.argv[2] === PROFILE_TYPE) {
       // The script itself is checked below; here the interpreter answers what it would print.
       return { value: { ...(options.profileAnswer ?? { exitCode: 0, stdout: '{"status":"ok","profile":"shop","target":"dev","type":"duckdb"}' }), stderr: '' } }
     }
-    if (bin === python && verb === '-c' && e.argv[2] === PROFILE_REDACT) return { value: { exitCode: 0, stdout: JSON.stringify({ redact: options.redactFrom?.(JSON.parse(e.init?.stdin ?? '{}').env ?? {}) ?? options.redactBy?.[e.argv[4] as string] ?? options.redact ?? [] }), stderr: '' } }
-    if (bin === python && verb === '-c' && e.argv[2] === RUN_FAILURES) return { value: { ...(options.runFailures ?? { exitCode: 0, stdout: JSON.stringify({ results: [] }) }), stderr: '' } }
-    if (bin === python && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
-    if (bin === python && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
-    if (bin === python) return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
+    if (isPython && verb === '-c' && e.argv[2] === PROFILE_REDACT) return { value: { exitCode: 0, stdout: JSON.stringify({ redact: options.redactFrom?.(JSON.parse(e.init?.stdin ?? '{}').env ?? {}) ?? options.redactBy?.[e.argv[4] as string] ?? options.redact ?? [] }), stderr: '' } }
+    if (isPython && verb === '-c' && e.argv[2] === RUN_FAILURES) return { value: { ...(options.runFailures ?? { exitCode: 0, stdout: JSON.stringify({ results: [] }) }), stderr: '' } }
+    if (isPython && verb === '-c' && options.sliceAnswer) return { value: { ...options.sliceAnswer, stderr: '' } }
+    if (isPython && verb === '-c') return { value: { exitCode: 0, stdout: JSON.stringify({ nodes: MANIFEST.nodes, parent_map: MANIFEST.parent_map, child_map: MANIFEST.child_map }), stderr: '' } }
+    if (bin && verb === '--version' && options.pythonVersions?.[bin]) return { value: { exitCode: 0, stdout: `Python ${options.pythonVersions[bin]}\n`, stderr: '' } }
+    if (isPython) return { value: { exitCode: 0, stdout: 'Python 3.13.13\n', stderr: '' } }
     if (e.argv.includes('dbt_map_relations')) {
       if (!options.mapRelations) return { value: { exitCode: 1, stdout: '', stderr: 'unknown tool: dbt_map_relations' } }
       mapAsked.push(JSON.parse(String(e.argv[e.argv.indexOf('--args') + 1])))
       return { value: { exitCode: 0, stdout: JSON.stringify({ status: 'ok', output: '', metadata: { success: true, mappings: options.mapRelations } }), stderr: '' } }
     }
-    if (bin !== (options.pathDbtPython ? 'dbt' : DBT)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
+    if (bin !== (options.pathDbtPython ? 'dbt' : DBT) && !options.launchers?.includes(bin as string)) return { value: { exitCode: 1, stdout: '', stderr: 'not this test' } }
     if (verb === '--version') return { value: { exitCode: 0, stdout: options.version ?? VERSION, stderr: '' } }
     if (verb === 'debug') {
       if (options.holdDebug) await options.holdDebug
@@ -481,7 +498,7 @@ async function start($: any, on: any, options: Options = {}) {
   })
   await $.session.start({ cwd: ROOT, surface: 'terminal', isInteractive: options.interactive ?? false })
   await clock.settle()
-  return { mapAsked, redactSent, clock, runs, envs, order, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
+  return { resolved, mapAsked, redactSent, clock, runs, envs, order, cwds, toasts, prompts, store, registered, storeGets, mtimes, opened, sizes, files, setBash: (next: typeof bash) => void (bash = next) }
 }
 
 // ─── What the helpers read from dbt ─────────────────────────────────────────────────────────────
@@ -806,6 +823,7 @@ test('a package repo with no manifest of its own: the doctor and model context r
     target: 'integration_tests/target',
     files: {
       'target/manifest.json': JSON.stringify(borrowed),
+      'integration_tests/models/only_in_tests.sql': 'select 1',
       'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
       'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
       'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
@@ -828,6 +846,7 @@ test('a package repo whose manifest comes from integration_tests: the doctor\'s 
     target: 'integration_tests/target',
     mtimes: { 'models/orders.sql': 5_000 },
     files: {
+      'target/manifest.json': JSON.stringify(PACKAGE_MANIFEST),
       'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
       'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
       'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
@@ -869,6 +888,427 @@ test('a package repo with a manifest of its own: the doctor\'s Run dbt parse ref
   expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
   expect(await doctor.find({ type: 'Text', text: /where dbt runs for this package/ })).toBeUndefined()
   await doctor.unmount()
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: the doctor says its packages are installed there, not missing', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+      'target/manifest.json': JSON.stringify(MANIFEST),
+      'integration_tests/target/manifest.json': JSON.stringify(MANIFEST),
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: 'installed in integration_tests, where dbt runs for this package' })).toBeDefined()
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeUndefined()
+  await doctor.unmount()
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: the doctor\'s Run dbt parse runs in that project', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { target: 'integration_tests/target' },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+      'target/manifest.json': JSON.stringify(MANIFEST),
+      'integration_tests/target/manifest.json': JSON.stringify(MANIFEST),
+    },
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  const at = runs.findIndex(argv => argv[1] === 'parse')
+  expect(cwds[at]).toBe(`${ROOT}/integration_tests`)
+  await band.unmount()
+})
+
+test('a plain project with no package below it: its manifest is its own, the doctor\'s Run dbt parse runs in it', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'target/manifest.json': JSON.stringify(MANIFEST),
+    },
+  })
+  await clock.settle()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(ROOT)
+  await band.unmount()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
+  await doctor.unmount()
+})
+
+// What dbt writes in the project that installs a package: its own name, and the package's models under the package's.
+const PACKAGE_MANIFEST = { ...MANIFEST, metadata: { project_name: 'shop_tests' }, nodes: Object.fromEntries(Object.entries(MANIFEST.nodes).map(([id, node]) => [id, { ...node, package_name: 'shop' }])) }
+
+const RUNNER_PYTHON = `${ROOT}/integration_tests/.venv/bin/python`
+const RUNNER_DBT = `${ROOT}/integration_tests/.venv/bin/dbt`
+
+const LINKED_REPO = {
+  'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+  'integration_tests/dbt_project.yml': "name: 'shop_tests'\nprofile: tests\n",
+  'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+  'integration_tests/dbt_packages/shop/dbt_project.yml': "name: 'shop'\n",
+  'integration_tests/profiles.yml': 'tests:\n  target: dev\n  outputs:\n    dev:\n      type: duckdb\n',
+  'target/manifest.json': JSON.stringify(PACKAGE_MANIFEST),
+  'integration_tests/target/manifest.json': JSON.stringify(PACKAGE_MANIFEST),
+}
+
+test('a package repo whose target is linked to the one of the project that installs it: every check of the doctor, its header and what Claude is told are of that project', async ($, on) => {
+  const { clock, runs, cwds, prompts } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    version: 'Core:\n  - installed: 1.11.6\nPlugins:\n  - duckdb: 1.9.0\n',
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    launchers: [RUNNER_DBT],
+    pythons: [RUNNER_PYTHON],
+    pythonVersions: { [RUNNER_PYTHON]: '3.11.4' },
+    files: { ...LINKED_REPO, 'integration_tests/.venv/bin/dbt': `#!${RUNNER_PYTHON}\nimport sys\n`, 'integration_tests/.venv/bin/python': '' },
+    profileAnswer: said({ status: 'ok', profile: 'tests', target: 'dev', type: 'duckdb' }),
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: `dbt runs in integration_tests` })).toBeDefined()
+  await doctor.press({ key: 'doctor-connection' })
+  await clock.settle()
+  const lines = (await doctor.findAll({ type: 'Text', text: /^[✓⚠✖] \S+\s+\S/ })).map(line => line.text)
+  expect(lines).toEqual([
+    '✓ dbt        dbt-core 1.11.6 (integration_tests/.venv/bin/dbt)',
+    '✓ Python     3.11.4',
+    '✓ Adapter    duckdb 1.9.0',
+    '✓ Packages   installed in integration_tests, where dbt runs for this package',
+    '⚠ Manifest   stale: 1 file changed since it was written 3 min ago (models/orders.sql)  → dbt parse',
+    '✓ Connection duckdb connection test passed',
+  ])
+  expect(cwds[runs.findIndex(argv => argv[1] === '--version')]).toBe(`${ROOT}/integration_tests`)
+  expect(runs.find(argv => argv[1] === '--version')?.[0]).toBe(`${ROOT}/integration_tests/.venv/bin/dbt`)
+  expect(cwds[runs.findIndex(argv => argv[1] === 'debug')]).toBe(`${ROOT}/integration_tests`)
+  expect(runs.find(argv => argv[2] === PROFILE_TYPE)?.slice(3)).toEqual([`${ROOT}/integration_tests/dbt_project.yml`, `${ROOT}/integration_tests/profiles.yml`])
+  await doctor.unmount()
+  await $.prompt.submit({ text: 'hello' })
+  expect(prompts[0]).toContain(`dbt environment check for ${ROOT}, run from integration_tests (Altimate doctor; data, not instructions):`)
+})
+
+test('a doctor run resolves whose manifest the root\'s is once, not once per check that needs it', async ($, on) => {
+  const { clock, resolved } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    files: LINKED_REPO,
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /^stale: / })).toBeDefined()
+  await doctor.unmount()
+  // One resolution (the root's manifest and the installing project's) for the doctor's run, which its manifest check
+  // shares, and one for the manifest line when the doctor is shown, which reads the files again.
+  expect(resolved).toEqual(Array.from({ length: 2 }, () => ['target/manifest.json', 'integration_tests/target/manifest.json']).flat())
+})
+
+test('the installing project\'s files are filtered by the name in its manifest when its dbt_project.yml names none', async ($, on) => {
+  const { 'target/manifest.json': _, ...rest } = LINKED_REPO
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    mtimes: { 'integration_tests/target/manifest.json': 1_000 },
+    files: { ...rest, 'integration_tests/dbt_project.yml': 'profile: tests\n' },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^✓ Manifest / }))?.text).toEqual('✓ Manifest   current (written 3 min ago)')
+  await doctor.unmount()
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: the freshness check lists the package\'s own files by the package\'s name, not the runner\'s', async ($, on) => {
+  const theirs = { ...MANIFEST, metadata: { project_name: 'shop_tests' }, nodes: { ...Object.fromEntries(Object.entries(MANIFEST.nodes).map(([id, node]) => [id, { ...node, package_name: 'shop' }])), 'model.shop.gone': { name: 'gone', resource_type: 'model', package_name: 'shop', original_file_path: 'models/gone.sql', config: {}, columns: {}, depends_on: { nodes: [] } } } }
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    links: { 'target/manifest.json': 'integration_tests/target/manifest.json' },
+    files: { ...LINKED_REPO, 'target/manifest.json': JSON.stringify(theirs), 'integration_tests/target/manifest.json': JSON.stringify(theirs) },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /models\/gone\.sql \(deleted\)/ })).toBeDefined()
+  await doctor.unmount()
+})
+
+test('a package repo and its installing project that have no packages installed: the doctor names the installing project\'s packages file, and Run dbt deps runs there', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: 'integration_tests/packages.yml is not installed' })).toBeDefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'deps')]).toBe(`${ROOT}/integration_tests`)
+  await band.unmount()
+})
+
+test('a package repo with no packages.yml of its own, installed by a project below it that has none installed: the doctor says so, and Run dbt deps runs there', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    files: {
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: 'integration_tests/packages.yml is not installed' })).toBeDefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'deps')]).toBe(`${ROOT}/integration_tests`)
+  await band.unmount()
+})
+
+test('a package repo with its own packages installed, and a manifest only in the project below that lacks them: the doctor works where compile and validate runs, the package itself', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    manifestAfterShow: MANIFEST,
+    files: {
+      'packages.yml': 'packages:\n  - package: dbt-labs/dbt_utils\n    version: 1.0.0\n',
+      'dbt_packages/dbt_utils/dbt_project.yml': "name: 'dbt_utils'\n",
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+      'integration_tests/target/manifest.json': JSON.stringify(MANIFEST),
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: 'dbt_packages installed' })).toBeDefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(ROOT)
+  await band.unmount()
+})
+
+test('a package repo and the project that installs it that each have a manifest of their own: the doctor stays in the package, its packages are missing there, and Run dbt parse runs in it', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    files: { ...LINKED_REPO },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
+  expect(await doctor.find({ type: 'Text', text: /dbt runs in/ })).toBeUndefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(ROOT)
+  await band.unmount()
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: a file changed in that project after the manifest was written makes the manifest stale', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'integration_tests/dbt_project.yml': 5_000 },
+    links: { target: 'integration_tests/target' },
+    files: LINKED_REPO,
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /stale: 1 file changed .*\(integration_tests\/dbt_project\.yml\)/ })).toBeDefined()
+  await doctor.unmount()
+})
+
+test('no manifest anywhere, dbt run in the project that installs the package: the doctor names the manifest a parse there writes', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    files: {
+      'integration_tests/dbt_project.yml': "name: 'shop_tests'\n",
+      'integration_tests/packages.yml': 'packages:\n  - local: ../\n',
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^integration_tests.*is missing/ }))?.text).toEqual('integration_tests/target/manifest.json is missing: lineage, model context and docs need it')
+  await doctor.unmount()
+})
+
+test('a package repo whose target is linked to the one of the project that installs it: the doctor reports the Python of that project\'s dbt, not the repo\'s', async ($, on) => {
+  const { clock, runs } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    links: { target: 'integration_tests/target' },
+    pythonVersions: { [RUNNER_PYTHON]: '3.11.4' },
+    files: { ...LINKED_REPO, 'integration_tests/.venv/bin/dbt': `#!${RUNNER_PYTHON}\nimport sys\n`, 'integration_tests/.venv/bin/python': '' },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^✓ Python /u }))?.text).toEqual('✓ Python     3.11.4')
+  expect(runs.filter(argv => argv[1] === '--version' && argv[0].endsWith('/python')).map(argv => argv[0])).toEqual([RUNNER_PYTHON])
+  await doctor.unmount()
+})
+
+test('a plain project: the doctor reports the Python of the project\'s own dbt', async ($, on) => {
+  const { clock } = await start($, on, { interactive: true, now: 200_000, pythonVersions: { [`${ROOT}/.venv/bin/python`]: '3.12.1' } })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^✓ Python /u }))?.text).toEqual('✓ Python     3.12.1')
+  await doctor.unmount()
+})
+
+// The doctor in a project other than the repo's: its stale files are those of both, each once, newest first.
+const STALE_PROJECT = { ...LINKED_REPO, 'dbt_project.yml': "name: 'shop'\nmodel-paths: ['.']\n", 'models/a.sql': 'select 1', 'integration_tests/models/b.sql': 'select 1', 'integration_tests/models/c.sql': 'select 1' }
+
+test('the doctor in the project that installs a package lists the stale files of both projects once each, newest first', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    links: { target: 'integration_tests/target' },
+    mtimes: { 'models/a.sql': 3_000, 'integration_tests/models/b.sql': 4_000, 'integration_tests/models/c.sql': 2_000 },
+    files: STALE_PROJECT,
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^stale: / }))?.text).toEqual('stale: 3 files changed since it was written 3 min ago (integration_tests/models/b.sql, models/a.sql, integration_tests/models/c.sql)')
+  await doctor.unmount()
+})
+
+test('the doctor in the project that installs a package puts a newer file of that project before an older one of the package', async ($, on) => {
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    links: { target: 'integration_tests/target' },
+    mtimes: { 'models/a.sql': 3_000, 'integration_tests/models/b.sql': 4_000 },
+    files: { ...LINKED_REPO, 'models/a.sql': 'select 1', 'integration_tests/models/b.sql': 'select 1' },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^stale: / }))?.text).toEqual('stale: 2 files changed since it was written 3 min ago (integration_tests/models/b.sql, models/a.sql)')
+  await doctor.unmount()
+})
+
+test('a package repo with no manifest of its own, whose own packages are the ones installed: the manifest read is the installing project\'s, so its changed files make it stale', async ($, on) => {
+  const { 'target/manifest.json': _, 'integration_tests/dbt_packages/shop/dbt_project.yml': __, ...rest } = LINKED_REPO
+  const { clock } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    manifestAfterShow: MANIFEST,
+    mtimes: { 'integration_tests/target/manifest.json': 1_000, 'integration_tests/models/x.sql': 5_000 },
+    files: { ...rest, 'dbt_packages/dbt_utils/dbt_project.yml': "name: 'dbt_utils'\n", 'integration_tests/models/x.sql': 'select 1' },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  // dbt runs in the package (its own packages are installed), but the manifest is the installing project's.
+  expect(await doctor.find({ type: 'Text', text: 'dbt runs in integration_tests' })).toBeUndefined()
+  expect((await doctor.find({ type: 'Text', text: /^✓ Packages / }))?.text).toEqual('✓ Packages   dbt_packages installed')
+  expect((await doctor.find({ type: 'Text', text: /^stale: / }))?.text).toEqual('stale: 1 file changed since it was written 3 min ago (integration_tests/models/x.sql)')
+  await doctor.unmount()
+})
+
+test('a canonical path that cannot be resolved leaves the root\'s manifest the root\'s own: the doctor stays in the package, as it did before paths were resolved', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { target: 'integration_tests/target' },
+    statFails: ['target/manifest.json'],
+    files: LINKED_REPO,
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect(await doctor.find({ type: 'Text', text: /dbt runs in/ })).toBeUndefined()
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeDefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(ROOT)
+  await band.unmount()
+})
+
+test('a target-path that is absolute and linked to the project that installs the package: the doctor works in that project', async ($, on) => {
+  const { clock, runs, cwds } = await start($, on, {
+    interactive: true,
+    now: 200_000,
+    mtimes: { 'models/orders.sql': 5_000 },
+    links: { 'linked-target': 'integration_tests/target' },
+    files: {
+      ...LINKED_REPO,
+      'dbt_project.yml': `name: 'shop'\nprofile: 'shop'\ntarget-path: '${ROOT}/linked-target'\n`,
+      'linked-target/manifest.json': JSON.stringify(PACKAGE_MANIFEST),
+    },
+  })
+  await clock.settle()
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^dbt runs in / }))?.text).toEqual('dbt runs in integration_tests')
+  expect(await doctor.find({ type: 'Text', text: /packages\.yml is not installed/ })).toBeUndefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-parse' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'parse')]).toBe(`${ROOT}/integration_tests`)
+  await band.unmount()
+})
+
+test('a doctor view kept from before it had a place: the pane shows the root alone, and Run dbt deps runs in the root', async ($, on) => {
+  let kept = false
+  const legacy = { root: ROOT, checks: [{ id: 'packages', label: 'Packages', status: 'fail', detail: 'packages.yml is not installed', fix: 'dbt deps' }], at: 1, staleFiles: [], busy: null }
+  on('state.get', async (_: unknown, e: { key: string }, next: (e: unknown) => Promise<{ value?: { value: unknown; version: number } }>) => {
+    const stored = await next(e)
+    return kept && e.key === 'dbtDoctor' ? { value: { value: legacy, version: stored.value?.version ?? 0 } } : stored
+  })
+  const { clock, runs, cwds } = await start($, on, { interactive: true, now: 200_000 })
+  await clock.settle()
+  kept = true
+  const doctor = await $.ui.mount({ ...DOCTOR, surface: 'terminal' })
+  expect((await doctor.find({ type: 'Text', text: /^\/proj$/ }))?.text).toEqual(ROOT)
+  expect(await doctor.find({ type: 'Text', text: /dbt runs in/ })).toBeUndefined()
+  expect(await doctor.find({ type: 'Text', text: 'packages.yml is not installed' })).toBeDefined()
+  await doctor.unmount()
+  const band = await $.ui.mount({ ...BAND, surface: 'terminal' })
+  await band.press({ key: 'dbt-doctor-deps' })
+  await clock.settle()
+  expect(cwds[runs.findIndex(argv => argv[1] === 'deps')]).toBe(ROOT)
+  await band.unmount()
 })
 
 test('a package tested from integration_tests is compiled and validated from there, where its packages are installed', async ($, on) => {
