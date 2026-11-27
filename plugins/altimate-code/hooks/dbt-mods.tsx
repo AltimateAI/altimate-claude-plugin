@@ -7,6 +7,7 @@ import type { Args, EngineInterface, EventResult, On, PluginOptions, RenderEleme
 import type { CheckView, DoctorCheck, DoctorView, FailureView, QueryResult, SavedQuery } from '../types'
 import { later, runTool } from './altimate-cli'
 import { openTracked } from './usage'
+import { bashChanged, MTIME_SLACK_MS, WRITES } from './bash-edits'
 import { doctorFacts, noteProblem, type DoctorFacts } from './last-problem'
 import { normalize, projectName, runnerOf } from './package-runner'
 import { loadPaneSizesOnce, noteTerminal, paneTerminalColumns, paneRequest, sizeControls, type PaneSpec } from './pane-size'
@@ -578,8 +579,72 @@ async function hardcodedReads($: EngineInterface, manifest: string, sql: string,
   return out
 }
 
-/** Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. */
-async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation): Promise<{ view: CheckView; note: string; current: () => boolean; newest: () => boolean }> {
+// The checks of each file version in each conversation that have started and not finished. A second asker of the same
+// version gets the first's answer: whichever of an edit, a shell edit and a recheck reaches the compile first, the file is run once.
+type Checked = { view: CheckView; note: string; current: () => boolean; newest: () => boolean }
+const checking = new Map<string, Promise<Checked>>()
+// The latest check of each file in each conversation that has not finished, and the one follow-up waiting behind it.
+const latestCheck = new Map<string, Promise<Checked>>()
+const followUp = new Map<string, Promise<Checked>>()
+// The order checks started in, and for each file the order at which the follow-up last took on an edit to read: a check
+// that began before that is not what the follow-up was promised, and cannot stand in for it.
+let startOrder = 0
+const startedOrder = new WeakMap<Promise<Checked>, number>()
+const absorbedAt = new Map<string, number>()
+
+/**
+ * Compiles the model and runs it against the warehouse (one row), then holds its columns to schema.yml. Asked again
+ * while the same version of the file (by its time) is being checked in the same conversation, it answers with that
+ * check. `forced` (a schema or macro edit changed what the file compiles to, not the file) waits for a check under way
+ * and then runs once more, however many ask meanwhile. `fresh` (an edit made through Claude's edit tools) always runs
+ * a new check, which replaces any older one of the file.
+ */
+async function compileAndValidate($: EngineInterface, root: string, file: string, mineGeneration = generation, mode: 'shared' | 'forced' | 'fresh' = 'shared'): Promise<Checked> {
+  const path = normalize(file)
+  const mtime = (await $.fs.stat(path).catch(() => null))?.mtimeMs ?? ''
+  const base = `${mineGeneration}\u0000${path}`
+  const key = `${base}\u0000${mtime}`
+  // From here to the registration, nothing awaits: two askers cannot both find the file free.
+  const running = latestCheck.get(base)
+  if (mode === 'forced' && running) {
+    const waiting = followUp.get(base)
+    if (waiting) return waiting
+    absorbedAt.set(base, ++startOrder)
+    const next: Promise<Checked> = running
+      .catch(() => null)
+      .then(async () => {
+        // The file's time now, after the wait: an edit that landed meanwhile is the version this follow-up compiles.
+        const waited = (await $.fs.stat(path).catch(() => null))?.mtimeMs ?? ''
+        followUp.delete(base)
+        const waitedKey = `${base}\u0000${waited}`
+        // A check of that version may have started during the wait: this follow-up is that check, not a second one.
+        const there = checking.get(waitedKey)
+        const joinable = there && (startedOrder.get(there) ?? 0) > (absorbedAt.get(base) ?? 0)
+        absorbedAt.delete(base)
+        return joinable ? there : startCheck($, root, file, mineGeneration, base, waitedKey)
+      })
+    followUp.set(base, next)
+    return next
+  }
+  const shared = mode === 'shared' ? checking.get(key) : undefined
+  if (shared) return shared
+  return startCheck($, root, file, mineGeneration, base, key)
+}
+
+function startCheck($: EngineInterface, root: string, file: string, mineGeneration: number, base: string, key: string): Promise<Checked> {
+  const run = compileAndValidateOnce($, root, file, mineGeneration)
+  startedOrder.set(run, ++startOrder)
+  checking.set(key, run)
+  latestCheck.set(base, run)
+  const done = () => {
+    if (checking.get(key) === run) checking.delete(key)
+    if (latestCheck.get(base) === run) latestCheck.delete(base)
+  }
+  run.then(done, done)
+  return run
+}
+
+async function compileAndValidateOnce($: EngineInterface, root: string, file: string, mineGeneration: number): Promise<Checked> {
   const rel = relative(root, file)
   // A check from a conversation that has ended takes no place in the order: it can neither land nor push a
   // current check out. Within this conversation, `current` is the newest check of its file (an older one of the
@@ -834,7 +899,13 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   // Busy (a check or recheck running): a forced recheck waits for it, so a schema.yml written meanwhile is not missed.
   if (check.status === 'running' || rechecking) {
     // Only an edit that concerns this check waits for it; an unrelated one never replaces it.
-    if (edited && editConcerns(check, edited)) forcedWhileBusy = edited
+    // One already waiting behind a check of the file has not started: it will read this edit too.
+    if (edited && editConcerns(check, edited)) {
+      const base = `${generation}\u0000${normalize(`${check.root}/${check.file}`)}`
+      if (!followUp.has(base)) forcedWhileBusy = edited
+      // The follow-up will read this edit too, so a check that began before it is not enough.
+      else absorbedAt.set(base, ++startOrder)
+    }
     return
   }
   const files = [check.file, ...(check.schema ? [check.schema] : [])]
@@ -848,10 +919,11 @@ async function recheck($: EngineInterface, edited: string | null = null) {
   if (!force && !stats.some(stat => !!stat && stat.mtimeMs > check.at)) return
   rechecking = true
   try {
-    const { view, current, newest } = await compileAndValidate($, check.root, `${check.root}/${check.file}`, asked)
+    const done = await compileAndValidate($, check.root, `${check.root}/${check.file}`, asked, force ? 'forced' : 'shared')
+    const { view, current, newest } = done
     if (!current()) return
-    // The toast points at the band: only the check the band shows may say so.
-    if (view.status !== 'running' && newest()) {
+    // The toast points at the band: only the check the band shows may say so, and only once however many asked for it.
+    if (view.status !== 'running' && newest() && claimAnnouncement(done)) {
       const text = `${STATUS_ICON[view.status]} ${view.model} changed · checked again against the warehouse`
       if (view.status === 'error') $.ui.toast(text, { timeoutMs: 6000 })
       else infoToast($, text, 6000)
@@ -1882,7 +1954,7 @@ const editedFile = (e: { tool: string }): string | null => {
   const path = (e as { file_path?: unknown }).file_path
   return EDIT_TOOLS.has(e.tool) && typeof path === 'string' ? normalize(path) : null
 }
-// One per key, the latest: a call refused after it started, or an edit that failed, leaves one behind that the next call of the same key replaces.
+// One per key, the latest: an edit that failed leaves one behind that the next call of the same key replaces. A Bash call whose result is a refusal is let go by dbtModsBashDropped.
 const noteStart = (key: string, start: Start) => void starts.set(key, start)
 const takeStart = (key: string): Start | undefined => {
   const start = starts.get(key)
@@ -1908,6 +1980,11 @@ async function ensureForRuns($: EngineInterface, base: string, runs: DbtCommand[
   }
 }
 
+// The dbt verbs that compile the models they select: a shell edit in a command that runs one is left to that run, whichever models it selects.
+const BUILD_VERBS = new Set(['run', 'build', 'compile', 'show'])
+/** Whether a shell command may write model files. A subagent's is left out, as the lineage notes leave it out. */
+const writesModels = (e: { agentId?: string }, command: string) => !e.agentId && WRITES.test(command)
+
 /** Before a call runs: the conversation it is in; for a dbt command also the folder, the time and the run artifact as they are now. */
 export async function dbtModsCallStart($: EngineInterface, e: { tool: string; agentId?: string }): Promise<void> {
   if (!enabled) return
@@ -1917,7 +1994,13 @@ export async function dbtModsCallStart($: EngineInterface, e: { tool: string; ag
   if (file) return noteStart(startKey(e, file), { asked, startedAt: 0, base: '', ready: Promise.resolve(null) })
   const bash = bashOf(e)
   const invocations = bash ? dbtCommands(bash.command) : []
-  if (!bash || invocations.length === 0) return
+  if (!bash) return
+  // A shell command that may write a model (`sed -i`, a script): when it started, to find the models it changed
+  // after. A dbt command is noted below, with the same time.
+  if (invocations.length === 0) {
+    if (writesModels(e, bash.command)) noteStart(startKey(e, bash.command), { asked, startedAt: await $.clock.now(), base: '', ready: Promise.resolve(null) })
+    return
+  }
   const runs = invocations.filter(one => RUN_VERBS.includes(one.verb))
   const cwd = await $.session.cwd().catch(() => null)
   const base = cwd ?? ((await $.session.root().catch(() => '.')) as string)
@@ -1943,10 +2026,13 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
   const agentId = agentOf(e)
   const command = e.command
   const start = takeStart(startKey(e, command))
-  // A command may have changed the checked model.
-  later($, () => recheck($, null))
-  await filesChanged($)
   const invocations = dbtCommands(command)
+  // A command that may have written models, and runs no dbt that builds them: each model it changed is checked as an edit's is.
+  const edits = start && writesModels(e, command) && !invocations.some(one => BUILD_VERBS.has(one.verb)) ? start : null
+  // A command may have changed the checked model. A shell edit's checks look again themselves, once they are done.
+  if (edits) later($, () => bashChecks($, edits, command, agentId))
+  else later($, () => recheck($, null))
+  await filesChanged($)
   if (invocations.length === 0) return pendingLines(agentId)
   const asked = start?.asked ?? generation
   const startedAt = start?.startedAt ?? (await $.clock.now())
@@ -2003,9 +2089,108 @@ export async function dbtModsBashAfter($: EngineInterface, e: { tool: string; co
   return pendingLines(agentId)
 }
 
+/** A Bash call that never reaches its after phase (a gate refused it): the start it noted is let go. */
+export function dbtModsBashDropped(e: { tool: string; command: string; agentId?: string }): void {
+  takeStart(startKey(e, e.command))
+}
+
 /** The notes that missed their own tool result, for this agent, as context lines. */
 function pendingLines(agentId: string | null): string[] {
   return withPending({ context: [] as string[] }, agentId).context
+}
+
+/** The project of a model file dbt can show: null outside a project, or outside its model-paths. */
+async function modelRoot($: EngineInterface, path: string): Promise<string | null> {
+  const root = await projectRoot($, path, true)
+  // Only a file under the project's model-paths is a model dbt can show.
+  const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
+  const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
+  return root && inModels ? root : null
+}
+
+// What has been shown to the person and handed to each agent, by check: whoever shares one check (an edit, a shell
+// task, a recheck) says it, and tells each agent, once.
+const announced = new WeakSet<Checked>()
+const delivered = new WeakMap<Checked, Set<string | null>>()
+
+/** True the first time it is asked of a check: the one that may toast it. */
+function claimAnnouncement(done: Checked): boolean {
+  if (announced.has(done)) return false
+  announced.add(done)
+  return true
+}
+
+/** True the first time it is asked of a check and an agent: the one that may hand that agent the note. */
+function claimDelivery(done: Checked, agentId: string | null): boolean {
+  const told = delivered.get(done) ?? new Set<string | null>()
+  delivered.set(done, told)
+  if (told.has(agentId)) return false
+  told.add(agentId)
+  return true
+}
+
+/** The toast of a check that landed, when it is still the newest one: the band it points at shows the same check. */
+function announceCheck($: EngineInterface, landed: { view: CheckView; newest: () => boolean }) {
+  if (!landed.newest()) return
+  if (landed.view.status === 'error') $.ui.toast(`✖ ${landed.view.model} · dbt could not compile or run it · see the band`, { timeoutMs: 6000 })
+  else
+    infoToast(
+      $,
+      landed.view.status === 'partial'
+        ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : `not checked: ${landed.view.reason}`}`
+        : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
+      6000,
+    )
+}
+
+/**
+ * Compiles a model file and runs it against the warehouse, then checks its columns. Null when the file is not a
+ * model dbt can show (outside a project, or outside its model-paths); the lines otherwise, none when the check was
+ * too slow for this result and its answer rides on the agent's next one.
+ */
+async function checkModel($: EngineInterface, path: string, asked: number, agentId: string | null): Promise<string[] | null> {
+  const root = await modelRoot($, path)
+  if (!root) return null
+  const check = compileAndValidate($, root, path, asked, 'fresh')
+  const landed = await within($, CHECK_HOLD_MS, check)
+  // Landed, and still the newest check of this file in this conversation.
+  if (landed && landed.current()) {
+    // The toast points at the band, so only the check the band shows may say so.
+    if (claimAnnouncement(landed)) announceCheck($, landed)
+    return landed.note && claimDelivery(landed, agentId) ? [landed.note] : []
+  }
+  // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
+  if (!landed) check.then(done => void (done.current() && done.note && claimDelivery(done, agentId) && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
+  return []
+}
+
+
+/**
+ * After a shell command that may have written models, in the background: each model file it changed (three at most)
+ * is checked as an edit of it is, its note kept for the agent's next tool result, and then the checked model is
+ * looked at again. A command that failed is looked at too, since it may have changed files before it did.
+ */
+async function bashChecks($: EngineInterface, start: { asked: number; startedAt: number }, command: string, agentId: string | null): Promise<void> {
+  try {
+    const changed = await bashChanged($, { command, startedAt: start.startedAt - MTIME_SLACK_MS }).catch(() => [])
+    await Promise.all(
+      changed.map(async one => {
+        const path = normalize(one.file)
+        try {
+          const root = await modelRoot($, path)
+          if (!root) return
+          const done = await compileAndValidate($, root, path, start.asked)
+          if (!done.current()) return
+          if (claimAnnouncement(done)) announceCheck($, done)
+          if (done.note && claimDelivery(done, agentId)) pendingNotes.push({ note: done.note, agentId, current: done.current })
+        } catch {
+        }
+      }),
+    )
+  } finally {
+    // After the checks, once.
+    await recheck($, null).catch(() => {})
+  }
 }
 
 /** After a model Claude edited: compile it and run it against the warehouse, then check its columns. */
@@ -2017,31 +2202,8 @@ export async function dbtModsEditAfter($: EngineInterface, e: { tool: string; ag
   const asked = takeStart(startKey(e, path))?.asked ?? generation
   const agentId = agentOf(e)
   if (/\.sql$/i.test(path)) {
-    const root = await projectRoot($, path, true)
-    // Only a file under the project's model-paths is a model dbt can show.
-    const folders = root ? modelPaths(await $.fs.read(`${root}/dbt_project.yml`).catch(() => '')) : []
-    const inModels = !!root && folders.some(folder => (folder === '' ? !/^(target|dbt_packages|dbt_modules|logs)\//.test(relative(root, path)) : relative(root, path).startsWith(`${folder}/`)))
-    if (root && inModels) {
-      const check = compileAndValidate($, root, path, asked)
-      const landed = await within($, CHECK_HOLD_MS, check)
-      // Landed, and still the newest check of this file in this conversation.
-      if (landed && landed.current()) {
-        // The toast points at the band, so only the check the band shows may say so.
-        if (landed.newest() && landed.view.status === 'error') $.ui.toast(`✖ ${landed.view.model} · dbt could not compile or run it · see the band`, { timeoutMs: 6000 })
-        else if (landed.newest())
-          infoToast(
-            $,
-            landed.view.status === 'partial'
-              ? `◦ ${landed.view.model} · ${landed.view.ran ? 'compiled and ran; columns not compared' : `not checked: ${landed.view.reason}`}`
-              : `${STATUS_ICON[landed.view.status]} ${landed.view.model} · compiled and validated against the warehouse`,
-            6000,
-          )
-        return landed.note ? [landed.note] : []
-      }
-      // Too slow for this result: its answer rides on this agent's next one, if it is still the newest.
-      if (!landed) check.then(done => void (done.current() && pendingNotes.push({ note: done.note, agentId, current: done.current }))).catch(() => {})
-      return []
-    }
+    const lines = await checkModel($, path, asked, agentId)
+    if (lines) return lines
   }
   // An edit of a .yml (a schema file documenting the model for the first time) or of another .sql (a macro
   // the model calls) can change its answer though neither watched file did: check it again regardless.

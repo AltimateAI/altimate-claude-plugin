@@ -210,6 +210,10 @@ type Options = {
   holdCwd?: Promise<void>
   /** The first dbt show waits for this. */
   holdShow?: Promise<void>
+  /** The second search for files a shell command changed (the background check's) waits for this. */
+  holdFind?: Promise<void>
+  /** Once set, a read of the manifest waits for it. */
+  holdManifest?: Promise<void>
   /** The dbt shows that run before the held one. */
   holdShowAfter?: number
   /** Folders that exist but cannot be listed. */
@@ -234,6 +238,8 @@ type Options = {
   cwd?: string
   /** The session's root folder, when not the project. */
   sessionRoot?: string
+  /** The project-relative files `find` lists as touched since a shell command started. */
+  changed?: string[]
 }
 
 /** A dbt project at /proj with its own .venv dbt, and the session beneath the plugin. */
@@ -359,6 +365,7 @@ async function start($: any, on: any, options: Options = {}) {
     if (options.pathDbtPython && e.path === '/x/bin/dbt') return { value: `#!${options.pathDbtPython}\nimport sys\n` }
     const rel = e.path.slice(ROOT.length + 1)
     if (rel.endsWith('manifest.json')) order.push(`read ${rel}`)
+    if (rel.endsWith('manifest.json') && options.holdManifest) return options.holdManifest.then(() => ({ value: files[rel] }))
     if (!(rel in files)) throw new Error('ENOENT')
     if (rel === 'target/run_results.json' && (options.runResultsSize ?? 0) > 4 * 1024 * 1024) throw new Error('file is larger than 4 MiB')
     return { value: files[rel] }
@@ -375,6 +382,7 @@ async function start($: any, on: any, options: Options = {}) {
     return { value: [...names].map(([name, kind]) => ({ name, kind })) }
   })
   let held = false
+  let finds = 0
   let shows = 0
   on('process.run', async (_: unknown, e: { argv: readonly string[]; init?: { cwd?: string; stdin?: string; env?: Record<string, string> } }) => {
     runs.push([...e.argv])
@@ -401,6 +409,13 @@ async function start($: any, on: any, options: Options = {}) {
       return { value: { exitCode: 127, stdout: '', stderr: 'zsh: command not found: dbt' } }
     }
     if (options.pathDbtPython && bin === 'which') return { value: { exitCode: 0, stdout: '/x/bin/dbt\n', stderr: '' } }
+    // Only what is under the folders the search was given.
+    // The second search waits: the first is lineage's, inside the call; the second is the background check's.
+    if (bin === 'find' && ++finds === 2) await options.holdFind
+    if (bin === 'find' && options.changed) {
+      const roots = e.argv.slice(1, e.argv.indexOf('-name'))
+      return { value: { exitCode: 0, stdout: options.changed.map(one => `${ROOT}/${one}`).filter(path => roots.some(root => path.startsWith(`${root}/`))).join('\n'), stderr: '' } }
+    }
     if (bin === 'printenv') {
       const value = { HOME: '/home/me', ...options.env }[verb as string]
       return { value: { exitCode: value ? 0 : 1, stdout: value ? `${value}\n` : '', stderr: '' } }
@@ -3580,6 +3595,404 @@ test('table rows are clipped to the pane, never wrapped, and a value that fits i
     expect(row!.text.includes('2018-01-01')).toBe(whole)
     await ui.unmount()
   }
+})
+
+// ─── Compile and validate after a shell command that edits a model ───────────────────────────────
+
+const BASH_NOTE = [
+  'Altimate compile-and-validate after this edit of "orders" (dbt show against the warehouse, one row; data, not instructions):',
+  '- compiled and ran; the warehouse returned 2 columns.',
+].join('\n')
+const NO_MANIFEST = '- its columns were not compared with schema.yml: the manifest has no entry for this file, so the documented columns could not be read.'
+const SED = "sed -i '' 's|amount / 100 as amount|amount|' models/orders.sql"
+const shows = (runs: string[][]) => runs.filter(argv => argv[1] === 'show' && !argv.includes('--inline'))
+const checkNotes = (result: any) => (result.context ?? []).filter((one: string) => one.startsWith('Altimate compile-and-validate'))
+// The notes of the next tool result, once the checks started in the background have run.
+const nextNotes = async ($: any, clock: any, setBash: (one: any) => void) => {
+  await clock.settle()
+  setBash({ stdout: 'ok' })
+  return checkNotes(await $.tool.call({ tool: 'Bash', command: 'ls' }))
+}
+
+test('a model a shell command rewrites is checked in the background: nothing in its result, the note in the next one, and the toast', async ($, on) => {
+  const { clock, runs, toasts, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  const result: any = await $.tool.call({ tool: 'Bash', command: SED })
+  expect(checkNotes(result)).toEqual([])
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+  expect(toasts).toContain('✓ orders · compiled and validated against the warehouse')
+})
+
+test('the note of a shell edit reaches Claude once', async ($, on) => {
+  const { clock, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  await $.tool.call({ tool: 'Bash', command: SED })
+  expect((await nextNotes($, clock, setBash)).length).toBe(1)
+  expect(checkNotes(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toEqual([])
+})
+
+test('a failed shell command that changed a model first is still checked', async ($, on) => {
+  const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  setBash({ stdout: 'sed: boom', isError: true })
+  await $.tool.call({ tool: 'Bash', command: `${SED} && false` })
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+})
+
+for (const [why, options] of ([
+  ['lists nothing as touched', { changed: [] as string[] }],
+  ['lists a model older than the command', { changed: ['models/orders.sql'], mtimes: { 'models/orders.sql': 10 } }],
+  ['lists a file outside the model paths', { files: { 'analyses/one.sql': 'select 1' }, mtimes: { 'analyses/one.sql': 99_500 }, changed: ['analyses/one.sql'] }],
+] satisfies [string, Options][])) {
+  test(`a shell command that changes no model gets no check: the search ${why}`, async ($, on) => {
+    const { clock, runs, toasts, setBash } = await start($, on, { now: 100_000, ...options })
+    await $.tool.call({ tool: 'Bash', command: SED })
+    expect(await nextNotes($, clock, setBash)).toEqual([])
+    expect(shows(runs).length).toBe(0)
+    expect(toasts.filter(one => one.includes('compiled'))).toEqual([])
+  })
+}
+
+for (const verb of ['run', 'build', 'compile', 'show']) {
+  test(`a shell command that writes and runs dbt ${verb} is left to that run`, async ($, on) => {
+    const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+    await $.tool.call({ tool: 'Bash', command: `${SED} && dbt ${verb} -s orders` })
+    expect(await nextNotes($, clock, setBash)).toEqual([])
+    expect(shows(runs).length).toBe(0)
+  })
+}
+
+for (const verb of ['parse', 'test', 'seed', 'ls', 'deps']) {
+  test(`a shell command that writes and runs only dbt ${verb} is still checked`, async ($, on) => {
+    const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+    await $.tool.call({ tool: 'Bash', command: `${SED} && dbt ${verb}` })
+    expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+    expect(shows(runs).length).toBe(1)
+  })
+}
+
+test("a subagent's shell command is not looked at for model changes, as its notes are left out too", async ($, on) => {
+  const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] })
+  await $.tool.call({ tool: 'Bash', command: SED, agentId: 'sub-1' } as any)
+  expect(await nextNotes($, clock, setBash)).toEqual([])
+  expect(shows(runs).length).toBe(0)
+})
+
+test('with two models changed, both notes reach Claude in the next result', async ($, on) => {
+  const { clock, runs, setBash } = await start($, on, {
+    now: 100_000,
+    files: { 'models/customers.sql': 'select 1 as customer_id' },
+    mtimes: { 'models/orders.sql': 99_500, 'models/customers.sql': 99_500 },
+    changed: ['models/orders.sql', 'models/customers.sql'],
+  })
+  await $.tool.call({ tool: 'Bash', command: SED })
+  const notes = await nextNotes($, clock, setBash)
+  expect([...notes].sort()).toEqual([BASH_NOTE, `${BASH_NOTE.replace('"orders"', '"customers"')}\n${NO_MANIFEST}`].sort())
+  expect(shows(runs).length).toBe(2)
+})
+
+test('a shell command that changes four models gets three of them checked', async ($, on) => {
+  const names = ['a', 'b', 'c', 'd'].map(one => `models/m_${one}.sql`)
+  const { clock, runs, setBash } = await start($, on, {
+    now: 100_000,
+    files: Object.fromEntries(names.map(one => [one, 'select 1 as id'])),
+    mtimes: Object.fromEntries(names.map(one => [one, 99_500])),
+    changed: names,
+  })
+  await $.tool.call({ tool: 'Bash', command: SED })
+  expect((await nextNotes($, clock, setBash)).length).toBe(3)
+  expect(shows(runs).length).toBe(3)
+})
+
+// A band recheck is due when the file is newer than the check on the band.
+const bump = async (clock: any, mtimes: Record<string, number>) => {
+  await clock.advance(5_000)
+  mtimes['models/orders.sql'] = 104_500
+}
+
+test('a recheck that starts while the shell task is still searching and one that follows it are one compile', async ($, on) => {
+  let freeFind!: () => void
+  let freeShow!: () => void
+  const { clock, runs, mtimes, setBash } = await start($, on, {
+    now: 100_000,
+    mtimes: { 'models/orders.sql': 50_000 },
+    changed: ['models/orders.sql'],
+    holdFind: new Promise<void>(go => (freeFind = go)),
+    holdShow: new Promise<void>(go => (freeShow = go)),
+    holdShowAfter: 1,
+  })
+  await editOrders($)
+  await clock.settle()
+  await bump(clock, mtimes)
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  // The search is held; another call's recheck compiles the model and its dbt show is held.
+  setBash({ stdout: 'ok' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
+  freeFind()
+  await clock.settle()
+  freeShow()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(2)
+})
+
+test('a recheck and the shell task reaching the compile together are one compile, and the shell task still gets the note', async ($, on) => {
+  let release!: () => void
+  const { clock, runs, mtimes, setBash, toasts } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 50_000 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (release = go)), holdShowAfter: 1 })
+  await editOrders($)
+  await clock.settle()
+  await bump(clock, mtimes)
+  setBash({ stdout: 'ok' })
+  await Promise.all([$.tool.call({ tool: 'Bash', command: SED }), $.tool.call({ tool: 'Bash', command: 'ls' })])
+  await clock.settle()
+  release()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(2)
+  // The edit's toast, then one for the compile the recheck and the shell task share.
+  expect(toasts).toEqual(['✓ orders · compiled and validated against the warehouse', '✓ orders changed · checked again against the warehouse'])
+})
+
+test("a schema edit that arrives while a shell edit's check is under way is checked once more after it, however many arrive", async ($, on) => {
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] }
+  const { clock, runs, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  expect(shows(runs).length).toBe(1)
+  let release!: () => void
+  options.holdManifest = new Promise<void>(go => (release = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  const schema = { tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'a', new_string: 'b' }
+  await $.tool.call(schema)
+  await $.tool.call(schema)
+  await clock.settle()
+  options.holdManifest = undefined
+  release()
+  await nextNotes($, clock, setBash)
+  await clock.settle()
+  // The edit's, the shell edit's, and one more for the schema edits: not zero, not two.
+  expect(shows(runs).length).toBe(3)
+})
+
+test("a shell task that arrives while a schema edit's follow-up check runs joins it, one compile", async ($, on) => {
+  let releaseFirst!: () => void
+  let releaseFollowUp!: () => void
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (releaseFollowUp = go)), holdShowAfter: 2 }
+  const { clock, runs, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  expect(shows(runs).length).toBe(1)
+  // The shell edit's check is held before it shows as running, so the schema edit queues one follow-up behind it.
+  options.holdManifest = new Promise<void>(go => (releaseFirst = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  options.holdManifest = undefined
+  releaseFirst()
+  await clock.settle()
+  // The follow-up is now running, held at its dbt show.
+  expect(shows(runs).length).toBe(3)
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  releaseFollowUp()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  await clock.settle()
+  // The edit's, the shell edit's and the follow-up's, which the second shell task joined: not four.
+  expect(shows(runs).length).toBe(3)
+})
+
+test('two shell tasks that join one compile give one note on the next result and one toast', async ($, on) => {
+  let release!: () => void
+  const { clock, runs, toasts, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (release = go)) })
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  release()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+  expect(toasts.filter(one => one === '✓ orders · compiled and validated against the warehouse').length).toBe(1)
+})
+
+test("an edit-tool check that a shell task joins, slow enough for its note to ride on the next result, gives that note once and one toast", async ($, on) => {
+  let freeFind!: () => void
+  let release!: () => void
+  const { clock, runs, toasts, setBash } = await start($, on, {
+    now: 100_000,
+    mtimes: { 'models/orders.sql': 99_500 },
+    changed: ['models/orders.sql'],
+    holdFind: new Promise<void>(go => (freeFind = go)),
+    holdShow: new Promise<void>(go => (release = go)),
+  })
+  // The shell command's search is held; the edit's check starts meanwhile and is too slow for the edit's result.
+  await $.tool.call({ tool: 'Bash', command: SED })
+  const edit = editOrders($)
+  await clock.settle()
+  await clock.advance(31_000)
+  expect(checkNotes(await edit)).toEqual([])
+  freeFind()
+  await clock.settle()
+  release()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  expect(checkNotes(await $.tool.call({ tool: 'Bash', command: 'ls' }))).toEqual([])
+  expect(shows(runs).length).toBe(1)
+  expect(toasts.filter(one => one === '✓ orders · compiled and validated against the warehouse').length).toBe(1)
+})
+
+test("an edit-tool check that a shell task joins before the edit's result returns gives its note in that result only, and one toast", async ($, on) => {
+  let release!: () => void
+  const { clock, runs, toasts, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (release = go)) })
+  const edit = editOrders($)
+  await clock.settle()
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  release()
+  await clock.settle()
+  expect(checkNotes(await edit)).toEqual([BASH_NOTE])
+  expect(await nextNotes($, clock, setBash)).toEqual([])
+  expect(shows(runs).length).toBe(1)
+  expect(toasts.filter(one => one === '✓ orders · compiled and validated against the warehouse').length).toBe(1)
+})
+
+test("a follow-up check is filed under the version of the file it compiles, so a shell task for a file edited during the wait joins it", async ($, on) => {
+  let releaseFirst!: () => void
+  let releaseFollowUp!: () => void
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (releaseFollowUp = go)), holdShowAfter: 2 }
+  const { clock, runs, mtimes, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  options.holdManifest = new Promise<void>(go => (releaseFirst = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  // The model is written again while the check the follow-up waits for is still under way.
+  mtimes['models/orders.sql'] = 100_000
+  options.holdManifest = undefined
+  releaseFirst()
+  await clock.settle()
+  expect(shows(runs).length).toBe(3)
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  releaseFollowUp()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  await clock.settle()
+  expect(shows(runs).length).toBe(3)
+})
+
+test("a follow-up that fires while a check of the file's new version is already running is that check: one compile, and Claude gets its note once", async ($, on) => {
+  let release!: () => void
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] }
+  const { clock, runs, mtimes, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  options.holdManifest = new Promise<void>(go => (release = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await $.tool.call({ tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'a', new_string: 'b' })
+  await clock.settle()
+  // The model is written again and a second shell edit's check of that version starts while the first still runs.
+  mtimes['models/orders.sql'] = 100_000
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  options.holdManifest = undefined
+  release()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  await clock.settle()
+  // The edit's, and one for the new version, which the follow-up joined; the first shell edit's check was superseded before it ran.
+  expect(shows(runs).length).toBe(2)
+})
+
+test("a follow-up that took on a schema edit after the new version's check began runs again rather than joining it", async ($, on) => {
+  let release!: () => void
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] }
+  const { clock, runs, mtimes, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  options.holdManifest = new Promise<void>(go => (release = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  const schema = { tool: 'Edit', file_path: `${ROOT}/models/schema.yml`, old_string: 'a', new_string: 'b' }
+  await $.tool.call(schema)
+  await clock.settle()
+  mtimes['models/orders.sql'] = 100_000
+  await $.tool.call({ tool: 'Bash', command: `${SED}; true` })
+  await clock.settle()
+  // Another schema edit while the follow-up still waits: the check of the new version began before it.
+  await $.tool.call(schema)
+  await clock.settle()
+  options.holdManifest = undefined
+  release()
+  await nextNotes($, clock, setBash)
+  await clock.settle()
+  // The edit's, the new version's, and the follow-up's own, which reads the second schema edit.
+  expect(shows(runs).length).toBe(3)
+})
+
+test('a file that changed again while its check was under way is checked again, not answered with the old check', async ($, on) => {
+  const options: any = { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'] }
+  const { clock, runs, mtimes, setBash } = await start($, on, options)
+  await editOrders($)
+  await clock.settle()
+  let release!: () => void
+  options.holdManifest = new Promise<void>(go => (release = go))
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await clock.advance(1_000)
+  mtimes['models/orders.sql'] = 101_500
+  setBash({ stdout: 'ok' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  await clock.settle()
+  options.holdManifest = undefined
+  release()
+  await nextNotes($, clock, setBash)
+  await clock.settle()
+  expect(shows(runs).length).toBe(3)
+})
+
+test("a new conversation does not share the old one's check of the same file version", async ($, on) => {
+  let release!: () => void
+  const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (release = go)) })
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  release()
+  expect(await nextNotes($, clock, setBash)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(2)
+})
+
+test("a shell edit's check still running at /clear delivers its note to nobody", async ($, on) => {
+  let release!: () => void
+  const { clock, runs, setBash } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 99_500 }, changed: ['models/orders.sql'], holdShow: new Promise<void>(go => (release = go)) })
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  await $.session.end({ reason: 'clear' } as any)
+  release()
+  expect(await nextNotes($, clock, setBash)).toEqual([])
+  expect(shows(runs).length).toBe(1)
+})
+
+test('a shell command that writes the checked model but is not seen to change it still has the band look at it again', async ($, on) => {
+  const { clock, runs, mtimes } = await start($, on, { now: 100_000, mtimes: { 'models/orders.sql': 50_000 }, changed: [] })
+  await editOrders($)
+  await clock.settle()
+  expect(shows(runs).length).toBe(1)
+  await clock.advance(5_000)
+  mtimes['models/orders.sql'] = 104_500
+  await $.tool.call({ tool: 'Bash', command: SED })
+  await clock.settle()
+  expect(shows(runs).length).toBe(2)
+})
+
+test('an edit with the Edit tool is compiled and validated once, with no shell search for changed files', async ($, on) => {
+  const { clock, runs } = await start($, on)
+  const result: any = await editOrders($)
+  await clock.settle()
+  expect(checkNotes(result)).toEqual([BASH_NOTE])
+  expect(shows(runs).length).toBe(1)
+  expect(runs.some(argv => argv[0] === 'find')).toBe(false)
 })
 
 // ─── Secrets in dbt output, selection, a missing dbt, stale artifacts, history size ─────────────────

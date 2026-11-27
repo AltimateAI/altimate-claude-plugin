@@ -33,7 +33,8 @@ import {
   WINDOWS_EXPLORER,
 } from './impact-report'
 import { findModel, projectLayout } from './lineage-graph'
-import { modelsNamed, openPane, projectRoot, readGraph } from './lineage'
+import { modelsNamed, openPane, readGraph } from './lineage'
+import { projectRoot } from './bash-edits'
 
 export const REPORT_COMMAND = 'lineage-report'
 // Under the project's target/, which dbt already keeps out of git.
