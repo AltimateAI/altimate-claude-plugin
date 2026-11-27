@@ -18,6 +18,7 @@ import {
   CHECK_HOLD_MS as dbtModsCheckHoldMs,
   bandDbtMods,
   dbtModsBashAfter,
+  dbtModsBashDropped,
   dbtModsCallStart,
   dbtModsEditAfter,
   dbtModsReadOrEditAfter,
@@ -384,6 +385,7 @@ export async function featuresCallStart($: EngineInterface, e: ToolCallInput): P
 export async function featuresBashDropped($: EngineInterface, e: BashCall): Promise<void> {
   await attempt($, 'runs', 'bashDropped', () => runsBashDropped($, e))
   await attempt($, 'defer', 'bashDropped', () => deferBashDropped($, e))
+  await attempt($, 'dbtMods', 'bashDropped', async () => dbtModsBashDropped(e))
 }
 
 /** The context lines every feature adds after a Bash call ran. */
