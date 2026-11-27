@@ -108,6 +108,13 @@ let showEditImpact = false
 // pane unless a newer one already has. A follow that fails claims nothing, so it cancels nobody.
 let startedSeq = 0
 let claimedSeq = 0
+// How many of those numbers went to reloads: a shell command's own reads count the ones that are not.
+let reloadsStarted = 0
+const readsStarted = () => startedSeq - reloadsStarted
+// The manifest revision a reload last tried, whether it landed or not: each is tried once, the next one when dbt writes the file again.
+let reloadAttempted: string | null = null
+// The conversation a reload is reading in: another is not started beside it, and one that lands checks for a newer rewrite itself.
+let reloadSession: number | null = null
 // The focus that owns the pane (model, manifest, revision), set when a follow claims it. Detail
 // answers are written only while it is still the focus they were asked for; a re-follow of the same
 // model keeps it, so its in-flight answers still land.
@@ -120,13 +127,17 @@ const contextGiven = new Set<string>()
 let turnCount = 0
 let followedTurn = -1
 let followsInFlight = 0
+// The answer's own follows, which `followsInFlight` leaves out.
+let answersInFlight = 0
 // Bumped when a conversation starts or ends: a follow left from the last one cannot touch the count.
 let followSession = 0
 const newConversation = () => {
   turnCount++
   followedTurn = -1
   followsInFlight = 0
+  answersInFlight = 0
   followSession++
+  reloadAttempted = null
   projectSeen = false
   forgetProjects()
   askedFor = null
@@ -492,6 +503,8 @@ type FollowInput = {
   auto?: boolean
   /** Re-read the manifest (and, unless a large manifest's cached columns stand, the column lineage) even when the model is unchanged. */
   refresh?: boolean
+  /** The manifest changed under the pane: a refresh nobody asked for, so it counts as no ask, opens nothing, and gives way to any other follow that starts meanwhile. */
+  reload?: boolean
   /** `model` may end in `.column`: read so only when the whole text is not itself a model (a unique_id or path has dots). */
   dottedColumn?: boolean
   /** The manifest a tool call named (Claude's own dbt_lineage call): its project is the one to follow. */
@@ -502,7 +515,15 @@ type FollowInput = {
 async function follow($: EngineInterface, given: FollowInput): Promise<boolean> {
   // A file spelled through `..` (a shell read from integration_tests) is the file it names.
   const input = given.file ? { ...given, file: normalize(given.file) } : given
-  if (input.fromAnswer !== undefined) return followOnce($, input)
+  if (input.fromAnswer !== undefined) {
+    const session = followSession
+    answersInFlight++
+    try {
+      return await followOnce($, input)
+    } finally {
+      if (session === followSession) answersInFlight--
+    }
+  }
   // Claude's reads and the person's own presses alike: in flight, the answer waits for them; landed,
   // the answer leaves the pane where they put it.
   const turn = turnCount
@@ -522,9 +543,12 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // What Claude's own reads run into outside a project (a package's SQL, a stray .sql) is not news.
   const isPackage = !!input.file && /[\\/]dbt_(?:packages|modules)[\\/]/.test(input.file)
   const say = async (text: string, always = false) => {
-    if (!input.auto || (always && !isPackage)) await update($, messageAtom, () => text)
+    // A reload that another follow has overtaken leaves that follow's pane and message alone.
+    if (input.reload && startedSeq !== seq) return
+    if (!input.auto || (always && !isPackage)) await update($, messageAtom, prev => (input.reload && startedSeq !== seq ? prev : text))
   }
   const seq = ++startedSeq
+  if (input.reload) reloadsStarted++
   const current = await read($, focusAtom)
   const sessionRoot = await $.session.root().catch(() => '.')
   const given = input.manifest ? normalize(/^([\\/]|[A-Za-z]:)/.test(input.manifest) ? input.manifest : `${sessionRoot}/${input.manifest}`) : null
@@ -567,7 +591,8 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // No manifest: the graph comes from the project's SQL files, their ref() and source() calls.
   // A default manifest that went away (dbt clean) also falls back to the SQL files.
   const fromSql = !stat && (!named || named === fallback || named === `${root}/target/manifest.json` || named === (await runnerManifest($, root)))
-  if (!stat && !fromSql) {
+  // A reload does not draw the SQL files over the graph shown when its manifest went away since it was due.
+  if (!stat && (!fromSql || input.reload)) {
     await say('No dbt manifest at that path: run `dbt parse` or `dbt compile` to see lineage.', true)
     return false
   }
@@ -641,10 +666,17 @@ async function followOnce($: EngineInterface, input: FollowInput): Promise<boole
   // An answer's follow whose turn is over leaves the pane to the newer turn. Checked here, before any
   // write: once a follow claims the pane it writes all of its state or a newer follow replaces it.
   if (claimedSeq > seq || (input.fromAnswer !== undefined && input.fromAnswer !== turnCount)) return false
+  // A reload gives way to a follow that started after it: the next tool call looks at the manifest again.
+  if (input.reload && startedSeq !== seq) {
+    reloadAttempted = null
+    return false
+  }
   claimedSeq = seq
   ownerKey = `${id}\u0000${manifest}\u0000${mtimeMs}`
   // The person's own follows; Claude's reads and the answer's follow are not asks.
-  if (!input.auto && input.fromAnswer === undefined) askedFor = `${id}\u0000${manifest}`
+  if (!input.auto && !input.reload && input.fromAnswer === undefined) askedFor = `${id}\u0000${manifest}`
+  // A reload is no ask: the person's earlier ask does not carry over to the rewritten manifest.
+  else if (input.reload) askedFor = null
   // update() may retry its write after a conflict, so each write below re-checks ownership inside
   // its callback: once a newer follow has claimed the pane, this one leaves the state as it is.
   const superseded = () => claimedSeq !== seq
@@ -825,11 +857,39 @@ async function staleSql($: EngineInterface, root: string, node: GraphNode | unde
   return null
 }
 
-/** The shown model's file may have changed since the pane read it (an edit, a shell command): checked again. */
+/**
+ * A dbt command (Claude's, or the person's in another terminal) rewrote the manifest the pane shows: the pane
+ * reads it again, as r does, so the lineage and the out-of-date warning follow the compile without a press.
+ * Each rewrite is tried once, whether the read lands or not (one that gave way to another follow is tried again at the next call); one that failed (dbt still writing the file)
+ * is tried again when the file changes again, and r reads it at once.
+ * Whether the pane now shows the new manifest.
+ */
+async function reloadIfRewritten($: EngineInterface, focus: LineageFocus): Promise<boolean> {
+  const stat = await $.fs.stat(focus.manifest).catch(() => null)
+  if (!stat || stat.mtimeMs <= focus.mtimeMs) return false
+  const revision = `${focus.model}\u0000${focus.manifest}\u0000${stat.mtimeMs}`
+  if (reloadAttempted === revision) return false
+  // Checked after the last await before the follow numbers itself, so no other follow slips in between:
+  // the focus is still the one shown and nothing is moving the pane to another model.
+  if (!sameFocus(await read($, focusAtom), focus) || followsInFlight > 0 || answersInFlight > 0 || reloadAttempted === revision || reloadSession === followSession) return false
+  reloadAttempted = revision
+  const session = followSession
+  reloadSession = session
+  try {
+    return await followOnce($, { model: focus.model, refresh: true, reload: true })
+  } finally {
+    if (reloadSession === session) reloadSession = null
+  }
+}
+
+/** The shown model's file or manifest may have changed since the pane read them (an edit, a dbt command): checked again. */
 async function recheckStale($: EngineInterface) {
   const focus = await read($, focusAtom)
   const graph = await read($, graphAtom)
-  if (!focus || !graph || focus.via === 'sql') return
+  if (!focus || !graph) return
+  // A reload that lands ends with its own check, against the manifest it read.
+  if (await reloadIfRewritten($, focus)) return
+  if (focus.via === 'sql') return
   const stale = await staleSql($, focus.root, graph.nodes[focus.model], focus.mtimeMs)
   if (sameFocus(await read($, focusAtom), focus)) await update($, staleAtom, prev => (prev === stale ? prev : stale))
 }
@@ -1368,7 +1428,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
       if (showEditImpact) $.ui.log(note.toast)
     }
     const result = await next(e)
-    // Any tool may have changed the shown model's file (Edit, a shell command): one stat says so.
+    // Any tool may have changed the shown model's file or rewritten its manifest (Edit, a shell command): a stat of each says so.
     later($, () => recheckStale($))
     // A shell command that failed may still have changed models first (`python3 rewrite.py && dbt test`): looked at too.
     if (result.deny || (result.isError && !bash)) return result
@@ -1440,7 +1500,7 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
         later($, async () => {
           // A path that exists but is in no project (a redirect target) is skipped for the next one; once
           // a newer follow (another read) has started, this command's candidates stop.
-          const start = startedSeq
+          const start = readsStarted()
           let own = 0
           // A named file of a project that its manifest does not have as the project's own model is not followed by
           // its name either (that name may be another package's model).
@@ -1449,14 +1509,14 @@ export function registerLineage(on: On, options: Record<string, unknown> = {}) {
             if (!(await $.fs.exists(file).catch(() => false))) continue
             if (await projectRoot($, file, true).catch(() => null)) projectFile = true
             // A read that started while this check waited owns the pane now.
-            if (startedSeq - start > own) return
+            if (readsStarted() - start > own) return
             own++
             if (await follow($, { file, auto: true })) return
-            if (startedSeq - start > own) return
+            if (readsStarted() - start > own) return
           }
           // Only a name (find -name x.sql): the model of that name in the command's project, unless a
           // newer follow has started since this command's own ones.
-          if (startedSeq - start > own || projectFile) return
+          if (readsStarted() - start > own || projectFile) return
           await follow($, { model: named[0]!.split('/').pop()!.replace(/\.sql$/i, ''), root: dir, auto: true })
         })
       }
